@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#1a1a2e">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>DevManager - Claude Code Orchestrator</title>
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="stylesheet" href="/static/vendor/xterm.css">
+    <link rel="stylesheet" href="/static/css/app.css?v=5">
+    <link rel="stylesheet" href="/static/css/mobile.css?v=6">
+</head>
+<body>
+    <div id="app">
+        <!-- Sidebar -->
+        <aside id="sidebar" class="sidebar">
+            <div class="sidebar-header">
+                <h1 class="logo">DevManager</h1>
+                <button id="sidebar-toggle" class="btn-icon" aria-label="Toggle sidebar">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="3" y1="12" x2="21" y2="12"></line>
+                        <line x1="3" y1="6" x2="21" y2="6"></line>
+                        <line x1="3" y1="18" x2="21" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+
+            <nav class="sidebar-nav">
+                <a href="#" class="nav-item active" data-view="projects">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                    </svg>
+                    <span>Projects</span>
+                </a>
+                <a href="#" class="nav-item" data-view="sessions">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="4 17 10 11 4 5"></polyline>
+                        <line x1="12" y1="19" x2="20" y2="19"></line>
+                    </svg>
+                    <span>Sessions</span>
+                </a>
+                <a href="#" class="nav-item" data-view="macros">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                        <polyline points="2 17 12 22 22 17"></polyline>
+                        <polyline points="2 12 12 17 22 12"></polyline>
+                    </svg>
+                    <span>Macros</span>
+                </a>
+                <a href="#" class="nav-item" data-view="config">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                    </svg>
+                    <span>Config</span>
+                </a>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div id="connection-status" class="connection-status disconnected">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Disconnected</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main id="main-content" class="main-content">
+            <!-- Projects View -->
+            <section id="view-projects" class="view active">
+                <header class="view-header">
+                    <h2>Projects</h2>
+                    <button id="btn-add-project" class="btn btn-primary">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                        </svg>
+                        Add Project
+                    </button>
+                </header>
+                <div id="projects-list" class="card-grid">
+                    <!-- Projects will be rendered here -->
+                </div>
+            </section>
+
+            <!-- Sessions View -->
+            <section id="view-sessions" class="view">
+                <header class="view-header">
+                    <h2>Active Sessions</h2>
+                </header>
+                <div id="sessions-list" class="session-list">
+                    <!-- Sessions will be rendered here -->
+                </div>
+            </section>
+
+            <!-- Terminal View -->
+            <section id="view-terminal" class="view terminal-view">
+                <!-- Tab sidebar on left -->
+                <aside class="terminal-tabs-sidebar">
+                    <div class="terminal-tabs-header">
+                        <span>Sessions</span>
+                    </div>
+                    <div id="terminal-tabs-list" class="terminal-tabs-list">
+                        <!-- Dynamic tabs will be inserted here -->
+                    </div>
+                </aside>
+
+                <!-- Main terminal area on right -->
+                <div class="terminal-main-area">
+                    <header class="terminal-header">
+                        <div class="terminal-info">
+                            <button id="btn-back-sessions" class="btn-icon">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="19" y1="12" x2="5" y2="12"></line>
+                                    <polyline points="12 19 5 12 12 5"></polyline>
+                                </svg>
+                            </button>
+                            <!-- Desktop title (hidden on mobile) -->
+                            <span id="terminal-title" class="desktop-only">Session</span>
+
+                            <!-- Mobile session dropdown -->
+                            <div id="mobile-session-dropdown" class="mobile-session-dropdown">
+                                <button id="mobile-session-trigger" class="mobile-session-trigger">
+                                    <span class="mobile-session-status"></span>
+                                    <span id="mobile-session-name">Session</span>
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="6 9 12 15 18 9"></polyline>
+                                    </svg>
+                                </button>
+                                <div id="mobile-session-menu" class="mobile-session-menu hidden">
+                                    <div class="mobile-session-menu-header">
+                                        <span>Active Sessions</span>
+                                        <button class="btn-icon btn-sm" id="mobile-session-close">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <line x1="18" y1="6" x2="6" y2="18"></line>
+                                                <line x1="6" y1="6" x2="18" y2="18"></line>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                    <div id="mobile-session-list" class="mobile-session-list"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="terminal-actions">
+                            <button id="btn-tool-activity" class="btn-icon" title="Tool Activity">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                                </svg>
+                            </button>
+                            <button id="btn-voice-input" class="btn-icon" title="Voice Input">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                    <line x1="12" y1="19" x2="12" y2="23"></line>
+                                    <line x1="8" y1="23" x2="16" y2="23"></line>
+                                </svg>
+                            </button>
+                            <button id="btn-file-browser" class="btn-icon" title="File Browser">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                                </svg>
+                            </button>
+                            <button id="split-screen-toggle" class="btn-icon" title="Toggle Split Screen">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <rect x="3" y="3" width="7" height="18" stroke-width="2"/>
+                                    <rect x="14" y="3" width="7" height="18" stroke-width="2"/>
+                                </svg>
+                            </button>
+                            <button id="btn-stop-session" class="btn btn-danger btn-sm">Stop</button>
+                        </div>
+                    </header>
+                    <div id="terminal-containers-wrapper" class="terminal-containers-wrapper">
+                        <!-- Multiple terminal containers will be created here dynamically -->
+                    </div>
+
+                    <!-- Mobile input bar -->
+                    <div id="mobile-terminal-input-bar" class="mobile-terminal-input-bar">
+                        <input type="text" id="mobile-terminal-input" class="mobile-terminal-input" placeholder="Type command..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+                        <button id="btn-mobile-voice-input" class="mobile-terminal-voice" title="Voice Input">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                <line x1="12" y1="19" x2="12" y2="23"></line>
+                                <line x1="8" y1="23" x2="16" y2="23"></line>
+                            </svg>
+                        </button>
+                        <button id="mobile-terminal-send" class="mobile-terminal-send">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="22" y1="2" x2="11" y2="13"></line>
+                                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                            </svg>
+                        </button>
+                    </div>
+                    <!-- Tool Activity Panel -->
+                    <div id="tool-activity-panel" class="tool-activity-panel hidden">
+                        <div class="tool-activity-header">
+                            <span>Tool Activity</span>
+                            <button id="btn-close-tool-panel" class="btn-icon btn-sm">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                                </svg>
+                            </button>
+                        </div>
+                        <div id="tool-activity-list" class="tool-activity-list">
+                            <!-- Tool events will be rendered here -->
+                        </div>
+                    </div>
+
+                    <div id="file-browser-panel" class="file-browser-panel hidden">
+                        <div class="file-browser-header">
+                            <span>Files</span>
+                            <button id="btn-close-files" class="btn-icon btn-sm">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="file-browser-actions">
+                            <button id="btn-upload-file" class="btn btn-sm">Upload</button>
+                            <input type="file" id="file-upload-input" multiple hidden>
+                        </div>
+                        <div id="file-list" class="file-list">
+                            <!-- Files will be rendered here -->
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Macros View -->
+            <section id="view-macros" class="view">
+                <header class="view-header">
+                    <h2>Macros</h2>
+                    <button id="btn-add-macro" class="btn btn-primary">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                        </svg>
+                        Add Macro
+                    </button>
+                </header>
+                <div id="macros-list" class="card-grid">
+                    <!-- Macros will be rendered here -->
+                </div>
+            </section>
+
+            <!-- Config View -->
+            <section id="view-config" class="view">
+                <header class="view-header">
+                    <h2>Global Configuration</h2>
+                    <button id="btn-sync-all" class="btn btn-secondary">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="23 4 23 10 17 10"></polyline>
+                            <polyline points="1 20 1 14 7 14"></polyline>
+                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                        </svg>
+                        Sync All Projects
+                    </button>
+                </header>
+                <div class="config-tabs">
+                    <button class="tab-btn active" data-tab="skills">Skills</button>
+                    <button class="tab-btn" data-tab="mcps">MCP Servers</button>
+                    <button class="tab-btn" data-tab="settings">Settings</button>
+                </div>
+                <div id="config-content" class="config-content">
+                    <!-- Config content will be rendered here -->
+                </div>
+            </section>
+        </main>
+
+        <!-- Mobile Bottom Navigation -->
+        <nav id="mobile-nav" class="mobile-nav">
+            <a href="#" class="mobile-nav-item active" data-view="projects">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                </svg>
+                <span>Projects</span>
+            </a>
+            <a href="#" class="mobile-nav-item" data-view="sessions">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="4 17 10 11 4 5"></polyline>
+                    <line x1="12" y1="19" x2="20" y2="19"></line>
+                </svg>
+                <span>Sessions</span>
+            </a>
+            <a href="#" class="mobile-nav-item" data-view="macros">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                </svg>
+                <span>Macros</span>
+            </a>
+            <a href="#" class="mobile-nav-item" data-view="config">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="3"></circle>
+                </svg>
+                <span>Config</span>
+            </a>
+        </nav>
+    </div>
+
+    <!-- Modals -->
+    <div id="modal-overlay" class="modal-overlay hidden">
+        <div id="modal-container" class="modal-container">
+            <!-- Modal content will be injected here -->
+        </div>
+    </div>
+
+    <!-- Session Name Modal -->
+    <div id="session-name-modal" class="modal-overlay hidden">
+        <div class="modal-container" style="max-width: 500px;">
+            <div class="modal-header">
+                <h3>Name Your Session</h3>
+            </div>
+            <div class="modal-body">
+                <p style="margin-bottom: 15px; color: #666;">Give this session a custom name or use the default:</p>
+                <input
+                    type="text"
+                    id="session-name-input"
+                    class="form-control"
+                    placeholder="Session name"
+                    style="width: 100%; padding: 10px; font-size: 14px; border: 1px solid #ddd; border-radius: 4px;"
+                >
+            </div>
+            <div class="modal-footer">
+                <button id="session-name-cancel" class="btn btn-secondary">Cancel</button>
+                <button id="session-name-start" class="btn btn-primary">Start Session</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Voice Recording Indicator -->
+    <div id="voice-indicator" class="voice-indicator hidden">
+        <div class="voice-indicator-pulse"></div>
+        <span>Recording...</span>
+        <button id="voice-cancel" class="btn btn-sm voice-cancel-btn" title="Cancel recording">Cancel</button>
+        <button id="voice-stop" class="btn btn-sm btn-danger">Stop</button>
+    </div>
+
+    <!-- Hook Permission Dialog -->
+    <div id="hook-permission-dialog" class="hook-permission-overlay hidden">
+        <div class="hook-permission-container">
+            <div class="hook-permission-header">
+                <div class="hook-permission-icon">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                    </svg>
+                </div>
+                <h3>Permission Required</h3>
+                <button id="hook-permission-dismiss" class="hook-permission-close" title="Dismiss (handle in terminal)">&times;</button>
+            </div>
+            <div class="hook-permission-body">
+                <div class="hook-permission-tool">
+                    <span class="hook-permission-tool-label">Tool:</span>
+                    <span id="hook-permission-tool-name" class="hook-permission-tool-name">—</span>
+                </div>
+                <div id="hook-permission-details" class="hook-permission-details">
+                    <!-- Tool details will be rendered here -->
+                </div>
+                <div class="hook-permission-deny-section">
+                    <input type="text" id="hook-permission-deny-reason" class="form-input" placeholder="Deny reason (optional)">
+                </div>
+            </div>
+            <div class="hook-permission-actions">
+                <button id="hook-permission-deny" class="btn btn-danger">Deny</button>
+                <button id="hook-permission-allow" class="btn btn-success">Allow</button>
+                <button id="hook-permission-allow-always" class="btn btn-success-outline">Allow Always</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ExitPlanMode Dialog -->
+    <div id="hook-exit-plan-dialog" class="hook-permission-overlay hidden">
+        <div class="hook-exit-plan-container">
+            <div class="hook-permission-header">
+                <div class="hook-permission-icon" style="color: var(--color-primary);">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                        <polyline points="14 2 14 8 20 8"></polyline>
+                        <line x1="16" y1="13" x2="8" y2="13"></line>
+                        <line x1="16" y1="17" x2="8" y2="17"></line>
+                        <polyline points="10 9 9 9 8 9"></polyline>
+                    </svg>
+                </div>
+                <h3>Plan Ready for Review</h3>
+                <button id="hook-plan-dismiss" class="hook-permission-close" title="Dismiss (handle in terminal)">&times;</button>
+            </div>
+            <div class="hook-exit-plan-body">
+                <p class="plan-review-text">Claude has finished planning. Review the plan in the terminal output, then choose an option:</p>
+                <div class="plan-prompts-section hidden">
+                    <div class="plan-prompts-label">Permissions requested:</div>
+                    <div id="hook-plan-prompts"></div>
+                </div>
+                <div class="plan-options">
+                    <label class="plan-option" for="plan-opt-1">
+                        <input type="radio" id="plan-opt-1" name="plan-option" value="1" />
+                        <div class="plan-option-content">
+                            <span class="plan-option-label">Yes, clear context and auto-accept edits</span>
+                        </div>
+                    </label>
+                    <label class="plan-option" for="plan-opt-2">
+                        <input type="radio" id="plan-opt-2" name="plan-option" value="2" />
+                        <div class="plan-option-content">
+                            <span class="plan-option-label">Yes, auto-accept edits</span>
+                        </div>
+                    </label>
+                    <label class="plan-option" for="plan-opt-3">
+                        <input type="radio" id="plan-opt-3" name="plan-option" value="3" checked />
+                        <div class="plan-option-content">
+                            <span class="plan-option-label">Yes, manually approve edits</span>
+                        </div>
+                    </label>
+                    <label class="plan-option plan-option-feedback" for="plan-opt-4">
+                        <input type="radio" id="plan-opt-4" name="plan-option" value="feedback" />
+                        <div class="plan-option-content">
+                            <span class="plan-option-label">Request changes</span>
+                            <input type="text" id="hook-plan-feedback" class="form-input plan-feedback-input" placeholder="Type here to tell Claude what to change...">
+                        </div>
+                    </label>
+                </div>
+            </div>
+            <div class="hook-permission-actions">
+                <button id="hook-plan-submit" class="btn btn-success">Submit</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- AskUserQuestion Dialog -->
+    <div id="hook-ask-user-dialog" class="hook-permission-overlay hidden">
+        <div class="hook-ask-user-container">
+            <div class="hook-permission-header">
+                <div class="hook-permission-icon">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+                        <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                    </svg>
+                </div>
+                <h3>Claude has a question</h3>
+                <button id="hook-ask-user-dismiss" class="hook-permission-close" title="Dismiss (handle in terminal)">&times;</button>
+            </div>
+            <div class="hook-ask-user-body">
+                <div id="hook-ask-user-questions"></div>
+            </div>
+            <div class="hook-permission-actions">
+                <button id="hook-ask-user-submit" class="btn btn-success">Submit</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/vendor/xterm.js"></script>
+    <script src="/static/vendor/xterm-addon-fit.js"></script>
+    <script src="/static/vendor/xterm-addon-web-links.js"></script>
+    <script src="/static/js/app.js?v=8"></script>
+    <script src="/static/js/terminal.js?v=4"></script>
+    <script src="/static/js/hooks.js?v=5"></script>
+    <script src="/static/js/voice.js?v=6"></script>
+    <script src="/static/js/files.js?v=2"></script>
+    <script src="/static/js/notifications.js?v=2"></script>
+    <script src="/static/js/macro-editor.js?v=2"></script>
+</body>
+</html>
