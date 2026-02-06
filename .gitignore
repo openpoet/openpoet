@@ -1,0 +1,39 @@
+# Binary / Build
+/build/
+/devmanager
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+
+# Node
+node_modules/
+
+# Screenshots / test files
+*.png
+hello.txt
+test.txt
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Claude Code
+.claude/
+
+# Playwright MCP
+.playwright-mcp/
+
+# Run configs
+.run/
+
+# OS
+.DS_Store
+Thumbs.db

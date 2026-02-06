@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clear DevManager Cache</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+        }
+        h1 {
+            margin: 0 0 10px 0;
+            color: #333;
+            font-size: 28px;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 16px;
+        }
+        .status {
+            background: #f5f5f5;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            font-family: monospace;
+            font-size: 14px;
+            min-height: 150px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .status-line {
+            margin: 5px 0;
+            padding: 5px 0;
+        }
+        .success { color: #22c55e; }
+        .error { color: #ef4444; }
+        .info { color: #3b82f6; }
+        .warning { color: #f59e0b; }
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+            margin-bottom: 10px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.2);
+        }
+        .btn:active {
+            transform: translateY(0);
+        }
+        .btn-secondary {
+            background: #6c757d;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧹 Clear DevManager Cache</h1>
+        <p class="subtitle">Force update to the latest version by clearing all cached data</p>
+
+        <div id="status" class="status">
+            <div class="info">Ready to clear cache...</div>
+        </div>
+
+        <button id="clear-btn" class="btn">Clear All Caches & Reload</button>
+        <button id="goto-app" class="btn btn-secondary" style="display:none;">Go to DevManager</button>
+    </div>
+
+    <script>
+        const statusDiv = document.getElementById('status');
+        const clearBtn = document.getElementById('clear-btn');
+        const gotoBtn = document.getElementById('goto-app');
+
+        function addStatus(message, type = 'info') {
+            const line = document.createElement('div');
+            line.className = `status-line ${type}`;
+            line.textContent = `${type === 'success' ? '✅' : type === 'error' ? '❌' : type === 'warning' ? '⚠️' : 'ℹ️'} ${message}`;
+            statusDiv.appendChild(line);
+            statusDiv.scrollTop = statusDiv.scrollHeight;
+        }
+
+        clearBtn.addEventListener('click', async () => {
+            statusDiv.innerHTML = '';
+            clearBtn.disabled = true;
+            clearBtn.textContent = 'Clearing...';
+
+            try {
+                // 1. Unregister all service workers
+                addStatus('Checking for Service Workers...', 'info');
+                if ('serviceWorker' in navigator) {
+                    const registrations = await navigator.serviceWorker.getRegistrations();
+                    if (registrations.length > 0) {
+                        for (let registration of registrations) {
+                            await registration.unregister();
+                            addStatus(`Unregistered Service Worker: ${registration.scope}`, 'success');
+                        }
+                    } else {
+                        addStatus('No Service Workers found', 'info');
+                    }
+                } else {
+                    addStatus('Service Workers not supported', 'warning');
+                }
+
+                // 2. Clear all caches
+                addStatus('Clearing cache storage...', 'info');
+                if ('caches' in window) {
+                    const cacheNames = await caches.keys();
+                    if (cacheNames.length > 0) {
+                        for (let name of cacheNames) {
+                            await caches.delete(name);
+                            addStatus(`Deleted cache: ${name}`, 'success');
+                        }
+                    } else {
+                        addStatus('No caches found', 'info');
+                    }
+                } else {
+                    addStatus('Cache API not supported', 'warning');
+                }
+
+                // 3. Clear localStorage
+                addStatus('Clearing localStorage...', 'info');
+                const localStorageKeys = Object.keys(localStorage);
+                if (localStorageKeys.length > 0) {
+                    localStorage.clear();
+                    addStatus(`Cleared ${localStorageKeys.length} localStorage items`, 'success');
+                } else {
+                    addStatus('localStorage already empty', 'info');
+                }
+
+                // 4. Clear sessionStorage
+                addStatus('Clearing sessionStorage...', 'info');
+                const sessionStorageKeys = Object.keys(sessionStorage);
+                if (sessionStorageKeys.length > 0) {
+                    sessionStorage.clear();
+                    addStatus(`Cleared ${sessionStorageKeys.length} sessionStorage items`, 'success');
+                } else {
+                    addStatus('sessionStorage already empty', 'info');
+                }
+
+                // 5. Clear IndexedDB (if any)
+                addStatus('Checking IndexedDB...', 'info');
+                if ('indexedDB' in window) {
+                    const databases = await indexedDB.databases();
+                    if (databases.length > 0) {
+                        for (let db of databases) {
+                            indexedDB.deleteDatabase(db.name);
+                            addStatus(`Deleted database: ${db.name}`, 'success');
+                        }
+                    } else {
+                        addStatus('No IndexedDB databases found', 'info');
+                    }
+                }
+
+                // Success!
+                addStatus('', 'info');
+                addStatus('🎉 All caches cleared successfully!', 'success');
+                addStatus('', 'info');
+                addStatus('The page will reload in 2 seconds...', 'info');
+
+                // Show goto button
+                gotoBtn.style.display = 'block';
+
+                // Auto-reload after 2 seconds
+                setTimeout(() => {
+                    window.location.href = '/';
+                }, 2000);
+
+            } catch (error) {
+                addStatus(`Error: ${error.message}`, 'error');
+                clearBtn.disabled = false;
+                clearBtn.textContent = 'Try Again';
+            }
+        });
+
+        gotoBtn.addEventListener('click', () => {
+            window.location.href = '/';
+        });
+
+        // Check if we just cleared (prevent loop)
+        if (sessionStorage.getItem('just-cleared')) {
+            sessionStorage.removeItem('just-cleared');
+            addStatus('Cache cleared - you now have the latest version!', 'success');
+            gotoBtn.style.display = 'block';
+            clearBtn.style.display = 'none';
+        }
+    </script>
+</body>
+</html>
