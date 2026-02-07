@@ -129,12 +129,113 @@ class TerminalManager {
                 fitAddon.fit();
             });
         });
+
+        // Setup mobile touch scroll with momentum
+        if (window.innerWidth <= 768) {
+            this.setupMobileTouchScroll(sessionId);
+        }
     }
 
-    // Mobile touch scroll is handled natively via CSS:
-    // - .xterm-screen gets pointer-events: none (touch falls through)
-    // - .xterm-viewport gets touch-action: pan-y + overflow-y: scroll
-    // No JS touch handler needed.
+    // Mobile touch scroll with momentum/inertia
+    setupMobileTouchScroll(sessionId) {
+        const termData = this.terminals.get(sessionId);
+        if (!termData) return;
+
+        const container = termData.container;
+        const terminal = termData.terminal;
+
+        let touchStartY = 0;
+        let lastTouchY = 0;
+        let lastTouchTime = 0;
+        let velocity = 0;
+        let momentumRAF = null;
+        let trackingPoints = []; // Store recent touch points for velocity calculation
+
+        const cancelMomentum = () => {
+            if (momentumRAF) {
+                cancelAnimationFrame(momentumRAF);
+                momentumRAF = null;
+            }
+        };
+
+        container.addEventListener('touchstart', (e) => {
+            cancelMomentum();
+            if (e.touches.length !== 1) return;
+            touchStartY = e.touches[0].clientY;
+            lastTouchY = touchStartY;
+            lastTouchTime = Date.now();
+            velocity = 0;
+            trackingPoints = [{ y: touchStartY, time: lastTouchTime }];
+        }, { passive: true });
+
+        container.addEventListener('touchmove', (e) => {
+            if (e.touches.length !== 1) return;
+            const currentY = e.touches[0].clientY;
+            const now = Date.now();
+            const deltaY = lastTouchY - currentY; // positive = scroll down
+
+            // Scroll by pixel amount converted to lines (approx 17px per line)
+            const lineHeight = 17;
+            if (Math.abs(deltaY) >= lineHeight) {
+                const lines = Math.round(deltaY / lineHeight);
+                terminal.scrollLines(lines);
+                lastTouchY = currentY;
+            }
+
+            // Track points for velocity (keep last 100ms of points)
+            trackingPoints.push({ y: currentY, time: now });
+            while (trackingPoints.length > 0 && now - trackingPoints[0].time > 100) {
+                trackingPoints.shift();
+            }
+
+            lastTouchTime = now;
+        }, { passive: true });
+
+        container.addEventListener('touchend', (e) => {
+            if (trackingPoints.length < 2) return;
+
+            // Calculate velocity from recent tracking points
+            const first = trackingPoints[0];
+            const last = trackingPoints[trackingPoints.length - 1];
+            const dt = last.time - first.time;
+            if (dt === 0) return;
+
+            velocity = (first.y - last.y) / dt; // pixels per ms (positive = scrolling down)
+
+            // Only apply momentum if velocity is significant
+            if (Math.abs(velocity) < 0.3) return;
+
+            // Cap velocity
+            velocity = Math.max(-8, Math.min(8, velocity));
+
+            const lineHeight = 17;
+            const friction = 0.95;
+            const minVelocity = 0.05;
+
+            const applyMomentum = () => {
+                velocity *= friction;
+
+                if (Math.abs(velocity) < minVelocity) {
+                    momentumRAF = null;
+                    return;
+                }
+
+                // Convert velocity to lines
+                const pixelDelta = velocity * 16; // 16ms per frame
+                const lines = Math.round(pixelDelta / lineHeight);
+                if (lines !== 0) {
+                    terminal.scrollLines(lines);
+                }
+
+                momentumRAF = requestAnimationFrame(applyMomentum);
+            };
+
+            momentumRAF = requestAnimationFrame(applyMomentum);
+        }, { passive: true });
+
+        // Store cleanup function
+        termData._cancelMomentum = cancelMomentum;
+    }
 
     // Setup WebSocket handlers
     setupWebSocket(sessionId, ws, terminal) {
@@ -421,6 +522,38 @@ document.addEventListener('DOMContentLoaded', () => {
             if (text && window.terminalManager) {
                 window.terminalManager.paste(text);
                 e.preventDefault();
+            }
+        });
+    }
+
+    // Mobile scroll navigation buttons
+    const btnScrollTop = document.getElementById('btn-scroll-top');
+    const btnScrollBottom = document.getElementById('btn-scroll-bottom');
+
+    if (btnScrollTop) {
+        btnScrollTop.addEventListener('click', () => {
+            const tm = window.terminalManager;
+            if (tm && tm.activeSessionId) {
+                const termData = tm.terminals.get(tm.activeSessionId);
+                if (termData && termData.terminal) {
+                    // Cancel any ongoing momentum
+                    if (termData._cancelMomentum) termData._cancelMomentum();
+                    termData.terminal.scrollToTop();
+                }
+            }
+        });
+    }
+
+    if (btnScrollBottom) {
+        btnScrollBottom.addEventListener('click', () => {
+            const tm = window.terminalManager;
+            if (tm && tm.activeSessionId) {
+                const termData = tm.terminals.get(tm.activeSessionId);
+                if (termData && termData.terminal) {
+                    // Cancel any ongoing momentum
+                    if (termData._cancelMomentum) termData._cancelMomentum();
+                    termData.terminal.scrollToBottom();
+                }
             }
         });
     }

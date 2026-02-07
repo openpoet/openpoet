@@ -648,7 +648,11 @@ body {
     display: none !important;
 }
 
-/* Mobile terminal bars - hidden on desktop */
+/* Mobile terminal elements - hidden on desktop */
+.mobile-scroll-nav {
+    display: none;
+}
+
 .mobile-terminal-keys-bar,
 .mobile-terminal-input-bar {
     display: none;

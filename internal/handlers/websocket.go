@@ -46,11 +46,16 @@ func (h *WebSocketHandler) HandleSessionWS(w http.ResponseWriter, r *http.Reques
 		}
 	})
 
-	// Set up resize handler to forward to session PTY
+	// Set up resize handler - tracks per-client size and uses minimum
 	client.SetResizeHandler(func(rows, cols uint16) {
-		if err := h.api.sessionMgr.ResizeSession(sessionID, rows, cols); err != nil {
-			log.Printf("Failed to resize session: %v", err)
+		if err := h.api.sessionMgr.RegisterClientSize(sessionID, client.ID, rows, cols); err != nil {
+			log.Printf("Failed to register client size: %v", err)
 		}
+	})
+
+	// Clean up client size tracking on disconnect
+	client.SetDisconnectHandler(func() {
+		h.api.sessionMgr.UnregisterClientSize(sessionID, client.ID)
 	})
 }
 

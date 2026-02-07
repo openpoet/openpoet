@@ -166,7 +166,7 @@
 
     .terminal-container {
         padding: 0; /* Remove any padding */
-        touch-action: pan-y; /* Allow native vertical scroll */
+        touch-action: none; /* JS handles touch scroll with momentum */
     }
 
     /* Make terminal content use full available width */
@@ -176,15 +176,51 @@
     }
 
     /* On mobile, terminal is read-only (input via bar below).
-       Let touch events pass through the canvas to the scrollable viewport. */
+       Disable pointer-events on canvas so touch events reach the container. */
     .terminal-container .xterm-screen {
         pointer-events: none !important;
     }
 
     .terminal-container .xterm-viewport {
         width: 100% !important;
-        touch-action: pan-y !important;
-        -webkit-overflow-scrolling: touch;
+        touch-action: none !important; /* JS handles scrolling */
+    }
+
+    /* Mobile scroll navigation buttons - positioned above keys/input bars */
+    .mobile-scroll-nav {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        position: absolute;
+        right: 10px;
+        bottom: 130px; /* Above keys bar (~48px) + input bar (~64px) + margin */
+        z-index: 50;
+        pointer-events: none; /* Let touches pass through the container */
+    }
+
+    .mobile-scroll-btn {
+        width: 40px;
+        height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background-color: rgba(30, 30, 50, 0.85);
+        border: 1px solid var(--color-border);
+        border-radius: 50%;
+        color: var(--color-text-secondary);
+        cursor: pointer;
+        pointer-events: auto; /* Re-enable for the buttons themselves */
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        transition: all 0.15s ease;
+        -webkit-tap-highlight-color: transparent;
+    }
+
+    .mobile-scroll-btn:active {
+        background-color: var(--color-primary);
+        border-color: var(--color-primary);
+        color: white;
+        transform: scale(0.9);
     }
 
     /* Hide desktop elements on mobile */
@@ -601,7 +637,7 @@
         display: none !important;
     }
 
-    /* Ensure xterm viewport allows native touch scroll */
+    /* xterm viewport scroll managed by JS momentum handler */
     .terminal-container .xterm-viewport {
         overflow-y: scroll !important;
         overscroll-behavior: contain; /* Prevent scroll chaining to parent */

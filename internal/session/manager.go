@@ -21,13 +21,19 @@ type Runner interface {
 	PID() int
 }
 
+type TermSize struct {
+	Rows uint16
+	Cols uint16
+}
+
 type Manager struct {
 	db         *database.DB
 	hub        *websocket.Hub
 	serverAddr string // DevManager server address (e.g. "localhost:8080")
 
-	mu       sync.RWMutex
-	sessions map[string]*runningSession
+	mu          sync.RWMutex
+	sessions    map[string]*runningSession
+	clientSizes map[string]map[string]TermSize // sessionID -> clientID -> size
 }
 
 // OutputBuffer is a ring buffer for storing recent terminal output
@@ -88,10 +94,11 @@ type runningSession struct {
 
 func NewManager(db *database.DB, hub *websocket.Hub, serverAddr string) *Manager {
 	return &Manager{
-		db:         db,
-		hub:        hub,
-		serverAddr: serverAddr,
-		sessions:   make(map[string]*runningSession),
+		db:          db,
+		hub:         hub,
+		serverAddr:  serverAddr,
+		sessions:    make(map[string]*runningSession),
+		clientSizes: make(map[string]map[string]TermSize),
 	}
 }
 
@@ -215,6 +222,81 @@ func (m *Manager) ResizeSession(sessionID string, rows, cols uint16) error {
 	}
 
 	return rs.runner.Resize(rows, cols)
+}
+
+// RegisterClientSize stores a client's terminal size and resizes the PTY
+// to the minimum dimensions across all connected clients.
+func (m *Manager) RegisterClientSize(sessionID, clientID string, rows, cols uint16) error {
+	m.mu.Lock()
+	rs, ok := m.sessions[sessionID]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	if m.clientSizes[sessionID] == nil {
+		m.clientSizes[sessionID] = make(map[string]TermSize)
+	}
+	m.clientSizes[sessionID][clientID] = TermSize{Rows: rows, Cols: cols}
+
+	minRows, minCols := m.computeMinSize(sessionID)
+	m.mu.Unlock()
+
+	log.Printf("Session %s: client %s reported %dx%d, PTY min is %dx%d (%d clients)",
+		sessionID[:8], clientID[:8], cols, rows, minCols, minRows, len(m.clientSizes[sessionID]))
+
+	return rs.runner.Resize(minRows, minCols)
+}
+
+// UnregisterClientSize removes a client's size and resizes the PTY to the
+// minimum of the remaining clients. If no clients remain, the PTY keeps its
+// current size.
+func (m *Manager) UnregisterClientSize(sessionID, clientID string) {
+	m.mu.Lock()
+	clients, ok := m.clientSizes[sessionID]
+	if !ok || clients == nil {
+		m.mu.Unlock()
+		return
+	}
+
+	delete(clients, clientID)
+
+	if len(clients) == 0 {
+		delete(m.clientSizes, sessionID)
+		m.mu.Unlock()
+		return
+	}
+
+	rs, sessionOk := m.sessions[sessionID]
+	minRows, minCols := m.computeMinSize(sessionID)
+	m.mu.Unlock()
+
+	if sessionOk {
+		log.Printf("Session %s: client %s disconnected, PTY resized to %dx%d (%d clients remain)",
+			sessionID[:8], clientID[:8], minCols, minRows, len(clients))
+		rs.runner.Resize(minRows, minCols)
+	}
+}
+
+// computeMinSize returns the minimum rows and cols across all clients for a session.
+// Must be called with m.mu held.
+func (m *Manager) computeMinSize(sessionID string) (rows, cols uint16) {
+	clients := m.clientSizes[sessionID]
+	first := true
+	for _, s := range clients {
+		if first {
+			rows, cols = s.Rows, s.Cols
+			first = false
+		} else {
+			if s.Cols < cols {
+				cols = s.Cols
+			}
+			if s.Rows < rows {
+				rows = s.Rows
+			}
+		}
+	}
+	return
 }
 
 func (m *Manager) GetSession(sessionID string) (*database.Session, bool) {
