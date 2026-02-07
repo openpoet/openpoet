@@ -4,6 +4,8 @@ class FileBrowser {
         this.panel = document.getElementById('file-browser-panel');
         this.fileList = document.getElementById('file-list');
         this.currentPath = '';
+        this.pendingImageBlob = null;
+        this.pendingImageDataUrl = null;
 
         this.setupEventListeners();
     }
@@ -45,8 +47,22 @@ class FileBrowser {
             });
         }
 
-        // Clipboard paste for images
+        // Clipboard paste for images - use capture phase to intercept before terminal
         document.addEventListener('paste', (e) => {
+            // Don't intercept when typing in normal inputs/textareas (except mobile-terminal-input)
+            const activeEl = document.activeElement;
+            if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
+                if (activeEl.id !== 'mobile-terminal-input') {
+                    return;
+                }
+            }
+
+            // Check if we're in terminal view
+            const terminalView = document.getElementById('view-terminal');
+            if (!terminalView || !terminalView.classList.contains('active')) {
+                return;
+            }
+
             const items = e.clipboardData?.items;
             if (!items) return;
 
@@ -54,13 +70,259 @@ class FileBrowser {
                 if (item.type.indexOf('image') !== -1) {
                     const blob = item.getAsFile();
                     if (blob) {
-                        this.uploadPastedImage(blob);
                         e.preventDefault();
+                        e.stopPropagation();
+                        this.showImagePasteModal(blob);
                         break;
                     }
                 }
             }
+        }, true); // capture phase
+
+        // Image picker buttons (desktop + mobile) - open file chooser
+        const imagePickerInput = document.getElementById('image-picker-input');
+        document.getElementById('btn-image-picker')?.addEventListener('click', () => {
+            imagePickerInput?.click();
         });
+        document.getElementById('btn-mobile-image-picker')?.addEventListener('click', () => {
+            imagePickerInput?.click();
+        });
+
+        // Handle file selection from image picker
+        imagePickerInput?.addEventListener('change', (e) => {
+            const file = e.target.files?.[0];
+            if (file && file.type.startsWith('image/')) {
+                this.showImagePasteModal(file);
+            }
+            // Reset so the same file can be selected again
+            e.target.value = '';
+        });
+
+        // Voice button in the image paste modal
+        document.getElementById('image-paste-voice-btn')?.addEventListener('click', () => {
+            if (!window.voiceInput) return;
+            const voiceBtn = document.getElementById('image-paste-voice-btn');
+            if (window.voiceInput.isRecording) {
+                window.voiceInput.stopRecording();
+                voiceBtn?.classList.remove('recording');
+                return;
+            }
+            voiceBtn?.classList.add('recording');
+            window.voiceInput.startRecordingWithCallback((text) => {
+                voiceBtn?.classList.remove('recording');
+                const prompt = document.getElementById('image-paste-prompt');
+                if (prompt) {
+                    // Append transcribed text (add space if existing text)
+                    const current = prompt.value;
+                    prompt.value = current ? current + ' ' + text : text;
+                    prompt.focus();
+                }
+            });
+        });
+
+        // Image paste modal buttons
+        document.getElementById('image-paste-send')?.addEventListener('click', () => {
+            this.sendImageWithPrompt();
+        });
+
+        document.getElementById('image-paste-cancel')?.addEventListener('click', () => {
+            this.hideImagePasteModal();
+        });
+
+        document.getElementById('image-paste-close')?.addEventListener('click', () => {
+            this.hideImagePasteModal();
+        });
+
+        // Keyboard shortcuts in the modal
+        document.getElementById('image-paste-prompt')?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                this.sendImageWithPrompt();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                this.hideImagePasteModal();
+            }
+        });
+
+        // Escape key on overlay
+        document.getElementById('image-paste-dialog')?.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                this.hideImagePasteModal();
+            }
+        });
+    }
+
+    showImagePasteModal(blob) {
+        this.pendingImageBlob = blob;
+
+        const reader = new FileReader();
+        reader.onload = () => {
+            this.pendingImageDataUrl = reader.result;
+
+            const preview = document.getElementById('image-paste-preview');
+            if (preview) {
+                preview.src = reader.result;
+            }
+
+            const dialog = document.getElementById('image-paste-dialog');
+            if (dialog) {
+                dialog.classList.remove('hidden');
+            }
+
+            // Clear and focus the prompt textarea
+            const prompt = document.getElementById('image-paste-prompt');
+            if (prompt) {
+                prompt.value = '';
+                setTimeout(() => prompt.focus(), 100);
+            }
+        };
+        reader.readAsDataURL(blob);
+    }
+
+    hideImagePasteModal() {
+        const dialog = document.getElementById('image-paste-dialog');
+        if (dialog) {
+            dialog.classList.add('hidden');
+        }
+
+        this.pendingImageBlob = null;
+        this.pendingImageDataUrl = null;
+
+        const preview = document.getElementById('image-paste-preview');
+        if (preview) {
+            preview.src = '';
+        }
+
+        // Cancel any ongoing voice recording in the modal
+        if (window.voiceInput && window.voiceInput.isRecording && window.voiceInput.targetCallback) {
+            window.voiceInput.cancelRecording();
+        }
+        document.getElementById('image-paste-voice-btn')?.classList.remove('recording');
+
+        // Refocus terminal
+        if (window.terminalManager) {
+            window.terminalManager.focus();
+        }
+    }
+
+    // Compress image using canvas to reduce size for upload
+    compressImage(dataUrl, maxWidth = 1920, quality = 0.8) {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+                let w = img.width;
+                let h = img.height;
+
+                // Scale down if wider than maxWidth
+                if (w > maxWidth) {
+                    h = Math.round(h * maxWidth / w);
+                    w = maxWidth;
+                }
+
+                const canvas = document.createElement('canvas');
+                canvas.width = w;
+                canvas.height = h;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, w, h);
+
+                resolve(canvas.toDataURL('image/jpeg', quality));
+            };
+            img.onerror = () => {
+                // If compression fails, return original
+                resolve(dataUrl);
+            };
+            img.src = dataUrl;
+        });
+    }
+
+    async sendImageWithPrompt() {
+        if (!this.pendingImageDataUrl) return;
+
+        const sessionId = app.currentSession;
+        if (!sessionId) {
+            app.showToast('Error', 'No active session', 'error');
+            this.hideImagePasteModal();
+            return;
+        }
+
+        const promptEl = document.getElementById('image-paste-prompt');
+        const userPrompt = promptEl ? promptEl.value.trim() : '';
+
+        // Hide modal immediately
+        const dialog = document.getElementById('image-paste-dialog');
+        if (dialog) {
+            dialog.classList.add('hidden');
+        }
+
+        try {
+            app.showToast('Info', 'Uploading image...', 'info');
+
+            // Compress image to reduce size (avoids nginx 413 errors)
+            let imageData = this.pendingImageDataUrl;
+            const originalSize = imageData.length;
+            if (originalSize > 500000) { // > 500KB, compress
+                imageData = await this.compressImage(imageData);
+                console.log(`Image compressed: ${Math.round(originalSize/1024)}KB -> ${Math.round(imageData.length/1024)}KB`);
+            }
+
+            const response = await fetch(`/api/sessions/${sessionId}/files/paste`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    data: imageData,
+                    dir: '.devmanager/images'
+                })
+            });
+
+            if (!response.ok) {
+                // Handle non-JSON error responses (e.g. nginx 413)
+                const ct = response.headers.get('content-type') || '';
+                if (ct.indexOf('application/json') !== -1) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Upload failed');
+                } else {
+                    throw new Error(`Upload failed (HTTP ${response.status}). Image may be too large.`);
+                }
+            }
+
+            const result = await response.json();
+            app.showToast('Success', `Image saved: ${result.path}`, 'success');
+
+            // Build the formatted message for Claude Code
+            let message;
+            if (userPrompt) {
+                message = `Read the image file at ${result.path} and then: ${userPrompt}`;
+            } else {
+                message = `Read and analyze the image file at ${result.path}`;
+            }
+
+            // Send to terminal: Ctrl+U (clear line) + message, then Enter after delay
+            if (window.terminalManager) {
+                window.terminalManager.sendInput('\x15' + message);
+                setTimeout(() => {
+                    window.terminalManager.sendInput('\r');
+                }, 100);
+            }
+
+        } catch (error) {
+            console.error('Image paste error:', error);
+            app.showToast('Error', error.message, 'error');
+        }
+
+        // Clean up state
+        this.pendingImageBlob = null;
+        this.pendingImageDataUrl = null;
+
+        const preview = document.getElementById('image-paste-preview');
+        if (preview) {
+            preview.src = '';
+        }
+
+        // Refocus terminal
+        if (window.terminalManager) {
+            window.terminalManager.focus();
+        }
     }
 
     toggle() {
@@ -219,11 +481,6 @@ class FileBrowser {
 
                 const result = await response.json();
                 app.showToast('Success', `Image saved: ${result.path}`, 'success');
-
-                // Optionally insert path into terminal
-                if (window.terminalManager) {
-                    window.terminalManager.sendInput(result.path + ' ');
-                }
 
                 this.loadFiles(this.currentPath);
 

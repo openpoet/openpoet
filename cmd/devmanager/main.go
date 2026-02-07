@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +28,39 @@ import (
 	"devmanager/internal/websocket"
 	"devmanager/web"
 )
+
+// debugResponseWriter wraps http.ResponseWriter to capture status and size for logging
+type debugResponseWriter struct {
+	http.ResponseWriter
+	path         string
+	statusCode   int
+	bytesWritten int
+	wroteHeader  bool
+}
+
+func (dw *debugResponseWriter) WriteHeader(code int) {
+	dw.statusCode = code
+	dw.wroteHeader = true
+	dw.ResponseWriter.WriteHeader(code)
+}
+
+func (dw *debugResponseWriter) Write(b []byte) (int, error) {
+	if !dw.wroteHeader {
+		dw.statusCode = 200
+		dw.wroteHeader = true
+	}
+	// Log first 100 bytes of response for JS/CSS files to detect if HTML is being served
+	if dw.bytesWritten == 0 && (strings.HasSuffix(dw.path, ".js") || strings.HasSuffix(dw.path, ".css") || strings.Contains(dw.path, ".js?") || strings.Contains(dw.path, ".css?")) {
+		snippet := string(b)
+		if len(snippet) > 100 {
+			snippet = snippet[:100]
+		}
+		log.Printf("[DEBUG-BODY] %s first100=%q", dw.path, snippet)
+	}
+	n, err := dw.ResponseWriter.Write(b)
+	dw.bytesWritten += n
+	return n, err
+}
 
 func main() {
 	// Parse command line flags
@@ -148,6 +183,26 @@ func main() {
 	r.Use(middleware.Compress(5))
 	r.Use(middleware.RealIP)
 
+	// DEBUG: Log static file requests with Content-Type and User-Agent
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := r.URL.RequestURI()
+			if strings.HasPrefix(path, "/static/") || path == "/sw.js" || path == "/" || path == "/manifest.json" {
+				ua := r.Header.Get("User-Agent")
+				log.Printf("[DEBUG-REQ] %s %s UA=%s", r.Method, path, ua)
+
+				// Wrap response writer to capture Content-Type
+				dw := &debugResponseWriter{ResponseWriter: w, path: path}
+				next.ServeHTTP(dw, r)
+
+				ct := w.Header().Get("Content-Type")
+				log.Printf("[DEBUG-RES] %s Content-Type=%s Status=%d Size=%d", path, ct, dw.statusCode, dw.bytesWritten)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+
 	// CORS for development
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +218,21 @@ func main() {
 	})
 
 	// API routes
+	// DEBUG: Client error reporting endpoint
+	r.Post("/api/debug/client-error", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Error string `json:"error"`
+			UA    string `json:"ua"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad request", 400)
+			return
+		}
+		log.Printf("[CLIENT-ERROR] UA=%s\n%s", body.UA, body.Error)
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	})
+
 	r.Route("/api", func(r chi.Router) {
 		// Projects
 		r.Get("/projects", api.ListProjects)
