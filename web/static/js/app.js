@@ -1105,8 +1105,89 @@ class DevManager {
             this.sendMobileTerminalInput();
         });
 
+        // Expand button opens full-screen editor
+        const expandBtn = document.getElementById('btn-mobile-expand-editor');
+        expandBtn?.addEventListener('click', () => {
+            this.openMobileEditor();
+        });
+
+        // Setup mobile editor buttons
+        this.setupMobileEditor();
+
         // Setup mobile special keys bar
         this.setupMobileSpecialKeys();
+    }
+
+    setupMobileEditor() {
+        const closeBtn = document.getElementById('mobile-editor-close');
+        const sendBtn = document.getElementById('mobile-editor-send');
+        const voiceBtn = document.getElementById('mobile-editor-voice');
+
+        closeBtn?.addEventListener('click', () => {
+            this.closeMobileEditor();
+        });
+
+        sendBtn?.addEventListener('click', () => {
+            const textarea = document.getElementById('mobile-editor-textarea');
+            const input = document.getElementById('mobile-terminal-input');
+            if (!textarea) return;
+
+            const text = textarea.value.trim();
+            if (text) {
+                // Copy to inline input and use the canonical send method
+                if (input) input.value = text;
+                this.sendMobileTerminalInput();
+            }
+
+            // Clear and close
+            textarea.value = '';
+            if (input) input.value = '';
+            const editor = document.getElementById('mobile-text-editor');
+            if (editor) editor.classList.add('hidden');
+        });
+
+        voiceBtn?.addEventListener('click', () => {
+            if (window.voiceInput) {
+                const textarea = document.getElementById('mobile-editor-textarea');
+                window.voiceInput.startRecordingWithCallback((text) => {
+                    if (textarea) {
+                        const current = textarea.value;
+                        textarea.value = current.length > 0 ? current + ' ' + text : text;
+                    }
+                });
+            }
+        });
+    }
+
+    openMobileEditor() {
+        const editor = document.getElementById('mobile-text-editor');
+        const textarea = document.getElementById('mobile-editor-textarea');
+        const input = document.getElementById('mobile-terminal-input');
+
+        if (!editor || !textarea || !input) return;
+
+        // Copy text from input to textarea
+        textarea.value = input.value;
+        editor.classList.remove('hidden');
+
+        // Focus textarea and move cursor to end
+        setTimeout(() => {
+            textarea.focus();
+            textarea.selectionStart = textarea.value.length;
+            textarea.selectionEnd = textarea.value.length;
+        }, 50);
+    }
+
+    closeMobileEditor() {
+        const editor = document.getElementById('mobile-text-editor');
+        const textarea = document.getElementById('mobile-editor-textarea');
+        const input = document.getElementById('mobile-terminal-input');
+
+        if (!editor || !textarea || !input) return;
+
+        // Preserve text back into inline input
+        input.value = textarea.value;
+        editor.classList.add('hidden');
     }
 
     setupMobileSpecialKeys() {
@@ -1130,6 +1211,9 @@ class DevManager {
             const key = btn.dataset.key;
             const sequence = keyMap[key];
             if (sequence && window.terminalManager) {
+                // Re-fit terminal before navigation keys to ensure PTY
+                // column count matches xterm.js, preventing line duplication.
+                window.terminalManager.ensureFit();
                 window.terminalManager.sendInput(sequence);
             }
         });
@@ -1141,22 +1225,21 @@ class DevManager {
 
         const text = input.value.trim();
         if (text) {
-            // Send input to terminal (same as voice input)
             if (window.terminalManager) {
-                // First, clear the current line in terminal
+                // Clear current line, send text, then Enter after delay.
+                // This is the exact sequence that works with voice Enviar.
                 window.terminalManager.sendInput('\x15'); // Ctrl+U
-
-                // Send the text
                 window.terminalManager.sendInput(text);
-
-                // Send Enter key separately after a small delay
                 setTimeout(() => {
                     window.terminalManager.sendInput('\r');
-                }, 50);
+                }, 700);
             }
-
-            // Clear input field
             input.value = '';
+        } else {
+            // Empty input: send Enter to the terminal (for navigation, confirming prompts, etc.)
+            if (window.terminalManager) {
+                window.terminalManager.sendInput('\r');
+            }
         }
     }
 
@@ -1588,12 +1671,6 @@ class DevManager {
                         <label class="form-label">Groq API Key</label>
                         <input type="password" class="form-input" id="groq-key" placeholder="gsk_...">
                     </div>
-                    <div class="form-group">
-                        <label style="display: flex; align-items: center; cursor: pointer;">
-                            <input type="checkbox" id="voice-auto-submit" style="margin-right: 8px;">
-                            <span>Auto-submit after transcription (clears input and presses Enter)</span>
-                        </label>
-                    </div>
                     <button class="btn btn-primary btn-sm" onclick="app.saveWhisperSettings()">Save</button>
                 </div>
             </div>
@@ -1605,10 +1682,6 @@ class DevManager {
                 const providerSelect = document.getElementById('whisper-provider');
                 if (providerSelect && this.settings.whisper_provider) {
                     providerSelect.value = this.settings.whisper_provider;
-                }
-                const autoSubmitCheckbox = document.getElementById('voice-auto-submit');
-                if (autoSubmitCheckbox) {
-                    autoSubmitCheckbox.checked = this.settings.voice_auto_submit === 'true';
                 }
             }
         }, 0);
@@ -2071,11 +2144,9 @@ class DevManager {
         const provider = document.getElementById('whisper-provider').value;
         const openaiKey = document.getElementById('openai-key').value;
         const groqKey = document.getElementById('groq-key').value;
-        const autoSubmit = document.getElementById('voice-auto-submit').checked;
 
         const settings = {
-            whisper_provider: provider,
-            voice_auto_submit: autoSubmit ? 'true' : 'false'
+            whisper_provider: provider
         };
         if (openaiKey) settings.openai_api_key = openaiKey;
         if (groqKey) settings.groq_api_key = groqKey;
@@ -2083,10 +2154,6 @@ class DevManager {
         try {
             await this.api('PUT', '/config/settings', settings);
             this.showToast('Success', 'Settings saved', 'success');
-            // Notify voice input of setting change
-            if (window.voiceInput) {
-                window.voiceInput.updateSettings();
-            }
         } catch (error) {
             this.showToast('Error', error.message, 'error');
         }

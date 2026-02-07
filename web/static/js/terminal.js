@@ -113,7 +113,10 @@ class TerminalManager {
         const resizeObserver = new ResizeObserver(() => {
             if (this.activeSessionId === sessionId) {
                 clearTimeout(fitDebounce);
-                fitDebounce = setTimeout(() => fitAddon.fit(), 50);
+                fitDebounce = setTimeout(() => {
+                    const td = this.terminals.get(sessionId);
+                    if (td) this.safeFit(td);
+                }, 50);
             }
         });
         if (wrapper) {
@@ -126,9 +129,24 @@ class TerminalManager {
         // Initial fit after layout has settled
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
-                fitAddon.fit();
+                const td = this.terminals.get(sessionId);
+                if (td) this.safeFit(td);
             });
         });
+
+        // On mobile, schedule additional fits to handle late layout settling.
+        // The initial double-rAF may fire before fonts load or bars finish
+        // animating, causing a column mismatch with the PTY.
+        if (window.innerWidth <= 768) {
+            setTimeout(() => {
+                const td = this.terminals.get(sessionId);
+                if (td) this.safeFit(td);
+            }, 300);
+            setTimeout(() => {
+                const td = this.terminals.get(sessionId);
+                if (td) this.safeFit(td);
+            }, 800);
+        }
 
         // Setup mobile touch scroll with momentum
         if (window.innerWidth <= 768) {
@@ -364,7 +382,7 @@ class TerminalManager {
         // Re-fit terminal after layout settles (double rAF ensures paint is done)
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
-                termData.fitAddon.fit();
+                this.safeFit(termData);
                 if (window.innerWidth > 768) {
                     termData.terminal.focus();
                 }
@@ -463,6 +481,35 @@ class TerminalManager {
         }
     }
 
+    // Fit the terminal to its container, applying a safety margin on mobile.
+    // On mobile browsers, sub-pixel font rendering can cause fitAddon to
+    // calculate 1-2 more columns than actually fit visually. When the PTY
+    // has more cols than the rendered terminal, TUI redraws (ANSI escapes)
+    // wrap at the wrong position, causing garbled/duplicated lines.
+    safeFit(termData) {
+        if (!termData || !termData.fitAddon || !termData.terminal) return;
+        termData.fitAddon.fit();
+        if (window.innerWidth <= 768) {
+            const term = termData.terminal;
+            const safeCols = Math.max(20, term.cols - 1);
+            if (safeCols !== term.cols) {
+                term.resize(safeCols, term.rows);
+            }
+        }
+    }
+
+    // Re-fit the active terminal to ensure cols/rows match the container.
+    // Call this before sending navigation keys on mobile to prevent
+    // rendering glitches from column mismatch between xterm.js and PTY.
+    ensureFit() {
+        if (this.activeSessionId) {
+            const termData = this.terminals.get(this.activeSessionId);
+            if (termData) {
+                this.safeFit(termData);
+            }
+        }
+    }
+
     // Send input to active terminal
     sendInput(data) {
         if (this.activeSessionId) {
@@ -493,6 +540,19 @@ class TerminalManager {
         }
     }
 
+    // Get text content of the current line in the active terminal
+    getActiveLineContent() {
+        if (this.activeSessionId) {
+            const termData = this.terminals.get(this.activeSessionId);
+            if (termData && termData.terminal) {
+                const buf = termData.terminal.buffer.active;
+                const line = buf.getLine(buf.cursorY + buf.baseY);
+                return line ? line.translateToString(true) : '';
+            }
+        }
+        return '';
+    }
+
     // Paste to active terminal
     paste(text) {
         if (this.activeSessionId) {
@@ -518,6 +578,20 @@ document.addEventListener('DOMContentLoaded', () => {
     const wrapper = document.getElementById('terminal-containers-wrapper');
     if (wrapper) {
         wrapper.addEventListener('paste', (e) => {
+            // If clipboard contains an image, let files.js handle it
+            const items = e.clipboardData?.items;
+            if (items) {
+                for (const item of items) {
+                    if (item.type.indexOf('image') !== -1) {
+                        return;
+                    }
+                }
+            }
+            // If image paste modal is open, don't interfere
+            const imgDialog = document.getElementById('image-paste-dialog');
+            if (imgDialog && !imgDialog.classList.contains('hidden')) {
+                return;
+            }
             const text = e.clipboardData.getData('text');
             if (text && window.terminalManager) {
                 window.terminalManager.paste(text);

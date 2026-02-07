@@ -4,12 +4,14 @@ class VoiceInput {
         this.mediaRecorder = null;
         this.audioChunks = [];
         this.isRecording = false;
-        this.autoSubmit = false;
+        this.submitAfterTranscribe = false;
+        this.targetCallback = null; // When set, transcribed text goes here instead of terminal
 
         this.indicator = document.getElementById('voice-indicator');
         this.startBtn = document.getElementById('btn-voice-input');
         this.mobileBtn = document.getElementById('btn-mobile-voice-input');
-        this.stopBtn = document.getElementById('voice-stop');
+        this.stopBtn = document.getElementById('voice-stop-btn');
+        this.sendBtn = document.getElementById('voice-send');
         this.cancelBtn = document.getElementById('voice-cancel');
         this.timerDisplay = document.getElementById('voice-timer');
         this.cancelled = false;
@@ -18,29 +20,13 @@ class VoiceInput {
         this.recordingSeconds = 0;
 
         this.setupEventListeners();
-        this.loadSettings();
-    }
-
-    async loadSettings() {
-        try {
-            const response = await fetch('/api/config/settings');
-            if (response.ok) {
-                const settings = await response.json();
-                this.autoSubmit = settings.voice_auto_submit === 'true';
-            }
-        } catch (error) {
-            console.error('Failed to load voice settings:', error);
-        }
-    }
-
-    updateSettings() {
-        this.loadSettings();
     }
 
     setupEventListeners() {
         this.startBtn?.addEventListener('click', () => this.toggleRecording());
         this.mobileBtn?.addEventListener('click', () => this.toggleRecording());
-        this.stopBtn?.addEventListener('click', () => this.stopRecording());
+        this.stopBtn?.addEventListener('click', () => this.stopRecording(false));
+        this.sendBtn?.addEventListener('click', () => this.stopRecording(true));
         this.cancelBtn?.addEventListener('click', () => this.cancelRecording());
     }
 
@@ -55,7 +41,7 @@ class VoiceInput {
             return;
         }
         if (this.isRecording) {
-            this.stopRecording();
+            this.stopRecording(false);
         } else {
             this.startRecording();
         }
@@ -97,8 +83,9 @@ class VoiceInput {
         }
     }
 
-    stopRecording() {
+    stopRecording(autoSubmit = false) {
         if (this.mediaRecorder && this.isRecording) {
+            this.submitAfterTranscribe = autoSubmit;
             this.clearTimers();
             this.mediaRecorder.stop();
             this.isRecording = false;
@@ -110,6 +97,7 @@ class VoiceInput {
         if (this.mediaRecorder && this.isRecording) {
             this.clearTimers();
             this.cancelled = true;
+            this.targetCallback = null;
             this.mediaRecorder.stop();
             this.isRecording = false;
             this.hideIndicator();
@@ -166,12 +154,6 @@ class VoiceInput {
         try {
             app.showToast('Info', 'Transcribing...', 'info');
 
-            // Clear input line if auto-submit is enabled
-            if (this.autoSubmit && window.terminalManager) {
-                // Send Ctrl+U to clear the current line in terminal
-                window.terminalManager.sendInput('\x15');
-            }
-
             const response = await fetch('/api/voice/transcribe', {
                 method: 'POST',
                 body: formData
@@ -185,18 +167,12 @@ class VoiceInput {
             const result = await response.json();
 
             if (result.text) {
-                // Insert transcribed text into terminal
-                if (window.terminalManager) {
-                    // Send the transcribed text first
-                    window.terminalManager.sendInput(result.text);
-
-                    // If auto-submit is enabled, send Enter key separately
-                    if (this.autoSubmit) {
-                        // Small delay to ensure text is processed first
-                        setTimeout(() => {
-                            window.terminalManager.sendInput('\r');
-                        }, 50);
-                    }
+                // If a target callback is set, send text there instead of terminal
+                if (this.targetCallback) {
+                    this.targetCallback(result.text);
+                    this.targetCallback = null;
+                } else {
+                    this.insertText(result.text, this.submitAfterTranscribe);
                 }
                 app.showToast('Success', 'Transcription complete', 'success');
             }
@@ -204,6 +180,52 @@ class VoiceInput {
         } catch (error) {
             console.error('Transcription error:', error);
             app.showToast('Error', error.message, 'error');
+        }
+    }
+
+    // Insert transcribed text into the appropriate input (mobile input bar or terminal)
+    insertText(text, submit) {
+        const isMobile = window.innerWidth <= 768;
+        const mobileInput = document.getElementById('mobile-terminal-input');
+
+        if (isMobile && mobileInput) {
+            // Mobile: use the mobile input bar
+            const current = mobileInput.value;
+            if (current.length > 0) {
+                mobileInput.value = current + ' ' + text;
+            } else {
+                mobileInput.value = text;
+            }
+
+            if (submit) {
+                // Trigger the mobile send flow
+                if (window.app) {
+                    window.app.sendMobileTerminalInput();
+                }
+            } else {
+                // Open full-screen editor with the transcribed text
+                if (window.app && window.app.openMobileEditor) {
+                    window.app.openMobileEditor();
+                } else {
+                    mobileInput.focus();
+                }
+            }
+        } else if (window.terminalManager) {
+            // Desktop: send directly to terminal
+            if (submit) {
+                window.terminalManager.sendInput(text);
+                setTimeout(() => {
+                    window.terminalManager.sendInput('\r');
+                }, 50);
+            } else {
+                // Move to end of line, add space if line has text, paste
+                window.terminalManager.sendInput('\x05'); // Ctrl+E
+                const lineContent = window.terminalManager.getActiveLineContent();
+                if (lineContent.trim().length > 0) {
+                    window.terminalManager.sendInput(' ');
+                }
+                window.terminalManager.sendInput(text);
+            }
         }
     }
 
@@ -228,12 +250,33 @@ class VoiceInput {
         this.indicator?.classList.remove('hidden');
         this.startBtn?.classList.add('recording');
         this.mobileBtn?.classList.add('recording');
+        // Hide "Enviar" button when in callback mode (image paste modal)
+        this.sendBtn?.classList.toggle('hidden', !!this.targetCallback);
     }
 
     hideIndicator() {
         this.indicator?.classList.add('hidden');
         this.startBtn?.classList.remove('recording');
         this.mobileBtn?.classList.remove('recording');
+    }
+
+    // Start recording with a callback for the transcribed text (used by image paste modal)
+    startRecordingWithCallback(callback) {
+        if (!this.isSupported()) {
+            const isHTTP = window.location.protocol === 'http:' && window.location.hostname !== 'localhost';
+            if (isHTTP) {
+                app.showToast('Error', 'Microphone requires HTTPS. Access via https:// or localhost.', 'error');
+            } else {
+                app.showToast('Error', 'Microphone not supported in this browser.', 'error');
+            }
+            return;
+        }
+        if (this.isRecording) {
+            this.stopRecording(false);
+            return;
+        }
+        this.targetCallback = callback;
+        this.startRecording();
     }
 
     isSupported() {

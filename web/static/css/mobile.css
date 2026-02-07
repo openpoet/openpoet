@@ -637,11 +637,83 @@
         display: none !important;
     }
 
-    /* xterm viewport scroll managed by JS momentum handler */
+    /* xterm viewport scroll managed by JS momentum handler.
+       Use overlay scrollbar to avoid consuming horizontal space,
+       which would cause column mismatch between xterm.js and PTY. */
     .terminal-container .xterm-viewport {
-        overflow-y: scroll !important;
+        overflow-y: auto !important;
+        scrollbar-width: none; /* Firefox: hide scrollbar */
         overscroll-behavior: contain; /* Prevent scroll chaining to parent */
     }
+
+    .terminal-container .xterm-viewport::-webkit-scrollbar {
+        display: none; /* Chrome/Safari: hide scrollbar */
+    }
+
+    /* Mobile full-screen text editor */
+    .mobile-text-editor {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 2500;
+        background-color: var(--color-bg);
+        display: flex;
+        flex-direction: column;
+    }
+
+    .mobile-text-editor.hidden {
+        display: none;
+    }
+
+    .mobile-text-editor-header {
+        display: flex;
+        align-items: center;
+        padding: 10px 12px;
+        gap: 10px;
+        border-bottom: 1px solid var(--color-border);
+        background-color: var(--color-bg-secondary);
+        flex-shrink: 0;
+    }
+
+    .mobile-editor-title {
+        flex: 1;
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--color-text);
+        text-align: center;
+    }
+
+    .mobile-editor-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    #mobile-editor-textarea {
+        flex: 1;
+        width: 100%;
+        padding: 16px;
+        background-color: var(--color-bg);
+        color: var(--color-text);
+        border: none;
+        outline: none;
+        resize: none;
+        font-size: 16px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        line-height: 1.5;
+    }
+
+    #mobile-editor-textarea::placeholder {
+        color: var(--color-text-muted);
+    }
+
+    /* Image Paste Modal - mobile */
+    .image-paste-container { max-width: none; margin: 16px; }
+    .image-paste-preview-wrapper { max-height: 160px; }
+    .image-paste-preview { max-height: 140px; }
+    .image-paste-prompt { font-size: 16px; }
 
     /* File Browser Panel */
     .file-browser-panel {
@@ -696,6 +768,15 @@
     /* Voice Indicator */
     .voice-indicator {
         bottom: calc(var(--mobile-nav-height) + 80px);
+        gap: 8px;
+        padding: 10px 14px;
+        font-size: 13px;
+    }
+
+    .voice-indicator .btn-sm {
+        padding: 5px 10px;
+        font-size: 11px;
+        min-height: 32px;
     }
 
     /* Buttons */

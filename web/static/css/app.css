@@ -939,7 +939,7 @@ body {
     background-color: var(--color-danger);
     color: white;
     border-radius: 24px;
-    z-index: 1000;
+    z-index: 4000;
     box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
 }
 
@@ -958,6 +958,23 @@ body {
 
 .voice-cancel-btn:hover {
     background-color: rgba(255, 255, 255, 0.35);
+}
+
+.voice-stop-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background-color: rgba(255, 255, 255, 0.85);
+    color: #1a1a2e;
+    border: 1px solid rgba(255, 255, 255, 0.9);
+    border-radius: 12px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: background-color 0.2s;
+}
+
+.voice-stop-btn:hover {
+    background-color: rgba(255, 255, 255, 1);
 }
 
 .voice-indicator-pulse {
@@ -1672,4 +1689,56 @@ body {
 .tool-activity-badge.badge-pending {
     background-color: var(--color-warning);
     animation: pulse 1.5s infinite;
+}
+
+/* Image Paste Dialog */
+.image-paste-container {
+    background-color: var(--color-bg-secondary);
+    border: 2px solid var(--color-primary);
+    border-radius: 12px;
+    max-width: 520px;
+    width: 100%;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    animation: slideUp 0.3s ease;
+}
+.image-paste-body { padding: 20px; }
+.image-paste-preview-wrapper {
+    display: flex;
+    justify-content: center;
+    background-color: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--border-radius);
+    padding: 8px;
+    max-height: 240px;
+    overflow: hidden;
+}
+.image-paste-preview {
+    max-width: 100%;
+    max-height: 220px;
+    object-fit: contain;
+    border-radius: 4px;
+}
+.image-paste-label-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+.image-paste-voice-btn {
+    color: var(--color-text-secondary);
+    transition: all 0.2s;
+}
+.image-paste-voice-btn:hover {
+    color: var(--color-primary);
+}
+.image-paste-voice-btn.recording {
+    color: white;
+    background-color: var(--color-danger);
+    animation: pulse 1s infinite;
+}
+.image-paste-prompt {
+    min-height: 72px;
+    resize: vertical;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px;
 }

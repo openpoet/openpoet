@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -202,7 +203,7 @@ func (h *FileHandler) PasteImage(w http.ResponseWriter, r *http.Request) {
 
 	filename := input.Filename
 	if filename == "" {
-		filename = fmt.Sprintf("paste_%d%s", sess.StartTime.Unix(), ext)
+		filename = fmt.Sprintf("paste_%d%s", time.Now().UnixNano(), ext)
 	}
 
 	targetPath := filepath.Join(input.Dir, filename)
