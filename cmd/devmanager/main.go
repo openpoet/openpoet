@@ -252,6 +252,7 @@ func main() {
 
 		// Session files
 		r.Get("/sessions/{id}/files", fileHandler.ListFiles)
+		r.Get("/sessions/{id}/files/view/*", fileHandler.ViewFile)
 		r.Get("/sessions/{id}/files/*", fileHandler.DownloadFile)
 		r.Post("/sessions/{id}/files", fileHandler.UploadFiles)
 		r.Post("/sessions/{id}/files/paste", fileHandler.PasteImage)
