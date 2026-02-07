@@ -715,15 +715,18 @@
     .image-paste-preview { max-height: 140px; }
     .image-paste-prompt { font-size: 16px; }
 
-    /* File Browser Panel */
+    /* File Browser Panel - full-screen on mobile */
     .file-browser-panel {
         width: 100%;
         max-width: none;
         position: fixed;
-        top: auto;
-        bottom: calc(var(--mobile-nav-height) + 68px); /* Nav + input bar */
-        height: 50vh;
-        border-radius: 16px 16px 0 0;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 100%;
+        border-radius: 0;
+        z-index: 2000;
     }
 
     /* Config View */
@@ -817,6 +820,37 @@
         width: 48px;
         height: 48px;
     }
+
+    /* File Viewer - full-screen on mobile */
+    .file-viewer-overlay {
+        padding: 0;
+    }
+    .file-viewer-container {
+        max-width: none;
+        max-height: none;
+        height: 100%;
+        border-radius: 0;
+        border: none;
+    }
+    .file-viewer-header {
+        padding: 10px 12px;
+    }
+    .file-viewer-title {
+        font-size: 13px;
+    }
+    .code-table {
+        font-size: 12px;
+    }
+    .code-table .line-number {
+        padding: 0 8px;
+    }
+    .code-table .line-content {
+        padding: 0 10px;
+    }
+    .file-viewer-markdown {
+        padding: 16px;
+        font-size: 14px;
+    }
 }
 
 /* Small phones */
@@ -853,8 +887,11 @@
     }
 
     .file-browser-panel {
+        top: 0;
         bottom: 0;
-        right: var(--mobile-nav-height);
+        left: 0;
+        right: 0;
+        height: 100%;
     }
 
     .toast-container {
@@ -959,7 +996,9 @@
         }
 
         .file-browser-panel {
-            bottom: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom));
+            top: 0;
+            bottom: 0;
+            height: 100%;
         }
     }
 }

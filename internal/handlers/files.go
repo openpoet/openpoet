@@ -247,6 +247,110 @@ func (h *FileHandler) PasteImage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *FileHandler) ViewFile(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+	filePath := chi.URLParam(r, "*")
+
+	// Get session and project
+	sess, err := h.api.db.GetSession(r.Context(), sessionID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Session not found")
+		return
+	}
+
+	project, err := h.api.db.GetProject(r.Context(), sess.ProjectID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	const maxSize int64 = 2 * 1024 * 1024 // 2MB limit
+
+	if project.Type == "local" {
+		fm := files.NewLocalFileManager(project.Path)
+		reader, fileInfo, err := fm.ReadStream(filePath)
+		if err != nil {
+			respondError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		defer reader.Close()
+
+		if fileInfo.Size > maxSize {
+			respondError(w, http.StatusRequestEntityTooLarge, "File too large to view (max 2MB)")
+			return
+		}
+
+		content, err := io.ReadAll(io.LimitReader(reader, maxSize+1))
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to read file")
+			return
+		}
+
+		// Detect binary: check for null bytes in first 512 bytes
+		checkLen := len(content)
+		if checkLen > 512 {
+			checkLen = 512
+		}
+		for i := 0; i < checkLen; i++ {
+			if content[i] == 0 {
+				respondError(w, http.StatusUnsupportedMediaType, "Binary file cannot be viewed")
+				return
+			}
+		}
+
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"name":      fileInfo.Name,
+			"path":      fileInfo.Path,
+			"size":      fileInfo.Size,
+			"mime_type": fm.GetMimeType(filePath),
+			"content":   string(content),
+			"mod_time":  fileInfo.ModTime,
+		})
+	} else {
+		fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
+		file, fileInfo, sshClient, sftpClient, err := fm.ReadStream(filePath)
+		if err != nil {
+			respondError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		defer file.Close()
+		defer sftpClient.Close()
+		defer sshClient.Close()
+
+		if fileInfo.Size > maxSize {
+			respondError(w, http.StatusRequestEntityTooLarge, "File too large to view (max 2MB)")
+			return
+		}
+
+		content, err := io.ReadAll(io.LimitReader(file, maxSize+1))
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to read file")
+			return
+		}
+
+		// Detect binary
+		checkLen := len(content)
+		if checkLen > 512 {
+			checkLen = 512
+		}
+		for i := 0; i < checkLen; i++ {
+			if content[i] == 0 {
+				respondError(w, http.StatusUnsupportedMediaType, "Binary file cannot be viewed")
+				return
+			}
+		}
+
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"name":      fileInfo.Name,
+			"path":      fileInfo.Path,
+			"size":      fileInfo.Size,
+			"mime_type": fm.GetMimeType(filePath),
+			"content":   string(content),
+			"mod_time":  fileInfo.ModTime,
+		})
+	}
+}
+
 // Simple base64 decoder
 func decodeBase64(src string, dst []byte) (int, error) {
 	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
