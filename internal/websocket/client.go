@@ -24,10 +24,11 @@ type Client struct {
 	conn *websocket.Conn
 	send chan *Message
 
-	mu            sync.Mutex
-	channels      map[string]bool
-	inputHandler  func(data []byte)
-	resizeHandler func(rows, cols uint16)
+	mu                sync.Mutex
+	channels          map[string]bool
+	inputHandler      func(data []byte)
+	resizeHandler     func(rows, cols uint16)
+	disconnectHandler func()
 }
 
 func NewClient(hub *Hub, conn *websocket.Conn) *Client {
@@ -52,6 +53,12 @@ func (c *Client) SetResizeHandler(handler func(rows, cols uint16)) {
 	c.resizeHandler = handler
 }
 
+func (c *Client) SetDisconnectHandler(handler func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.disconnectHandler = handler
+}
+
 func (c *Client) Subscribe(channelID string) {
 	c.mu.Lock()
 	c.channels[channelID] = true
@@ -68,6 +75,12 @@ func (c *Client) Unsubscribe(channelID string) {
 
 func (c *Client) ReadPump(ctx context.Context) {
 	defer func() {
+		c.mu.Lock()
+		handler := c.disconnectHandler
+		c.mu.Unlock()
+		if handler != nil {
+			handler()
+		}
 		c.hub.Unregister(c)
 		c.conn.Close(websocket.StatusNormalClosure, "")
 	}()
