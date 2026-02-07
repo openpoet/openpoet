@@ -45,6 +45,13 @@ func (h *WebSocketHandler) HandleSessionWS(w http.ResponseWriter, r *http.Reques
 			log.Printf("Failed to write to session: %v", err)
 		}
 	})
+
+	// Set up resize handler to forward to session PTY
+	client.SetResizeHandler(func(rows, cols uint16) {
+		if err := h.api.sessionMgr.ResizeSession(sessionID, rows, cols); err != nil {
+			log.Printf("Failed to resize session: %v", err)
+		}
+	})
 }
 
 // HandleMacroWS handles WebSocket connections for macro output

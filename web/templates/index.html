@@ -10,8 +10,8 @@
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
-    <link rel="stylesheet" href="/static/css/app.css?v=5">
-    <link rel="stylesheet" href="/static/css/mobile.css?v=6">
+    <link rel="stylesheet" href="/static/css/app.css?v=7">
+    <link rel="stylesheet" href="/static/css/mobile.css?v=7">
 </head>
 <body>
     <div id="app">
@@ -169,11 +169,35 @@
                                     <rect x="14" y="3" width="7" height="18" stroke-width="2"/>
                                 </svg>
                             </button>
-                            <button id="btn-stop-session" class="btn btn-danger btn-sm">Stop</button>
+                            <button id="btn-stop-session" class="btn btn-danger btn-sm" title="Encerrar sessão">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                                    <line x1="18" y1="6" x2="6" y2="18"/>
+                                    <line x1="6" y1="6" x2="18" y2="18"/>
+                                </svg>
+                            </button>
                         </div>
                     </header>
                     <div id="terminal-containers-wrapper" class="terminal-containers-wrapper">
                         <!-- Multiple terminal containers will be created here dynamically -->
+                    </div>
+
+                    <!-- Mobile special keys bar -->
+                    <div id="mobile-terminal-keys-bar" class="mobile-terminal-keys-bar">
+                        <button class="mobile-key-btn" data-key="shift-tab" title="Shift+Tab">⇧Tab</button>
+                        <button class="mobile-key-btn" data-key="esc" title="Esc">Esc</button>
+                        <button class="mobile-key-btn" data-key="up" title="Up">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="18 15 12 9 6 15"></polyline></svg>
+                        </button>
+                        <button class="mobile-key-btn" data-key="down" title="Down">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                        </button>
+                        <button class="mobile-key-btn" data-key="left" title="Left">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                        </button>
+                        <button class="mobile-key-btn" data-key="right" title="Right">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 6 15 12 9 18"></polyline></svg>
+                        </button>
+                        <button class="mobile-key-btn" data-key="ctrl-c" title="Ctrl+C">^C</button>
                     </div>
 
                     <!-- Mobile input bar -->
@@ -339,8 +363,9 @@
     <div id="voice-indicator" class="voice-indicator hidden">
         <div class="voice-indicator-pulse"></div>
         <span>Recording...</span>
+        <span id="voice-timer" class="voice-timer">0:00</span>
         <button id="voice-cancel" class="btn btn-sm voice-cancel-btn" title="Cancel recording">Cancel</button>
-        <button id="voice-stop" class="btn btn-sm btn-danger">Stop</button>
+        <button id="voice-stop" class="btn btn-sm btn-danger">Enviar</button>
     </div>
 
     <!-- Hook Permission Dialog -->
@@ -353,7 +378,7 @@
                     </svg>
                 </div>
                 <h3>Permission Required</h3>
-                <button id="hook-permission-dismiss" class="hook-permission-close" title="Dismiss (handle in terminal)">&times;</button>
+                <button id="hook-permission-dismiss" class="hook-permission-close" title="Minimize">&times;</button>
             </div>
             <div class="hook-permission-body">
                 <div class="hook-permission-tool">
@@ -389,7 +414,7 @@
                     </svg>
                 </div>
                 <h3>Plan Ready for Review</h3>
-                <button id="hook-plan-dismiss" class="hook-permission-close" title="Dismiss (handle in terminal)">&times;</button>
+                <button id="hook-plan-dismiss" class="hook-permission-close" title="Minimize">&times;</button>
             </div>
             <div class="hook-exit-plan-body">
                 <p class="plan-review-text">Claude has finished planning. Review the plan in the terminal output, then choose an option:</p>
@@ -443,7 +468,7 @@
                     </svg>
                 </div>
                 <h3>Claude has a question</h3>
-                <button id="hook-ask-user-dismiss" class="hook-permission-close" title="Dismiss (handle in terminal)">&times;</button>
+                <button id="hook-ask-user-dismiss" class="hook-permission-close" title="Minimize">&times;</button>
             </div>
             <div class="hook-ask-user-body">
                 <div id="hook-ask-user-questions"></div>
@@ -458,10 +483,10 @@
     <script src="/static/vendor/xterm-addon-fit.js"></script>
     <script src="/static/vendor/xterm-addon-web-links.js"></script>
     <script src="/static/js/app.js?v=8"></script>
-    <script src="/static/js/terminal.js?v=4"></script>
-    <script src="/static/js/hooks.js?v=5"></script>
-    <script src="/static/js/voice.js?v=6"></script>
-    <script src="/static/js/files.js?v=2"></script>
+    <script src="/static/js/terminal.js?v=5"></script>
+    <script src="/static/js/hooks.js?v=8"></script>
+    <script src="/static/js/voice.js?v=7"></script>
+    <script src="/static/js/files.js?v=3"></script>
     <script src="/static/js/notifications.js?v=2"></script>
     <script src="/static/js/macro-editor.js?v=2"></script>
 </body>

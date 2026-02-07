@@ -126,13 +126,13 @@
         justify-content: space-between;
     }
 
+    /* Show terminal actions on mobile */
     .terminal-actions {
         width: 100%;
         justify-content: flex-end;
-        gap: 6px; /* Slightly smaller gap on mobile */
+        gap: 6px;
     }
 
-    /* Smaller action buttons on mobile */
     .terminal-actions .btn-icon {
         width: 36px;
         height: 36px;
@@ -144,18 +144,29 @@
         height: 18px;
     }
 
-    /* Optimize terminal container for mobile */
+    /* Hide split-screen button on mobile (not useful) */
+    #split-screen-toggle {
+        display: none;
+    }
+
+    /* Terminal container - use flexbox instead of absolute positioning */
+    .terminal-main-area {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
     .terminal-containers-wrapper {
         width: 100%;
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: calc(68px + var(--mobile-nav-height)); /* Input bar (68px) + nav bar */
+        flex: 1;
+        position: relative;
+        min-height: 0; /* Allow flex shrink */
     }
 
     .terminal-container {
         padding: 0; /* Remove any padding */
+        touch-action: pan-y; /* Allow native vertical scroll */
     }
 
     /* Make terminal content use full available width */
@@ -164,8 +175,16 @@
         height: 100% !important;
     }
 
+    /* On mobile, terminal is read-only (input via bar below).
+       Let touch events pass through the canvas to the scrollable viewport. */
+    .terminal-container .xterm-screen {
+        pointer-events: none !important;
+    }
+
     .terminal-container .xterm-viewport {
         width: 100% !important;
+        touch-action: pan-y !important;
+        -webkit-overflow-scrolling: touch;
     }
 
     /* Hide desktop elements on mobile */
@@ -414,27 +433,67 @@
         color: var(--color-text-muted);
     }
 
-    /* Mobile terminal input bar */
+    /* Mobile terminal special keys bar - flex item in terminal-main-area */
+    .mobile-terminal-keys-bar {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 6px 10px;
+        background-color: var(--color-bg-secondary);
+        border-top: 1px solid var(--color-border);
+        flex-shrink: 0;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .mobile-key-btn {
+        min-width: 40px;
+        height: 36px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background-color: var(--color-surface);
+        border: 1px solid var(--color-border);
+        border-radius: 6px;
+        color: var(--color-text);
+        font-size: 13px;
+        font-weight: 500;
+        font-family: 'Menlo', 'Monaco', monospace;
+        cursor: pointer;
+        flex-shrink: 0;
+        padding: 0 10px;
+        transition: all 0.1s ease;
+        -webkit-tap-highlight-color: transparent;
+    }
+
+    .mobile-key-btn:active {
+        background-color: var(--color-primary);
+        border-color: var(--color-primary);
+        color: white;
+        transform: scale(0.95);
+    }
+
+    .mobile-key-btn svg {
+        width: 16px;
+        height: 16px;
+    }
+
+    /* Mobile terminal input bar - flex item in terminal-main-area */
     .mobile-terminal-input-bar {
         display: flex;
         align-items: center;
-        gap: 8px;
-        padding: 12px;
+        gap: 6px;
+        padding: 10px;
         background-color: var(--color-bg-secondary);
         border-top: 1px solid var(--color-border);
-        position: fixed;
-        bottom: var(--mobile-nav-height);
-        left: 0;
-        right: 0;
-        z-index: 100;
-        /* Safe area for notched devices */
-        padding-bottom: max(12px, env(safe-area-inset-bottom));
+        flex-shrink: 0;
     }
 
     .mobile-terminal-input {
         flex: 1;
+        min-width: 0; /* Allow shrinking below intrinsic width */
         height: 44px; /* Touch-friendly height */
-        padding: 0 16px;
+        padding: 0 12px;
         background-color: var(--color-surface);
         border: 1px solid var(--color-border);
         border-radius: var(--border-radius);
@@ -450,6 +509,32 @@
 
     .mobile-terminal-input::placeholder {
         color: var(--color-text-muted);
+    }
+
+    .mobile-terminal-action-btn {
+        width: 44px;
+        height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background-color: transparent;
+        border: 1px solid var(--color-border);
+        border-radius: var(--border-radius);
+        color: var(--color-text-secondary);
+        cursor: pointer;
+        flex-shrink: 0;
+        transition: all var(--transition);
+    }
+
+    .mobile-terminal-action-btn:active {
+        transform: scale(0.95);
+        background-color: var(--color-surface);
+    }
+
+    .mobile-terminal-action-btn.active {
+        background-color: var(--color-primary);
+        border-color: var(--color-primary);
+        color: white;
     }
 
     .mobile-terminal-voice {
@@ -509,16 +594,17 @@
         padding-bottom: 0 !important;
     }
 
-    /* Adjust terminal container to make room for input bar */
-    .terminal-containers-wrapper {
-        padding-bottom: calc(44px + 24px + var(--mobile-nav-height)); /* Input bar height + padding + nav */
+    /* No extra padding needed - flexbox handles terminal sizing */
+
+    /* Terminal is read-only on mobile - completely disable xterm input */
+    .xterm-helper-textarea {
+        display: none !important;
     }
 
-    /* Hide xterm's native textarea on mobile (it's invisible anyway) */
-    .xterm-helper-textarea {
-        position: absolute;
-        opacity: 0;
-        left: -9999px;
+    /* Ensure xterm viewport allows native touch scroll */
+    .terminal-container .xterm-viewport {
+        overflow-y: scroll !important;
+        overscroll-behavior: contain; /* Prevent scroll chaining to parent */
     }
 
     /* File Browser Panel */

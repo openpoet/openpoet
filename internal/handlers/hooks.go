@@ -162,6 +162,12 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 				"event":      hookEvent,
 			},
 		})
+
+		// Send push notification for AskUser question
+		if h.notifService != nil {
+			go h.notifService.Send(context.Background(), sessionID, "question",
+				"Question from Claude", "Claude needs your input")
+		}
 	} else if isExitPlan {
 		// Send plan approval UI
 		h.hub.BroadcastHookEvent(sessionID, &websocket.Message{
@@ -171,6 +177,12 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 				"event":      hookEvent,
 			},
 		})
+
+		// Send push notification for plan approval
+		if h.notifService != nil {
+			go h.notifService.Send(context.Background(), sessionID, "permission",
+				"Plan Ready", "Claude's plan needs your approval")
+		}
 	} else {
 		// Standard permission request dialog
 		h.hub.BroadcastHookEvent(sessionID, &websocket.Message{

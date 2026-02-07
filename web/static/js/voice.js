@@ -11,7 +11,11 @@ class VoiceInput {
         this.mobileBtn = document.getElementById('btn-mobile-voice-input');
         this.stopBtn = document.getElementById('voice-stop');
         this.cancelBtn = document.getElementById('voice-cancel');
+        this.timerDisplay = document.getElementById('voice-timer');
         this.cancelled = false;
+        this.recordingTimer = null;
+        this.timeoutTimer = null;
+        this.recordingSeconds = 0;
 
         this.setupEventListeners();
         this.loadSettings();
@@ -41,6 +45,15 @@ class VoiceInput {
     }
 
     toggleRecording() {
+        if (!this.isSupported()) {
+            const isHTTP = window.location.protocol === 'http:' && window.location.hostname !== 'localhost';
+            if (isHTTP) {
+                app.showToast('Error', 'Microphone requires HTTPS. Access via https:// or localhost.', 'error');
+            } else {
+                app.showToast('Error', 'Microphone not supported in this browser.', 'error');
+            }
+            return;
+        }
         if (this.isRecording) {
             this.stopRecording();
         } else {
@@ -76,6 +89,7 @@ class VoiceInput {
             this.mediaRecorder.start();
             this.isRecording = true;
             this.showIndicator();
+            this.startTimers();
 
         } catch (error) {
             console.error('Failed to start recording:', error);
@@ -85,20 +99,56 @@ class VoiceInput {
 
     stopRecording() {
         if (this.mediaRecorder && this.isRecording) {
+            this.clearTimers();
             this.mediaRecorder.stop();
             this.isRecording = false;
             this.hideIndicator();
         }
     }
 
-    cancelRecording() {
+    cancelRecording(isTimeout = false) {
         if (this.mediaRecorder && this.isRecording) {
+            this.clearTimers();
             this.cancelled = true;
             this.mediaRecorder.stop();
             this.isRecording = false;
             this.hideIndicator();
-            app.showToast('Info', 'Recording cancelled', 'info');
+            if (isTimeout) {
+                app.showToast('Warning', 'Recording cancelled: 60s limit reached', 'warning');
+            } else {
+                app.showToast('Info', 'Recording cancelled', 'info');
+            }
         }
+    }
+
+    startTimers() {
+        this.recordingSeconds = 0;
+        this.updateTimerDisplay();
+        this.recordingTimer = setInterval(() => {
+            this.recordingSeconds++;
+            this.updateTimerDisplay();
+        }, 1000);
+        this.timeoutTimer = setTimeout(() => this.cancelRecording(true), 60000);
+    }
+
+    clearTimers() {
+        if (this.recordingTimer) {
+            clearInterval(this.recordingTimer);
+            this.recordingTimer = null;
+        }
+        if (this.timeoutTimer) {
+            clearTimeout(this.timeoutTimer);
+            this.timeoutTimer = null;
+        }
+        this.recordingSeconds = 0;
+    }
+
+    updateTimerDisplay() {
+        if (!this.timerDisplay) return;
+        const mins = Math.floor(this.recordingSeconds / 60);
+        const secs = this.recordingSeconds % 60;
+        this.timerDisplay.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+        this.timerDisplay.classList.toggle('warning', this.recordingSeconds >= 55);
     }
 
     async processRecording() {
@@ -193,8 +243,3 @@ class VoiceInput {
 
 // Initialize voice input
 window.voiceInput = new VoiceInput();
-if (!window.voiceInput.isSupported()) {
-    // Hide voice buttons if not supported
-    document.getElementById('btn-voice-input')?.classList.add('hidden');
-    document.getElementById('btn-mobile-voice-input')?.classList.add('hidden');
-}
