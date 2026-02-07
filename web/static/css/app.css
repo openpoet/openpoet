@@ -48,6 +48,7 @@ body {
 #app {
     display: flex;
     height: 100vh;
+    height: 100dvh;
     width: 100%;
 }
 
@@ -647,7 +648,8 @@ body {
     display: none !important;
 }
 
-/* Mobile terminal input bar - hidden on desktop */
+/* Mobile terminal bars - hidden on desktop */
+.mobile-terminal-keys-bar,
 .mobile-terminal-input-bar {
     display: none;
 }
@@ -971,6 +973,18 @@ body {
         opacity: 0.5;
         transform: scale(1.2);
     }
+}
+
+.voice-timer {
+    font-family: 'Monaco', 'Menlo', monospace;
+    font-size: 14px;
+    margin: 0 8px;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.voice-timer.warning {
+    color: #ef4444;
+    font-weight: bold;
 }
 
 /* Mobile Navigation */
@@ -1599,4 +1613,59 @@ body {
 
 #btn-tool-activity {
     position: relative;
+}
+
+/* Pending items in tool activity panel */
+.tool-status-pending {
+    border-color: var(--color-warning);
+    background: rgba(245, 158, 11, 0.08);
+}
+
+.tool-status-pending:hover {
+    background: rgba(245, 158, 11, 0.15);
+}
+
+.tool-status-pending .tool-event-name {
+    color: var(--color-warning);
+}
+
+.pending-pulse {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: var(--color-warning);
+    animation: pulse 1.5s infinite;
+    flex-shrink: 0;
+}
+
+.pending-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.btn-warning {
+    background-color: var(--color-warning);
+    color: #000;
+    font-weight: 600;
+}
+
+.btn-warning:hover {
+    background-color: #d97706;
+}
+
+.tool-panel-section-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 8px 4px 4px;
+    margin-bottom: 4px;
+}
+
+.tool-activity-badge.badge-pending {
+    background-color: var(--color-warning);
+    animation: pulse 1.5s infinite;
 }

@@ -9,7 +9,7 @@ class FileBrowser {
     }
 
     setupEventListeners() {
-        // Toggle button
+        // Toggle button (desktop)
         document.getElementById('btn-file-browser')?.addEventListener('click', () => {
             this.toggle();
         });

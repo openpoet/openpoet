@@ -24,9 +24,10 @@ type Client struct {
 	conn *websocket.Conn
 	send chan *Message
 
-	mu           sync.Mutex
-	channels     map[string]bool
-	inputHandler func(data []byte)
+	mu            sync.Mutex
+	channels      map[string]bool
+	inputHandler  func(data []byte)
+	resizeHandler func(rows, cols uint16)
 }
 
 func NewClient(hub *Hub, conn *websocket.Conn) *Client {
@@ -43,6 +44,12 @@ func (c *Client) SetInputHandler(handler func(data []byte)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.inputHandler = handler
+}
+
+func (c *Client) SetResizeHandler(handler func(rows, cols uint16)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resizeHandler = handler
 }
 
 func (c *Client) Subscribe(channelID string) {
@@ -110,8 +117,18 @@ func (c *Client) ReadPump(ctx context.Context) {
 				}
 			}
 		case "resize":
-			// Handle terminal resize if needed
-			// Could be passed to PTY
+			c.mu.Lock()
+			handler := c.resizeHandler
+			c.mu.Unlock()
+			if handler != nil && msg.Data != nil {
+				var size struct {
+					Cols uint16 `json:"cols"`
+					Rows uint16 `json:"rows"`
+				}
+				if err := json.Unmarshal(msg.Data, &size); err == nil && size.Cols > 0 && size.Rows > 0 {
+					handler(size.Rows, size.Cols)
+				}
+			}
 		}
 	}
 }

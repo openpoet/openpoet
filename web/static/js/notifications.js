@@ -1,9 +1,10 @@
 // Push Notifications using Web Push API
 class NotificationManager {
     constructor() {
-        this.permission = 'default';
+        this.permission = Notification.permission || 'default';
         this.subscription = null;
         this.vapidPublicKey = null;
+        this.ready = false;
 
         this.init();
     }
@@ -33,8 +34,16 @@ class NotificationManager {
 
             // Check existing subscription
             this.subscription = await registration.pushManager.getSubscription();
+            this.permission = Notification.permission || 'default';
+            this.ready = true;
+
             if (this.subscription) {
                 console.log('Already subscribed to push notifications');
+            } else if (this.permission === 'granted') {
+                // Permission was granted but subscription lost (e.g. browser cleared it)
+                // Re-subscribe automatically
+                console.log('Permission granted but no subscription, re-subscribing...');
+                await this.subscribe();
             }
         } catch (error) {
             console.error('Service Worker registration failed:', error);
@@ -140,8 +149,3 @@ class NotificationManager {
 
 // Initialize notification manager
 window.notificationManager = new NotificationManager();
-
-// Add notification permission request to settings
-document.addEventListener('DOMContentLoaded', () => {
-    // Could add a button in settings to enable/disable notifications
-});

@@ -1,20 +1,20 @@
 // Service Worker for DevManager PWA
 
-const CACHE_NAME = 'devmanager-v4';
+const CACHE_NAME = 'devmanager-v6';
 const OFFLINE_URL = '/';
 
 // Assets to cache
 const PRECACHE_ASSETS = [
     '/',
-    '/static/css/app.css?v=3',
-    '/static/css/mobile.css?v=3',
-    '/static/js/app.js?v=3',
-    '/static/js/terminal.js?v=3',
-    '/static/js/voice.js?v=3',
+    '/static/css/app.css?v=5',
+    '/static/css/mobile.css?v=7',
+    '/static/js/app.js?v=8',
+    '/static/js/terminal.js?v=4',
+    '/static/js/voice.js?v=7',
     '/static/js/files.js?v=3',
-    '/static/js/notifications.js?v=3',
-    '/static/js/hooks.js?v=1',
-    '/static/js/macro-editor.js?v=3',
+    '/static/js/notifications.js?v=2',
+    '/static/js/hooks.js?v=5',
+    '/static/js/macro-editor.js?v=2',
     '/static/vendor/xterm.js',
     '/static/vendor/xterm.css',
     '/static/vendor/xterm-addon-fit.js',

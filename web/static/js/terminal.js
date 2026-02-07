@@ -84,7 +84,6 @@ class TerminalManager {
 
         // Open terminal in container
         terminal.open(container);
-        fitAddon.fit();
 
         // Create WebSocket connection
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -106,17 +105,36 @@ class TerminalManager {
         // Switch to this terminal
         this.switchToSession(sessionId);
 
-        // Handle window resize
-        const resizeHandler = () => {
+        // Use ResizeObserver to re-fit terminal whenever the wrapper changes size.
+        // This handles: initial layout settling, orientation changes, bars appearing,
+        // window resize, and any other layout shift.
+        const wrapper = document.getElementById(this.containerWrapperId);
+        let fitDebounce = null;
+        const resizeObserver = new ResizeObserver(() => {
             if (this.activeSessionId === sessionId) {
-                fitAddon.fit();
+                clearTimeout(fitDebounce);
+                fitDebounce = setTimeout(() => fitAddon.fit(), 50);
             }
-        };
-        window.addEventListener('resize', resizeHandler);
+        });
+        if (wrapper) {
+            resizeObserver.observe(wrapper);
+        }
 
-        // Store resize handler for cleanup
-        this.terminals.get(sessionId).resizeHandler = resizeHandler;
+        // Store for cleanup
+        this.terminals.get(sessionId).resizeObserver = resizeObserver;
+
+        // Initial fit after layout has settled
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                fitAddon.fit();
+            });
+        });
     }
+
+    // Mobile touch scroll is handled natively via CSS:
+    // - .xterm-screen gets pointer-events: none (touch falls through)
+    // - .xterm-viewport gets touch-action: pan-y + overflow-y: scroll
+    // No JS touch handler needed.
 
     // Setup WebSocket handlers
     setupWebSocket(sessionId, ws, terminal) {
@@ -188,12 +206,14 @@ class TerminalManager {
             this.updateSessionStatus(sessionId, 'disconnected');
         };
 
-        // Handle terminal input
-        terminal.onData((data) => {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'input', data: data }));
-            }
-        });
+        // Handle terminal input (desktop only - mobile uses input bar)
+        if (window.innerWidth > 768) {
+            terminal.onData((data) => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'input', data: data }));
+                }
+            });
+        }
 
         // Handle resize
         terminal.onResize(({ cols, rows }) => {
@@ -240,11 +260,20 @@ class TerminalManager {
         termData.container.classList.add('active');
         this.activeSessionId = sessionId;
 
-        // Re-fit terminal to ensure proper dimensions
-        setTimeout(() => {
-            termData.fitAddon.fit();
-            termData.terminal.focus();
-        }, 0);
+        // Re-fit terminal after layout settles (double rAF ensures paint is done)
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                termData.fitAddon.fit();
+                if (window.innerWidth > 768) {
+                    termData.terminal.focus();
+                }
+            });
+        });
+
+        // Notify hook manager to refresh panel/badge for the new session
+        if (window.hookManager) {
+            window.hookManager.onSessionSwitch();
+        }
     }
 
     // Close a terminal session
@@ -257,14 +286,16 @@ class TerminalManager {
 
         console.log(`Disconnecting session: ${sessionId}`);
 
-        // Remove resize handler
-        if (termData.resizeHandler) {
-            window.removeEventListener('resize', termData.resizeHandler);
+        // Remove resize observer
+        if (termData.resizeObserver) {
+            termData.resizeObserver.disconnect();
         }
 
         // Close WebSocket
         if (termData.ws) {
-            termData.ws.onclose = null; // Remove handler to prevent events
+            termData.ws.onmessage = null; // Prevent writes to disposed terminal
+            termData.ws.onerror = null;
+            termData.ws.onclose = null;
             termData.ws.close();
         }
 
@@ -341,9 +372,9 @@ class TerminalManager {
         }
     }
 
-    // Focus active terminal
+    // Focus active terminal (desktop only - mobile terminal is read-only)
     focus() {
-        if (this.activeSessionId) {
+        if (this.activeSessionId && window.innerWidth > 768) {
             const termData = this.terminals.get(this.activeSessionId);
             if (termData && termData.terminal) {
                 termData.terminal.focus();

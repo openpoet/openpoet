@@ -2,11 +2,94 @@
 class HookManager {
     constructor() {
         this.pendingPermission = null; // { sessionId, event, timestamp }
-        this.toolEvents = []; // Recent tool call events
-        this.maxToolEvents = 50;
+        this.maxToolEventsPerSession = 50;
         this.panelVisible = false;
+        this.storageKeyEvents = 'devmanager_tool_events';
+        this.storageKeyDismissed = 'devmanager_dismissed_requests';
+
+        // Load persisted state from localStorage
+        this.toolEventsBySession = this._loadFromStorage(this.storageKeyEvents) || {};
+        this.dismissedRequests = this._loadFromStorage(this.storageKeyDismissed) || [];
 
         this.setupUI();
+    }
+
+    // Auto-reopen the first pending dismissed request (called after sessions are loaded)
+    _autoReopenDismissed() {
+        this.cleanupStaleDismissedRequests();
+
+        if (this.dismissedRequests.length === 0) return;
+
+        // Reopen the first (oldest) dismissed request
+        const entry = this.dismissedRequests[0];
+        this.reopenDialog(entry.id);
+    }
+
+    // ==================== PERSISTENCE ====================
+
+    _loadFromStorage(key) {
+        try {
+            const data = localStorage.getItem(key);
+            return data ? JSON.parse(data) : null;
+        } catch (e) {
+            console.warn('Failed to load from localStorage:', key, e);
+            return null;
+        }
+    }
+
+    _saveToolEvents() {
+        try {
+            localStorage.setItem(this.storageKeyEvents, JSON.stringify(this.toolEventsBySession));
+        } catch (e) {
+            console.warn('Failed to save tool events:', e);
+        }
+    }
+
+    _saveDismissedRequests() {
+        try {
+            localStorage.setItem(this.storageKeyDismissed, JSON.stringify(this.dismissedRequests));
+        } catch (e) {
+            console.warn('Failed to save dismissed requests:', e);
+        }
+    }
+
+    cleanupStaleDismissedRequests() {
+        const sessions = window.app?.sessions || [];
+        const activeSessionIds = new Set(
+            sessions.filter(s => s.status === 'running' || s.status === 'starting').map(s => s.id)
+        );
+
+        const before = this.dismissedRequests.length;
+        this.dismissedRequests = this.dismissedRequests.filter(entry => activeSessionIds.has(entry.sessionId));
+
+        if (this.dismissedRequests.length !== before) {
+            this._saveDismissedRequests();
+            this.renderToolPanel();
+            this.updateToolBadge();
+        }
+    }
+
+    // Get the currently active session ID
+    _getActiveSessionId() {
+        return window.terminalManager?.activeSessionId || null;
+    }
+
+    // Get tool events for a specific session
+    _getSessionEvents(sessionId) {
+        if (!sessionId) return [];
+        return this.toolEventsBySession[sessionId] || [];
+    }
+
+    // Get tool events for the active session
+    _getActiveSessionEvents() {
+        return this._getSessionEvents(this._getActiveSessionId());
+    }
+
+    // Get dismissed requests for the active session
+    _getActiveSessionDismissed() {
+        const activeId = this._getActiveSessionId();
+        if (!activeId) return [];
+        return this.dismissedRequests.filter(e => e.sessionId === activeId);
     }
 
     setupUI() {
@@ -21,7 +104,7 @@ class HookManager {
             this.respondToPermission('deny');
         });
         document.getElementById('hook-permission-dismiss')?.addEventListener('click', () => {
-            this.respondToPermission('passthrough');
+            this.dismissDialog('permission');
         });
 
         // ExitPlanMode dialog buttons
@@ -29,7 +112,7 @@ class HookManager {
             this.submitPlanChoice();
         });
         document.getElementById('hook-plan-dismiss')?.addEventListener('click', () => {
-            this.respondToPlan('passthrough');
+            this.dismissDialog('exitPlan');
         });
 
         // Auto-select feedback radio when typing or focusing in the feedback field
@@ -63,7 +146,7 @@ class HookManager {
             this.submitAskUserAnswers();
         });
         document.getElementById('hook-ask-user-dismiss')?.addEventListener('click', () => {
-            this.dismissAskUser();
+            this.dismissDialog('askUser');
         });
 
         // Tool panel toggle
@@ -85,6 +168,14 @@ class HookManager {
                 this.hidePermissionDialog();
                 this.hideAskUserDialog();
                 this.hideExitPlanDialog();
+                // Clean up any dismissed requests for this session
+                if (msg.data && msg.data.session_id) {
+                    this.dismissedRequests = this.dismissedRequests.filter(e => e.sessionId !== msg.data.session_id);
+                    this._saveDismissedRequests();
+                    this.hidePendingBadge(msg.data.session_id);
+                    this.renderToolPanel();
+                    this.updateToolBadge();
+                }
                 break;
             case 'hook_ask_user':
                 this.showAskUserDialog(msg.data);
@@ -115,6 +206,10 @@ class HookManager {
     showPermissionDialog(data) {
         const dialog = document.getElementById('hook-permission-dialog');
         if (!dialog) return;
+
+        // Clean up old dismissed requests for this session (backend cancels previous)
+        this.dismissedRequests = this.dismissedRequests.filter(e => e.sessionId !== data.session_id);
+        this._saveDismissedRequests();
 
         const event = data.event || {};
         this.pendingPermission = {
@@ -250,6 +345,10 @@ class HookManager {
         const dialog = document.getElementById('hook-exit-plan-dialog');
         if (!dialog) return;
 
+        // Clean up old dismissed requests for this session
+        this.dismissedRequests = this.dismissedRequests.filter(e => e.sessionId !== data.session_id);
+        this._saveDismissedRequests();
+
         const event = data.event || {};
         const toolInput = event.tool_input || {};
 
@@ -383,6 +482,10 @@ class HookManager {
     showAskUserDialog(data) {
         const dialog = document.getElementById('hook-ask-user-dialog');
         if (!dialog) return;
+
+        // Clean up old dismissed requests for this session
+        this.dismissedRequests = this.dismissedRequests.filter(e => e.sessionId !== data.session_id);
+        this._saveDismissedRequests();
 
         const event = data.event || {};
         const toolInput = event.tool_input || {};
@@ -531,6 +634,93 @@ class HookManager {
         this.hideAskUserDialog();
     }
 
+    // ==================== DISMISS / REOPEN ====================
+
+    dismissDialog(dialogType) {
+        if (!this.pendingPermission) return;
+
+        const entry = {
+            id: `dismissed-${Date.now()}`,
+            sessionId: this.pendingPermission.sessionId,
+            event: this.pendingPermission.event,
+            dialogType: dialogType,
+            timestamp: this.pendingPermission.timestamp
+        };
+
+        this.dismissedRequests.push(entry);
+        this._saveDismissedRequests();
+
+        // Hide the corresponding dialog without sending anything to backend
+        if (dialogType === 'permission') {
+            const dialog = document.getElementById('hook-permission-dialog');
+            if (dialog) dialog.classList.add('hidden');
+        } else if (dialogType === 'exitPlan') {
+            const dialog = document.getElementById('hook-exit-plan-dialog');
+            if (dialog) dialog.classList.add('hidden');
+        } else if (dialogType === 'askUser') {
+            const dialog = document.getElementById('hook-ask-user-dialog');
+            if (dialog) dialog.classList.add('hidden');
+        }
+
+        // Clear pending permission timer but keep the pending badge on the tab
+        if (this.permissionTimer) {
+            clearTimeout(this.permissionTimer);
+            this.permissionTimer = null;
+        }
+
+        this.pendingPermission = null;
+
+        // Update panel and badge
+        this.renderToolPanel();
+        this.updateToolBadge();
+
+        // Auto-open tool activity panel so user sees the pending item
+        if (!this.panelVisible) {
+            this.toggleToolPanel();
+        }
+    }
+
+    reopenDialog(entryId) {
+        const idx = this.dismissedRequests.findIndex(e => e.id === entryId);
+        if (idx === -1) return;
+
+        const entry = this.dismissedRequests[idx];
+
+        // Validate session still exists and is running
+        const sessions = window.app?.sessions || [];
+        const session = sessions.find(s => s.id === entry.sessionId);
+        if (!session || (session.status !== 'running' && session.status !== 'starting')) {
+            this.dismissedRequests.splice(idx, 1);
+            this._saveDismissedRequests();
+            this.renderToolPanel();
+            this.updateToolBadge();
+            return;
+        }
+
+        this.dismissedRequests.splice(idx, 1);
+        this._saveDismissedRequests();
+
+        // Restore as pendingPermission
+        this.pendingPermission = {
+            sessionId: entry.sessionId,
+            event: entry.event,
+            timestamp: entry.timestamp
+        };
+
+        // Show the corresponding dialog with original data
+        const data = { session_id: entry.sessionId, event: entry.event };
+        if (entry.dialogType === 'permission') {
+            this.showPermissionDialog(data);
+        } else if (entry.dialogType === 'exitPlan') {
+            this.showExitPlanDialog(data);
+        } else if (entry.dialogType === 'askUser') {
+            this.showAskUserDialog(data);
+        }
+
+        this.renderToolPanel();
+        this.updateToolBadge();
+    }
+
     // ==================== TOOL ACTIVITY ====================
 
     addToolEvent(data, status) {
@@ -551,11 +741,15 @@ class HookManager {
             timestamp: Date.now()
         };
 
-        this.toolEvents.unshift(entry);
-        if (this.toolEvents.length > this.maxToolEvents) {
-            this.toolEvents.pop();
+        if (!this.toolEventsBySession[sessionId]) {
+            this.toolEventsBySession[sessionId] = [];
+        }
+        this.toolEventsBySession[sessionId].unshift(entry);
+        if (this.toolEventsBySession[sessionId].length > this.maxToolEventsPerSession) {
+            this.toolEventsBySession[sessionId].pop();
         }
 
+        this._saveToolEvents();
         this.renderToolPanel();
         this.updateToolBadge();
     }
@@ -563,9 +757,11 @@ class HookManager {
     updateToolEvent(data, status) {
         const event = data.event || {};
         const toolId = event.tool_use_id;
+        const sessionId = data.session_id;
+        const events = this._getSessionEvents(sessionId);
 
         if (toolId) {
-            const entry = this.toolEvents.find(e => e.id === toolId);
+            const entry = events.find(e => e.id === toolId);
             if (entry) {
                 entry.status = status;
                 if (event.tool_output) {
@@ -575,12 +771,13 @@ class HookManager {
         } else {
             // If no tool_use_id, update the most recent matching tool
             const toolName = event.tool_name;
-            const entry = this.toolEvents.find(e => e.toolName === toolName && e.status === 'running');
+            const entry = events.find(e => e.toolName === toolName && e.status === 'running');
             if (entry) {
                 entry.status = status;
             }
         }
 
+        this._saveToolEvents();
         this.renderToolPanel();
         this.updateToolBadge();
     }
@@ -606,60 +803,119 @@ class HookManager {
         const list = document.getElementById('tool-activity-list');
         if (!list || !this.panelVisible) return;
 
-        if (this.toolEvents.length === 0) {
-            list.innerHTML = '<div class="empty-state" style="padding:24px;"><p>No tool activity yet</p></div>';
-            return;
+        const sessionDismissed = this._getActiveSessionDismissed();
+        const sessionEvents = this._getActiveSessionEvents();
+
+        let html = '';
+
+        // Render pending (dismissed) actions section first
+        if (sessionDismissed.length > 0) {
+            html += '<div class="tool-panel-section-label">Pending Actions</div>';
+            html += sessionDismissed.map(entry => {
+                const event = entry.event || {};
+                const toolName = event.tool_name || '';
+                let label = '';
+                if (entry.dialogType === 'permission') {
+                    label = `Permission: ${toolName || 'Unknown'}`;
+                } else if (entry.dialogType === 'exitPlan') {
+                    label = 'Plan Review';
+                } else if (entry.dialogType === 'askUser') {
+                    label = 'Question from Claude';
+                }
+
+                const timeStr = new Date(entry.timestamp).toLocaleTimeString();
+
+                return `
+                    <div class="tool-event-item tool-status-pending">
+                        <div class="tool-event-header">
+                            <span class="pending-pulse"></span>
+                            <span class="tool-event-name">${this.escapeHtml(label)}</span>
+                            <span class="tool-event-time">${timeStr}</span>
+                        </div>
+                        <div class="pending-actions">
+                            <button class="btn btn-sm btn-warning" onclick="window.hookManager.reopenDialog('${entry.id}')">Reopen</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
         }
 
-        list.innerHTML = this.toolEvents.map(entry => {
-            const statusClass = `tool-status-${entry.status}`;
-            const statusIcon = entry.status === 'running' ? '<span class="spinner-small"></span>' :
-                               entry.status === 'completed' ? '<span class="tool-check">&#10003;</span>' :
-                               '<span class="tool-x">&#10007;</span>';
-
-            let description = '';
-            if (entry.toolName === 'Bash' || entry.toolName === 'bash') {
-                description = (entry.toolInput.command || '').substring(0, 80);
-            } else if (entry.toolName === 'Edit' || entry.toolName === 'Write') {
-                description = entry.toolInput.file_path || entry.toolInput.path || '';
-            } else if (entry.toolName === 'Read') {
-                description = entry.toolInput.file_path || '';
-            } else {
-                description = Object.keys(entry.toolInput).join(', ');
+        // Render tool events for the active session
+        if (sessionEvents.length > 0) {
+            if (sessionDismissed.length > 0) {
+                html += '<div class="tool-panel-section-label">Tool Events</div>';
             }
+            html += sessionEvents.map(entry => {
+                const statusClass = `tool-status-${entry.status}`;
+                const statusIcon = entry.status === 'running' ? '<span class="spinner-small"></span>' :
+                                   entry.status === 'completed' ? '<span class="tool-check">&#10003;</span>' :
+                                   '<span class="tool-x">&#10007;</span>';
 
-            const timeStr = new Date(entry.timestamp).toLocaleTimeString();
+                let description = '';
+                if (entry.toolName === 'Bash' || entry.toolName === 'bash') {
+                    description = (entry.toolInput.command || '').substring(0, 80);
+                } else if (entry.toolName === 'Edit' || entry.toolName === 'Write') {
+                    description = entry.toolInput.file_path || entry.toolInput.path || '';
+                } else if (entry.toolName === 'Read') {
+                    description = entry.toolInput.file_path || '';
+                } else {
+                    description = Object.keys(entry.toolInput).join(', ');
+                }
 
-            return `
-                <div class="tool-event-item ${statusClass}">
-                    <div class="tool-event-header">
-                        ${statusIcon}
-                        <span class="tool-event-name">${this.escapeHtml(entry.toolName)}</span>
-                        <span class="tool-event-time">${timeStr}</span>
+                const timeStr = new Date(entry.timestamp).toLocaleTimeString();
+
+                return `
+                    <div class="tool-event-item ${statusClass}">
+                        <div class="tool-event-header">
+                            ${statusIcon}
+                            <span class="tool-event-name">${this.escapeHtml(entry.toolName)}</span>
+                            <span class="tool-event-time">${timeStr}</span>
+                        </div>
+                        ${description ? `<div class="tool-event-desc">${this.escapeHtml(description)}</div>` : ''}
                     </div>
-                    ${description ? `<div class="tool-event-desc">${this.escapeHtml(description)}</div>` : ''}
-                </div>
-            `;
-        }).join('');
+                `;
+            }).join('');
+        }
+
+        if (!html) {
+            html = '<div class="empty-state" style="padding:24px;"><p>No tool activity yet</p></div>';
+        }
+
+        list.innerHTML = html;
     }
 
     updateToolBadge() {
         const btn = document.getElementById('btn-tool-activity');
         if (!btn) return;
 
-        const runningCount = this.toolEvents.filter(e => e.status === 'running').length;
+        const sessionEvents = this._getActiveSessionEvents();
+        const sessionDismissed = this._getActiveSessionDismissed();
+        const runningCount = sessionEvents.filter(e => e.status === 'running').length;
+        const pendingCount = sessionDismissed.length;
+        const totalCount = runningCount + pendingCount;
         let badge = btn.querySelector('.tool-activity-badge');
 
-        if (runningCount > 0) {
+        if (totalCount > 0) {
             if (!badge) {
                 badge = document.createElement('span');
                 badge.className = 'tool-activity-badge';
                 btn.appendChild(badge);
             }
-            badge.textContent = runningCount;
+            badge.textContent = totalCount;
+            if (pendingCount > 0) {
+                badge.classList.add('badge-pending');
+            } else {
+                badge.classList.remove('badge-pending');
+            }
         } else if (badge) {
             badge.remove();
         }
+    }
+
+    // Called when user switches session tab - refresh panel and badge for new session
+    onSessionSwitch() {
+        this.renderToolPanel();
+        this.updateToolBadge();
     }
 
     // ==================== NOTIFICATIONS & STOP ====================
@@ -679,7 +935,12 @@ class HookManager {
 
     // Clear events for a specific session
     clearSession(sessionId) {
-        this.toolEvents = this.toolEvents.filter(e => e.sessionId !== sessionId);
+        delete this.toolEventsBySession[sessionId];
+        this._saveToolEvents();
+
+        this.dismissedRequests = this.dismissedRequests.filter(e => e.sessionId !== sessionId);
+        this._saveDismissedRequests();
+
         this.renderToolPanel();
         this.updateToolBadge();
 

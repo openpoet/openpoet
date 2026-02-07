@@ -213,6 +213,11 @@ class DevManager {
             this.loadSessions(),
             this.loadMacros()
         ]);
+
+        // Now that sessions are loaded, clean up stale dismissed requests and auto-reopen valid ones
+        if (window.hookManager) {
+            window.hookManager._autoReopenDismissed();
+        }
     }
 
     // Projects
@@ -301,11 +306,9 @@ class DevManager {
 
             // Set default name
             input.value = defaultName;
-            input.select();
 
-            // Show modal
+            // Show modal (don't focus input to avoid mobile keyboard popup)
             modal.classList.remove('hidden');
-            input.focus();
 
             // Handle start
             const handleStart = () => {
@@ -738,6 +741,7 @@ class DevManager {
         });
 
         // Remove tabs for sessions that are no longer running
+        let tabsRemoved = false;
         document.querySelectorAll('.terminal-tab').forEach(tab => {
             const sessionId = tab.dataset.sessionId;
             const sessionExists = activeSessions.find(s => s.id === sessionId);
@@ -750,8 +754,22 @@ class DevManager {
                 }
                 this.openTabs.delete(sessionId);
                 tab.remove();
+                tabsRemoved = true;
             }
         });
+
+        // If tabs were removed, navigate accordingly
+        if (tabsRemoved) {
+            if (this.openTabs.size > 0) {
+                // Switch to the next available session
+                const nextSessionId = Array.from(this.openTabs.keys())[0];
+                window.terminalManager.switchToSession(nextSessionId);
+                this.updateMobileSessionTrigger(nextSessionId);
+            } else if (this.currentView === 'terminal') {
+                // No tabs left and we're on terminal view - go to sessions
+                this.showView('sessions');
+            }
+        }
     }
 
     updateTabActiveState(activeSessionId) {
@@ -823,7 +841,18 @@ class DevManager {
     setupStatusListener() {
         // Listen for session status changes from terminal manager
         window.addEventListener('session-status-changed', (e) => {
-            this.updateTabStatus(e.detail.sessionId, e.detail.status);
+            const { sessionId, status } = e.detail;
+            this.updateTabStatus(sessionId, status);
+
+            // When session ends, close its tab and navigate away
+            if (status === 'completed' || status === 'stopped' || status === 'error' || status === 'disconnected') {
+                setTimeout(() => {
+                    if (this.openTabs.has(sessionId)) {
+                        this.closeTab(sessionId);
+                        this.loadSessions();
+                    }
+                }, 1500);
+            }
         });
     }
 
@@ -1076,23 +1105,33 @@ class DevManager {
             this.sendMobileTerminalInput();
         });
 
-        // Auto-focus input when terminal view becomes active
-        const observer = new MutationObserver(() => {
-            const terminalView = document.querySelector('.terminal-view');
-            if (terminalView && terminalView.classList.contains('active')) {
-                // Small delay to ensure keyboard doesn't interfere with layout
-                setTimeout(() => {
-                    if (window.innerWidth <= 768) {
-                        input.focus();
-                    }
-                }, 300);
-            }
-        });
+        // Setup mobile special keys bar
+        this.setupMobileSpecialKeys();
+    }
 
-        observer.observe(document.body, {
-            attributes: true,
-            subtree: true,
-            attributeFilter: ['class']
+    setupMobileSpecialKeys() {
+        const keysBar = document.getElementById('mobile-terminal-keys-bar');
+        if (!keysBar) return;
+
+        const keyMap = {
+            'shift-tab': '\x1b[Z',
+            'esc': '\x1b',
+            'up': '\x1b[A',
+            'down': '\x1b[B',
+            'left': '\x1b[D',
+            'right': '\x1b[C',
+            'ctrl-c': '\x03',
+        };
+
+        keysBar.addEventListener('click', (e) => {
+            const btn = e.target.closest('.mobile-key-btn');
+            if (!btn) return;
+
+            const key = btn.dataset.key;
+            const sequence = keyMap[key];
+            if (sequence && window.terminalManager) {
+                window.terminalManager.sendInput(sequence);
+            }
         });
     }
 
@@ -1488,7 +1527,47 @@ class DevManager {
     }
 
     renderSettingsConfig() {
+        const nm = window.notificationManager;
+        const pushSupported = nm && nm.isSupported();
+        const pushSubscribed = nm && nm.isSubscribed();
+        const pushPermission = nm ? nm.permission : 'default';
+
+        let pushStatusText = '';
+        let pushBtnText = '';
+        let pushBtnClass = '';
+        let pushBtnAction = '';
+
+        if (!pushSupported) {
+            pushStatusText = 'Push notifications are not supported on this browser.';
+        } else if (pushPermission === 'denied') {
+            pushStatusText = 'Notifications blocked by the browser. Unblock in your browser/OS settings.';
+        } else if (pushSubscribed) {
+            pushStatusText = 'Push notifications are enabled.';
+            pushBtnText = 'Disable Push Notifications';
+            pushBtnClass = 'btn btn-danger btn-sm';
+            pushBtnAction = 'app.togglePushNotifications(false)';
+        } else {
+            pushStatusText = 'Push notifications are disabled. Enable them to receive alerts when the screen is off.';
+            pushBtnText = 'Enable Push Notifications';
+            pushBtnClass = 'btn btn-primary btn-sm';
+            pushBtnAction = 'app.togglePushNotifications(true)';
+        }
+
         const html = `
+            <div class="card" style="margin-bottom: 16px;">
+                <div class="card-header">
+                    <div class="card-title">Push Notifications</div>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: 12px; color: var(--text-secondary, #999); font-size: 13px;">
+                        Receive push notifications for permission requests, plan approvals, and questions even when the app is in the background or the screen is off.
+                    </p>
+                    <div id="push-status" style="margin-bottom: 12px; font-size: 13px;">
+                        ${pushStatusText}
+                    </div>
+                    ${pushBtnText ? `<button class="${pushBtnClass}" onclick="${pushBtnAction}">${pushBtnText}</button>` : ''}
+                </div>
+            </div>
             <div class="card">
                 <div class="card-header">
                     <div class="card-title">Voice Transcription</div>
@@ -1535,6 +1614,23 @@ class DevManager {
         }, 0);
 
         return html;
+    }
+
+    async togglePushNotifications(enable) {
+        const nm = window.notificationManager;
+        if (!nm) return;
+
+        if (enable) {
+            const granted = await nm.requestPermission();
+            if (!granted) {
+                this.showToast('Warning', 'Notification permission was denied. Check your browser settings.', 'warning');
+            }
+        } else {
+            await nm.unsubscribe();
+        }
+
+        // Re-render settings to update the button state
+        this.renderConfig();
     }
 
     // Modals
@@ -1666,6 +1762,9 @@ class DevManager {
 
     // Toast notifications
     showToast(title, message, type = 'info') {
+        // Only show toasts for errors and warnings
+        if (type !== 'error' && type !== 'warning') return;
+
         const container = document.getElementById('toast-container');
         const toast = document.createElement('div');
         toast.className = `toast toast-${type}`;
