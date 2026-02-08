@@ -1681,6 +1681,7 @@ class DevManager {
         const pushSupported = nm && nm.isSupported();
         const pushSubscribed = nm && nm.isSubscribed();
         const pushPermission = nm ? nm.permission : 'default';
+        const pushOptedOut = nm && nm.isOptedOut && nm.isOptedOut();
 
         let pushStatusText = '';
         let pushBtnText = '';
@@ -1691,6 +1692,11 @@ class DevManager {
             pushStatusText = 'Push notifications are not supported on this browser.';
         } else if (pushPermission === 'denied') {
             pushStatusText = 'Notifications blocked by the browser. Unblock in your browser/OS settings.';
+        } else if (pushOptedOut) {
+            pushStatusText = 'Push notifications disabled by you.';
+            pushBtnText = 'Enable Push Notifications';
+            pushBtnClass = 'btn btn-primary btn-sm';
+            pushBtnAction = 'app.togglePushNotifications(true)';
         } else if (pushSubscribed) {
             pushStatusText = 'Push notifications are enabled.';
             pushBtnText = 'Disable Push Notifications';

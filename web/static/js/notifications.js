@@ -1,10 +1,12 @@
 // Push Notifications using Web Push API
+// Default ON — opt-out preference stored server-side (survives cache clear)
 class NotificationManager {
     constructor() {
         this.permission = Notification.permission || 'default';
         this.subscription = null;
         this.vapidPublicKey = null;
         this.ready = false;
+        this._optedOut = false;
 
         this.init();
     }
@@ -15,7 +17,7 @@ class NotificationManager {
             return;
         }
 
-        // Get VAPID public key
+        // 1. Get VAPID public key
         try {
             const response = await fetch('/api/notifications/vapid');
             if (response.ok) {
@@ -27,26 +29,68 @@ class NotificationManager {
             return;
         }
 
-        // Register service worker
+        // 2. Register service worker
         try {
-            const registration = await navigator.serviceWorker.register('/sw.js');
+            await navigator.serviceWorker.register('/sw.js');
             console.log('Service Worker registered');
+        } catch (error) {
+            console.error('Service Worker registration failed:', error);
+            return;
+        }
 
-            // Check existing subscription
+        // 3. Check existing subscription
+        try {
+            const registration = await navigator.serviceWorker.ready;
             this.subscription = await registration.pushManager.getSubscription();
-            this.permission = Notification.permission || 'default';
-            this.ready = true;
+        } catch (error) {
+            console.error('Failed to check push subscription:', error);
+        }
 
+        this.permission = Notification.permission || 'default';
+        this.ready = true;
+
+        // 4. Fetch server-side preference
+        try {
+            const resp = await fetch('/api/notifications/preference');
+            if (resp.ok) {
+                const data = await resp.json();
+                this._optedOut = !!data.disabled;
+            }
+        } catch (error) {
+            // Fail-open: assume not opted out
+            console.warn('Failed to fetch notification preference, assuming enabled:', error);
+            this._optedOut = false;
+        }
+
+        // 5. If user explicitly opted out, stop here
+        if (this._optedOut) {
+            console.log('Push notifications: user opted out (server preference)');
+            return;
+        }
+
+        // 6. If browser denied, nothing we can do
+        if (this.permission === 'denied') {
+            console.log('Push notifications: blocked by browser');
+            return;
+        }
+
+        // 7. Permission granted — ensure subscription exists
+        if (this.permission === 'granted') {
             if (this.subscription) {
-                console.log('Already subscribed to push notifications');
-            } else if (this.permission === 'granted') {
-                // Permission was granted but subscription lost (e.g. browser cleared it)
-                // Re-subscribe automatically
+                // Re-confirm subscription with server (in case server lost it)
+                await this._sendSubscriptionToServer(this.subscription);
+            } else {
+                // Subscription lost (e.g. after cache clear) — re-subscribe
                 console.log('Permission granted but no subscription, re-subscribing...');
                 await this.subscribe();
             }
-        } catch (error) {
-            console.error('Service Worker registration failed:', error);
+            return;
+        }
+
+        // 8. Permission = 'default' (never asked) — auto-request with delay
+        if (this.permission === 'default') {
+            console.log('Push notifications: will auto-request permission in 2s');
+            setTimeout(() => this.requestPermission(), 2000);
         }
     }
 
@@ -84,20 +128,21 @@ class NotificationManager {
             });
 
             // Send subscription to server
-            const response = await fetch('/api/notifications/subscribe', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(this.subscription.toJSON())
-            });
+            await this._sendSubscriptionToServer(this.subscription);
 
-            if (response.ok) {
-                console.log('Push subscription saved');
+            // Clear opt-out on server (user is actively enabling)
+            await this._setServerPreference(false);
+            this._optedOut = false;
+
+            if (typeof app !== 'undefined' && app.showToast) {
                 app.showToast('Success', 'Push notifications enabled', 'success');
             }
 
         } catch (error) {
             console.error('Push subscription failed:', error);
-            app.showToast('Error', 'Failed to enable push notifications', 'error');
+            if (typeof app !== 'undefined' && app.showToast) {
+                app.showToast('Error', 'Failed to enable push notifications', 'error');
+            }
         }
     }
 
@@ -116,10 +161,44 @@ class NotificationManager {
             });
 
             this.subscription = null;
-            app.showToast('Success', 'Push notifications disabled', 'success');
+
+            // Save opt-out preference on server
+            await this._setServerPreference(true);
+            this._optedOut = true;
+
+            if (typeof app !== 'undefined' && app.showToast) {
+                app.showToast('Success', 'Push notifications disabled', 'success');
+            }
 
         } catch (error) {
             console.error('Unsubscribe failed:', error);
+        }
+    }
+
+    async _sendSubscriptionToServer(subscription) {
+        try {
+            const response = await fetch('/api/notifications/subscribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(subscription.toJSON())
+            });
+            if (response.ok) {
+                console.log('Push subscription confirmed with server');
+            }
+        } catch (error) {
+            console.error('Failed to send subscription to server:', error);
+        }
+    }
+
+    async _setServerPreference(disabled) {
+        try {
+            await fetch('/api/notifications/preference', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ disabled })
+            });
+        } catch (error) {
+            console.error('Failed to save notification preference:', error);
         }
     }
 
@@ -140,6 +219,10 @@ class NotificationManager {
 
     isSubscribed() {
         return !!this.subscription;
+    }
+
+    isOptedOut() {
+        return this._optedOut;
     }
 
     isSupported() {

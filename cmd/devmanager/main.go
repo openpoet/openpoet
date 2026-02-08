@@ -149,8 +149,11 @@ func main() {
 	// Initialize notification service
 	notifService := notifications.NewService(db, hub, webpush)
 
+	// Initialize hook handler (before API so it can be passed as dependency)
+	hookHandler := handlers.NewHookHandler(hub, notifService, sessionMgr)
+
 	// Initialize API handlers
-	api := handlers.NewAPI(db, hub, sessionMgr, macroExec, configSync, encryptor, notifService)
+	api := handlers.NewAPI(db, hub, sessionMgr, macroExec, configSync, encryptor, notifService, hookHandler)
 
 	// Initialize other handlers
 	fileHandler := handlers.NewFileHandler(api)
@@ -181,7 +184,6 @@ func main() {
 
 		return provider, key
 	})
-	hookHandler := handlers.NewHookHandler(hub, notifService, sessionMgr)
 	wsHandler := handlers.NewWebSocketHandler(hub, api, webpush)
 
 	// Set up router
@@ -305,6 +307,8 @@ func main() {
 		r.Delete("/notifications/subscribe", wsHandler.HandlePushUnsubscribe)
 		r.Get("/notifications/vapid", wsHandler.HandleVAPIDPublicKey)
 		r.Post("/notifications/test-push", wsHandler.HandleTestPush)
+		r.Get("/notifications/preference", wsHandler.HandleNotificationPreference)
+		r.Put("/notifications/preference", wsHandler.HandleSetNotificationPreference)
 
 		// Hooks
 		r.Post("/hooks/permission", hookHandler.HandlePermission)
