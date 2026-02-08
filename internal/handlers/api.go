@@ -25,6 +25,7 @@ type API struct {
 	configSync   *macro.ConfigSyncer
 	encryptor    *security.Encryptor
 	notifService *notifications.Service
+	hookHandler  *HookHandler
 }
 
 func NewAPI(
@@ -35,6 +36,7 @@ func NewAPI(
 	configSync *macro.ConfigSyncer,
 	encryptor *security.Encryptor,
 	notifService *notifications.Service,
+	hookHandler *HookHandler,
 ) *API {
 	return &API{
 		db:           db,
@@ -44,6 +46,7 @@ func NewAPI(
 		configSync:   configSync,
 		encryptor:    encryptor,
 		notifService: notifService,
+		hookHandler:  hookHandler,
 	}
 }
 
@@ -319,6 +322,11 @@ func (a *API) GetSessionOutput(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) DeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+
+	// Mark as user-initiated stop so the Stop hook doesn't send a push notification
+	if a.hookHandler != nil {
+		a.hookHandler.MarkUserStopped(id)
+	}
 
 	// Try to stop the running session
 	if err := a.sessionMgr.StopSession(r.Context(), id); err != nil {

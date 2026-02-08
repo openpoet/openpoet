@@ -149,6 +149,39 @@ func (h *WebSocketHandler) HandleVAPIDPublicKey(w http.ResponseWriter, r *http.R
 	})
 }
 
+// HandleNotificationPreference returns the server-side push notification opt-out preference
+func (h *WebSocketHandler) HandleNotificationPreference(w http.ResponseWriter, r *http.Request) {
+	val, _ := h.api.GetDB().GetSetting(r.Context(), "push_notifications_disabled")
+	disabled := val == "true"
+	respondJSON(w, http.StatusOK, map[string]bool{"disabled": disabled})
+}
+
+// HandleSetNotificationPreference sets the server-side push notification opt-out preference
+func (h *WebSocketHandler) HandleSetNotificationPreference(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Disabled bool `json:"disabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	ctx := r.Context()
+	if body.Disabled {
+		if err := h.api.GetDB().SetSetting(ctx, "push_notifications_disabled", "true"); err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	} else {
+		if err := h.api.GetDB().DeleteSetting(ctx, "push_notifications_disabled"); err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 // HandleTestPush sends a test push notification to all subscriptions
 func (h *WebSocketHandler) HandleTestPush(w http.ResponseWriter, r *http.Request) {
 	if h.webpush == nil {
