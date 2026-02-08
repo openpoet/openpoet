@@ -64,10 +64,11 @@ type HookHandler struct {
 	notifService *notifications.Service
 	sessionMgr   *session.Manager
 
-	mu           sync.Mutex
-	pending      map[string]*pendingPermission  // sessionID -> pending permission
-	alwaysAllow  map[string]map[string]bool     // sessionID -> toolName -> true
-	toolEvents   map[string][]toolEventEntry    // sessionID -> recent tool events buffer
+	mu            sync.Mutex
+	pending       map[string]*pendingPermission  // sessionID -> pending permission
+	alwaysAllow   map[string]map[string]bool     // sessionID -> toolName -> true
+	toolEvents    map[string][]toolEventEntry    // sessionID -> recent tool events buffer
+	lastPushSent  map[string]time.Time           // sessionID -> last push timestamp (for rate-limiting)
 }
 
 // NewHookHandler creates a new hook handler
@@ -79,6 +80,7 @@ func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, ses
 		pending:      make(map[string]*pendingPermission),
 		alwaysAllow:  make(map[string]map[string]bool),
 		toolEvents:   make(map[string][]toolEventEntry),
+		lastPushSent: make(map[string]time.Time),
 	}
 }
 
@@ -187,9 +189,14 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		})
 
 		// Send push notification for AskUser question
-		if h.notifService != nil {
-			go h.notifService.Send(context.Background(), sessionID, "question",
-				"Question from Claude", "Claude needs your input")
+		if h.notifService != nil && h.shouldSendPush(sessionID, true) {
+			log.Printf("[hooks] Sending push for AskUserQuestion on session %s", sessionID)
+			go func() {
+				if err := h.notifService.Send(context.Background(), sessionID, "question",
+					"Question from Claude", "Claude needs your input"); err != nil {
+					log.Printf("[hooks] Push failed for AskUserQuestion: %v", err)
+				}
+			}()
 		}
 	} else if isExitPlan {
 		// Send plan approval UI
@@ -202,9 +209,14 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		})
 
 		// Send push notification for plan approval
-		if h.notifService != nil {
-			go h.notifService.Send(context.Background(), sessionID, "permission",
-				"Plan Ready", "Claude's plan needs your approval")
+		if h.notifService != nil && h.shouldSendPush(sessionID, true) {
+			log.Printf("[hooks] Sending push for ExitPlanMode on session %s", sessionID)
+			go func() {
+				if err := h.notifService.Send(context.Background(), sessionID, "permission",
+					"Plan Ready", "Claude's plan needs your approval"); err != nil {
+					log.Printf("[hooks] Push failed for ExitPlanMode: %v", err)
+				}
+			}()
 		}
 	} else {
 		// Standard permission request dialog
@@ -217,13 +229,18 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		})
 
 		// Send push notification for permission request
-		if h.notifService != nil {
+		if h.notifService != nil && h.shouldSendPush(sessionID, true) {
 			notifToolName := "Tool"
 			if tn, ok := hookEvent["tool_name"].(string); ok {
 				notifToolName = tn
 			}
-			go h.notifService.Send(context.Background(), sessionID, "permission",
-				"Permission Request", notifToolName+" needs approval")
+			log.Printf("[hooks] Sending push for PermissionRequest (%s) on session %s", notifToolName, sessionID)
+			go func() {
+				if err := h.notifService.Send(context.Background(), sessionID, "permission",
+					"Permission Request", notifToolName+" needs approval"); err != nil {
+					log.Printf("[hooks] Push failed for PermissionRequest: %v", err)
+				}
+			}()
 		}
 	}
 
@@ -235,6 +252,11 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		delete(h.pending, sessionID)
 		h.mu.Unlock()
+
+		// Cancel push notifications for this session
+		if h.notifService != nil {
+			go h.notifService.SendCancel(context.Background(), sessionID)
+		}
 
 		// Build decision based on user response
 		decision := permissionDecision{}
@@ -372,6 +394,21 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		h.mu.Unlock()
 		cancel()
 
+		// Broadcast resolved to browser so UI cleans up
+		h.hub.BroadcastHookEvent(sessionID, &websocket.Message{
+			Type: websocket.MsgTypeHookPermissionResolved,
+			Data: map[string]interface{}{
+				"session_id": sessionID,
+				"behavior":   "deny",
+				"reason":     "timeout",
+			},
+		})
+
+		// Cancel push notifications for this session
+		if h.notifService != nil {
+			go h.notifService.SendCancel(context.Background(), sessionID)
+		}
+
 		// Return deny on timeout in Claude Code's expected envelope format
 		output := hookPermissionOutput{
 			HookSpecificOutput: hookSpecificOutput{
@@ -489,14 +526,30 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		h.mu.Unlock()
 	}
 
-	// For Notification events, also persist and push
-	if eventName == "Notification" && h.notifService != nil {
+	// For Stop events, send push notification (rate-limited)
+	if eventName == "Stop" && h.notifService != nil && h.shouldSendPush(sessionID, false) {
+		log.Printf("[hooks] Sending push for Stop event on session %s", sessionID)
+		go func() {
+			if err := h.notifService.Send(context.Background(), sessionID, "info",
+				"Claude Stopped", "Claude Code finished execution"); err != nil {
+				log.Printf("[hooks] Push failed for Stop: %v", err)
+			}
+		}()
+	}
+
+	// For Notification events, also persist and push (rate-limited)
+	if eventName == "Notification" && h.notifService != nil && h.shouldSendPush(sessionID, false) {
 		title := "Claude Code"
 		body := "Notification"
 		if msg, ok := hookEvent["message"].(string); ok {
 			body = msg
 		}
-		go h.notifService.Send(context.Background(), sessionID, "hook_notification", title, body)
+		log.Printf("[hooks] Sending push for Notification event on session %s: %s", sessionID, body)
+		go func() {
+			if err := h.notifService.Send(context.Background(), sessionID, "hook_notification", title, body); err != nil {
+				log.Printf("[hooks] Push failed for Notification: %v", err)
+			}
+		}()
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -510,12 +563,32 @@ func (h *HookHandler) HasPendingPermission(sessionID string) bool {
 	return ok
 }
 
+// shouldSendPush checks rate-limit for push notifications per session.
+// isPermission=true (PermissionRequest, AskUser, ExitPlan) always sends and updates the timestamp.
+// isPermission=false (Stop, Notification) skips if a push was sent in the last 5 seconds.
+func (h *HookHandler) shouldSendPush(sessionID string, isPermission bool) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if isPermission {
+		h.lastPushSent[sessionID] = time.Now()
+		return true
+	}
+
+	if last, ok := h.lastPushSent[sessionID]; ok && time.Since(last) < 5*time.Second {
+		return false
+	}
+	h.lastPushSent[sessionID] = time.Now()
+	return true
+}
+
 // ClearSession removes all state for a session (call when session ends)
 func (h *HookHandler) ClearSession(sessionID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.alwaysAllow, sessionID)
 	delete(h.toolEvents, sessionID)
+	delete(h.lastPushSent, sessionID)
 	if pending, ok := h.pending[sessionID]; ok {
 		pending.cancel()
 		delete(h.pending, sessionID)

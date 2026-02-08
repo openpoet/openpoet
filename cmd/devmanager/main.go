@@ -87,10 +87,20 @@ func main() {
 		cfg.OpenAIKey = *openaiKey
 	}
 
-	// Initialize database
-	db, err := database.New(cfg.DBPath)
+	// Initialize database (with silent recovery on migration failure)
+	db, err := initDatabase(cfg.DBPath)
 	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
+		// Unrecoverable: serve error page and wait for user action
+		log.Printf("[DB] Unrecoverable error: %v", err)
+		for {
+			serveMigrationError(cfg)
+			log.Printf("[DB] User requested retry...")
+			db, err = initDatabase(cfg.DBPath)
+			if err == nil {
+				break
+			}
+			log.Printf("[DB] Retry failed: %v", err)
+		}
 	}
 	defer db.Close()
 
@@ -294,6 +304,7 @@ func main() {
 		r.Post("/notifications/subscribe", wsHandler.HandlePushSubscribe)
 		r.Delete("/notifications/subscribe", wsHandler.HandlePushUnsubscribe)
 		r.Get("/notifications/vapid", wsHandler.HandleVAPIDPublicKey)
+		r.Post("/notifications/test-push", wsHandler.HandleTestPush)
 
 		// Hooks
 		r.Post("/hooks/permission", hookHandler.HandlePermission)
@@ -379,3 +390,171 @@ func main() {
 
 	fmt.Println("DevManager stopped")
 }
+
+// initDatabase tries to open/migrate the database. On failure, it silently
+// attempts recovery: backs up the old DB, creates a fresh one, and copies data over.
+func initDatabase(dbPath string) (*database.DB, error) {
+	db, err := database.New(dbPath)
+	if err == nil {
+		return db, nil
+	}
+
+	log.Printf("[DB] Migration failed: %v — attempting silent recovery...", err)
+
+	// Silent recovery: backup old DB, create fresh, recover data
+	backupPath := dbPath + ".bak." + time.Now().Format("20060102-150405")
+	if renameErr := os.Rename(dbPath, backupPath); renameErr != nil {
+		log.Printf("[DB] Recovery: could not backup DB: %v", renameErr)
+		// Try removing instead
+		if rmErr := os.Remove(dbPath); rmErr != nil {
+			return nil, fmt.Errorf("migration failed and recovery impossible: %w", err)
+		}
+		backupPath = ""
+	}
+
+	// Create fresh DB
+	db, freshErr := database.New(dbPath)
+	if freshErr != nil {
+		// Restore backup if possible
+		if backupPath != "" {
+			os.Rename(backupPath, dbPath)
+		}
+		return nil, fmt.Errorf("migration failed and fresh install also failed: %w", freshErr)
+	}
+
+	// Recover data from backup
+	if backupPath != "" {
+		recoverDataFromBackup(db, backupPath)
+	}
+
+	log.Printf("[DB] Silent recovery successful")
+	return db, nil
+}
+
+// serveMigrationError starts a minimal HTTP server showing a generic error page.
+// Blocks until the user clicks "Tentar Novamente".
+func serveMigrationError(cfg *config.Config) {
+	ready := make(chan struct{}, 1)
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(migrationErrorPageHTML))
+	})
+
+	mux.HandleFunc("/api/migration/retry", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", 405)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+		select {
+		case ready <- struct{}{}:
+		default:
+		}
+	})
+
+	server := &http.Server{
+		Addr:    cfg.Address(),
+		Handler: mux,
+	}
+
+	go func() {
+		log.Printf("[DB] Serving error page on http://%s", cfg.Address())
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("[DB] Error server failed: %v", err)
+		}
+	}()
+
+	<-ready
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	server.Shutdown(shutdownCtx)
+}
+
+// recoverDataFromBackup copies data from an old DB backup into the fresh DB.
+func recoverDataFromBackup(db *database.DB, backupPath string) {
+	tables := []string{
+		"projects", "sessions", "macros", "skills",
+		"mcp_servers", "settings", "push_subscriptions", "notifications",
+	}
+
+	_, err := db.Exec(fmt.Sprintf("ATTACH DATABASE '%s' AS old_db", backupPath))
+	if err != nil {
+		log.Printf("[DB] Recovery: could not attach backup: %v", err)
+		return
+	}
+	defer db.Exec("DETACH DATABASE old_db")
+
+	for _, table := range tables {
+		result, err := db.Exec(fmt.Sprintf("INSERT OR IGNORE INTO main.%s SELECT * FROM old_db.%s", table, table))
+		if err != nil {
+			log.Printf("[DB] Recovery: table %s skipped (%v)", table, err)
+			continue
+		}
+		if rows, _ := result.RowsAffected(); rows > 0 {
+			log.Printf("[DB] Recovery: table %s — %d rows recovered", table, rows)
+		}
+	}
+}
+
+const migrationErrorPageHTML = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DevManager</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #1a1a2e; color: #e0e0e0;
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh; padding: 20px;
+  }
+  .container {
+    max-width: 420px; width: 100%%;
+    background: #16213e; border-radius: 12px;
+    padding: 32px; box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    text-align: center;
+  }
+  .icon { font-size: 48px; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin-bottom: 12px; color: #e0e0e0; }
+  p { color: #a0a0a0; font-size: 14px; margin-bottom: 24px; line-height: 1.5; }
+  button {
+    width: 100%%; padding: 14px; border: none; border-radius: 8px;
+    font-size: 16px; font-weight: 600; cursor: pointer;
+    background: #4361ee; color: white; transition: opacity 0.2s;
+  }
+  button:hover { opacity: 0.9; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .status { margin-top: 16px; font-size: 14px; display: none; }
+  .spinner { display: inline-block; width: 16px; height: 16px;
+    border: 2px solid #666; border-top-color: #fff; border-radius: 50%%;
+    animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="icon">&#9888;&#65039;</div>
+  <h1>A aplicação não pôde iniciar</h1>
+  <p>Ocorreu um problema interno. Verifique os logs para mais detalhes.</p>
+  <button onclick="doRetry(this)">Tentar Novamente</button>
+  <div class="status" id="status"><span class="spinner"></span> Reiniciando...</div>
+</div>
+<script>
+function doRetry(btn) {
+  btn.disabled = true;
+  document.getElementById('status').style.display = 'block';
+  fetch('/api/migration/retry', { method: 'POST' })
+    .then(function() { setTimeout(function() { window.location.reload(); }, 3000); })
+    .catch(function() { btn.disabled = false; document.getElementById('status').style.display = 'none'; });
+}
+</script>
+</body>
+</html>`

@@ -30,6 +30,8 @@ func NewService(db *database.DB, hub *websocket.Hub, webpush *WebPushService) *S
 
 // Send creates and broadcasts a notification
 func (s *Service) Send(ctx context.Context, sessionID, notifType, title, body string) error {
+	log.Printf("[NotifService] Send called: type=%s title=%q body=%q session=%s", notifType, title, body, sessionID)
+
 	notification := &database.Notification{
 		SessionID: sessionID,
 		Type:      notifType,
@@ -39,6 +41,7 @@ func (s *Service) Send(ctx context.Context, sessionID, notifType, title, body st
 
 	// Save to database
 	if err := s.db.CreateNotification(ctx, notification); err != nil {
+		log.Printf("[NotifService] DB save failed: %v", err)
 		return err
 	}
 
@@ -48,13 +51,16 @@ func (s *Service) Send(ctx context.Context, sessionID, notifType, title, body st
 	// Send push notification
 	if s.webpush != nil {
 		go func() {
-			if err := s.webpush.SendToAll(ctx, title, body, map[string]string{
+			log.Printf("[NotifService] Launching push for: %q", title)
+			if err := s.webpush.SendToAll(context.Background(), title, body, map[string]string{
 				"session_id": sessionID,
 				"type":       notifType,
 			}); err != nil {
-				log.Printf("Failed to send push notification: %v", err)
+				log.Printf("[NotifService] Push failed: %v", err)
 			}
 		}()
+	} else {
+		log.Printf("[NotifService] webpush is nil, skipping push")
 	}
 
 	// Call registered handlers
@@ -70,6 +76,16 @@ func (s *Service) Send(ctx context.Context, sessionID, notifType, title, body st
 	}
 
 	return nil
+}
+
+// SendCancel sends a cancel push to dismiss notifications for a session
+func (s *Service) SendCancel(ctx context.Context, sessionID string) {
+	if s.webpush == nil {
+		return
+	}
+	if err := s.webpush.SendCancelToAll(ctx, sessionID); err != nil {
+		log.Printf("[NotifService] Cancel push failed for session %s: %v", sessionID, err)
+	}
 }
 
 // RegisterHandler registers a notification handler

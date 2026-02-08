@@ -148,3 +148,27 @@ func (h *WebSocketHandler) HandleVAPIDPublicKey(w http.ResponseWriter, r *http.R
 		"publicKey": h.webpush.GetPublicKey(),
 	})
 }
+
+// HandleTestPush sends a test push notification to all subscriptions
+func (h *WebSocketHandler) HandleTestPush(w http.ResponseWriter, r *http.Request) {
+	if h.webpush == nil {
+		respondError(w, http.StatusServiceUnavailable, "Push notifications not configured")
+		return
+	}
+
+	err := h.webpush.SendToAll(r.Context(), "DevManager Test", "Push notifications are working!", map[string]string{
+		"type": "test",
+	})
+	if err != nil {
+		respondJSON(w, http.StatusOK, map[string]string{
+			"status":  "partial",
+			"message": "Some notifications failed: " + err.Error(),
+		})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{
+		"status":  "sent",
+		"message": "Test notification sent to all subscriptions",
+	})
+}

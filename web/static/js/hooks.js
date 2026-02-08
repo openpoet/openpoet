@@ -262,6 +262,13 @@ class HookManager {
                     this.hidePendingBadge(msg.data.session_id);
                     this.renderToolPanel();
                     this.updateToolBadge();
+                    // Close push notifications via Service Worker
+                    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+                        navigator.serviceWorker.controller.postMessage({
+                            type: 'close_notifications',
+                            session_id: msg.data.session_id
+                        });
+                    }
                 }
                 break;
             case 'hook_ask_user':
