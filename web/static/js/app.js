@@ -1625,28 +1625,93 @@ class DevManager {
     }
 
     renderSkillsConfig() {
-        return `
-            <div class="mb-4">
-                <button class="btn btn-primary" onclick="app.showSkillModal()">Add Skill</button>
-            </div>
-            <div class="card-grid">
-                ${this.skills.map(skill => `
-                    <div class="card">
+        // Filter skills by search and category
+        const searchTerm = (this._skillSearch || '').toLowerCase();
+        const filterCategory = this._skillFilterCategory || '';
+        const filterStatus = this._skillFilterStatus || '';
+
+        let filtered = this.skills;
+        if (searchTerm) {
+            filtered = filtered.filter(s => s.name.toLowerCase().includes(searchTerm) || s.content.toLowerCase().includes(searchTerm));
+        }
+        if (filterCategory) {
+            filtered = filtered.filter(s => s.category === filterCategory);
+        }
+        if (filterStatus === 'enabled') {
+            filtered = filtered.filter(s => s.enabled);
+        } else if (filterStatus === 'disabled') {
+            filtered = filtered.filter(s => !s.enabled);
+        }
+
+        // Get unique categories
+        const categories = [...new Set(this.skills.map(s => s.category).filter(c => c))];
+
+        const skillCards = filtered.length === 0
+            ? `<div class="skills-empty-state">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="opacity:0.4; margin-bottom: 12px;">
+                    <path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/>
+                </svg>
+                <div style="font-weight: 600; margin-bottom: 4px;">No skills found</div>
+                <div style="font-size: 12px; opacity: 0.6;">Skills are markdown instructions that are synced to your projects and available to Claude during sessions.</div>
+                <button class="btn btn-primary btn-sm" style="margin-top: 12px;" onclick="app.showSkillModal()">Create your first skill</button>
+              </div>`
+            : `<div class="card-grid">
+                ${filtered.map(skill => `
+                    <div class="card ${!skill.enabled ? 'card-disabled' : ''}">
                         <div class="card-header">
-                            <div class="card-title">${this.escapeHtml(skill.name)}</div>
-                            <input type="checkbox" ${skill.enabled ? 'checked' : ''}
-                                onchange="app.toggleSkill(${skill.id}, this.checked)">
+                            <div>
+                                <div class="card-title">${this.escapeHtml(skill.name)}</div>
+                                ${skill.category ? `<span class="skill-badge">${this.escapeHtml(skill.category)}</span>` : ''}
+                            </div>
+                            <label class="toggle-switch" title="${skill.enabled ? 'Enabled' : 'Disabled'}">
+                                <input type="checkbox" ${skill.enabled ? 'checked' : ''}
+                                    onchange="app.toggleSkill(${skill.id}, this.checked)">
+                                <span class="toggle-slider"></span>
+                            </label>
                         </div>
                         <div class="card-body">
-                            <pre style="max-height: 100px; overflow: hidden; font-size: 11px;">${this.escapeHtml(skill.content.substring(0, 200))}...</pre>
+                            <pre class="skill-preview">${this.escapeHtml(skill.content.substring(0, 200))}${skill.content.length > 200 ? '...' : ''}</pre>
+                        </div>
+                        <div class="card-footer-info">
+                            ${skill.sync_count > 0 ? `<span class="skill-stat" title="Times synced">Synced ${skill.sync_count}x</span>` : ''}
                         </div>
                         <div class="card-actions">
                             <button class="btn btn-secondary btn-sm" onclick="app.editSkill(${skill.id})">Edit</button>
+                            <button class="btn btn-secondary btn-sm" onclick="app.duplicateSkill(${skill.id})">Duplicate</button>
+                            <button class="btn btn-secondary btn-sm" onclick="app.showSkillVersions(${skill.id})">History</button>
                             <button class="btn btn-danger btn-sm" onclick="app.deleteSkill(${skill.id})">Delete</button>
                         </div>
                     </div>
                 `).join('')}
+              </div>`;
+
+        return `
+            <div class="skills-toolbar">
+                <div class="skills-toolbar-left">
+                    <button class="btn btn-primary" onclick="app.showSkillModal()">Add Skill</button>
+                    <button class="btn btn-secondary" onclick="app.showAISkillCreator()" title="Generate a skill using AI">Criar com IA</button>
+                    <button class="btn btn-secondary" onclick="app.syncAllConfig()" title="Sync skills to all projects">Sync Now</button>
+                </div>
+                <div class="skills-toolbar-right">
+                    <input type="text" class="form-input skills-search" placeholder="Search skills..."
+                        value="${this.escapeHtml(this._skillSearch || '')}"
+                        oninput="app._skillSearch = this.value; app.renderConfig()">
+                    ${categories.length > 0 ? `
+                        <select class="form-select skills-filter" onchange="app._skillFilterCategory = this.value; app.renderConfig()">
+                            <option value="">All categories</option>
+                            ${categories.map(c => `<option value="${this.escapeHtml(c)}" ${filterCategory === c ? 'selected' : ''}>${this.escapeHtml(c)}</option>`).join('')}
+                        </select>
+                    ` : ''}
+                    <select class="form-select skills-filter" onchange="app._skillFilterStatus = this.value; app.renderConfig()">
+                        <option value="" ${!filterStatus ? 'selected' : ''}>All status</option>
+                        <option value="enabled" ${filterStatus === 'enabled' ? 'selected' : ''}>Enabled</option>
+                        <option value="disabled" ${filterStatus === 'disabled' ? 'selected' : ''}>Disabled</option>
+                    </select>
+                    <button class="btn btn-secondary btn-sm" onclick="app.exportSkills()" title="Export all skills as JSON">Export</button>
+                    <button class="btn btn-secondary btn-sm" onclick="app.importSkillsDialog()" title="Import skills from JSON">Import</button>
+                </div>
             </div>
+            ${skillCards}
         `;
     }
 
@@ -1747,6 +1812,42 @@ class DevManager {
                     <button class="btn btn-primary btn-sm" onclick="app.saveWhisperSettings()">Save</button>
                 </div>
             </div>
+            <div class="card" style="margin-top: 16px;">
+                <div class="card-header">
+                    <div class="card-title">AI Assistant (Anthropic)</div>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: 12px; color: var(--text-secondary, #999); font-size: 13px;">
+                        Configure the AI provider for the chat assistant, skill generation, and auto-configuration features.
+                    </p>
+                    <div class="form-group">
+                        <label class="form-label">Provider</label>
+                        <select class="form-input" id="ai-provider">
+                            <option value="">Auto-detect</option>
+                            <option value="claudecode">Claude Code CLI (Max plan)</option>
+                            <option value="apikey">Anthropic API Key</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Anthropic API Key</label>
+                        <input type="password" class="form-input" id="anthropic-key" placeholder="sk-ant-...">
+                        <small style="color: var(--color-text-muted); font-size: 11px;">Only needed if using API Key provider. Key is stored securely and never exposed to the frontend.</small>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Model</label>
+                        <select class="form-input" id="ai-model">
+                            <option value="claude-sonnet-4-5-20250929">Claude Sonnet 4.5</option>
+                            <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5 (Faster)</option>
+                            <option value="claude-opus-4-6">Claude Opus 4.6</option>
+                        </select>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn btn-primary btn-sm" onclick="app.saveAISettings()">Save</button>
+                        <button class="btn btn-secondary btn-sm" onclick="app.testAIConnection()">Test Connection</button>
+                    </div>
+                    <div id="ai-test-result" style="margin-top: 8px; font-size: 12px;"></div>
+                </div>
+            </div>
         `;
 
         // Populate settings after render
@@ -1755,6 +1856,14 @@ class DevManager {
                 const providerSelect = document.getElementById('whisper-provider');
                 if (providerSelect && this.settings.whisper_provider) {
                     providerSelect.value = this.settings.whisper_provider;
+                }
+                const aiProviderSelect = document.getElementById('ai-provider');
+                if (aiProviderSelect && this.settings.ai_provider) {
+                    aiProviderSelect.value = this.settings.ai_provider;
+                }
+                const aiModelSelect = document.getElementById('ai-model');
+                if (aiModelSelect && this.settings.ai_model) {
+                    aiModelSelect.value = this.settings.ai_model;
                 }
             }
         }, 0);
@@ -2061,15 +2170,32 @@ class DevManager {
 
     showSkillModal(skill = null) {
         const isEdit = !!skill;
+        this._skillModalDirty = false;
         const content = `
-            <form id="skill-form">
+            <form id="skill-form" oninput="app._skillModalDirty = true">
                 <div class="form-group">
                     <label class="form-label">Name</label>
-                    <input type="text" class="form-input" name="name" value="${skill?.name || ''}" required>
+                    <input type="text" class="form-input" name="name" value="${this.escapeHtml(skill?.name || '')}" required
+                        placeholder="e.g. coding-style, deploy-guide">
                 </div>
                 <div class="form-group">
-                    <label class="form-label">Content</label>
-                    <textarea class="form-textarea" name="content" rows="10" required>${skill?.content || ''}</textarea>
+                    <label class="form-label">Category <span style="opacity:0.5; font-weight:normal;">(optional)</span></label>
+                    <input type="text" class="form-input" name="category" value="${this.escapeHtml(skill?.category || '')}"
+                        placeholder="e.g. Python, Git, Deploy">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">
+                        Content
+                        <div class="skill-editor-tabs">
+                            <button type="button" class="skill-tab active" onclick="app.switchSkillEditorTab('edit', this)">Edit</button>
+                            <button type="button" class="skill-tab" onclick="app.switchSkillEditorTab('preview', this)">Preview</button>
+                        </div>
+                    </label>
+                    <div id="skill-editor-edit">
+                        <textarea class="form-textarea skill-content-editor" name="content" rows="14" required
+                            placeholder="# Skill Title&#10;&#10;Write markdown instructions for Claude...">${this.escapeHtml(skill?.content || '')}</textarea>
+                    </div>
+                    <div id="skill-editor-preview" class="skill-preview-pane" style="display:none;"></div>
                 </div>
                 <div class="form-checkbox">
                     <input type="checkbox" name="enabled" ${skill?.enabled !== false ? 'checked' : ''}>
@@ -2079,20 +2205,94 @@ class DevManager {
         `;
 
         const actions = `
-            <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
+            <button class="btn btn-secondary" onclick="app.closeSkillModal()">Cancel</button>
             <button class="btn btn-primary" onclick="app.saveSkill(${skill?.id || 'null'})">${isEdit ? 'Save' : 'Create'}</button>
         `;
 
         this.showModal(isEdit ? 'Edit Skill' : 'New Skill', content, actions);
     }
 
+    closeSkillModal() {
+        if (this._skillModalDirty) {
+            if (!confirm('You have unsaved changes. Discard?')) return;
+        }
+        this.hideModal();
+    }
+
+    switchSkillEditorTab(tab, btn) {
+        const editPane = document.getElementById('skill-editor-edit');
+        const previewPane = document.getElementById('skill-editor-preview');
+        if (!editPane || !previewPane) return;
+
+        // Update tab buttons
+        btn.parentElement.querySelectorAll('.skill-tab').forEach(t => t.classList.remove('active'));
+        btn.classList.add('active');
+
+        if (tab === 'preview') {
+            const content = document.querySelector('textarea[name="content"]')?.value || '';
+            previewPane.innerHTML = this.renderMarkdownPreview(content);
+            editPane.style.display = 'none';
+            previewPane.style.display = 'block';
+        } else {
+            editPane.style.display = 'block';
+            previewPane.style.display = 'none';
+        }
+    }
+
+    renderMarkdownPreview(md) {
+        // Simple markdown to HTML renderer
+        let html = this.escapeHtml(md);
+        // Headers
+        html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+        html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+        html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+        // Bold and italic
+        html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+        // Code blocks
+        html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+        // Inline code
+        html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+        // Lists
+        html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
+        html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+        // Line breaks
+        html = html.replace(/\n\n/g, '</p><p>');
+        html = '<p>' + html + '</p>';
+        return html;
+    }
+
     async saveSkill(skillId) {
         const form = document.getElementById('skill-form');
+        const name = form.querySelector('input[name="name"]').value.trim();
+        const content = form.querySelector('textarea[name="content"]').value.trim();
+        const category = form.querySelector('input[name="category"]').value.trim();
+
+        if (!name) {
+            this.showToast('Error', 'Name is required', 'error');
+            return;
+        }
+        if (!content) {
+            this.showToast('Error', 'Content is required', 'error');
+            return;
+        }
+        if (/[/\\]/.test(name) || name.includes('..')) {
+            this.showToast('Error', 'Name cannot contain / \\ or ..', 'error');
+            return;
+        }
+
         const data = {
-            name: form.querySelector('input[name="name"]').value,
-            content: form.querySelector('textarea[name="content"]').value,
+            name,
+            content,
+            category,
             enabled: form.querySelector('input[name="enabled"]').checked
         };
+
+        // Preserve sort_order if editing
+        if (skillId) {
+            const existing = this.skills.find(s => s.id === skillId);
+            if (existing) data.sort_order = existing.sort_order;
+        }
 
         try {
             if (skillId) {
@@ -2100,6 +2300,7 @@ class DevManager {
             } else {
                 await this.api('POST', '/config/skills', data);
             }
+            this._skillModalDirty = false;
             this.hideModal();
             this.showToast('Success', 'Skill saved', 'success');
             this.loadConfig();
@@ -2114,7 +2315,7 @@ class DevManager {
     }
 
     async deleteSkill(skillId) {
-        if (!confirm('Delete this skill?')) return;
+        if (!confirm('Delete this skill? This action cannot be undone.')) return;
         try {
             await this.api('DELETE', `/config/skills/${skillId}`);
             this.showToast('Success', 'Skill deleted', 'success');
@@ -2126,8 +2327,115 @@ class DevManager {
 
     async toggleSkill(skillId, enabled) {
         const skill = this.skills.find(s => s.id === skillId);
-        if (skill) {
+        if (!skill) return;
+        try {
             await this.api('PUT', `/config/skills/${skillId}`, { ...skill, enabled });
+            this.showToast('Success', enabled ? 'Skill enabled' : 'Skill disabled', 'success');
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+            // Revert checkbox
+            this.loadConfig();
+        }
+    }
+
+    async duplicateSkill(skillId) {
+        try {
+            await this.api('POST', `/config/skills/${skillId}/duplicate`);
+            this.showToast('Success', 'Skill duplicated', 'success');
+            this.loadConfig();
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    async syncAllConfig() {
+        try {
+            this.showToast('Info', 'Syncing skills to all projects...', 'info');
+            await this.api('POST', '/config/sync-all');
+            this.showToast('Success', 'Skills synced to all projects', 'success');
+            this.loadConfig();
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    async exportSkills() {
+        try {
+            const skills = await this.api('GET', '/config/skills/export');
+            const blob = new Blob([JSON.stringify(skills, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'devmanager-skills.json';
+            a.click();
+            URL.revokeObjectURL(url);
+            this.showToast('Success', 'Skills exported', 'success');
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    importSkillsDialog() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+        input.onchange = async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            try {
+                const text = await file.text();
+                const skills = JSON.parse(text);
+                const result = await this.api('POST', '/config/skills/import', skills);
+                this.showToast('Success', `Imported ${result.imported} skills (${result.skipped} skipped)`, 'success');
+                this.loadConfig();
+            } catch (error) {
+                this.showToast('Error', error.message || 'Invalid JSON file', 'error');
+            }
+        };
+        input.click();
+    }
+
+    async showSkillVersions(skillId) {
+        try {
+            const versions = await this.api('GET', `/config/skills/${skillId}/versions`);
+            const skill = this.skills.find(s => s.id === skillId);
+            if (!versions.length) {
+                this.showToast('Info', 'No version history yet', 'info');
+                return;
+            }
+
+            const content = `
+                <div class="skill-versions-list">
+                    ${versions.map(v => `
+                        <div class="skill-version-item">
+                            <div class="skill-version-info">
+                                <strong>v${v.version}</strong> - ${this.escapeHtml(v.name)}
+                                <div class="skill-version-date">${new Date(v.created_at).toLocaleString()}</div>
+                                <pre class="skill-preview" style="margin-top: 4px;">${this.escapeHtml(v.content.substring(0, 150))}${v.content.length > 150 ? '...' : ''}</pre>
+                            </div>
+                            <button class="btn btn-secondary btn-sm" onclick="app.restoreSkillVersion(${skillId}, ${v.id})">Restore</button>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+
+            this.showModal(`Version History: ${this.escapeHtml(skill?.name || '')}`, content, `
+                <button class="btn btn-secondary" onclick="app.hideModal()">Close</button>
+            `);
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    async restoreSkillVersion(skillId, versionId) {
+        if (!confirm('Restore this version? Current content will be saved as a new version.')) return;
+        try {
+            await this.api('POST', `/config/skills/${skillId}/versions/${versionId}/restore`);
+            this.hideModal();
+            this.showToast('Success', 'Version restored', 'success');
+            this.loadConfig();
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
         }
     }
 
@@ -2229,6 +2537,161 @@ class DevManager {
             this.showToast('Success', 'Settings saved', 'success');
         } catch (error) {
             this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    async saveAISettings() {
+        const aiProvider = document.getElementById('ai-provider').value;
+        const anthropicKey = document.getElementById('anthropic-key').value;
+        const aiModel = document.getElementById('ai-model').value;
+
+        const settings = {};
+        if (aiProvider) settings.ai_provider = aiProvider;
+        if (anthropicKey) settings.anthropic_api_key = anthropicKey;
+        if (aiModel) settings.ai_model = aiModel;
+
+        try {
+            await this.api('PUT', '/config/settings', settings);
+            this.showToast('Success', 'AI settings saved. Restart the service for changes to take effect.', 'success');
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    async testAIConnection() {
+        const resultEl = document.getElementById('ai-test-result');
+        if (resultEl) resultEl.innerHTML = '<span style="color: var(--color-text-muted);">Testing...</span>';
+
+        try {
+            const resp = await fetch('/api/ai/status');
+            const data = await resp.json();
+            if (data.configured) {
+                const provider = data.provider === 'apikey' ? 'API Key' : 'Claude Code CLI';
+                if (resultEl) resultEl.innerHTML = `<span style="color: var(--color-success);">Connected (${provider}, model: ${data.model})</span>`;
+            } else {
+                if (resultEl) resultEl.innerHTML = '<span style="color: var(--color-danger);">Not configured. Set an API key or install Claude Code CLI.</span>';
+            }
+        } catch (e) {
+            if (resultEl) resultEl.innerHTML = `<span style="color: var(--color-danger);">Error: ${e.message}</span>`;
+        }
+    }
+
+    showAISkillCreator() {
+        const modalContent = `
+            <div class="form-group">
+                <label class="form-label">Describe the skill you want to create</label>
+                <textarea id="ai-skill-description" class="form-textarea" rows="4"
+                    placeholder="e.g., A skill that enforces Python best practices, including type hints, docstrings, and PEP 8 compliance..."></textarea>
+            </div>
+            <div id="ai-skill-progress" class="hidden" style="margin-top: 12px;">
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                    <div class="spinner-small" style="width: 16px; height: 16px; border: 2px solid var(--color-border); border-top-color: var(--color-primary); border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
+                    <span style="font-size: 13px; color: var(--color-text-secondary);">Generating skill...</span>
+                </div>
+                <div id="ai-skill-preview" style="background: var(--color-bg); border-radius: 8px; padding: 12px; font-size: 12px; max-height: 300px; overflow-y: auto; white-space: pre-wrap; font-family: monospace;"></div>
+            </div>
+        `;
+
+        this.showModal('Create Skill with AI', modalContent, `
+            <button class="btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+            <button id="ai-skill-generate-btn" class="btn btn-primary" onclick="app.generateAISkill()">Generate</button>
+            <button id="ai-skill-save-btn" class="btn btn-success hidden" onclick="app.saveAIGeneratedSkill()">Save Skill</button>
+        `);
+    }
+
+    async generateAISkill() {
+        const description = document.getElementById('ai-skill-description')?.value?.trim();
+        if (!description) {
+            this.showToast('Error', 'Please enter a description', 'error');
+            return;
+        }
+
+        const progressEl = document.getElementById('ai-skill-progress');
+        const previewEl = document.getElementById('ai-skill-preview');
+        const genBtn = document.getElementById('ai-skill-generate-btn');
+        const saveBtn = document.getElementById('ai-skill-save-btn');
+
+        if (progressEl) progressEl.classList.remove('hidden');
+        if (genBtn) genBtn.disabled = true;
+        if (previewEl) previewEl.textContent = '';
+
+        let fullText = '';
+
+        try {
+            const resp = await fetch('/api/ai/generate-skill', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ description }),
+            });
+
+            if (!resp.ok) {
+                const err = await resp.json();
+                throw new Error(err.error || 'Generation failed');
+            }
+
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    try {
+                        const event = JSON.parse(line.slice(6));
+                        if (event.type === 'text') {
+                            fullText += event.data.text;
+                            if (previewEl) previewEl.textContent = fullText;
+                        }
+                    } catch (e) { /* skip */ }
+                }
+            }
+
+            // Store for save
+            this._aiGeneratedSkill = fullText;
+            if (saveBtn) saveBtn.classList.remove('hidden');
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+        } finally {
+            if (genBtn) genBtn.disabled = false;
+        }
+    }
+
+    async saveAIGeneratedSkill() {
+        if (!this._aiGeneratedSkill) return;
+
+        try {
+            // Try to parse as JSON (the model should return a JSON object)
+            let skillData;
+            try {
+                skillData = JSON.parse(this._aiGeneratedSkill);
+            } catch (e) {
+                // If not JSON, use raw text as content
+                skillData = {
+                    name: 'AI Generated Skill',
+                    content: this._aiGeneratedSkill,
+                    category: 'ai-generated',
+                };
+            }
+
+            await this.api('POST', '/config/skills', {
+                name: skillData.name || 'AI Generated Skill',
+                content: skillData.content || this._aiGeneratedSkill,
+                enabled: true,
+                category: skillData.category || 'ai-generated',
+            });
+
+            this.showToast('Success', `Skill "${skillData.name}" created`, 'success');
+            this.closeModal();
+            this.loadConfig();
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
         }
     }
 }

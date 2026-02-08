@@ -745,6 +745,32 @@
         padding: 16px;
     }
 
+    /* Skills toolbar mobile */
+    .skills-toolbar {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .skills-toolbar-left,
+    .skills-toolbar-right {
+        flex-wrap: wrap;
+    }
+
+    .skills-search {
+        max-width: none;
+        flex: 1;
+        min-width: 120px;
+    }
+
+    .skills-filter {
+        flex: 1;
+        min-width: 100px;
+    }
+
+    .skill-content-editor {
+        min-height: 150px;
+    }
+
     /* Modal */
     .modal-container {
         max-width: none;
@@ -984,6 +1010,60 @@
         padding: 16px;
         font-size: 14px;
     }
+
+    /* AI Chat - fullscreen on mobile */
+    .ai-chat-panel {
+        width: 100%;
+        right: -100%;
+    }
+    .ai-chat-panel.open {
+        right: 0;
+    }
+    .ai-chat-toggle-btn {
+        bottom: calc(var(--mobile-nav-height) + 12px);
+        right: 12px;
+        width: 44px;
+        height: 44px;
+    }
+
+    /* AI Chat input - mobile touch-friendly */
+    .ai-chat-input-area {
+        padding: 10px 12px;
+        padding-bottom: 10px;
+        gap: 6px;
+    }
+    .ai-chat-input {
+        height: 44px;
+        min-height: 44px;
+        padding: 10px 12px;
+        font-size: 16px; /* Prevents iOS zoom */
+        border-radius: var(--border-radius);
+    }
+    .ai-chat-action-btn {
+        display: flex;
+        width: 44px;
+        height: 44px;
+    }
+    .ai-chat-send-btn,
+    .ai-chat-stop-btn {
+        width: 44px;
+        height: 44px;
+    }
+}
+
+/* Hook dialog containers - mobile scroll fix */
+@media (max-width: 768px) {
+    .hook-permission-container,
+    .hook-exit-plan-container,
+    .hook-ask-user-container {
+        max-height: calc(100vh - 32px);
+        max-width: none;
+        margin: 0 8px;
+    }
+
+    .hook-permission-overlay {
+        padding: 16px 0;
+    }
 }
 
 /* Small phones */
@@ -1117,6 +1197,15 @@
 
     .main-content {
         padding-bottom: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom));
+    }
+
+    @media (max-width: 768px) {
+        .ai-chat-toggle-btn {
+            bottom: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom) + 12px);
+        }
+        .ai-chat-input-area {
+            padding-bottom: calc(10px + env(safe-area-inset-bottom));
+        }
     }
 
     @media (max-width: 768px) {

@@ -18,6 +18,8 @@ type Migration struct {
 var migrations = []Migration{
 	{Version: 1, Description: "initial schema", Up: migrateV1},
 	{Version: 2, Description: "notifications: add permission and hook_notification types", Up: migrateV2},
+	{Version: 3, Description: "skills: add category, sort_order, sync_count; add synced_skill_files and skill_versions tables", Up: migrateV3},
+	{Version: 4, Description: "ai: add ai_conversations and ai_messages tables", Up: migrateV4},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -201,6 +203,77 @@ func migrateV2(tx *sqlx.Tx) error {
 	} else {
 		// Constraint already allows 'permission' - clean up test row
 		tx.Exec("DELETE FROM notifications WHERE session_id = '__test__' AND title = '__test__'")
+	}
+	return nil
+}
+
+// migrateV3 adds category, sort_order, sync_count to skills;
+// creates synced_skill_files and skill_versions tables.
+func migrateV3(tx *sqlx.Tx) error {
+	stmts := []string{
+		// New columns on skills
+		`ALTER TABLE skills ADD COLUMN category TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE skills ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE skills ADD COLUMN sync_count INTEGER NOT NULL DEFAULT 0`,
+
+		// Track which skill files DevManager wrote to each project
+		`CREATE TABLE IF NOT EXISTS synced_skill_files (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL,
+			skill_id INTEGER,
+			file_name TEXT NOT NULL,
+			synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+			FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE SET NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_synced_skill_files_project ON synced_skill_files(project_id)`,
+
+		// Skill version history
+		`CREATE TABLE IF NOT EXISTS skill_versions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			skill_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			content TEXT NOT NULL,
+			version INTEGER NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_skill_versions_skill ON skill_versions(skill_id)`,
+	}
+
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("statement failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV4 adds AI conversation and message tables.
+func migrateV4(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS ai_conversations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			title TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS ai_messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			conversation_id INTEGER NOT NULL,
+			role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+			content TEXT NOT NULL,
+			tool_calls TEXT NOT NULL DEFAULT '[]',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (conversation_id) REFERENCES ai_conversations(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_messages_conversation ON ai_messages(conversation_id)`,
+	}
+
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("statement failed: %w\nSQL: %s", err, s)
+		}
 	}
 	return nil
 }
