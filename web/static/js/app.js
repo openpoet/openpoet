@@ -1214,10 +1214,24 @@ class DevManager {
             const key = btn.dataset.key;
             const sequence = keyMap[key];
             if (sequence && window.terminalManager) {
-                // Re-fit terminal before navigation keys to ensure PTY
-                // column count matches xterm.js, preventing line duplication.
-                window.terminalManager.ensureFit();
-                window.terminalManager.sendInput(sequence);
+                const tm = window.terminalManager;
+                const termData = tm.activeSessionId ? tm.terminals.get(tm.activeSessionId) : null;
+                const savedViewportY = termData?.terminal?.buffer?.active?.viewportY ?? 0;
+
+                tm.sendInput(sequence);
+
+                // Claude Code's first mode switch emits ~28 \r\n that push content
+                // into scrollback. Detect viewport displacement and restore position.
+                if (termData?.terminal) {
+                    const term = termData.terminal;
+                    const disp = term.onWriteParsed(() => {
+                        const currentY = term.buffer.active.viewportY;
+                        if (currentY > savedViewportY) {
+                            term.scrollLines(-(currentY - savedViewportY));
+                        }
+                    });
+                    setTimeout(() => disp.dispose(), 2000);
+                }
             }
         });
     }
