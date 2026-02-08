@@ -289,7 +289,12 @@ func UnmarshalMessage(data []byte) (*Message, error) {
 	return &msg, err
 }
 
-// BroadcastHookEvent sends a hook event to clients subscribed to the hooks channel for a session
+// BroadcastHookEvent sends a hook event to clients subscribed to the hooks channel for a session.
+// Also sends to the global "events" channel so that app.js receives hooks even without
+// the specific session WebSocket open (e.g. screen off, tab not selected).
 func (h *Hub) BroadcastHookEvent(sessionID string, msg *Message) {
 	h.BroadcastToChannel("hooks:"+sessionID, msg)
+	// Also broadcast to global events channel for reconnection recovery
+	eventMsg := &Message{Type: msg.Type, Data: msg.Data}
+	h.BroadcastToChannel("events", eventMsg)
 }

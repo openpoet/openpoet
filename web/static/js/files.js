@@ -4,8 +4,11 @@ class FileBrowser {
         this.panel = document.getElementById('file-browser-panel');
         this.fileList = document.getElementById('file-list');
         this.currentPath = '';
-        this.pendingImageBlob = null;
-        this.pendingImageDataUrl = null;
+        // Multi-image state
+        this.pendingImages = []; // { id, blob, dataUrl }
+        this.imageIdCounter = 0;
+        this.isUploading = false;
+        this.MAX_IMAGES = 10;
 
         this.setupEventListeners();
     }
@@ -49,17 +52,19 @@ class FileBrowser {
 
         // Clipboard paste for images - use capture phase to intercept before terminal
         document.addEventListener('paste', (e) => {
-            // Don't intercept when typing in normal inputs/textareas (except mobile-terminal-input)
+            // Don't intercept when typing in normal inputs/textareas (except mobile-terminal-input and image-paste-prompt)
             const activeEl = document.activeElement;
             if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
-                if (activeEl.id !== 'mobile-terminal-input') {
+                if (activeEl.id !== 'mobile-terminal-input' && activeEl.id !== 'image-paste-prompt') {
                     return;
                 }
             }
 
-            // Check if we're in terminal view
+            // Check if we're in terminal view OR image paste modal is open
+            const dialog = document.getElementById('image-paste-dialog');
+            const modalOpen = dialog && !dialog.classList.contains('hidden');
             const terminalView = document.getElementById('view-terminal');
-            if (!terminalView || !terminalView.classList.contains('active')) {
+            if (!modalOpen && (!terminalView || !terminalView.classList.contains('active'))) {
                 return;
             }
 
@@ -88,11 +93,14 @@ class FileBrowser {
             imagePickerInput?.click();
         });
 
-        // Handle file selection from image picker
+        // Handle file selection from image picker (supports multiple)
         imagePickerInput?.addEventListener('change', (e) => {
-            const file = e.target.files?.[0];
-            if (file && file.type.startsWith('image/')) {
-                this.showImagePasteModal(file);
+            const files = e.target.files;
+            if (!files || files.length === 0) return;
+            for (const file of files) {
+                if (file.type.startsWith('image/')) {
+                    this.showImagePasteModal(file);
+                }
             }
             // Reset so the same file can be selected again
             e.target.value = '';
@@ -133,6 +141,11 @@ class FileBrowser {
             this.hideImagePasteModal();
         });
 
+        // Add Image button in modal
+        document.getElementById('image-paste-add-btn')?.addEventListener('click', () => {
+            document.getElementById('image-picker-input')?.click();
+        });
+
         // Keyboard shortcuts in the modal
         document.getElementById('image-paste-prompt')?.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
@@ -154,30 +167,58 @@ class FileBrowser {
     }
 
     showImagePasteModal(blob) {
-        this.pendingImageBlob = blob;
+        if (this.isUploading) return;
+        if (this.pendingImages.length >= this.MAX_IMAGES) {
+            app.showToast('Warning', `Maximum ${this.MAX_IMAGES} images allowed`, 'warning');
+            return;
+        }
 
+        const id = ++this.imageIdCounter;
         const reader = new FileReader();
         reader.onload = () => {
-            this.pendingImageDataUrl = reader.result;
-
-            const preview = document.getElementById('image-paste-preview');
-            if (preview) {
-                preview.src = reader.result;
-            }
+            this.pendingImages.push({ id, blob, dataUrl: reader.result });
+            this.renderImageGrid();
 
             const dialog = document.getElementById('image-paste-dialog');
-            if (dialog) {
+            if (dialog && dialog.classList.contains('hidden')) {
                 dialog.classList.remove('hidden');
-            }
-
-            // Clear and focus the prompt textarea
-            const prompt = document.getElementById('image-paste-prompt');
-            if (prompt) {
-                prompt.value = '';
-                setTimeout(() => prompt.focus(), 100);
+                // Clear and focus the prompt textarea only on first open
+                const prompt = document.getElementById('image-paste-prompt');
+                if (prompt) {
+                    prompt.value = '';
+                    setTimeout(() => prompt.focus(), 100);
+                }
             }
         };
         reader.readAsDataURL(blob);
+    }
+
+    renderImageGrid() {
+        const grid = document.getElementById('image-paste-grid');
+        if (!grid) return;
+
+        grid.innerHTML = this.pendingImages.map(img => `
+            <div class="image-paste-thumb" data-id="${img.id}">
+                <img src="${img.dataUrl}" alt="Image ${img.id}" />
+                <button class="image-paste-thumb-remove" onclick="fileBrowser.removeImage(${img.id})" title="Remove">&times;</button>
+            </div>
+        `).join('');
+
+        // Update counter
+        const count = document.getElementById('image-paste-count');
+        if (count) {
+            count.textContent = `${this.pendingImages.length}/${this.MAX_IMAGES} images`;
+        }
+    }
+
+    removeImage(id) {
+        if (this.isUploading) return;
+        this.pendingImages = this.pendingImages.filter(img => img.id !== id);
+        if (this.pendingImages.length === 0) {
+            this.hideImagePasteModal();
+        } else {
+            this.renderImageGrid();
+        }
     }
 
     hideImagePasteModal() {
@@ -186,13 +227,20 @@ class FileBrowser {
             dialog.classList.add('hidden');
         }
 
-        this.pendingImageBlob = null;
-        this.pendingImageDataUrl = null;
+        this.pendingImages = [];
+        this.isUploading = false;
 
-        const preview = document.getElementById('image-paste-preview');
-        if (preview) {
-            preview.src = '';
-        }
+        const grid = document.getElementById('image-paste-grid');
+        if (grid) grid.innerHTML = '';
+
+        const count = document.getElementById('image-paste-count');
+        if (count) count.textContent = '';
+
+        const progress = document.getElementById('image-paste-progress');
+        if (progress) progress.classList.add('hidden');
+
+        // Re-enable buttons
+        this.setModalButtonsEnabled(true);
 
         // Cancel any ongoing voice recording in the modal
         if (window.voiceInput && window.voiceInput.isRecording && window.voiceInput.targetCallback) {
@@ -204,6 +252,15 @@ class FileBrowser {
         if (window.terminalManager) {
             window.terminalManager.focus();
         }
+    }
+
+    setModalButtonsEnabled(enabled) {
+        const sendBtn = document.getElementById('image-paste-send');
+        const cancelBtn = document.getElementById('image-paste-cancel');
+        const addBtn = document.getElementById('image-paste-add-btn');
+        if (sendBtn) sendBtn.disabled = !enabled;
+        if (cancelBtn) cancelBtn.disabled = !enabled;
+        if (addBtn) addBtn.disabled = !enabled;
     }
 
     // Compress image using canvas to reduce size for upload
@@ -237,7 +294,7 @@ class FileBrowser {
     }
 
     async sendImageWithPrompt() {
-        if (!this.pendingImageDataUrl) return;
+        if (this.pendingImages.length === 0 || this.isUploading) return;
 
         const sessionId = app.currentSession;
         if (!sessionId) {
@@ -249,60 +306,82 @@ class FileBrowser {
         const promptEl = document.getElementById('image-paste-prompt');
         const userPrompt = promptEl ? promptEl.value.trim() : '';
 
-        // Hide modal immediately
-        const dialog = document.getElementById('image-paste-dialog');
-        if (dialog) {
-            dialog.classList.add('hidden');
-        }
+        // Lock UI during upload
+        this.isUploading = true;
+        this.setModalButtonsEnabled(false);
+
+        const progress = document.getElementById('image-paste-progress');
+        const progressText = document.getElementById('image-paste-progress-text');
+        if (progress) progress.classList.remove('hidden');
+
+        const totalImages = this.pendingImages.length;
+        const uploadedPaths = [];
 
         try {
-            app.showToast('Info', 'Uploading image...', 'info');
-
-            // Compress image to reduce size (avoids nginx 413 errors)
-            let imageData = this.pendingImageDataUrl;
-            const originalSize = imageData.length;
-            if (originalSize > 500000) { // > 500KB, compress
-                imageData = await this.compressImage(imageData);
-                console.log(`Image compressed: ${Math.round(originalSize/1024)}KB -> ${Math.round(imageData.length/1024)}KB`);
-            }
-
-            const response = await fetch(`/api/sessions/${sessionId}/files/paste`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    data: imageData,
-                    dir: '.devmanager/images'
-                })
-            });
-
-            if (!response.ok) {
-                // Handle non-JSON error responses (e.g. nginx 413)
-                const ct = response.headers.get('content-type') || '';
-                if (ct.indexOf('application/json') !== -1) {
-                    const error = await response.json();
-                    throw new Error(error.error || 'Upload failed');
-                } else {
-                    throw new Error(`Upload failed (HTTP ${response.status}). Image may be too large.`);
+            // Upload images sequentially
+            for (let i = 0; i < totalImages; i++) {
+                if (progressText) {
+                    progressText.textContent = `Uploading ${i + 1}/${totalImages}...`;
                 }
+
+                const img = this.pendingImages[i];
+                let imageData = img.dataUrl;
+
+                // Compress if > 500KB
+                if (imageData.length > 500000) {
+                    imageData = await this.compressImage(imageData);
+                    console.log(`Image ${i+1} compressed: ${Math.round(img.dataUrl.length/1024)}KB -> ${Math.round(imageData.length/1024)}KB`);
+                }
+
+                const response = await fetch(`/api/sessions/${sessionId}/files/paste`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        data: imageData,
+                        dir: '.devmanager/images'
+                    })
+                });
+
+                if (!response.ok) {
+                    const ct = response.headers.get('content-type') || '';
+                    if (ct.indexOf('application/json') !== -1) {
+                        const error = await response.json();
+                        throw new Error(error.error || `Upload failed for image ${i+1}`);
+                    } else {
+                        throw new Error(`Upload failed (HTTP ${response.status}). Image ${i+1} may be too large.`);
+                    }
+                }
+
+                const result = await response.json();
+                uploadedPaths.push(result.path);
             }
 
-            const result = await response.json();
-            app.showToast('Success', `Image saved: ${result.path}`, 'success');
+            app.showToast('Success', `${uploadedPaths.length} image(s) uploaded`, 'success');
 
             // Build the formatted message for Claude Code
             let message;
-            if (userPrompt) {
-                message = `Read the image file at ${result.path} and then: ${userPrompt}`;
+            if (uploadedPaths.length === 1) {
+                if (userPrompt) {
+                    message = `Read the image file at ${uploadedPaths[0]} and then: ${userPrompt}`;
+                } else {
+                    message = `Read and analyze the image file at ${uploadedPaths[0]}`;
+                }
             } else {
-                message = `Read and analyze the image file at ${result.path}`;
+                const pathList = uploadedPaths.map(p => `  - ${p}`).join('\n');
+                if (userPrompt) {
+                    message = `Read the following ${uploadedPaths.length} image files:\n${pathList}\nThen: ${userPrompt}`;
+                } else {
+                    message = `Read and analyze the following ${uploadedPaths.length} image files:\n${pathList}`;
+                }
             }
 
-            // Send to terminal: Ctrl+U (clear line) + message, then Enter after delay
+            // Send to terminal using canonical sequence: \x15 separate, text, \r after 700ms
             if (window.terminalManager) {
-                window.terminalManager.sendInput('\x15' + message);
+                window.terminalManager.sendInput('\x15');
+                window.terminalManager.sendInput(message);
                 setTimeout(() => {
                     window.terminalManager.sendInput('\r');
-                }, 100);
+                }, 700);
             }
 
         } catch (error) {
@@ -310,14 +389,19 @@ class FileBrowser {
             app.showToast('Error', error.message, 'error');
         }
 
-        // Clean up state
-        this.pendingImageBlob = null;
-        this.pendingImageDataUrl = null;
+        // Hide modal and clean up
+        const dialog = document.getElementById('image-paste-dialog');
+        if (dialog) dialog.classList.add('hidden');
 
-        const preview = document.getElementById('image-paste-preview');
-        if (preview) {
-            preview.src = '';
-        }
+        this.pendingImages = [];
+        this.isUploading = false;
+
+        const grid = document.getElementById('image-paste-grid');
+        if (grid) grid.innerHTML = '';
+        const count = document.getElementById('image-paste-count');
+        if (count) count.textContent = '';
+        if (progress) progress.classList.add('hidden');
+        this.setModalButtonsEnabled(true);
 
         // Refocus terminal
         if (window.terminalManager) {

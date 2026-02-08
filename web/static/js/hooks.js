@@ -15,14 +15,36 @@ class HookManager {
     }
 
     // Auto-reopen the first pending dismissed request (called after sessions are loaded)
-    _autoReopenDismissed() {
+    // Validates with backend before reopening to avoid showing stale dialogs
+    async _autoReopenDismissed() {
         this.cleanupStaleDismissedRequests();
 
         if (this.dismissedRequests.length === 0) return;
 
-        // Reopen the first (oldest) dismissed request
         const entry = this.dismissedRequests[0];
-        this.reopenDialog(entry.id);
+
+        // Verify with backend if still pending
+        try {
+            const resp = await fetch(`/api/hooks/pending/${entry.sessionId}`);
+            if (resp.ok) {
+                const state = await resp.json();
+                if (!state.pending_permission) {
+                    // Stale — remove
+                    this.dismissedRequests.shift();
+                    this._saveDismissedRequests();
+                    this.hidePendingBadge(entry.sessionId);
+                    this.renderToolPanel();
+                    this.updateToolBadge();
+                    return;
+                }
+            }
+        } catch (err) { /* on error, proceed with reopen */ }
+
+        // Only reopen if the session is the active one
+        if (entry.sessionId === this._getActiveSessionId()) {
+            this.reopenDialog(entry.id);
+        }
+        // If not the active session, the badge is already there and onSessionSwitch will handle it
     }
 
     // ==================== PERSISTENCE ====================
@@ -72,6 +94,12 @@ class HookManager {
     // Get the currently active session ID
     _getActiveSessionId() {
         return window.terminalManager?.activeSessionId || null;
+    }
+
+    // Get a human-readable session name
+    _getSessionName(sessionId) {
+        const tabData = window.app?.openTabs?.get(sessionId);
+        return tabData?.sessionName || sessionId?.substring(0, 8) || 'Session';
     }
 
     // Get tool events for a specific session
@@ -156,13 +184,72 @@ class HookManager {
         document.getElementById('btn-close-tool-panel')?.addEventListener('click', () => {
             this.hideToolPanel();
         });
+
+        // Voice buttons for static modals
+        this.setupVoiceButton(
+            document.getElementById('hook-permission-voice-btn'),
+            document.getElementById('hook-permission-deny-reason')
+        );
+        this.setupVoiceButton(
+            document.getElementById('hook-plan-voice-btn'),
+            document.getElementById('hook-plan-feedback')
+        );
+    }
+
+    // Setup a voice recording button linked to a text input
+    setupVoiceButton(buttonEl, inputEl) {
+        if (!buttonEl || !inputEl) return;
+        buttonEl.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!window.voiceInput) return;
+            if (window.voiceInput.isRecording) {
+                window.voiceInput.stopRecording();
+                buttonEl.classList.remove('recording');
+                return;
+            }
+            buttonEl.classList.add('recording');
+            window.voiceInput.startRecordingWithCallback((text) => {
+                buttonEl.classList.remove('recording');
+                inputEl.value = (inputEl.value ? inputEl.value + ' ' : '') + text;
+                inputEl.focus();
+                inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+            });
+        });
+    }
+
+    // Cancel any active voice recording in hook modals
+    _cancelVoiceRecording() {
+        if (window.voiceInput?.isRecording) {
+            window.voiceInput.cancelRecording();
+        }
+        document.querySelectorAll('.hook-voice-btn.recording').forEach(b => b.classList.remove('recording'));
     }
 
     // Handle incoming WebSocket hook messages
     handleMessage(msg) {
+        console.log('[HookManager] handleMessage:', msg.type, 'session:', msg.data?.session_id, 'active:', this._getActiveSessionId());
+
+        // Dedup: hooks now arrive via both hooks:{id} and events channels.
+        // If we already have a pending or dismissed entry for this session, skip duplicates.
+        if ((msg.type === 'hook_permission_request' ||
+             msg.type === 'hook_ask_user' ||
+             msg.type === 'hook_exit_plan') &&
+            msg.data?.session_id) {
+            const sid = msg.data.session_id;
+            if (this.pendingPermission?.sessionId === sid) {
+                console.log('[HookManager] dedup: already pending for', sid);
+                return;
+            }
+            if (this.dismissedRequests.some(e => e.sessionId === sid)) {
+                console.log('[HookManager] dedup: already dismissed for', sid);
+                return;
+            }
+        }
+
         switch (msg.type) {
             case 'hook_permission_request':
-                this.showPermissionDialog(msg.data);
+                this._handlePermissionRequest(msg.data);
                 break;
             case 'hook_permission_resolved':
                 this.hidePermissionDialog();
@@ -178,10 +265,10 @@ class HookManager {
                 }
                 break;
             case 'hook_ask_user':
-                this.showAskUserDialog(msg.data);
+                this._handleAskUser(msg.data);
                 break;
             case 'hook_exit_plan':
-                this.showExitPlanDialog(msg.data);
+                this._handleExitPlan(msg.data);
                 break;
             case 'hook_tool_start':
                 this.addToolEvent(msg.data, 'running');
@@ -201,6 +288,216 @@ class HookManager {
         }
     }
 
+    // ==================== SESSION-AWARE ROUTING ====================
+
+    // Route permission request: show dialog if active session, toast if not
+    _handlePermissionRequest(data) {
+        const sessionId = data.session_id;
+        const activeId = this._getActiveSessionId();
+        console.log('[HookManager] _handlePermissionRequest session:', sessionId, 'active:', activeId, 'match:', sessionId === activeId);
+        if (sessionId === activeId) {
+            this.showPermissionDialog(data);
+        } else {
+            this._dismissToBackground(data, 'permission');
+        }
+    }
+
+    _handleAskUser(data) {
+        const sessionId = data.session_id;
+        const activeId = this._getActiveSessionId();
+        console.log('[HookManager] _handleAskUser session:', sessionId, 'active:', activeId, 'match:', sessionId === activeId);
+        if (sessionId === activeId) {
+            this.showAskUserDialog(data);
+        } else {
+            this._dismissToBackground(data, 'askUser');
+        }
+    }
+
+    _handleExitPlan(data) {
+        const sessionId = data.session_id;
+        const activeId = this._getActiveSessionId();
+        console.log('[HookManager] _handleExitPlan session:', sessionId, 'active:', activeId, 'match:', sessionId === activeId);
+        if (sessionId === activeId) {
+            this.showExitPlanDialog(data);
+        } else {
+            this._dismissToBackground(data, 'exitPlan');
+        }
+    }
+
+    // Auto-dismiss to background: store as dismissed and show toast
+    _dismissToBackground(data, dialogType) {
+        const sessionId = data.session_id;
+        const event = data.event || {};
+
+        // Clean up old dismissed for this session
+        this.dismissedRequests = this.dismissedRequests.filter(e => e.sessionId !== sessionId);
+
+        const entry = {
+            id: `dismissed-${Date.now()}`,
+            sessionId: sessionId,
+            event: event,
+            dialogType: dialogType,
+            timestamp: Date.now()
+        };
+
+        this.dismissedRequests.push(entry);
+        this._saveDismissedRequests();
+
+        // Show badge on tab
+        this.showPendingBadge(sessionId);
+
+        // Show toast
+        let label = '';
+        if (dialogType === 'permission') {
+            label = `Permission: ${event.tool_name || 'Tool'}`;
+        } else if (dialogType === 'exitPlan') {
+            label = 'Plan ready for review';
+        } else if (dialogType === 'askUser') {
+            label = 'Question from Claude';
+        }
+        this._showHookToast(sessionId, label, entry.id);
+
+        this.renderToolPanel();
+        this.updateToolBadge();
+    }
+
+    // Show a clickable toast notification for hooks from non-active sessions
+    _showHookToast(sessionId, label, entryId) {
+        console.log('[HookManager] _showHookToast session:', sessionId, 'label:', label);
+        const sessionName = this._getSessionName(sessionId);
+
+        // Create toast directly on document.body with very high z-index
+        // to ensure visibility even when terminal view is active
+        const toast = document.createElement('div');
+        toast.className = 'hook-toast-floating';
+        toast.innerHTML = `
+            <span class="hook-toast-session-badge">${this.escapeHtml(sessionName)}</span>
+            <span class="toast-message">${this.escapeHtml(label)}</span>
+            <button class="toast-close" onclick="event.stopPropagation(); this.parentElement.remove();">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+            </button>
+        `;
+
+        // Click toast to switch to that session and reopen dialog
+        toast.addEventListener('click', () => {
+            toast.remove();
+            // Switch to the session
+            if (window.terminalManager?.hasSession(sessionId)) {
+                window.terminalManager.switchToSession(sessionId);
+                if (window.app) {
+                    window.app.updateTabActiveState(sessionId);
+                }
+            } else if (window.app) {
+                window.app.openTerminal(sessionId);
+            }
+            // Reopen the dialog
+            const entry = this.dismissedRequests.find(e => e.id === entryId);
+            if (entry) {
+                // Small delay to let session switch complete
+                setTimeout(() => this.reopenDialog(entryId), 200);
+            }
+        });
+
+        document.body.appendChild(toast);
+
+        // Vibrate for haptic feedback on mobile
+        if (navigator.vibrate) {
+            navigator.vibrate([200, 100, 200]);
+        }
+
+        // Auto-remove after 15s (longer since this is actionable)
+        setTimeout(() => {
+            if (toast.parentElement) toast.remove();
+        }, 15000);
+    }
+
+    // ==================== RESTORE FROM SERVER ====================
+
+    // Called after WebSocket connects to restore pending hooks from backend
+    restoreFromServer(state, sessionId) {
+        if (!state) return;
+
+        // Merge tool events from server (dedup by tool_use_id)
+        if (state.tool_events && state.tool_events.length > 0) {
+            const existingIds = new Set(
+                (this.toolEventsBySession[sessionId] || []).map(e => e.id)
+            );
+
+            for (const serverEvent of state.tool_events) {
+                const event = serverEvent.event || {};
+                const toolId = event.tool_use_id || `server-${serverEvent.timestamp}`;
+                if (existingIds.has(toolId)) continue;
+
+                const toolName = event.tool_name || 'Unknown';
+                const toolInput = event.tool_input || {};
+
+                // Determine status from msg_type
+                let status = 'running';
+                if (serverEvent.msg_type === 'hook_tool_done') status = 'completed';
+                else if (serverEvent.msg_type === 'hook_tool_failed') status = 'failed';
+
+                const entry = {
+                    id: toolId,
+                    sessionId,
+                    toolName,
+                    toolInput,
+                    status,
+                    timestamp: new Date(serverEvent.timestamp).getTime()
+                };
+
+                if (!this.toolEventsBySession[sessionId]) {
+                    this.toolEventsBySession[sessionId] = [];
+                }
+                this.toolEventsBySession[sessionId].push(entry);
+                existingIds.add(toolId);
+            }
+
+            // Sort by timestamp descending and trim
+            if (this.toolEventsBySession[sessionId]) {
+                this.toolEventsBySession[sessionId].sort((a, b) => b.timestamp - a.timestamp);
+                if (this.toolEventsBySession[sessionId].length > this.maxToolEventsPerSession) {
+                    this.toolEventsBySession[sessionId] = this.toolEventsBySession[sessionId].slice(0, this.maxToolEventsPerSession);
+                }
+            }
+            this._saveToolEvents();
+        }
+
+        // Restore pending permission
+        if (state.pending_permission) {
+            const pp = state.pending_permission;
+            const activeId = this._getActiveSessionId();
+
+            // Check if we already have this tracked
+            if (this.pendingPermission?.sessionId === sessionId) return;
+            if (this.dismissedRequests.some(e => e.sessionId === sessionId)) return;
+
+            const data = {
+                session_id: sessionId,
+                event: pp.event
+            };
+
+            if (sessionId === activeId) {
+                // Active session: show dialog directly
+                if (pp.msg_type === 'permission') {
+                    this.showPermissionDialog(data);
+                } else if (pp.msg_type === 'askUser') {
+                    this.showAskUserDialog(data);
+                } else if (pp.msg_type === 'exitPlan') {
+                    this.showExitPlanDialog(data);
+                }
+            } else {
+                // Not active: dismiss to background with toast
+                this._dismissToBackground(data, pp.msg_type);
+            }
+        }
+
+        this.renderToolPanel();
+        this.updateToolBadge();
+    }
+
     // ==================== PERMISSION DIALOG ====================
 
     showPermissionDialog(data) {
@@ -217,6 +514,9 @@ class HookManager {
             event: event,
             timestamp: Date.now()
         };
+
+        // Show session label
+        this._updateDialogSessionLabel('hook-permission-session-label', data.session_id);
 
         // Extract tool info
         const toolName = event.tool_name || 'Unknown Tool';
@@ -269,6 +569,7 @@ class HookManager {
     }
 
     hidePermissionDialog() {
+        this._cancelVoiceRecording();
         const dialog = document.getElementById('hook-permission-dialog');
         if (dialog) dialog.classList.add('hidden');
 
@@ -339,6 +640,15 @@ class HookManager {
         if (badge) badge.remove();
     }
 
+    // Update session label element in a dialog
+    _updateDialogSessionLabel(elementId, sessionId) {
+        const el = document.getElementById(elementId);
+        if (el) {
+            el.textContent = this._getSessionName(sessionId);
+            el.classList.remove('hidden');
+        }
+    }
+
     // ==================== EXIT PLAN MODE ====================
 
     showExitPlanDialog(data) {
@@ -357,6 +667,9 @@ class HookManager {
             event: event,
             timestamp: Date.now()
         };
+
+        // Show session label
+        this._updateDialogSessionLabel('hook-plan-session-label', data.session_id);
 
         // Show allowed prompts if available
         const promptsEl = document.getElementById('hook-plan-prompts');
@@ -407,6 +720,7 @@ class HookManager {
     }
 
     hideExitPlanDialog() {
+        this._cancelVoiceRecording();
         const dialog = document.getElementById('hook-exit-plan-dialog');
         if (dialog) dialog.classList.add('hidden');
     }
@@ -514,6 +828,9 @@ class HookManager {
             timestamp: Date.now()
         };
 
+        // Show session label
+        this._updateDialogSessionLabel('hook-ask-user-session-label', data.session_id);
+
         const container = document.getElementById('hook-ask-user-questions');
         if (!container) return;
 
@@ -542,14 +859,24 @@ class HookManager {
                     </label>`;
             });
 
-            // "Other" option with text input
+            // "Other" option with text input and voice button
             const otherId = `ask-q${qIdx}-other`;
             html += `
                 <label class="ask-user-option" for="${otherId}">
                     <input type="${inputType}" id="${otherId}" name="ask-q${qIdx}" value="__other__" />
                     <div class="ask-user-option-content">
                         <span class="ask-user-option-label">Other</span>
-                        <input type="text" class="ask-user-other-input form-input" id="${otherId}-text" placeholder="Type your answer..." />
+                        <div class="hook-input-label-row">
+                            <input type="text" class="ask-user-other-input form-input" id="${otherId}-text" placeholder="Type or record your answer..." />
+                            <button class="btn-icon btn-sm hook-voice-btn ask-user-voice-btn" data-target="${otherId}-text" title="Record voice message">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                    <line x1="12" y1="19" x2="12" y2="23"></line>
+                                    <line x1="8" y1="23" x2="16" y2="23"></line>
+                                </svg>
+                            </button>
+                        </div>
                     </div>
                 </label>`;
 
@@ -575,6 +902,13 @@ class HookManager {
             });
         });
 
+        // Setup voice buttons for "Other" inputs
+        container.querySelectorAll('.ask-user-voice-btn').forEach(btn => {
+            const targetId = btn.dataset.target;
+            const inputEl = document.getElementById(targetId);
+            this.setupVoiceButton(btn, inputEl);
+        });
+
         dialog.classList.remove('hidden');
 
         if (navigator.vibrate) {
@@ -584,6 +918,7 @@ class HookManager {
     }
 
     hideAskUserDialog() {
+        this._cancelVoiceRecording();
         const dialog = document.getElementById('hook-ask-user-dialog');
         if (dialog) dialog.classList.add('hidden');
     }
@@ -929,10 +1264,38 @@ class HookManager {
         }
     }
 
-    // Called when user switches session tab - refresh panel and badge for new session
+    // Called when user switches session tab - refresh panel and badge for new session.
+    // Auto-reopens pending dialog if the newly active session has one.
     onSessionSwitch() {
         this.renderToolPanel();
         this.updateToolBadge();
+
+        // Auto-reopen the first dismissed request for the newly active session
+        const activeId = this._getActiveSessionId();
+        const pendingForActive = this.dismissedRequests.find(e => e.sessionId === activeId);
+        if (pendingForActive) {
+            // Verify with backend before reopening
+            fetch(`/api/hooks/pending/${activeId}`)
+                .then(r => r.ok ? r.json() : null)
+                .then(state => {
+                    if (state?.pending_permission) {
+                        this.reopenDialog(pendingForActive.id);
+                    } else {
+                        // Backend no longer has it — clean up
+                        this.dismissedRequests = this.dismissedRequests.filter(
+                            e => e.sessionId !== activeId
+                        );
+                        this._saveDismissedRequests();
+                        this.hidePendingBadge(activeId);
+                        this.renderToolPanel();
+                        this.updateToolBadge();
+                    }
+                })
+                .catch(() => {
+                    // On error, reopen anyway (better to show than to lose)
+                    this.reopenDialog(pendingForActive.id);
+                });
+        }
     }
 
     // ==================== NOTIFICATIONS & STOP ====================

@@ -10,7 +10,7 @@
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
-    <link rel="stylesheet" href="/static/css/app.css?v=9">
+    <link rel="stylesheet" href="/static/css/app.css?v=10">
     <link rel="stylesheet" href="/static/css/mobile.css?v=10">
 </head>
 <body>
@@ -278,7 +278,7 @@
                     </div>
 
                     <!-- Hidden image picker input -->
-                    <input type="file" id="image-picker-input" accept="image/*" hidden>
+                    <input type="file" id="image-picker-input" accept="image/*" multiple hidden>
 
                     <!-- Mobile input bar -->
                     <div id="mobile-terminal-input-bar" class="mobile-terminal-input-bar">
@@ -507,8 +507,14 @@
                 <button id="image-paste-close" class="hook-permission-close" title="Close">&times;</button>
             </div>
             <div class="image-paste-body">
-                <div class="image-paste-preview-wrapper">
-                    <img id="image-paste-preview" class="image-paste-preview" alt="Preview" />
+                <div id="image-paste-grid" class="image-paste-grid"></div>
+                <div class="image-paste-add-row">
+                    <button id="image-paste-add-btn" class="btn btn-secondary btn-sm">+ Add Image</button>
+                    <span id="image-paste-count" class="image-paste-count"></span>
+                </div>
+                <div id="image-paste-progress" class="image-paste-progress hidden">
+                    <div class="spinner-small"></div>
+                    <span id="image-paste-progress-text">Uploading...</span>
                 </div>
                 <div class="form-group" style="margin-top: 12px;">
                     <div class="image-paste-label-row">
@@ -547,6 +553,7 @@
                 <button id="hook-permission-dismiss" class="hook-permission-close" title="Minimize">&times;</button>
             </div>
             <div class="hook-permission-body">
+                <div id="hook-permission-session-label" class="hook-session-label hidden"></div>
                 <div class="hook-permission-tool">
                     <span class="hook-permission-tool-label">Tool:</span>
                     <span id="hook-permission-tool-name" class="hook-permission-tool-name">—</span>
@@ -555,6 +562,17 @@
                     <!-- Tool details will be rendered here -->
                 </div>
                 <div class="hook-permission-deny-section">
+                    <div class="hook-input-label-row">
+                        <label class="form-label" style="margin-bottom: 0;">Deny reason</label>
+                        <button id="hook-permission-voice-btn" class="btn-icon btn-sm hook-voice-btn" title="Record voice message">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                <line x1="12" y1="19" x2="12" y2="23"></line>
+                                <line x1="8" y1="23" x2="16" y2="23"></line>
+                            </svg>
+                        </button>
+                    </div>
                     <input type="text" id="hook-permission-deny-reason" class="form-input" placeholder="Deny reason (optional)">
                 </div>
             </div>
@@ -583,6 +601,7 @@
                 <button id="hook-plan-dismiss" class="hook-permission-close" title="Minimize">&times;</button>
             </div>
             <div class="hook-exit-plan-body">
+                <div id="hook-plan-session-label" class="hook-session-label hidden"></div>
                 <p class="plan-review-text">Claude has finished planning. Choose an option:</p>
                 <button id="hook-plan-view-btn" class="plan-view-btn hidden">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -620,7 +639,17 @@
                         <input type="radio" id="plan-opt-4" name="plan-option" value="feedback" />
                         <div class="plan-option-content">
                             <span class="plan-option-label">Request changes</span>
-                            <input type="text" id="hook-plan-feedback" class="form-input plan-feedback-input" placeholder="Type here to tell Claude what to change...">
+                            <div class="hook-input-label-row">
+                                <input type="text" id="hook-plan-feedback" class="form-input plan-feedback-input" placeholder="Type or record what to change...">
+                                <button id="hook-plan-voice-btn" class="btn-icon btn-sm hook-voice-btn" title="Record voice message">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                        <line x1="12" y1="19" x2="12" y2="23"></line>
+                                        <line x1="8" y1="23" x2="16" y2="23"></line>
+                                    </svg>
+                                </button>
+                            </div>
                         </div>
                     </label>
                 </div>
@@ -646,6 +675,7 @@
                 <button id="hook-ask-user-dismiss" class="hook-permission-close" title="Minimize">&times;</button>
             </div>
             <div class="hook-ask-user-body">
+                <div id="hook-ask-user-session-label" class="hook-session-label hidden"></div>
                 <div id="hook-ask-user-questions"></div>
             </div>
             <div class="hook-permission-actions">
@@ -777,6 +807,10 @@
                         <tbody id="file-viewer-code-body"></tbody>
                     </table>
                 </div>
+                <!-- Image content -->
+                <div id="file-viewer-image" class="file-viewer-image hidden">
+                    <img id="file-viewer-image-el" src="" alt="">
+                </div>
             </div>
         </div>
     </div>
@@ -789,8 +823,8 @@
     <script src="/static/js/hooks.js?v=8"></script>
     <script src="/static/js/voice.js?v=10"></script>
     <script src="/static/vendor/marked.min.js"></script>
-    <script src="/static/js/files.js?v=9"></script>
-    <script src="/static/js/file-viewer.js?v=1"></script>
+    <script src="/static/js/files.js?v=10"></script>
+    <script src="/static/js/file-viewer.js?v=3"></script>
     <script src="/static/js/notifications.js?v=2"></script>
     <script src="/static/js/macro-editor.js?v=2"></script>
 </body>

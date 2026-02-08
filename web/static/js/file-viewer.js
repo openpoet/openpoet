@@ -16,6 +16,11 @@ class FileViewer {
 
     static MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown']);
 
+    static IMAGE_EXTENSIONS = new Set([
+        '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg',
+        '.bmp', '.ico', '.avif', '.apng', '.tiff', '.tif',
+    ]);
+
     constructor() {
         this.overlay = document.getElementById('file-viewer-overlay');
         this.nameEl = document.getElementById('file-viewer-name');
@@ -27,9 +32,22 @@ class FileViewer {
         this.markdownEl = document.getElementById('file-viewer-markdown');
         this.codeEl = document.getElementById('file-viewer-code');
         this.codeBodyEl = document.getElementById('file-viewer-code-body');
+        this.imageContainerEl = document.getElementById('file-viewer-image');
+        this.imageEl = document.getElementById('file-viewer-image-el');
 
         this.currentPath = '';
+        this.imageZoom = 1;
+        this.imagePanX = 0;
+        this.imagePanY = 0;
+        this._pinchStartDist = 0;
+        this._pinchStartZoom = 1;
+        this._panStartX = 0;
+        this._panStartY = 0;
+        this._panStartPanX = 0;
+        this._panStartPanY = 0;
+        this._isPanning = false;
         this.setupEventListeners();
+        this.setupImageZoom();
     }
 
     setupEventListeners() {
@@ -57,8 +75,143 @@ class FileViewer {
         });
     }
 
+    setupImageZoom() {
+        const container = this.imageContainerEl;
+        const img = this.imageEl;
+        if (!container || !img) return;
+
+        // Keyboard zoom (+, -, 0)
+        this._keyHandler = (e) => {
+            if (this.overlay.classList.contains('hidden')) return;
+            if (this.imageContainerEl.classList.contains('hidden')) return;
+            if (e.key === '+' || e.key === '=') { this.zoomImage(1.25); e.preventDefault(); }
+            else if (e.key === '-') { this.zoomImage(0.8); e.preventDefault(); }
+            else if (e.key === '0') { this.resetImageZoom(); e.preventDefault(); }
+        };
+        document.addEventListener('keydown', this._keyHandler);
+
+        // Mouse wheel zoom
+        container.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const factor = e.deltaY < 0 ? 1.1 : 0.9;
+            this.zoomImage(factor);
+        }, { passive: false });
+
+        // Double-click to toggle zoom
+        img.addEventListener('dblclick', (e) => {
+            e.preventDefault();
+            if (this.imageZoom > 1.05) {
+                this.resetImageZoom();
+            } else {
+                this.zoomImage(2.5);
+            }
+        });
+
+        // Pinch-to-zoom (mobile)
+        container.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                this._pinchStartDist = this._touchDist(e.touches);
+                this._pinchStartZoom = this.imageZoom;
+            } else if (e.touches.length === 1 && this.imageZoom > 1.05) {
+                this._isPanning = true;
+                this._panStartX = e.touches[0].clientX;
+                this._panStartY = e.touches[0].clientY;
+                this._panStartPanX = this.imagePanX;
+                this._panStartPanY = this.imagePanY;
+            }
+        }, { passive: false });
+
+        container.addEventListener('touchmove', (e) => {
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                const dist = this._touchDist(e.touches);
+                const scale = dist / this._pinchStartDist;
+                this.setImageZoom(this._pinchStartZoom * scale);
+            } else if (e.touches.length === 1 && this._isPanning) {
+                e.preventDefault();
+                const dx = e.touches[0].clientX - this._panStartX;
+                const dy = e.touches[0].clientY - this._panStartY;
+                this.imagePanX = this._panStartPanX + dx;
+                this.imagePanY = this._panStartPanY + dy;
+                this.applyImageTransform();
+            }
+        }, { passive: false });
+
+        container.addEventListener('touchend', (e) => {
+            if (e.touches.length < 2) {
+                this._pinchStartDist = 0;
+            }
+            if (e.touches.length === 0) {
+                this._isPanning = false;
+            }
+        });
+
+        // Mouse drag to pan when zoomed (desktop)
+        container.addEventListener('mousedown', (e) => {
+            if (this.imageZoom <= 1.05) return;
+            e.preventDefault();
+            this._isPanning = true;
+            this._panStartX = e.clientX;
+            this._panStartY = e.clientY;
+            this._panStartPanX = this.imagePanX;
+            this._panStartPanY = this.imagePanY;
+            container.style.cursor = 'grabbing';
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!this._isPanning) return;
+            const dx = e.clientX - this._panStartX;
+            const dy = e.clientY - this._panStartY;
+            this.imagePanX = this._panStartPanX + dx;
+            this.imagePanY = this._panStartPanY + dy;
+            this.applyImageTransform();
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (this._isPanning) {
+                this._isPanning = false;
+                container.style.cursor = this.imageZoom > 1.05 ? 'grab' : '';
+            }
+        });
+    }
+
+    _touchDist(touches) {
+        const dx = touches[0].clientX - touches[1].clientX;
+        const dy = touches[0].clientY - touches[1].clientY;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    zoomImage(factor) {
+        this.setImageZoom(this.imageZoom * factor);
+    }
+
+    setImageZoom(newZoom) {
+        this.imageZoom = Math.max(0.5, Math.min(10, newZoom));
+        if (this.imageZoom <= 1.05 && this.imageZoom >= 0.95) {
+            this.imageZoom = 1;
+            this.imagePanX = 0;
+            this.imagePanY = 0;
+        }
+        this.applyImageTransform();
+        this.imageContainerEl.style.cursor = this.imageZoom > 1.05 ? 'grab' : '';
+    }
+
+    resetImageZoom() {
+        this.imageZoom = 1;
+        this.imagePanX = 0;
+        this.imagePanY = 0;
+        this.applyImageTransform();
+        this.imageContainerEl.style.cursor = '';
+    }
+
+    applyImageTransform() {
+        this.imageEl.style.transform = `translate(${this.imagePanX}px, ${this.imagePanY}px) scale(${this.imageZoom})`;
+    }
+
     static isViewable(filename) {
         if (!filename) return false;
+        if (FileViewer.isImage(filename)) return true;
         const lower = filename.toLowerCase();
         // Check for exact filenames (Dockerfile, Makefile, etc.)
         const baseName = lower.split('/').pop();
@@ -71,6 +224,16 @@ class FileViewer {
         const lastDotIdx = baseName.lastIndexOf('.');
         if (lastDotIdx >= 0) {
             return FileViewer.VIEWABLE_EXTENSIONS.has(baseName.substring(lastDotIdx));
+        }
+        return false;
+    }
+
+    static isImage(filename) {
+        if (!filename) return false;
+        const lower = filename.toLowerCase();
+        const lastDotIdx = lower.lastIndexOf('.');
+        if (lastDotIdx >= 0) {
+            return FileViewer.IMAGE_EXTENSIONS.has(lower.substring(lastDotIdx));
         }
         return false;
     }
@@ -98,6 +261,13 @@ class FileViewer {
         const filename = filePath.split('/').pop();
         this.nameEl.textContent = filename;
         this.sizeEl.textContent = '';
+
+        // Images: use the download endpoint directly as img src
+        if (FileViewer.isImage(filename)) {
+            const url = `/api/sessions/${sessionId}/files/${filePath}`;
+            this.renderImage(url);
+            return;
+        }
 
         try {
             const response = await fetch(`/api/sessions/${sessionId}/files/view/${filePath}`);
@@ -138,6 +308,18 @@ class FileViewer {
         }
     }
 
+    renderImage(url) {
+        this.resetImageZoom();
+        this.imageEl.onload = () => {
+            this.sizeEl.textContent = `${this.imageEl.naturalWidth} × ${this.imageEl.naturalHeight}`;
+        };
+        this.imageEl.onerror = () => {
+            this.showError('Failed to load image.');
+        };
+        this.imageEl.src = url;
+        this.showState('image');
+    }
+
     renderMarkdown(content) {
         if (typeof marked !== 'undefined') {
             // Configure marked for safe rendering
@@ -174,6 +356,7 @@ class FileViewer {
         this.errorEl.classList.add('hidden');
         this.markdownEl.classList.add('hidden');
         this.codeEl.classList.add('hidden');
+        this.imageContainerEl.classList.add('hidden');
 
         switch (state) {
             case 'loading':
@@ -187,6 +370,9 @@ class FileViewer {
                 break;
             case 'code':
                 this.codeEl.classList.remove('hidden');
+                break;
+            case 'image':
+                this.imageContainerEl.classList.remove('hidden');
                 break;
         }
     }
@@ -218,6 +404,10 @@ class FileViewer {
         // Clean up content
         this.markdownEl.innerHTML = '';
         this.codeBodyEl.innerHTML = '';
+        this.imageEl.src = '';
+        this.imageEl.onload = null;
+        this.imageEl.onerror = null;
+        this.resetImageZoom();
         this.currentPath = '';
 
         // Refocus terminal

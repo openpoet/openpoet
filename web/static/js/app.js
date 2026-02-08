@@ -153,6 +153,7 @@ class DevManager {
             default:
                 // Route hook messages to HookManager
                 if (msg.type && msg.type.startsWith('hook_') && window.hookManager) {
+                    console.log('[EventsWS] routing hook msg to HookManager:', msg.type, 'session:', msg.data?.session_id);
                     window.hookManager.handleMessage(msg);
                 }
                 break;
