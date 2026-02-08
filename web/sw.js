@@ -1,6 +1,6 @@
 // Service Worker for DevManager PWA
 
-const CACHE_NAME = 'devmanager-v10';
+const CACHE_NAME = 'devmanager-v11';
 const OFFLINE_URL = '/';
 
 // Assets to cache
@@ -132,12 +132,23 @@ self.addEventListener('push', (event) => {
         }
     }
 
+    // Handle cancel push — close existing notifications instead of showing new one
+    if (data.action === 'cancel' && data.data && data.data.session_id) {
+        event.waitUntil(
+            self.registration.getNotifications({ tag: `session-${data.data.session_id}` })
+                .then(notifications => notifications.forEach(n => n.close()))
+        );
+        return;
+    }
+
     const options = {
         body: data.body,
-        icon: '/static/favicon.svg',
-        badge: '/static/favicon.svg',
+        icon: '/static/icon-192.png',
+        badge: '/static/icon-192.png',
         vibrate: [100, 50, 100],
         data: data.data || {},
+        tag: (data.data && data.data.session_id) ? `session-${data.data.session_id}` : undefined,
+        renotify: !!(data.data && data.data.session_id),
         actions: [
             { action: 'open', title: 'Open' },
             { action: 'dismiss', title: 'Dismiss' }
@@ -147,6 +158,14 @@ self.addEventListener('push', (event) => {
     event.waitUntil(
         self.registration.showNotification(data.title, options)
     );
+});
+
+// Message from page — close notifications on demand
+self.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'close_notifications' && event.data.session_id) {
+        self.registration.getNotifications({ tag: `session-${event.data.session_id}` })
+            .then(notifications => notifications.forEach(n => n.close()));
+    }
 });
 
 // Notification click event

@@ -117,20 +117,30 @@ func (s *WebPushService) Send(ctx context.Context, sub *database.PushSubscriptio
 		},
 	}
 
+	endpointShort := sub.Endpoint
+	if len(endpointShort) > 60 {
+		endpointShort = endpointShort[:60] + "..."
+	}
+	log.Printf("[WebPush] Sending to %s | title=%q body=%q", endpointShort, title, body)
+
 	resp, err := webpush.SendNotification(payloadJSON, subscription, &webpush.Options{
 		Subscriber:      s.vapidEmail,
 		VAPIDPublicKey:  s.publicKey,
 		VAPIDPrivateKey: s.privateKey,
-		TTL:             30,
+		TTL:             86400,
 	})
 	if err != nil {
+		log.Printf("[WebPush] Send error: %v", err)
 		return fmt.Errorf("failed to send notification: %w", err)
 	}
 	defer resp.Body.Close()
 
+	log.Printf("[WebPush] Response status: %d for %s", resp.StatusCode, endpointShort)
+
 	// Check for invalid subscription (410 Gone)
 	if resp.StatusCode == 410 {
 		// Subscription is no longer valid, remove it
+		log.Printf("[WebPush] Subscription expired (410), removing: %s", endpointShort)
 		s.db.DeletePushSubscription(ctx, sub.Endpoint)
 		return fmt.Errorf("subscription expired")
 	}
@@ -142,6 +152,64 @@ func (s *WebPushService) Send(ctx context.Context, sub *database.PushSubscriptio
 	return nil
 }
 
+// SendCancelToAll sends a cancel push to all subscriptions to dismiss notifications
+func (s *WebPushService) SendCancelToAll(ctx context.Context, sessionID string) error {
+	subs, err := s.db.ListPushSubscriptions(ctx)
+	if err != nil {
+		return err
+	}
+
+	if len(subs) == 0 {
+		return nil
+	}
+
+	payload := map[string]interface{}{
+		"action": "cancel",
+		"data": map[string]string{
+			"session_id": sessionID,
+		},
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("[WebPush] SendCancelToAll: %d subscription(s) for session %s", len(subs), sessionID)
+
+	var lastErr error
+	sent := 0
+	for _, sub := range subs {
+		subscription := &webpush.Subscription{
+			Endpoint: sub.Endpoint,
+			Keys: webpush.Keys{
+				P256dh: sub.P256dh,
+				Auth:   sub.Auth,
+			},
+		}
+
+		resp, err := webpush.SendNotification(payloadJSON, subscription, &webpush.Options{
+			Subscriber:      s.vapidEmail,
+			VAPIDPublicKey:  s.publicKey,
+			VAPIDPrivateKey: s.privateKey,
+			TTL:             30,
+		})
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode == 410 {
+			s.db.DeletePushSubscription(ctx, sub.Endpoint)
+			continue
+		}
+		sent++
+	}
+
+	log.Printf("[WebPush] SendCancelToAll complete: %d/%d sent", sent, len(subs))
+	return lastErr
+}
+
 // SendToAll sends a push notification to all subscriptions
 func (s *WebPushService) SendToAll(ctx context.Context, title, body string, data map[string]string) error {
 	subs, err := s.db.ListPushSubscriptions(ctx)
@@ -149,13 +217,23 @@ func (s *WebPushService) SendToAll(ctx context.Context, title, body string, data
 		return err
 	}
 
+	log.Printf("[WebPush] SendToAll: %d subscription(s) | title=%q", len(subs), title)
+
+	if len(subs) == 0 {
+		log.Printf("[WebPush] No subscriptions found, skipping send")
+		return nil
+	}
+
 	var lastErr error
+	sent := 0
 	for _, sub := range subs {
 		if err := s.Send(ctx, &sub, title, body, data); err != nil {
-			log.Printf("Failed to send push to %s: %v", sub.Endpoint[:50], err)
 			lastErr = err
+		} else {
+			sent++
 		}
 	}
 
+	log.Printf("[WebPush] SendToAll complete: %d/%d sent successfully", sent, len(subs))
 	return lastErr
 }
