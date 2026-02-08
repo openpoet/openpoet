@@ -292,6 +292,19 @@ class TerminalManager {
             } catch (err) {
                 console.error('Failed to fetch session output buffer:', err);
             }
+
+            // Recover pending hook state from backend
+            try {
+                const hookResp = await fetch(`/api/hooks/pending/${sessionId}`);
+                if (hookResp.ok) {
+                    const hookState = await hookResp.json();
+                    if (window.hookManager) {
+                        window.hookManager.restoreFromServer(hookState, sessionId);
+                    }
+                }
+            } catch (err) {
+                console.error('Failed to fetch hook state:', err);
+            }
         };
 
         ws.onmessage = (event) => {

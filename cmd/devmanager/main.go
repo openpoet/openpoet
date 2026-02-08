@@ -299,6 +299,7 @@ func main() {
 		r.Post("/hooks/permission", hookHandler.HandlePermission)
 		r.Post("/hooks/permission/{sessionId}/respond", hookHandler.HandlePermissionRespond)
 		r.Post("/hooks/event", hookHandler.HandleEvent)
+		r.Get("/hooks/pending/{sessionId}", hookHandler.HandleGetPending)
 	})
 
 	// WebSocket routes

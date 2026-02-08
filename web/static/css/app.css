@@ -1520,6 +1520,77 @@ body {
     padding: 6px 8px;
 }
 
+/* Session label inside hook dialogs */
+.hook-session-label {
+    background: var(--color-primary);
+    color: #fff;
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    display: inline-block;
+}
+
+/* Clickable hook toast (for hooks from non-active sessions) */
+/* Floating hook toast — rendered directly on document.body for maximum visibility */
+.hook-toast-floating {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 99999;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 20px;
+    background-color: var(--color-surface);
+    border: 2px solid var(--color-warning);
+    border-radius: var(--border-radius);
+    box-shadow: 0 8px 24px rgba(245, 158, 11, 0.4);
+    animation: hookToastSlideDown 0.3s ease;
+    max-width: min(400px, 90vw);
+    cursor: pointer;
+    transition: background-color 0.15s, box-shadow 0.15s;
+}
+
+.hook-toast-floating:hover {
+    background-color: var(--color-bg-tertiary);
+    box-shadow: 0 8px 32px rgba(245, 158, 11, 0.5);
+}
+
+@keyframes hookToastSlideDown {
+    from {
+        transform: translateX(-50%) translateY(-100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(-50%) translateY(0);
+        opacity: 1;
+    }
+}
+
+.hook-toast-clickable {
+    cursor: pointer;
+    transition: background-color 0.15s, box-shadow 0.15s;
+}
+
+.hook-toast-clickable:hover {
+    background-color: var(--color-bg-tertiary);
+    box-shadow: 0 4px 16px rgba(245, 158, 11, 0.3);
+}
+
+.hook-toast-session-badge {
+    background: var(--color-primary);
+    color: #fff;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
 /* Hook pending badge on terminal tab */
 .hook-pending-badge {
     position: absolute;
@@ -1733,21 +1804,86 @@ body {
     animation: slideUp 0.3s ease;
 }
 .image-paste-body { padding: 20px; }
-.image-paste-preview-wrapper {
-    display: flex;
-    justify-content: center;
+.image-paste-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+    gap: 8px;
     background-color: var(--color-bg);
     border: 1px solid var(--color-border);
     border-radius: var(--border-radius);
     padding: 8px;
-    max-height: 240px;
-    overflow: hidden;
+    min-height: 60px;
+    max-height: 260px;
+    overflow-y: auto;
 }
-.image-paste-preview {
-    max-width: 100%;
-    max-height: 220px;
-    object-fit: contain;
-    border-radius: 4px;
+.image-paste-grid:empty {
+    display: none;
+}
+.image-paste-thumb {
+    position: relative;
+    aspect-ratio: 1;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--color-border);
+    background-color: var(--color-bg-tertiary);
+}
+.image-paste-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+.image-paste-thumb-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.7);
+    color: white;
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    line-height: 1;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.image-paste-thumb:hover .image-paste-thumb-remove {
+    opacity: 1;
+}
+/* Always visible on touch devices */
+@media (hover: none) {
+    .image-paste-thumb-remove {
+        opacity: 1;
+    }
+}
+.image-paste-add-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 8px;
+}
+.image-paste-count {
+    font-size: 12px;
+    color: var(--color-text-muted);
+}
+.image-paste-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    border-radius: 6px;
+    font-size: 13px;
+    color: var(--color-info);
+}
+.image-paste-progress.hidden {
+    display: none;
 }
 .image-paste-label-row {
     display: flex;
@@ -1755,17 +1891,41 @@ body {
     justify-content: space-between;
     margin-bottom: 6px;
 }
-.image-paste-voice-btn {
+.image-paste-voice-btn,
+.hook-voice-btn {
     color: var(--color-text-secondary);
     transition: all 0.2s;
 }
-.image-paste-voice-btn:hover {
+.image-paste-voice-btn:hover,
+.hook-voice-btn:hover {
     color: var(--color-primary);
 }
-.image-paste-voice-btn.recording {
+.image-paste-voice-btn.recording,
+.hook-voice-btn.recording {
     color: white;
     background-color: var(--color-danger);
     animation: pulse 1s infinite;
+}
+.hook-input-label-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.hook-permission-deny-section .hook-input-label-row {
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+.plan-option-feedback .hook-input-label-row {
+    flex: 1;
+}
+.plan-option-feedback .hook-input-label-row .form-input {
+    flex: 1;
+}
+.ask-user-option .hook-input-label-row {
+    flex: 1;
+}
+.ask-user-option .hook-input-label-row .form-input {
+    flex: 1;
 }
 .image-paste-prompt {
     min-height: 72px;
@@ -1880,7 +2040,8 @@ body {
 .file-viewer-loading.hidden,
 .file-viewer-error.hidden,
 .file-viewer-markdown.hidden,
-.file-viewer-code.hidden {
+.file-viewer-code.hidden,
+.file-viewer-image.hidden {
     display: none;
 }
 /* Error state */
@@ -1896,6 +2057,32 @@ body {
 }
 .file-viewer-error svg {
     color: var(--color-warning);
+}
+/* Image view */
+.file-viewer-image {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    min-height: 200px;
+    overflow: hidden;
+    touch-action: none;
+    background-image:
+        linear-gradient(45deg, var(--color-border) 25%, transparent 25%),
+        linear-gradient(-45deg, var(--color-border) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, var(--color-border) 75%),
+        linear-gradient(-45deg, transparent 75%, var(--color-border) 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+}
+.file-viewer-image img {
+    max-width: 100%;
+    max-height: 75vh;
+    object-fit: contain;
+    border-radius: 8px;
+    transform-origin: center center;
+    user-select: none;
+    -webkit-user-select: none;
 }
 /* Code view with line numbers */
 .file-viewer-code {

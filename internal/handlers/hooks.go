@@ -46,6 +46,16 @@ type permissionDecision struct {
 type pendingPermission struct {
 	responseCh chan PermissionResponse
 	cancel     context.CancelFunc
+	hookEvent  map[string]interface{} // original event data for GET endpoint
+	msgType    string                 // "permission", "askUser", "exitPlan"
+	createdAt  time.Time
+}
+
+// toolEventEntry stores a buffered tool event for the GET endpoint
+type toolEventEntry struct {
+	Event     map[string]interface{} `json:"event"`
+	MsgType   string                 `json:"msg_type"`
+	Timestamp time.Time              `json:"timestamp"`
 }
 
 // HookHandler manages hook API endpoints
@@ -57,6 +67,7 @@ type HookHandler struct {
 	mu           sync.Mutex
 	pending      map[string]*pendingPermission  // sessionID -> pending permission
 	alwaysAllow  map[string]map[string]bool     // sessionID -> toolName -> true
+	toolEvents   map[string][]toolEventEntry    // sessionID -> recent tool events buffer
 }
 
 // NewHookHandler creates a new hook handler
@@ -67,6 +78,7 @@ func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, ses
 		sessionMgr:   sessionMgr,
 		pending:      make(map[string]*pendingPermission),
 		alwaysAllow:  make(map[string]map[string]bool),
+		toolEvents:   make(map[string][]toolEventEntry),
 	}
 }
 
@@ -139,6 +151,16 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	// Create response channel
 	responseCh := make(chan PermissionResponse, 1)
 
+	// Determine message type for the pending entry
+	var pendingMsgType string
+	if isAskUser {
+		pendingMsgType = "askUser"
+	} else if isExitPlan {
+		pendingMsgType = "exitPlan"
+	} else {
+		pendingMsgType = "permission"
+	}
+
 	h.mu.Lock()
 	// Cancel any existing pending permission for this session
 	if existing, ok := h.pending[sessionID]; ok {
@@ -147,6 +169,9 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	h.pending[sessionID] = &pendingPermission{
 		responseCh: responseCh,
 		cancel:     cancel,
+		hookEvent:  hookEvent,
+		msgType:    pendingMsgType,
+		createdAt:  time.Now(),
 	}
 	h.mu.Unlock()
 
@@ -449,6 +474,21 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 
+	// Buffer tool events for the GET endpoint (max 50 per session)
+	if eventName == "PreToolUse" || eventName == "PostToolUse" || eventName == "PostToolUseFailure" {
+		h.mu.Lock()
+		entry := toolEventEntry{
+			Event:     hookEvent,
+			MsgType:   string(msgType),
+			Timestamp: time.Now(),
+		}
+		h.toolEvents[sessionID] = append([]toolEventEntry{entry}, h.toolEvents[sessionID]...)
+		if len(h.toolEvents[sessionID]) > 50 {
+			h.toolEvents[sessionID] = h.toolEvents[sessionID][:50]
+		}
+		h.mu.Unlock()
+	}
+
 	// For Notification events, also persist and push
 	if eventName == "Notification" && h.notifService != nil {
 		title := "Claude Code"
@@ -475,8 +515,42 @@ func (h *HookHandler) ClearSession(sessionID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.alwaysAllow, sessionID)
+	delete(h.toolEvents, sessionID)
 	if pending, ok := h.pending[sessionID]; ok {
 		pending.cancel()
 		delete(h.pending, sessionID)
 	}
+}
+
+// HandleGetPending handles GET /api/hooks/pending/{sessionId}
+// Returns current pending permission and recent tool events for reconnection recovery
+func (h *HookHandler) HandleGetPending(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "sessionId")
+	if sessionID == "" {
+		respondError(w, http.StatusBadRequest, "Missing session ID")
+		return
+	}
+
+	h.mu.Lock()
+	result := map[string]interface{}{}
+
+	// Include pending permission if exists
+	if pending, ok := h.pending[sessionID]; ok {
+		result["pending_permission"] = map[string]interface{}{
+			"event":      pending.hookEvent,
+			"msg_type":   pending.msgType,
+			"created_at": pending.createdAt,
+		}
+	}
+
+	// Include buffered tool events
+	if events, ok := h.toolEvents[sessionID]; ok {
+		result["tool_events"] = events
+	} else {
+		result["tool_events"] = []toolEventEntry{}
+	}
+	h.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
