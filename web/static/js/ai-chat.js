@@ -163,7 +163,9 @@ class AIChatManager {
         this.isOpen = true;
         this.panel.classList.add('open');
         document.body.classList.add('ai-chat-open');
-        this.input?.focus();
+        if (window.innerWidth > 768) {
+            this.input?.focus();
+        }
         this.checkStatus();
     }
 

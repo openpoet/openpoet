@@ -113,6 +113,24 @@ body {
     border-right: 2px solid var(--color-primary);
 }
 
+/* AI Assistant nav item - highlighted style */
+.nav-ai {
+    background: var(--color-primary) !important;
+    color: white !important;
+    border-radius: 8px;
+    margin: 4px 8px;
+    box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
+}
+
+.nav-ai:hover {
+    background: #5558e6 !important;
+    color: white !important;
+}
+
+.nav-ai span {
+    color: white !important;
+}
+
 .sidebar-footer {
     padding: 16px;
     border-top: 1px solid var(--color-border);
