@@ -69,6 +69,7 @@ type HookHandler struct {
 	alwaysAllow   map[string]map[string]bool     // sessionID -> toolName -> true
 	toolEvents    map[string][]toolEventEntry    // sessionID -> recent tool events buffer
 	lastPushSent  map[string]time.Time           // sessionID -> last push timestamp (for rate-limiting)
+	userStopped   map[string]bool                // sessionID -> true if user explicitly stopped
 }
 
 // NewHookHandler creates a new hook handler
@@ -81,6 +82,7 @@ func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, ses
 		alwaysAllow:  make(map[string]map[string]bool),
 		toolEvents:   make(map[string][]toolEventEntry),
 		lastPushSent: make(map[string]time.Time),
+		userStopped:  make(map[string]bool),
 	}
 }
 
@@ -527,7 +529,11 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// For Stop events, send push notification (rate-limited)
-	if eventName == "Stop" && h.notifService != nil && h.shouldSendPush(sessionID, false) {
+	// Skip if the user explicitly stopped the session (no need to notify)
+	h.mu.Lock()
+	stoppedByUser := h.userStopped[sessionID]
+	h.mu.Unlock()
+	if eventName == "Stop" && h.notifService != nil && !stoppedByUser && h.shouldSendPush(sessionID, false) {
 		log.Printf("[hooks] Sending push for Stop event on session %s", sessionID)
 		go func() {
 			if err := h.notifService.Send(context.Background(), sessionID, "info",
@@ -535,6 +541,8 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[hooks] Push failed for Stop: %v", err)
 			}
 		}()
+	} else if eventName == "Stop" && stoppedByUser {
+		log.Printf("[hooks] Skipping push for Stop event on session %s (user-initiated stop)", sessionID)
 	}
 
 	// For Notification events, also persist and push (rate-limited)
@@ -582,6 +590,14 @@ func (h *HookHandler) shouldSendPush(sessionID string, isPermission bool) bool {
 	return true
 }
 
+// MarkUserStopped marks a session as explicitly stopped by the user,
+// so that the Stop hook does not send a push notification.
+func (h *HookHandler) MarkUserStopped(sessionID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.userStopped[sessionID] = true
+}
+
 // ClearSession removes all state for a session (call when session ends)
 func (h *HookHandler) ClearSession(sessionID string) {
 	h.mu.Lock()
@@ -589,6 +605,7 @@ func (h *HookHandler) ClearSession(sessionID string) {
 	delete(h.alwaysAllow, sessionID)
 	delete(h.toolEvents, sessionID)
 	delete(h.lastPushSent, sessionID)
+	delete(h.userStopped, sessionID)
 	if pending, ok := h.pending[sessionID]; ok {
 		pending.cancel()
 		delete(h.pending, sessionID)

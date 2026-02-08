@@ -1,6 +1,6 @@
 // Service Worker for DevManager PWA
 
-const CACHE_NAME = 'devmanager-v11';
+const CACHE_NAME = 'devmanager-v12';
 const OFFLINE_URL = '/';
 
 // Assets to cache
@@ -12,7 +12,7 @@ const PRECACHE_ASSETS = [
     '/static/js/terminal.js?v=5',
     '/static/js/voice.js?v=8',
     '/static/js/files.js?v=8',
-    '/static/js/notifications.js?v=2',
+    '/static/js/notifications.js?v=3',
     '/static/js/hooks.js?v=8',
     '/static/js/macro-editor.js?v=2',
     '/static/vendor/xterm.js',
