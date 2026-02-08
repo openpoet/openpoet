@@ -20,6 +20,7 @@ import (
 	"devmanager/internal/config"
 	"devmanager/internal/database"
 	"devmanager/internal/handlers"
+	"devmanager/internal/llm"
 	"devmanager/internal/macro"
 	"devmanager/internal/notifications"
 	"devmanager/internal/security"
@@ -186,6 +187,10 @@ func main() {
 	})
 	wsHandler := handlers.NewWebSocketHandler(hub, api, webpush)
 
+	// Initialize AI provider
+	aiProvider := initAIProvider(db)
+	aiHandler := handlers.NewAIHandler(api, aiProvider)
+
 	// Set up router
 	r := chi.NewRouter()
 
@@ -281,9 +286,14 @@ func main() {
 		// Config - Skills
 		r.Get("/config/skills", api.ListSkills)
 		r.Post("/config/skills", api.CreateSkill)
+		r.Get("/config/skills/export", api.ExportSkills)
+		r.Post("/config/skills/import", api.ImportSkills)
 		r.Get("/config/skills/{id}", api.GetSkill)
 		r.Put("/config/skills/{id}", api.UpdateSkill)
 		r.Delete("/config/skills/{id}", api.DeleteSkill)
+		r.Post("/config/skills/{id}/duplicate", api.DuplicateSkill)
+		r.Get("/config/skills/{id}/versions", api.ListSkillVersions)
+		r.Post("/config/skills/{id}/versions/{versionId}/restore", api.RestoreSkillVersion)
 
 		// Config - MCP Servers
 		r.Get("/config/mcps", api.ListMCPServers)
@@ -315,6 +325,15 @@ func main() {
 		r.Post("/hooks/permission/{sessionId}/respond", hookHandler.HandlePermissionRespond)
 		r.Post("/hooks/event", hookHandler.HandleEvent)
 		r.Get("/hooks/pending/{sessionId}", hookHandler.HandleGetPending)
+
+		// AI
+		r.Get("/ai/status", aiHandler.HandleStatus)
+		r.Post("/ai/chat", aiHandler.HandleChat)
+		r.Get("/ai/conversations", aiHandler.HandleListConversations)
+		r.Get("/ai/conversations/{id}", aiHandler.HandleGetConversation)
+		r.Delete("/ai/conversations/{id}", aiHandler.HandleDeleteConversation)
+		r.Post("/ai/generate-skill", aiHandler.HandleGenerateSkill)
+		r.Post("/ai/validate-skill", aiHandler.HandleValidateSkill)
 	})
 
 	// WebSocket routes
@@ -479,11 +498,53 @@ func serveMigrationError(cfg *config.Config) {
 	server.Shutdown(shutdownCtx)
 }
 
+// initAIProvider creates the appropriate LLM provider based on settings.
+func initAIProvider(db *database.DB) llm.Provider {
+	ctx := context.Background()
+
+	// Check provider setting
+	providerType, _ := db.GetSetting(ctx, "ai_provider")
+
+	switch providerType {
+	case "apikey":
+		apiKey, _ := db.GetSetting(ctx, "anthropic_api_key")
+		if apiKey != "" {
+			log.Printf("[AI] Using Anthropic API key provider")
+			return llm.NewAnthropicProvider(apiKey)
+		}
+		log.Printf("[AI] Provider set to apikey but no API key configured")
+		return nil
+
+	case "claudecode":
+		if llm.IsClaudeCLIAvailable() {
+			log.Printf("[AI] Using Claude Code CLI provider")
+			return llm.NewClaudeCLIProvider()
+		}
+		log.Printf("[AI] Provider set to claudecode but CLI not available")
+		return nil
+
+	default:
+		// Auto-detect: try Claude CLI first, then API key
+		if llm.IsClaudeCLIAvailable() {
+			log.Printf("[AI] Auto-detected Claude Code CLI provider")
+			return llm.NewClaudeCLIProvider()
+		}
+		apiKey, _ := db.GetSetting(ctx, "anthropic_api_key")
+		if apiKey != "" {
+			log.Printf("[AI] Auto-detected Anthropic API key provider")
+			return llm.NewAnthropicProvider(apiKey)
+		}
+		log.Printf("[AI] No AI provider available (no Claude CLI, no API key)")
+		return nil
+	}
+}
+
 // recoverDataFromBackup copies data from an old DB backup into the fresh DB.
 func recoverDataFromBackup(db *database.DB, backupPath string) {
 	tables := []string{
 		"projects", "sessions", "macros", "skills",
 		"mcp_servers", "settings", "push_subscriptions", "notifications",
+		"ai_conversations", "ai_messages",
 	}
 
 	_, err := db.Exec(fmt.Sprintf("ATTACH DATABASE '%s' AS old_db", backupPath))

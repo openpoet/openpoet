@@ -27,12 +27,13 @@ func NewConfigSyncer(db *database.DB, decryptFunc func(string, string) (string, 
 // SyncToProject syncs global configuration to a project
 func (cs *ConfigSyncer) SyncToProject(ctx context.Context, project *database.Project) error {
 	if project.Type == "local" {
-		return cs.syncToLocal(ctx, project.Path)
+		return cs.syncToLocal(ctx, project)
 	}
 	return cs.syncToRemote(ctx, project)
 }
 
-func (cs *ConfigSyncer) syncToLocal(ctx context.Context, projectPath string) error {
+func (cs *ConfigSyncer) syncToLocal(ctx context.Context, project *database.Project) error {
+	projectPath := project.Path
 	claudeDir := filepath.Join(projectPath, ".claude")
 	skillsDir := filepath.Join(claudeDir, "skills")
 	hooksDir := filepath.Join(claudeDir, "hooks")
@@ -50,17 +51,9 @@ func (cs *ConfigSyncer) syncToLocal(ctx context.Context, projectPath string) err
 		return fmt.Errorf("failed to sync bridge.sh: %w", err)
 	}
 
-	// Sync skills
-	skills, err := cs.db.ListEnabledSkills(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to list skills: %w", err)
-	}
-
-	for _, skill := range skills {
-		skillPath := filepath.Join(skillsDir, skill.Name+".md")
-		if err := os.WriteFile(skillPath, []byte(skill.Content), 0644); err != nil {
-			return fmt.Errorf("failed to write skill %s: %w", skill.Name, err)
-		}
+	// Sync skills with smart tracking
+	if err := cs.syncSkillsToLocal(ctx, skillsDir, projectPath); err != nil {
+		return fmt.Errorf("failed to sync skills: %w", err)
 	}
 
 	// Sync MCP servers
@@ -127,20 +120,9 @@ func (cs *ConfigSyncer) syncToRemote(ctx context.Context, project *database.Proj
 		return fmt.Errorf("failed to sync bridge.sh to remote: %w", err)
 	}
 
-	// Sync skills
-	skills, err := cs.db.ListEnabledSkills(ctx)
-	if err != nil {
-		return err
-	}
-
-	for _, skill := range skills {
-		skillPath := filepath.Join(skillsDir, skill.Name+".md")
-		f, err := sftpClient.Create(skillPath)
-		if err != nil {
-			return fmt.Errorf("failed to create skill file: %w", err)
-		}
-		f.Write([]byte(skill.Content))
-		f.Close()
+	// Sync skills with smart tracking
+	if err := cs.syncSkillsToRemote(ctx, sftpClient, skillsDir, project); err != nil {
+		return fmt.Errorf("failed to sync skills to remote: %w", err)
 	}
 
 	// Sync MCP config
@@ -174,6 +156,100 @@ func (cs *ConfigSyncer) syncToRemote(ctx context.Context, project *database.Proj
 	}
 	f.Write(settingsJSON)
 	f.Close()
+
+	return nil
+}
+
+// syncSkillsToLocal syncs skills to a local project, tracking which files DevManager manages.
+func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string, projectPath string) error {
+	// Get project ID from path
+	var projectID int64
+	projects, _ := cs.db.ListProjects(ctx)
+	for _, p := range projects {
+		if p.Path == projectPath {
+			projectID = p.ID
+			break
+		}
+	}
+
+	skills, err := cs.db.ListEnabledSkills(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list skills: %w", err)
+	}
+
+	// Build set of expected file names
+	expectedFiles := make(map[string]int64) // fileName -> skillID
+	for _, skill := range skills {
+		expectedFiles[skill.Name+".md"] = skill.ID
+	}
+
+	// Get previously synced files for this project
+	if projectID > 0 {
+		syncedFiles, _ := cs.db.ListSyncedSkillFiles(ctx, projectID)
+		for _, sf := range syncedFiles {
+			if _, stillNeeded := expectedFiles[sf.FileName]; !stillNeeded {
+				// This file was managed by DevManager but skill is now deleted/disabled/renamed
+				oldPath := filepath.Join(skillsDir, sf.FileName)
+				os.Remove(oldPath) // Best effort removal
+				cs.db.DeleteSyncedSkillFile(ctx, sf.ID)
+			}
+		}
+	}
+
+	// Write enabled skills
+	for _, skill := range skills {
+		fileName := skill.Name + ".md"
+		skillPath := filepath.Join(skillsDir, fileName)
+		if err := os.WriteFile(skillPath, []byte(skill.Content), 0644); err != nil {
+			return fmt.Errorf("failed to write skill %s: %w", skill.Name, err)
+		}
+		// Track and increment sync count
+		if projectID > 0 {
+			cs.db.UpsertSyncedSkillFile(ctx, projectID, skill.ID, fileName)
+		}
+		cs.db.IncrementSkillSyncCount(ctx, skill.ID)
+	}
+
+	return nil
+}
+
+// syncSkillsToRemote syncs skills to a remote project via SFTP, tracking which files DevManager manages.
+func (cs *ConfigSyncer) syncSkillsToRemote(ctx context.Context, sftpClient *sftp.Client, skillsDir string, project *database.Project) error {
+	skills, err := cs.db.ListEnabledSkills(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Build set of expected file names
+	expectedFiles := make(map[string]int64)
+	for _, skill := range skills {
+		expectedFiles[skill.Name+".md"] = skill.ID
+	}
+
+	// Get previously synced files for this project and remove stale ones
+	syncedFiles, _ := cs.db.ListSyncedSkillFiles(ctx, project.ID)
+	for _, sf := range syncedFiles {
+		if _, stillNeeded := expectedFiles[sf.FileName]; !stillNeeded {
+			oldPath := filepath.Join(skillsDir, sf.FileName)
+			sftpClient.Remove(oldPath) // Best effort
+			cs.db.DeleteSyncedSkillFile(ctx, sf.ID)
+		}
+	}
+
+	// Write enabled skills
+	for _, skill := range skills {
+		fileName := skill.Name + ".md"
+		skillPath := filepath.Join(skillsDir, fileName)
+		f, err := sftpClient.Create(skillPath)
+		if err != nil {
+			return fmt.Errorf("failed to create skill file: %w", err)
+		}
+		f.Write([]byte(skill.Content))
+		f.Close()
+
+		cs.db.UpsertSyncedSkillFile(ctx, project.ID, skill.ID, fileName)
+		cs.db.IncrementSkillSyncCount(ctx, skill.ID)
+	}
 
 	return nil
 }
