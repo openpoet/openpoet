@@ -22,7 +22,7 @@ func Load() *Config {
 		DBPath:     getEnv("DEVMANAGER_DB", "devmanager.db"),
 		OpenAIKey:  getEnv("OPENAI_API_KEY", ""),
 		GroqKey:    getEnv("GROQ_API_KEY", ""),
-		VAPIDEmail: getEnv("VAPID_EMAIL", "admin@localhost"),
+		VAPIDEmail: getEnv("VAPID_EMAIL", "admin@devmanager.minhapalavra.com.br"),
 		EncryptKey: getEnv("DEVMANAGER_ENCRYPT_KEY", ""),
 	}
 	return cfg
