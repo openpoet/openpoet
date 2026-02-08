@@ -205,6 +205,14 @@ class FileViewer {
         window.open(url, '_blank');
     }
 
+    showPlanContent(content, title) {
+        this.overlay.classList.remove('hidden');
+        this.currentPath = '';
+        this.nameEl.textContent = title || 'Plan';
+        this.sizeEl.textContent = this.formatSize(content.length);
+        this.renderMarkdown(content);
+    }
+
     hide() {
         this.overlay?.classList.add('hidden');
         // Clean up content

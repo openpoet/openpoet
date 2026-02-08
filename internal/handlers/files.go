@@ -351,6 +351,7 @@ func (h *FileHandler) ViewFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+
 // Simple base64 decoder
 func decodeBase64(src string, dst []byte) (int, error) {
 	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"

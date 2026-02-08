@@ -381,6 +381,23 @@ class HookManager {
         const feedbackEl = document.getElementById('hook-plan-feedback');
         if (feedbackEl) feedbackEl.value = '';
 
+        // Show View Plan button if plan content is available in the event
+        const viewBtn = document.getElementById('hook-plan-view-btn');
+        const viewFilename = document.getElementById('hook-plan-view-filename');
+        const planContent = toolInput.plan || '';
+        if (viewBtn) {
+            viewBtn.classList.add('hidden');
+            if (planContent) {
+                viewFilename.textContent = 'View Plan';
+                viewBtn.classList.remove('hidden');
+                viewBtn.onclick = () => {
+                    if (window.fileViewer) {
+                        window.fileViewer.showPlanContent(planContent, 'Plan');
+                    }
+                };
+            }
+        }
+
         dialog.classList.remove('hidden');
 
         if (navigator.vibrate) {
