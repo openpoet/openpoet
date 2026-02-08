@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -172,12 +173,17 @@ func (d *DB) DeleteMacro(ctx context.Context, id int64) error {
 
 // Skill operations
 func (d *DB) CreateSkill(ctx context.Context, s *Skill) error {
-	query := `INSERT INTO skills (name, content, enabled) VALUES (?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, s.Name, s.Content, s.Enabled)
+	query := `INSERT INTO skills (name, content, enabled, category, sort_order) VALUES (?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, s.Name, s.Content, s.Enabled, s.Category, s.SortOrder)
 	if err != nil {
 		return err
 	}
 	s.ID, _ = result.LastInsertId()
+	// Re-fetch to get DB-generated timestamps
+	fresh, err := d.GetSkill(ctx, s.ID)
+	if err == nil {
+		*s = *fresh
+	}
 	return nil
 }
 
@@ -189,25 +195,104 @@ func (d *DB) GetSkill(ctx context.Context, id int64) (*Skill, error) {
 
 func (d *DB) ListSkills(ctx context.Context) ([]Skill, error) {
 	var skills []Skill
-	err := d.SelectContext(ctx, &skills, "SELECT * FROM skills ORDER BY name")
+	err := d.SelectContext(ctx, &skills, "SELECT * FROM skills ORDER BY sort_order, name")
 	return skills, err
 }
 
 func (d *DB) ListEnabledSkills(ctx context.Context) ([]Skill, error) {
 	var skills []Skill
-	err := d.SelectContext(ctx, &skills, "SELECT * FROM skills WHERE enabled = 1 ORDER BY name")
+	err := d.SelectContext(ctx, &skills, "SELECT * FROM skills WHERE enabled = 1 ORDER BY sort_order, name")
 	return skills, err
 }
 
 func (d *DB) UpdateSkill(ctx context.Context, s *Skill) error {
-	query := `UPDATE skills SET name=?, content=?, enabled=?, updated_at=? WHERE id=?`
-	_, err := d.ExecContext(ctx, query, s.Name, s.Content, s.Enabled, time.Now(), s.ID)
-	return err
+	query := `UPDATE skills SET name=?, content=?, enabled=?, category=?, sort_order=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, s.Name, s.Content, s.Enabled, s.Category, s.SortOrder, time.Now(), s.ID)
+	if err != nil {
+		return err
+	}
+	// Re-fetch to get updated timestamps
+	fresh, err := d.GetSkill(ctx, s.ID)
+	if err == nil {
+		*s = *fresh
+	}
+	return nil
 }
 
 func (d *DB) DeleteSkill(ctx context.Context, id int64) error {
 	_, err := d.ExecContext(ctx, "DELETE FROM skills WHERE id = ?", id)
 	return err
+}
+
+func (d *DB) IncrementSkillSyncCount(ctx context.Context, id int64) error {
+	_, err := d.ExecContext(ctx, "UPDATE skills SET sync_count = sync_count + 1 WHERE id = ?", id)
+	return err
+}
+
+// SyncedSkillFile operations
+func (d *DB) ListSyncedSkillFiles(ctx context.Context, projectID int64) ([]SyncedSkillFile, error) {
+	var files []SyncedSkillFile
+	err := d.SelectContext(ctx, &files, "SELECT * FROM synced_skill_files WHERE project_id = ?", projectID)
+	return files, err
+}
+
+func (d *DB) UpsertSyncedSkillFile(ctx context.Context, projectID int64, skillID int64, fileName string) error {
+	query := `INSERT INTO synced_skill_files (project_id, skill_id, file_name, synced_at)
+			  VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+			  ON CONFLICT(id) DO UPDATE SET skill_id=excluded.skill_id, file_name=excluded.file_name, synced_at=CURRENT_TIMESTAMP`
+	// Check if already exists for this project+skill
+	var existing SyncedSkillFile
+	err := d.GetContext(ctx, &existing, "SELECT * FROM synced_skill_files WHERE project_id = ? AND skill_id = ?", projectID, skillID)
+	if err == nil {
+		// Update existing
+		_, err = d.ExecContext(ctx, "UPDATE synced_skill_files SET file_name=?, synced_at=CURRENT_TIMESTAMP WHERE id=?", fileName, existing.ID)
+		return err
+	}
+	// Insert new
+	_, err = d.ExecContext(ctx, query, projectID, skillID, fileName)
+	return err
+}
+
+func (d *DB) DeleteSyncedSkillFile(ctx context.Context, id int64) error {
+	_, err := d.ExecContext(ctx, "DELETE FROM synced_skill_files WHERE id = ?", id)
+	return err
+}
+
+func (d *DB) DeleteSyncedSkillFilesForProject(ctx context.Context, projectID int64) error {
+	_, err := d.ExecContext(ctx, "DELETE FROM synced_skill_files WHERE project_id = ?", projectID)
+	return err
+}
+
+// SkillVersion operations
+func (d *DB) CreateSkillVersion(ctx context.Context, v *SkillVersion) error {
+	query := `INSERT INTO skill_versions (skill_id, name, content, version) VALUES (?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, v.SkillID, v.Name, v.Content, v.Version)
+	if err != nil {
+		return err
+	}
+	v.ID, _ = result.LastInsertId()
+	return nil
+}
+
+func (d *DB) ListSkillVersions(ctx context.Context, skillID int64) ([]SkillVersion, error) {
+	var versions []SkillVersion
+	err := d.SelectContext(ctx, &versions, "SELECT * FROM skill_versions WHERE skill_id = ? ORDER BY version DESC", skillID)
+	return versions, err
+}
+
+func (d *DB) GetNextSkillVersion(ctx context.Context, skillID int64) (int, error) {
+	var maxVersion sql.NullInt64
+	err := d.GetContext(ctx, &maxVersion, "SELECT MAX(version) FROM skill_versions WHERE skill_id = ?", skillID)
+	if err != nil || !maxVersion.Valid {
+		return 1, nil
+	}
+	return int(maxVersion.Int64) + 1, nil
+}
+
+func (d *DB) GetSkillVersion(ctx context.Context, id int64) (*SkillVersion, error) {
+	var v SkillVersion
+	err := d.GetContext(ctx, &v, "SELECT * FROM skill_versions WHERE id = ?", id)
+	return &v, err
 }
 
 // MCP Server operations
@@ -344,4 +429,63 @@ func (d *DB) MarkAllNotificationsRead(ctx context.Context) error {
 func (d *DB) DeleteNotification(ctx context.Context, id int64) error {
 	_, err := d.ExecContext(ctx, "DELETE FROM notifications WHERE id = ?", id)
 	return err
+}
+
+// AI Conversation operations
+func (d *DB) CreateAIConversation(ctx context.Context, c *AIConversation) error {
+	query := `INSERT INTO ai_conversations (title) VALUES (?)`
+	result, err := d.ExecContext(ctx, query, c.Title)
+	if err != nil {
+		return err
+	}
+	c.ID, _ = result.LastInsertId()
+	fresh, err := d.GetAIConversation(ctx, c.ID)
+	if err == nil {
+		*c = *fresh
+	}
+	return nil
+}
+
+func (d *DB) GetAIConversation(ctx context.Context, id int64) (*AIConversation, error) {
+	var c AIConversation
+	err := d.GetContext(ctx, &c, "SELECT * FROM ai_conversations WHERE id = ?", id)
+	return &c, err
+}
+
+func (d *DB) ListAIConversations(ctx context.Context) ([]AIConversation, error) {
+	var convs []AIConversation
+	err := d.SelectContext(ctx, &convs, "SELECT * FROM ai_conversations ORDER BY updated_at DESC")
+	return convs, err
+}
+
+func (d *DB) UpdateAIConversationTitle(ctx context.Context, id int64, title string) error {
+	_, err := d.ExecContext(ctx, "UPDATE ai_conversations SET title=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", title, id)
+	return err
+}
+
+func (d *DB) TouchAIConversation(ctx context.Context, id int64) error {
+	_, err := d.ExecContext(ctx, "UPDATE ai_conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=?", id)
+	return err
+}
+
+func (d *DB) DeleteAIConversation(ctx context.Context, id int64) error {
+	_, err := d.ExecContext(ctx, "DELETE FROM ai_conversations WHERE id = ?", id)
+	return err
+}
+
+// AI Message operations
+func (d *DB) CreateAIMessage(ctx context.Context, m *AIMessage) error {
+	query := `INSERT INTO ai_messages (conversation_id, role, content, tool_calls) VALUES (?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, m.ConversationID, m.Role, m.Content, m.ToolCalls)
+	if err != nil {
+		return err
+	}
+	m.ID, _ = result.LastInsertId()
+	return nil
+}
+
+func (d *DB) ListAIMessages(ctx context.Context, conversationID int64) ([]AIMessage, error) {
+	var msgs []AIMessage
+	err := d.SelectContext(ctx, &msgs, "SELECT * FROM ai_messages WHERE conversation_id = ? ORDER BY created_at ASC", conversationID)
+	return msgs, err
 }

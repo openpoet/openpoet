@@ -10,9 +10,12 @@ import (
 	"devmanager/internal/session"
 	"devmanager/internal/websocket"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -479,6 +482,27 @@ func (a *API) RunMacro(w http.ResponseWriter, r *http.Request) {
 
 // ============ Skills ============
 
+// validateSkillName checks for empty, path traversal, and invalid characters.
+func validateSkillName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "Name is required"
+	}
+	if len(name) > 200 {
+		return "Name must be 200 characters or less"
+	}
+	if strings.ContainsAny(name, "/\\") {
+		return "Name cannot contain / or \\"
+	}
+	if strings.Contains(name, "..") {
+		return "Name cannot contain .."
+	}
+	if filepath.Base(name) != name {
+		return "Invalid skill name"
+	}
+	return ""
+}
+
 func (a *API) ListSkills(w http.ResponseWriter, r *http.Request) {
 	skills, err := a.db.ListSkills(r.Context())
 	if err != nil {
@@ -498,10 +522,25 @@ func (a *API) CreateSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if msg := validateSkillName(s.Name); msg != "" {
+		respondError(w, http.StatusBadRequest, msg)
+		return
+	}
+	if strings.TrimSpace(s.Content) == "" {
+		respondError(w, http.StatusBadRequest, "Content is required")
+		return
+	}
+
 	if err := a.db.CreateSkill(r.Context(), &s); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	// Save initial version
+	nextVer, _ := a.db.GetNextSkillVersion(r.Context(), s.ID)
+	a.db.CreateSkillVersion(r.Context(), &database.SkillVersion{
+		SkillID: s.ID, Name: s.Name, Content: s.Content, Version: nextVer,
+	})
 
 	a.hub.BroadcastStateUpdate("skill", map[string]interface{}{"action": "created", "skill": s})
 	respondJSON(w, http.StatusCreated, s)
@@ -536,10 +575,34 @@ func (a *API) UpdateSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if msg := validateSkillName(s.Name); msg != "" {
+		respondError(w, http.StatusBadRequest, msg)
+		return
+	}
+	if strings.TrimSpace(s.Content) == "" {
+		respondError(w, http.StatusBadRequest, "Content is required")
+		return
+	}
+
+	// Get old skill to check if content changed
+	old, err := a.db.GetSkill(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Skill not found")
+		return
+	}
+
 	s.ID = id
 	if err := a.db.UpdateSkill(r.Context(), &s); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// Save version if content or name changed
+	if old.Content != s.Content || old.Name != s.Name {
+		nextVer, _ := a.db.GetNextSkillVersion(r.Context(), s.ID)
+		a.db.CreateSkillVersion(r.Context(), &database.SkillVersion{
+			SkillID: s.ID, Name: s.Name, Content: s.Content, Version: nextVer,
+		})
 	}
 
 	a.hub.BroadcastStateUpdate("skill", map[string]interface{}{"action": "updated", "skill": s})
@@ -560,6 +623,178 @@ func (a *API) DeleteSkill(w http.ResponseWriter, r *http.Request) {
 
 	a.hub.BroadcastStateUpdate("skill", map[string]interface{}{"action": "deleted", "id": id})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) DuplicateSkill(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid skill ID")
+		return
+	}
+
+	original, err := a.db.GetSkill(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Skill not found")
+		return
+	}
+
+	// Find a unique name
+	newName := original.Name + " (copy)"
+	for i := 2; ; i++ {
+		var existing database.Skill
+		err := a.db.GetContext(r.Context(), &existing, "SELECT id FROM skills WHERE name = ?", newName)
+		if err != nil {
+			break // name available
+		}
+		newName = original.Name + fmt.Sprintf(" (copy %d)", i)
+	}
+
+	dup := database.Skill{
+		Name:      newName,
+		Content:   original.Content,
+		Enabled:   original.Enabled,
+		Category:  original.Category,
+		SortOrder: original.SortOrder,
+	}
+
+	if err := a.db.CreateSkill(r.Context(), &dup); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("skill", map[string]interface{}{"action": "created", "skill": dup})
+	respondJSON(w, http.StatusCreated, dup)
+}
+
+func (a *API) ExportSkills(w http.ResponseWriter, r *http.Request) {
+	skills, err := a.db.ListSkills(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if skills == nil {
+		skills = []database.Skill{}
+	}
+
+	type exportSkill struct {
+		Name     string `json:"name"`
+		Content  string `json:"content"`
+		Enabled  bool   `json:"enabled"`
+		Category string `json:"category"`
+	}
+	exported := make([]exportSkill, len(skills))
+	for i, s := range skills {
+		exported[i] = exportSkill{Name: s.Name, Content: s.Content, Enabled: s.Enabled, Category: s.Category}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", "attachment; filename=devmanager-skills.json")
+	json.NewEncoder(w).Encode(exported)
+}
+
+func (a *API) ImportSkills(w http.ResponseWriter, r *http.Request) {
+	type importSkill struct {
+		Name     string `json:"name"`
+		Content  string `json:"content"`
+		Enabled  bool   `json:"enabled"`
+		Category string `json:"category"`
+	}
+
+	var skills []importSkill
+	if err := json.NewDecoder(r.Body).Decode(&skills); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON: expected array of skills")
+		return
+	}
+
+	imported := 0
+	skipped := 0
+	for _, s := range skills {
+		if msg := validateSkillName(s.Name); msg != "" {
+			skipped++
+			continue
+		}
+		if strings.TrimSpace(s.Content) == "" {
+			skipped++
+			continue
+		}
+
+		skill := database.Skill{
+			Name:     s.Name,
+			Content:  s.Content,
+			Enabled:  s.Enabled,
+			Category: s.Category,
+		}
+		if err := a.db.CreateSkill(r.Context(), &skill); err != nil {
+			skipped++ // likely duplicate name
+			continue
+		}
+		imported++
+	}
+
+	a.hub.BroadcastStateUpdate("skill", map[string]interface{}{"action": "imported"})
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"imported": imported,
+		"skipped":  skipped,
+	})
+}
+
+func (a *API) ListSkillVersions(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid skill ID")
+		return
+	}
+
+	versions, err := a.db.ListSkillVersions(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if versions == nil {
+		versions = []database.SkillVersion{}
+	}
+	respondJSON(w, http.StatusOK, versions)
+}
+
+func (a *API) RestoreSkillVersion(w http.ResponseWriter, r *http.Request) {
+	skillID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid skill ID")
+		return
+	}
+	versionID, err := strconv.ParseInt(chi.URLParam(r, "versionId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid version ID")
+		return
+	}
+
+	ver, err := a.db.GetSkillVersion(r.Context(), versionID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Version not found")
+		return
+	}
+
+	skill, err := a.db.GetSkill(r.Context(), skillID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Skill not found")
+		return
+	}
+
+	skill.Name = ver.Name
+	skill.Content = ver.Content
+	if err := a.db.UpdateSkill(r.Context(), skill); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Save as new version
+	nextVer, _ := a.db.GetNextSkillVersion(r.Context(), skillID)
+	a.db.CreateSkillVersion(r.Context(), &database.SkillVersion{
+		SkillID: skillID, Name: ver.Name, Content: ver.Content, Version: nextVer,
+	})
+
+	a.hub.BroadcastStateUpdate("skill", map[string]interface{}{"action": "updated", "skill": skill})
+	respondJSON(w, http.StatusOK, skill)
 }
 
 // ============ MCP Servers ============
@@ -660,6 +895,7 @@ func (a *API) GetSettings(w http.ResponseWriter, r *http.Request) {
 	delete(settings, "vapid_private_key")
 	delete(settings, "openai_api_key")
 	delete(settings, "groq_api_key")
+	delete(settings, "anthropic_api_key")
 
 	respondJSON(w, http.StatusOK, settings)
 }

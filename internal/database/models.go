@@ -57,8 +57,28 @@ type Skill struct {
 	Name      string    `db:"name" json:"name"`
 	Content   string    `db:"content" json:"content"`
 	Enabled   bool      `db:"enabled" json:"enabled"`
+	Category  string    `db:"category" json:"category"`
+	SortOrder int       `db:"sort_order" json:"sort_order"`
+	SyncCount int       `db:"sync_count" json:"sync_count"`
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+}
+
+type SyncedSkillFile struct {
+	ID        int64        `db:"id" json:"id"`
+	ProjectID int64        `db:"project_id" json:"project_id"`
+	SkillID   sql.NullInt64 `db:"skill_id" json:"skill_id,omitempty"`
+	FileName  string       `db:"file_name" json:"file_name"`
+	SyncedAt  time.Time    `db:"synced_at" json:"synced_at"`
+}
+
+type SkillVersion struct {
+	ID        int64     `db:"id" json:"id"`
+	SkillID   int64     `db:"skill_id" json:"skill_id"`
+	Name      string    `db:"name" json:"name"`
+	Content   string    `db:"content" json:"content"`
+	Version   int       `db:"version" json:"version"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
 }
 
 type MCPServer struct {
@@ -93,4 +113,20 @@ type Notification struct {
 	Body      string    `db:"body" json:"body"`
 	Read      bool      `db:"read" json:"read"`
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
+}
+
+type AIConversation struct {
+	ID        int64     `db:"id" json:"id"`
+	Title     string    `db:"title" json:"title"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+}
+
+type AIMessage struct {
+	ID             int64     `db:"id" json:"id"`
+	ConversationID int64     `db:"conversation_id" json:"conversation_id"`
+	Role           string    `db:"role" json:"role"` // 'user', 'assistant'
+	Content        string    `db:"content" json:"content"`
+	ToolCalls      string    `db:"tool_calls" json:"tool_calls"` // JSON array
+	CreatedAt      time.Time `db:"created_at" json:"created_at"`
 }

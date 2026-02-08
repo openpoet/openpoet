@@ -10,8 +10,8 @@
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
-    <link rel="stylesheet" href="/static/css/app.css?v=10">
-    <link rel="stylesheet" href="/static/css/mobile.css?v=10">
+    <link rel="stylesheet" href="/static/css/app.css?v=13">
+    <link rel="stylesheet" href="/static/css/mobile.css?v=14">
 </head>
 <body>
     <div id="app">
@@ -416,6 +416,102 @@
             </section>
         </main>
 
+        <!-- AI Chat Toggle Button (floating) -->
+        <button id="ai-chat-toggle" class="ai-chat-toggle-btn" title="AI Assistant" onclick="window.aiChat?.toggle()">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                <path d="M2 17l10 5 10-5"/>
+                <path d="M2 12l10 5 10-5"/>
+            </svg>
+        </button>
+
+        <!-- AI Chat Panel -->
+        <div id="ai-chat-panel" class="ai-chat-panel">
+            <div class="ai-chat-inner">
+                <div class="ai-chat-header">
+                    <div class="ai-chat-header-left">
+                        <h3>AI Assistant</h3>
+                        <span id="ai-chat-status" class="ai-chat-status-badge">Checking...</span>
+                    </div>
+                    <div class="ai-chat-header-actions">
+                        <button id="ai-chat-history" class="btn-icon btn-sm" title="History">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="10"/>
+                                <polyline points="12 6 12 12 16 14"/>
+                            </svg>
+                        </button>
+                        <button id="ai-chat-new" class="btn-icon btn-sm" title="New chat">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="12" y1="5" x2="12" y2="19"/>
+                                <line x1="5" y1="12" x2="19" y2="12"/>
+                            </svg>
+                        </button>
+                        <button id="ai-chat-close" class="btn-icon btn-sm" title="Close">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="18" y1="6" x2="6" y2="18"/>
+                                <line x1="6" y1="6" x2="18" y2="18"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                <div id="ai-chat-messages" class="ai-chat-messages"></div>
+                <div class="ai-chat-input-area">
+                    <textarea id="ai-chat-input" class="ai-chat-input" placeholder="Ask the AI assistant..." rows="1"></textarea>
+                    <button id="ai-chat-expand" class="ai-chat-action-btn" title="Expand editor">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="15 3 21 3 21 9"></polyline>
+                            <polyline points="9 21 3 21 3 15"></polyline>
+                            <line x1="21" y1="3" x2="14" y2="10"></line>
+                            <line x1="3" y1="21" x2="10" y2="14"></line>
+                        </svg>
+                    </button>
+                    <button id="ai-chat-voice" class="ai-chat-action-btn" title="Voice Input">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                            <line x1="12" y1="19" x2="12" y2="23"></line>
+                            <line x1="8" y1="23" x2="16" y2="23"></line>
+                        </svg>
+                    </button>
+                    <button id="ai-chat-send" class="ai-chat-send-btn" title="Send">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="22" y1="2" x2="11" y2="13"/>
+                            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                        </svg>
+                    </button>
+                    <button id="ai-chat-stop" class="ai-chat-stop-btn" title="Stop" style="display:none;">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                            <rect x="4" y="4" width="16" height="16" rx="2"/>
+                        </svg>
+                    </button>
+                </div>
+                <!-- AI Chat full-screen editor (mobile) -->
+                <div id="ai-chat-editor" class="ai-chat-fullscreen-editor hidden">
+                    <div class="ai-chat-editor-header">
+                        <button id="ai-chat-editor-close" class="btn-icon" title="Close">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="18" y1="6" x2="6" y2="18"></line>
+                                <line x1="6" y1="6" x2="18" y2="18"></line>
+                            </svg>
+                        </button>
+                        <span class="ai-chat-editor-title">AI Assistant</span>
+                        <div class="ai-chat-editor-actions">
+                            <button id="ai-chat-editor-voice" class="btn-icon" title="Voice Input">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                    <line x1="12" y1="19" x2="12" y2="23"></line>
+                                    <line x1="8" y1="23" x2="16" y2="23"></line>
+                                </svg>
+                            </button>
+                            <button id="ai-chat-editor-send" class="btn btn-primary btn-sm">Enviar</button>
+                        </div>
+                    </div>
+                    <textarea id="ai-chat-editor-textarea" placeholder="Digite ou dite sua mensagem..."></textarea>
+                </div>
+            </div>
+        </div>
+
         <!-- Mobile Bottom Navigation -->
         <nav id="mobile-nav" class="mobile-nav">
             <a href="#" class="mobile-nav-item active" data-view="projects">
@@ -818,7 +914,7 @@
     <script src="/static/vendor/xterm.js"></script>
     <script src="/static/vendor/xterm-addon-fit.js"></script>
     <script src="/static/vendor/xterm-addon-web-links.js"></script>
-    <script src="/static/js/app.js?v=10"></script>
+    <script src="/static/js/app.js?v=11"></script>
     <script src="/static/js/terminal.js?v=6"></script>
     <script src="/static/js/hooks.js?v=8"></script>
     <script src="/static/js/voice.js?v=10"></script>
@@ -827,5 +923,6 @@
     <script src="/static/js/file-viewer.js?v=3"></script>
     <script src="/static/js/notifications.js?v=3"></script>
     <script src="/static/js/macro-editor.js?v=2"></script>
+    <script src="/static/js/ai-chat.js?v=2"></script>
 </body>
 </html>
