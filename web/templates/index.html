@@ -222,6 +222,59 @@
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 6 15 12 9 18"></polyline></svg>
                         </button>
                         <button class="mobile-key-btn" data-key="ctrl-c" title="Ctrl+C">^C</button>
+                        <button id="btn-quick-commands" class="mobile-key-btn mobile-key-btn-accent" title="Quick Commands">/</button>
+                    </div>
+
+                    <!-- Quick Commands Popup -->
+                    <div id="quick-commands-popup" class="quick-commands-popup hidden">
+                        <div class="quick-commands-header">
+                            <span>Quick Commands</span>
+                            <button id="quick-commands-close" class="quick-commands-close-btn">&times;</button>
+                        </div>
+                        <div class="quick-commands-list">
+                            <button class="quick-cmd-item" data-cmd="/resume">
+                                <span class="quick-cmd-icon">&#9654;</span>
+                                <div class="quick-cmd-info">
+                                    <span class="quick-cmd-name">/resume</span>
+                                    <span class="quick-cmd-desc">Continue previous session</span>
+                                </div>
+                            </button>
+                            <button class="quick-cmd-item" data-cmd="/compact">
+                                <span class="quick-cmd-icon">&#128230;</span>
+                                <div class="quick-cmd-info">
+                                    <span class="quick-cmd-name">/compact</span>
+                                    <span class="quick-cmd-desc">Compact conversation context</span>
+                                </div>
+                            </button>
+                            <button class="quick-cmd-item" data-cmd="/clear">
+                                <span class="quick-cmd-icon">&#128465;</span>
+                                <div class="quick-cmd-info">
+                                    <span class="quick-cmd-name">/clear</span>
+                                    <span class="quick-cmd-desc">Clear conversation history</span>
+                                </div>
+                            </button>
+                            <button class="quick-cmd-item" data-cmd="/help">
+                                <span class="quick-cmd-icon">&#10068;</span>
+                                <div class="quick-cmd-info">
+                                    <span class="quick-cmd-name">/help</span>
+                                    <span class="quick-cmd-desc">Show available commands</span>
+                                </div>
+                            </button>
+                            <button class="quick-cmd-item" data-cmd="/config">
+                                <span class="quick-cmd-icon">&#9881;</span>
+                                <div class="quick-cmd-info">
+                                    <span class="quick-cmd-name">/config</span>
+                                    <span class="quick-cmd-desc">Open configuration</span>
+                                </div>
+                            </button>
+                            <button class="quick-cmd-item" data-cmd="/cost">
+                                <span class="quick-cmd-icon">&#128176;</span>
+                                <div class="quick-cmd-info">
+                                    <span class="quick-cmd-name">/cost</span>
+                                    <span class="quick-cmd-desc">Show session cost</span>
+                                </div>
+                            </button>
+                        </div>
                     </div>
 
                     <!-- Hidden image picker input -->
@@ -530,7 +583,16 @@
                 <button id="hook-plan-dismiss" class="hook-permission-close" title="Minimize">&times;</button>
             </div>
             <div class="hook-exit-plan-body">
-                <p class="plan-review-text">Claude has finished planning. Review the plan in the terminal output, then choose an option:</p>
+                <p class="plan-review-text">Claude has finished planning. Choose an option:</p>
+                <button id="hook-plan-view-btn" class="plan-view-btn hidden">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                        <polyline points="14 2 14 8 20 8"></polyline>
+                        <line x1="16" y1="13" x2="8" y2="13"></line>
+                        <line x1="16" y1="17" x2="8" y2="17"></line>
+                    </svg>
+                    <span id="hook-plan-view-filename">View Plan</span>
+                </button>
                 <div class="plan-prompts-section hidden">
                     <div class="plan-prompts-label">Permissions requested:</div>
                     <div id="hook-plan-prompts"></div>
@@ -661,6 +723,7 @@
         }
     }, 100);
     setTimeout(function() { clearInterval(_toastInterval); }, 10000);
+
     </script>
     <!-- File Viewer Overlay -->
     <div id="file-viewer-overlay" class="file-viewer-overlay hidden">

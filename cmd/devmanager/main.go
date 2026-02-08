@@ -257,6 +257,7 @@ func main() {
 		r.Post("/sessions/{id}/files", fileHandler.UploadFiles)
 		r.Post("/sessions/{id}/files/paste", fileHandler.PasteImage)
 
+
 		// Macros
 		r.Get("/macros", api.ListMacros)
 		r.Post("/macros", api.CreateMacro)

@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -232,42 +230,52 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 			// Option 3 (manual): just approve, nothing else (default behavior).
 			// Option 2 (auto-accept): approve, wait, Shift+Tab.
 			// Option 1 (clear context + auto-accept): approve, dismiss dialog,
-			//   /clear, paste plan content, Shift+Tab.
+			//   /clear, paste plan content from event, Shift+Tab.
 			if h.sessionMgr != nil && planChoice == "1" {
-				go func() {
-					// Hook "allow" already approved the plan.
-					// Wait for Claude to process and write the plan file.
-					time.Sleep(5 * time.Second)
-					planContent, planFile, err := findLatestPlanFile()
-					if err != nil {
-						log.Printf("[hooks] Option 1: could not find plan file: %v — falling back to option 2 (Shift+Tab only)", err)
-						h.sessionMgr.WriteToSession(sessionID, []byte("\x1b[Z"))
-						return
+				// Get plan content from the hook event (tool_input.plan)
+				planContent := ""
+				if ti, ok := hookEvent["tool_input"].(map[string]interface{}); ok {
+					if p, ok := ti["plan"].(string); ok {
+						planContent = strings.TrimSpace(p)
 					}
-					log.Printf("[hooks] Option 1: found plan file: %s (%d bytes)", planFile, len(planContent))
+				}
+				if planContent == "" {
+					log.Printf("[hooks] Option 1: no plan content in hook event, falling back to option 2 (Shift+Tab only)")
+					go func() {
+						time.Sleep(3 * time.Second)
+						h.sessionMgr.WriteToSession(sessionID, []byte("\x1b[Z"))
+					}()
+				} else {
+					go func() {
+						log.Printf("[hooks] Option 1: using plan content from event (%d bytes)", len(planContent))
 
-					// Escape to interrupt Claude if generating
-					h.sessionMgr.WriteToSession(sessionID, []byte("\x1b"))
-					time.Sleep(1 * time.Second)
+						// Hook "allow" already approved the plan.
+						// Wait for Claude to process.
+						time.Sleep(5 * time.Second)
 
-					// /clear command
-					h.sessionMgr.WriteToSession(sessionID, []byte("/clear"))
-					time.Sleep(50 * time.Millisecond)
-					h.sessionMgr.WriteToSession(sessionID, []byte("\r"))
-					time.Sleep(3 * time.Second)
+						// Escape to interrupt Claude if generating
+						h.sessionMgr.WriteToSession(sessionID, []byte("\x1b"))
+						time.Sleep(1 * time.Second)
 
-					// Paste plan content (bracketed paste preserves newlines)
-					paste := "\x1b[200~" + planContent + "\x1b[201~"
-					h.sessionMgr.WriteToSession(sessionID, []byte(paste))
-					time.Sleep(1 * time.Second)
-					// Submit with Enter (separate write, like voice auto-submit)
-					h.sessionMgr.WriteToSession(sessionID, []byte("\r"))
-					time.Sleep(3 * time.Second)
+						// /clear command
+						h.sessionMgr.WriteToSession(sessionID, []byte("/clear"))
+						time.Sleep(50 * time.Millisecond)
+						h.sessionMgr.WriteToSession(sessionID, []byte("\r"))
+						time.Sleep(3 * time.Second)
 
-					// Shift+Tab for auto-accept mode
-					h.sessionMgr.WriteToSession(sessionID, []byte("\x1b[Z"))
-					log.Printf("[hooks] Option 1 complete: cleared context, sent plan, auto-accept for session %s", sessionID)
-				}()
+						// Paste plan content (bracketed paste preserves newlines)
+						paste := "\x1b[200~" + planContent + "\x1b[201~"
+						h.sessionMgr.WriteToSession(sessionID, []byte(paste))
+						time.Sleep(1 * time.Second)
+						// Submit with Enter (separate write, like voice auto-submit)
+						h.sessionMgr.WriteToSession(sessionID, []byte("\r"))
+						time.Sleep(3 * time.Second)
+
+						// Shift+Tab for auto-accept mode
+						h.sessionMgr.WriteToSession(sessionID, []byte("\x1b[Z"))
+						log.Printf("[hooks] Option 1 complete: cleared context, sent plan, auto-accept for session %s", sessionID)
+					}()
+				}
 			} else if h.sessionMgr != nil && planChoice == "2" {
 				go func() {
 					time.Sleep(3 * time.Second)
@@ -471,46 +479,4 @@ func (h *HookHandler) ClearSession(sessionID string) {
 		pending.cancel()
 		delete(h.pending, sessionID)
 	}
-}
-
-// findLatestPlanFile finds and reads the most recently modified plan file in ~/.claude/plans/
-func findLatestPlanFile() (content string, filePath string, err error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", "", err
-	}
-
-	plansDir := filepath.Join(homeDir, ".claude", "plans")
-	entries, err := os.ReadDir(plansDir)
-	if err != nil {
-		return "", "", err
-	}
-
-	var latestFile string
-	var latestTime time.Time
-
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".md" {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().After(latestTime) {
-			latestTime = info.ModTime()
-			latestFile = filepath.Join(plansDir, entry.Name())
-		}
-	}
-
-	if latestFile == "" {
-		return "", "", os.ErrNotExist
-	}
-
-	data, err := os.ReadFile(latestFile)
-	if err != nil {
-		return "", "", err
-	}
-
-	return strings.TrimSpace(string(data)), latestFile, nil
 }

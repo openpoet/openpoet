@@ -1294,6 +1294,37 @@ body {
     line-height: 1.5;
 }
 
+.plan-view-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(139, 92, 246, 0.15));
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: 8px;
+    color: #c4b5fd;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.plan-view-btn:hover {
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(139, 92, 246, 0.25));
+    border-color: rgba(99, 102, 241, 0.5);
+}
+
+.plan-view-btn svg {
+    flex-shrink: 0;
+    color: #a78bfa;
+}
+
+.plan-view-btn.hidden {
+    display: none;
+}
+
 .plan-prompts-section {
     margin-bottom: 16px;
 }
