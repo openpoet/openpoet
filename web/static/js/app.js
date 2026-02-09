@@ -83,9 +83,10 @@ class DevManager {
         const view = document.getElementById(`view-${viewName}`);
         if (view) view.classList.add('active');
 
-        // Update navigation
+        // Update navigation - project-detail keeps "Projects" active
+        const navView = viewName === 'project-detail' ? 'projects' : viewName;
         document.querySelectorAll('.nav-item, .mobile-nav-item').forEach(item => {
-            item.classList.toggle('active', item.dataset.view === viewName);
+            item.classList.toggle('active', item.dataset.view === navView);
         });
 
         this.currentView = viewName;
@@ -101,6 +102,9 @@ class DevManager {
         switch (viewName) {
             case 'projects':
                 this.loadProjects();
+                break;
+            case 'project-detail':
+                // Don't refresh on initial navigation - only on explicit refresh
                 break;
             case 'sessions':
                 this.loadSessions();
@@ -163,7 +167,11 @@ class DevManager {
     handleStateUpdate(data) {
         switch (data.entity) {
             case 'project':
-                this.loadProjects();
+                this.loadProjects().then(() => {
+                    if (this.currentView === 'project-detail' && this._detailProject) {
+                        this.showProjectDetail(this._detailProject.id);
+                    }
+                });
                 break;
             case 'session':
                 this.loadSessions();
@@ -249,7 +257,7 @@ class DevManager {
         }
 
         container.innerHTML = this.projects.map(project => `
-            <div class="card" data-project-id="${project.id}">
+            <div class="card card-clickable" data-project-id="${project.id}" onclick="app.showProjectDetail(${project.id})">
                 <div class="card-header">
                     <div>
                         <div class="card-title">${this.escapeHtml(project.name)}</div>
@@ -265,13 +273,13 @@ class DevManager {
                     ` : ''}
                 </div>
                 <div class="card-actions">
-                    <button class="btn btn-primary btn-sm" onclick="app.startSession(${project.id})">
+                    <button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); app.startSession(${project.id})">
                         Start Session
                     </button>
-                    <button class="btn btn-secondary btn-sm" onclick="app.editProject(${project.id})">
+                    <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); app.editProject(${project.id})">
                         Edit
                     </button>
-                    <button class="btn btn-secondary btn-sm" onclick="app.syncProjectConfig(${project.id})">
+                    <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); app.syncProjectConfig(${project.id})">
                         Sync
                     </button>
                 </div>
@@ -360,6 +368,225 @@ class DevManager {
     editProject(projectId) {
         const project = this.projects.find(p => p.id === projectId);
         if (project) this.showProjectModal(project);
+    }
+
+    // Project Detail
+    showProjectDetail(projectId) {
+        const project = this.projects.find(p => p.id === projectId);
+        if (!project) return;
+
+        this._detailProject = project;
+
+        // Update header
+        const titleEl = document.getElementById('project-detail-title');
+        const badgeEl = document.getElementById('project-detail-badge');
+        if (titleEl) titleEl.textContent = project.name;
+        if (badgeEl) {
+            badgeEl.textContent = project.type;
+            badgeEl.className = `badge badge-${project.type}`;
+        }
+
+        // Render detail content
+        const container = document.getElementById('project-detail-content');
+        if (!container) return;
+
+        const syncDate = project.last_sync ? this.formatTime(project.last_sync) : 'Never synced';
+        const createdDate = project.created_at ? this.formatTime(project.created_at) : '—';
+        const updatedDate = project.updated_at ? this.formatTime(project.updated_at) : '—';
+
+        let html = `
+            <div class="project-detail-card">
+                <div class="project-detail-section">
+                    <div class="project-detail-section-title">General</div>
+                    <div class="project-detail-field">
+                        <span class="project-detail-label">Name</span>
+                        <span class="project-detail-value">${this.escapeHtml(project.name)}</span>
+                    </div>
+                    <div class="project-detail-field">
+                        <span class="project-detail-label">Path</span>
+                        <span class="project-detail-value">${this.escapeHtml(project.path)}</span>
+                    </div>
+                    <div class="project-detail-field">
+                        <span class="project-detail-label">Type</span>
+                        <span class="project-detail-value"><span class="badge badge-${project.type}">${project.type}</span></span>
+                    </div>
+                </div>
+        `;
+
+        if (project.type === 'remote') {
+            html += `
+                <div class="project-detail-section">
+                    <div class="project-detail-section-title">SSH</div>
+                    <div class="project-detail-field">
+                        <span class="project-detail-label">Host</span>
+                        <span class="project-detail-value">${this.escapeHtml(project.ssh_host?.String || '—')}</span>
+                    </div>
+                    <div class="project-detail-field">
+                        <span class="project-detail-label">Port</span>
+                        <span class="project-detail-value">${project.ssh_port?.Int64 || 22}</span>
+                    </div>
+                    <div class="project-detail-field">
+                        <span class="project-detail-label">User</span>
+                        <span class="project-detail-value">${this.escapeHtml(project.ssh_user?.String || '—')}</span>
+                    </div>
+                    <div class="project-detail-field">
+                        <span class="project-detail-label">Auth Type</span>
+                        <span class="project-detail-value">${this.escapeHtml(project.ssh_auth_type?.String || '—')}</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        html += `
+                <div class="project-detail-section">
+                    <div class="project-detail-section-title">Status</div>
+                    <div class="project-detail-field">
+                        <span class="project-detail-label">Config Sync</span>
+                        <span class="project-detail-value">${syncDate}</span>
+                    </div>
+                    <div class="project-detail-field">
+                        <span class="project-detail-label">Created</span>
+                        <span class="project-detail-value">${createdDate}</span>
+                    </div>
+                    <div class="project-detail-field">
+                        <span class="project-detail-label">Updated</span>
+                        <span class="project-detail-value">${updatedDate}</span>
+                    </div>
+                </div>
+
+            </div>
+        `;
+
+        container.innerHTML = html;
+
+        // Render actions in the fixed bottom bar
+        const actionsBar = document.getElementById('project-detail-actions');
+        if (actionsBar) {
+            actionsBar.innerHTML = `
+                <button class="btn btn-primary btn-sm" onclick="app.startSession(${project.id})">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                    </svg>
+                    Start Session
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="app.editProject(${project.id})">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                    </svg>
+                    Edit
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="app.syncProjectConfig(${project.id})">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="23 4 23 10 17 10"></polyline>
+                        <polyline points="1 20 1 14 7 14"></polyline>
+                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                    </svg>
+                    Sync Config
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="app.duplicateProject(${project.id})">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                    Duplicate
+                </button>
+                <button class="btn btn-danger btn-sm" onclick="app.deleteProject(${project.id})">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="3 6 5 6 21 6"></polyline>
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                    </svg>
+                    Delete
+                </button>
+            `;
+        }
+        if (this.currentView !== 'project-detail') {
+            this.showView('project-detail');
+        }
+    }
+
+    duplicateProject(projectId) {
+        const project = this.projects.find(p => p.id === projectId) || this._detailProject;
+        if (!project) return;
+
+        const defaultName = project.name + ' (Copy)';
+
+        let content = `
+            <form id="duplicate-project-form">
+                <div class="form-group">
+                    <label class="form-label">Name</label>
+                    <input type="text" class="form-input" name="name" value="${this.escapeHtml(defaultName)}" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Path</label>
+                    <input type="text" class="form-input" name="path" value="${this.escapeHtml(project.path)}" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Type</label>
+                    <select class="form-select" name="type" onchange="app.toggleSSHFields(this.value)">
+                        <option value="local" ${project.type === 'local' ? 'selected' : ''}>Local</option>
+                        <option value="remote" ${project.type === 'remote' ? 'selected' : ''}>Remote (SSH)</option>
+                    </select>
+                </div>
+                <div id="ssh-fields" class="${project.type !== 'remote' ? 'hidden' : ''}">
+                    <div class="form-group">
+                        <label class="form-label">SSH Host</label>
+                        <input type="text" class="form-input" name="ssh_host" value="${this.escapeHtml(project.ssh_host?.String || '')}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">SSH Port</label>
+                        <input type="number" class="form-input" name="ssh_port" value="${project.ssh_port?.Int64 || 22}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">SSH User</label>
+                        <input type="text" class="form-input" name="ssh_user" value="${this.escapeHtml(project.ssh_user?.String || '')}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Auth Type</label>
+                        <select class="form-select" name="ssh_auth_type">
+                            <option value="password" ${project.ssh_auth_type?.String === 'password' ? 'selected' : ''}>Password</option>
+                            <option value="key" ${project.ssh_auth_type?.String === 'key' ? 'selected' : ''}>Private Key</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Credential (Password or Key)</label>
+                        <textarea class="form-textarea" name="ssh_credential" placeholder="Leave empty to keep the same credential from the original project"></textarea>
+                    </div>
+                </div>
+            </form>
+        `;
+
+        const actions = `
+            <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="app.executeDuplicate(${project.id})">Duplicate</button>
+        `;
+
+        this.showModal('Duplicate Project', content, actions);
+    }
+
+    async executeDuplicate(projectId) {
+        const form = document.getElementById('duplicate-project-form');
+        const formData = new FormData(form);
+        const data = {
+            name: formData.get('name'),
+            path: formData.get('path'),
+            type: formData.get('type'),
+            ssh_host: formData.get('ssh_host') || '',
+            ssh_port: parseInt(formData.get('ssh_port')) || 0,
+            ssh_user: formData.get('ssh_user') || '',
+            ssh_auth_type: formData.get('ssh_auth_type') || '',
+            ssh_credential: formData.get('ssh_credential') || ''
+        };
+
+        try {
+            await this.api('POST', `/projects/${projectId}/duplicate`, data);
+            this.hideModal();
+            this.showToast('Success', 'Project duplicated', 'success');
+            this.loadProjects();
+            this.showView('projects');
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
     }
 
     // Sessions
@@ -1915,7 +2142,7 @@ class DevManager {
     }
 
     showProjectModal(project = null) {
-        const isEdit = !!project;
+        const isEdit = project && project.id;
         const content = `
             <form id="project-form">
                 <div class="form-group">
@@ -2009,7 +2236,12 @@ class DevManager {
             await this.api('DELETE', `/projects/${projectId}`);
             this.hideModal();
             this.showToast('Success', 'Project deleted', 'success');
-            this.loadProjects();
+            if (this.currentView === 'project-detail') {
+                this._detailProject = null;
+                this.showView('projects');
+            } else {
+                this.loadProjects();
+            }
         } catch (error) {
             this.showToast('Error', error.message, 'error');
         }
@@ -2078,6 +2310,11 @@ class DevManager {
             } catch (error) {
                 this.showToast('Error', error.message, 'error');
             }
+        });
+
+        // Project detail back button
+        document.getElementById('btn-back-projects')?.addEventListener('click', () => {
+            this.showView('projects');
         });
 
         // Terminal back button

@@ -268,6 +268,7 @@ func main() {
 		r.Get("/projects/{id}", api.GetProject)
 		r.Put("/projects/{id}", api.UpdateProject)
 		r.Delete("/projects/{id}", api.DeleteProject)
+		r.Post("/projects/{id}/duplicate", api.DuplicateProject)
 		r.Post("/projects/{id}/validate", api.ValidateProject)
 		r.Post("/projects/{id}/sync-config", api.SyncProjectConfig)
 		r.Get("/projects/{id}/files", fileHandler.ListProjectFiles)
