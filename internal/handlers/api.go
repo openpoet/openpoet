@@ -181,6 +181,81 @@ func (a *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, project)
 }
 
+func (a *API) DuplicateProject(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	original, err := a.db.GetProject(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	// Decode optional overrides from request body
+	var overrides database.ProjectInput
+	if r.Body != nil {
+		json.NewDecoder(r.Body).Decode(&overrides)
+	}
+
+	newName := original.Name + " (Copy)"
+	if overrides.Name != "" {
+		newName = overrides.Name
+	}
+
+	clone := &database.Project{
+		Name:                   newName,
+		Path:                   original.Path,
+		Type:                   original.Type,
+		SSHHost:                original.SSHHost,
+		SSHPort:                original.SSHPort,
+		SSHUser:                original.SSHUser,
+		SSHAuthType:            original.SSHAuthType,
+		SSHCredentialEncrypted: original.SSHCredentialEncrypted,
+		SSHCredentialIV:        original.SSHCredentialIV,
+	}
+
+	// Apply overrides
+	if overrides.Path != "" {
+		clone.Path = overrides.Path
+	}
+	if overrides.Type != "" {
+		clone.Type = overrides.Type
+	}
+	if overrides.SSHHost != "" {
+		clone.SSHHost = sql.NullString{String: overrides.SSHHost, Valid: true}
+	}
+	if overrides.SSHPort > 0 {
+		clone.SSHPort = sql.NullInt64{Int64: int64(overrides.SSHPort), Valid: true}
+	}
+	if overrides.SSHUser != "" {
+		clone.SSHUser = sql.NullString{String: overrides.SSHUser, Valid: true}
+	}
+	if overrides.SSHAuthType != "" {
+		clone.SSHAuthType = sql.NullString{String: overrides.SSHAuthType, Valid: true}
+	}
+	// If a new credential is provided, encrypt it; otherwise keep the original
+	if overrides.SSHCredential != "" {
+		encrypted, iv, err := a.encryptor.Encrypt(overrides.SSHCredential)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to encrypt credentials")
+			return
+		}
+		clone.SSHCredentialEncrypted = sql.NullString{String: encrypted, Valid: true}
+		clone.SSHCredentialIV = sql.NullString{String: iv, Valid: true}
+	}
+
+	if err := a.db.CreateProject(r.Context(), clone); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("project", map[string]interface{}{"action": "created", "project": clone})
+	respondJSON(w, http.StatusCreated, clone)
+}
+
 func (a *API) DeleteProject(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
