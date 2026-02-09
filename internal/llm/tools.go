@@ -5,13 +5,13 @@ func ChatTools() []ToolDefinition {
 	return []ToolDefinition{
 		{
 			Name:        "create_skill",
-			Description: "Create a new skill in DevManager. Skills are markdown instructions synced to projects for Claude Code to follow.",
+			Description: "Create a new skill in DevManager. Skills are markdown instructions synced to projects as .claude/skills/<name>/SKILL.md for Claude Code to follow.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
-					"name":     {Type: "string", Description: "Unique name for the skill"},
-					"content":  {Type: "string", Description: "Markdown content of the skill"},
-					"category": {Type: "string", Description: "Category label (e.g. coding, testing, deployment)"},
+					"name":     {Type: "string", Description: "Unique name. MUST be lowercase with hyphens, no spaces (e.g. 'python-best-practices'). Max 64 chars."},
+					"content":  {Type: "string", Description: "Markdown content with instructions. Do NOT include YAML frontmatter (---) — it is auto-generated."},
+					"category": {Type: "string", Description: "Category label (e.g. coding, testing, deployment, documentation, workflow)"},
 				},
 				Required: []string{"name", "content"},
 			},

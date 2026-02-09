@@ -5,17 +5,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
 
 // ClaudeCLIProvider spawns the Claude CLI as a subprocess.
 // It inherits OAuth auth from the keychain (Max plan, zero config).
-type ClaudeCLIProvider struct{}
+type ClaudeCLIProvider struct {
+	apiURL string // DevManager API URL for MCP server
+}
 
 // NewClaudeCLIProvider creates a provider that uses the Claude CLI.
-func NewClaudeCLIProvider() *ClaudeCLIProvider {
-	return &ClaudeCLIProvider{}
+// apiURL is the DevManager HTTP API URL used by the MCP server subprocess.
+func NewClaudeCLIProvider(apiURL string) *ClaudeCLIProvider {
+	return &ClaudeCLIProvider{apiURL: apiURL}
 }
 
 func (p *ClaudeCLIProvider) Name() string { return "claudecode" }
@@ -42,26 +46,57 @@ type claudeCLIMessage struct {
 }
 
 func (p *ClaudeCLIProvider) StreamMessage(ctx context.Context, req *Request, callback StreamCallback) (*Response, error) {
-	// Build the prompt from the last user message
-	var prompt string
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == "user" {
-			prompt = req.Messages[i].TextContent()
-			break
-		}
+	// Build prompt with full conversation history so the model has context.
+	// Claude CLI --print is stateless (single-turn), so we serialize all
+	// previous messages into the prompt to preserve conversational context.
+	var promptBuilder strings.Builder
+
+	if req.System != "" {
+		promptBuilder.WriteString(req.System)
+		promptBuilder.WriteString("\n\n---\n\n")
 	}
-	if prompt == "" {
+
+	if len(req.Messages) > 1 {
+		promptBuilder.WriteString("## Conversation History\n\n")
+		for _, msg := range req.Messages[:len(req.Messages)-1] {
+			text := msg.TextContent()
+			if text == "" {
+				continue
+			}
+			if msg.Role == "user" {
+				promptBuilder.WriteString("**User**: ")
+			} else {
+				promptBuilder.WriteString("**Assistant**: ")
+			}
+			promptBuilder.WriteString(text)
+			promptBuilder.WriteString("\n\n")
+		}
+		promptBuilder.WriteString("---\n\n")
+	}
+
+	// Append the latest user message
+	lastMsg := req.Messages[len(req.Messages)-1]
+	lastText := lastMsg.TextContent()
+	if lastText == "" {
 		return nil, fmt.Errorf("no user message found")
 	}
+	promptBuilder.WriteString("**User**: ")
+	promptBuilder.WriteString(lastText)
 
-	// Prepend system prompt as context if provided
-	if req.System != "" {
-		prompt = req.System + "\n\n---\n\n" + prompt
+	prompt := promptBuilder.String()
+
+	// Build MCP config JSON that tells Claude CLI to launch our MCP server subprocess.
+	// The MCP server calls back into the DevManager HTTP API for tool execution.
+	execPath, _ := os.Executable()
+	mcpConfig := fmt.Sprintf(`{"mcpServers":{"devmanager":{"command":"%s","args":["mcp-serve"],"env":{"DEVMANAGER_API_URL":"%s"}}}}`, execPath, p.apiURL)
+
+	args := []string{
+		"--print", "--verbose", "--output-format", "stream-json",
+		"--tools", "",                          // disable built-in tools (Bash, Edit, etc.)
+		"--strict-mcp-config",                  // only use MCP servers from --mcp-config
+		"--mcp-config", mcpConfig,              // inject DevManager MCP server
+		"--allowedTools", "mcp__devmanager__*", // auto-approve all devmanager MCP tools
 	}
-
-	// --tools "" disables all built-in tools, --strict-mcp-config with no config disables MCP tools.
-	// This ensures the CLI only generates text responses — tool execution is handled by DevManager.
-	args := []string{"--print", "--verbose", "--output-format", "stream-json", "--tools", "", "--strict-mcp-config"}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}

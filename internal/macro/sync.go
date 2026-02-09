@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -161,6 +162,7 @@ func (cs *ConfigSyncer) syncToRemote(ctx context.Context, project *database.Proj
 }
 
 // syncSkillsToLocal syncs skills to a local project, tracking which files DevManager manages.
+// Skills are written as .claude/skills/<name>/SKILL.md with YAML frontmatter.
 func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string, projectPath string) error {
 	// Get project ID from path
 	var projectID int64
@@ -177,35 +179,58 @@ func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string,
 		return fmt.Errorf("failed to list skills: %w", err)
 	}
 
-	// Build set of expected file names
-	expectedFiles := make(map[string]int64) // fileName -> skillID
+	// Build set of expected directory names (new format: <name>/SKILL.md)
+	expectedDirs := make(map[string]int64) // dirName -> skillID
 	for _, skill := range skills {
-		expectedFiles[skill.Name+".md"] = skill.ID
+		expectedDirs[skill.Name] = skill.ID
 	}
 
-	// Get previously synced files for this project
+	// Get previously synced files for this project and clean up stale ones
 	if projectID > 0 {
 		syncedFiles, _ := cs.db.ListSyncedSkillFiles(ctx, projectID)
 		for _, sf := range syncedFiles {
-			if _, stillNeeded := expectedFiles[sf.FileName]; !stillNeeded {
-				// This file was managed by DevManager but skill is now deleted/disabled/renamed
+			// Extract dir name from tracked file (could be old "name.md" or new "name/SKILL.md")
+			dirName := sf.FileName
+			if strings.HasSuffix(dirName, ".md") && !strings.Contains(dirName, "/") {
+				// Old flat format: "name.md" -> remove flat file
+				dirName = strings.TrimSuffix(dirName, ".md")
 				oldPath := filepath.Join(skillsDir, sf.FileName)
-				os.Remove(oldPath) // Best effort removal
+				os.Remove(oldPath)
+			}
+			if strings.HasSuffix(dirName, "/SKILL.md") {
+				dirName = strings.TrimSuffix(dirName, "/SKILL.md")
+			}
+
+			if _, stillNeeded := expectedDirs[dirName]; !stillNeeded {
+				// Skill deleted/disabled/renamed — remove directory
+				dirPath := filepath.Join(skillsDir, dirName)
+				os.RemoveAll(dirPath)
 				cs.db.DeleteSyncedSkillFile(ctx, sf.ID)
 			}
 		}
 	}
 
-	// Write enabled skills
+	// Write enabled skills as <name>/SKILL.md
 	for _, skill := range skills {
-		fileName := skill.Name + ".md"
-		skillPath := filepath.Join(skillsDir, fileName)
-		if err := os.WriteFile(skillPath, []byte(skill.Content), 0644); err != nil {
+		skillDirPath := filepath.Join(skillsDir, skill.Name)
+		if err := os.MkdirAll(skillDirPath, 0755); err != nil {
+			return fmt.Errorf("failed to create skill dir %s: %w", skill.Name, err)
+		}
+
+		content := buildSkillMD(skill.Name, skill.Content)
+		skillFilePath := filepath.Join(skillDirPath, "SKILL.md")
+		if err := os.WriteFile(skillFilePath, []byte(content), 0644); err != nil {
 			return fmt.Errorf("failed to write skill %s: %w", skill.Name, err)
 		}
-		// Track and increment sync count
+
+		// Also clean up legacy flat file if it exists
+		legacyPath := filepath.Join(skillsDir, skill.Name+".md")
+		os.Remove(legacyPath)
+
+		// Track with new format
+		trackedName := skill.Name + "/SKILL.md"
 		if projectID > 0 {
-			cs.db.UpsertSyncedSkillFile(ctx, projectID, skill.ID, fileName)
+			cs.db.UpsertSyncedSkillFile(ctx, projectID, skill.ID, trackedName)
 		}
 		cs.db.IncrementSkillSyncCount(ctx, skill.ID)
 	}
@@ -214,44 +239,101 @@ func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string,
 }
 
 // syncSkillsToRemote syncs skills to a remote project via SFTP, tracking which files DevManager manages.
+// Skills are written as .claude/skills/<name>/SKILL.md with YAML frontmatter.
 func (cs *ConfigSyncer) syncSkillsToRemote(ctx context.Context, sftpClient *sftp.Client, skillsDir string, project *database.Project) error {
 	skills, err := cs.db.ListEnabledSkills(ctx)
 	if err != nil {
 		return err
 	}
 
-	// Build set of expected file names
-	expectedFiles := make(map[string]int64)
+	// Build set of expected directory names
+	expectedDirs := make(map[string]int64)
 	for _, skill := range skills {
-		expectedFiles[skill.Name+".md"] = skill.ID
+		expectedDirs[skill.Name] = skill.ID
 	}
 
 	// Get previously synced files for this project and remove stale ones
 	syncedFiles, _ := cs.db.ListSyncedSkillFiles(ctx, project.ID)
 	for _, sf := range syncedFiles {
-		if _, stillNeeded := expectedFiles[sf.FileName]; !stillNeeded {
-			oldPath := filepath.Join(skillsDir, sf.FileName)
-			sftpClient.Remove(oldPath) // Best effort
+		dirName := sf.FileName
+		if strings.HasSuffix(dirName, ".md") && !strings.Contains(dirName, "/") {
+			// Old flat format
+			dirName = strings.TrimSuffix(dirName, ".md")
+			sftpClient.Remove(filepath.Join(skillsDir, sf.FileName))
+		}
+		if strings.HasSuffix(dirName, "/SKILL.md") {
+			dirName = strings.TrimSuffix(dirName, "/SKILL.md")
+		}
+
+		if _, stillNeeded := expectedDirs[dirName]; !stillNeeded {
+			dirPath := filepath.Join(skillsDir, dirName)
+			// Remove SKILL.md then directory
+			sftpClient.Remove(filepath.Join(dirPath, "SKILL.md"))
+			sftpClient.RemoveDirectory(dirPath)
 			cs.db.DeleteSyncedSkillFile(ctx, sf.ID)
 		}
 	}
 
-	// Write enabled skills
+	// Write enabled skills as <name>/SKILL.md
 	for _, skill := range skills {
-		fileName := skill.Name + ".md"
-		skillPath := filepath.Join(skillsDir, fileName)
-		f, err := sftpClient.Create(skillPath)
+		skillDirPath := filepath.Join(skillsDir, skill.Name)
+		sftpClient.MkdirAll(skillDirPath)
+
+		content := buildSkillMD(skill.Name, skill.Content)
+		skillFilePath := filepath.Join(skillDirPath, "SKILL.md")
+		f, err := sftpClient.Create(skillFilePath)
 		if err != nil {
 			return fmt.Errorf("failed to create skill file: %w", err)
 		}
-		f.Write([]byte(skill.Content))
+		f.Write([]byte(content))
 		f.Close()
 
-		cs.db.UpsertSyncedSkillFile(ctx, project.ID, skill.ID, fileName)
+		// Clean up legacy flat file
+		sftpClient.Remove(filepath.Join(skillsDir, skill.Name+".md"))
+
+		trackedName := skill.Name + "/SKILL.md"
+		cs.db.UpsertSyncedSkillFile(ctx, project.ID, skill.ID, trackedName)
 		cs.db.IncrementSkillSyncCount(ctx, skill.ID)
 	}
 
 	return nil
+}
+
+// buildSkillMD generates a SKILL.md with YAML frontmatter from DB fields.
+// If the content already has frontmatter (starts with ---), it is used as-is.
+func buildSkillMD(name string, content string) string {
+	trimmed := strings.TrimSpace(content)
+	if strings.HasPrefix(trimmed, "---") {
+		// Content already has frontmatter — use as-is
+		return trimmed + "\n"
+	}
+
+	// Extract description from first markdown heading or first line
+	description := "DevManager managed skill: " + name
+	for _, line := range strings.Split(trimmed, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "# ") {
+			description = strings.TrimPrefix(line, "# ")
+			break
+		}
+		if line != "" && !strings.HasPrefix(line, "#") {
+			description = line
+			if len(description) > 120 {
+				description = description[:120]
+			}
+			break
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("---\n")
+	sb.WriteString("name: " + name + "\n")
+	sb.WriteString("description: " + description + "\n")
+	sb.WriteString("user-invocable: false\n")
+	sb.WriteString("---\n\n")
+	sb.WriteString(trimmed)
+	sb.WriteString("\n")
+	return sb.String()
 }
 
 func (cs *ConfigSyncer) buildMCPConfig(servers []database.MCPServer) map[string]interface{} {
