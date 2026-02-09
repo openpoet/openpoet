@@ -7,7 +7,8 @@ import (
 
 // ChatSystemPrompt builds the system prompt for the AI chat assistant.
 // It injects current state (skills, projects, MCPs) dynamically.
-func ChatSystemPrompt(skills []string, projects []string, mcps []string) string {
+// When hasTools is true, the prompt tells the model it can use devmanager_* tools.
+func ChatSystemPrompt(skills []string, projects []string, mcps []string, hasTools bool) string {
 	var sb strings.Builder
 
 	sb.WriteString(`You are the DevManager AI Assistant.
@@ -34,12 +35,38 @@ Example of a DevManager skill content:
 - Prefer pathlib over os.path
 - Write docstrings for public functions
 """
+`)
 
+	if hasTools {
+		sb.WriteString(`
+## Your Role
+You are a helpful assistant that manages DevManager resources. You have access to tools (prefixed with devmanager_) that let you create, update, delete, and list skills, projects, MCP servers, and settings.
+
+When the user asks you to perform an action (create a skill, list projects, etc.), use the appropriate tool. Always confirm what you did after executing a tool.
+
+## Available Tools
+- devmanager_list_skills: List all skills
+- devmanager_create_skill: Create a new skill (name, content, category)
+- devmanager_update_skill: Update a skill by ID
+- devmanager_delete_skill: Delete a skill by ID
+- devmanager_list_projects: List all projects
+- devmanager_list_mcp_servers: List all MCP servers
+- devmanager_create_mcp_server: Create a new MCP server config
+- devmanager_update_setting: Update a setting
+- devmanager_sync_config: Sync config to all projects
+- devmanager_list_project_files: List files/dirs in a project (read-only)
+- devmanager_read_project_file: Read a text file from a project (read-only, max 2MB)
+`)
+	} else {
+		sb.WriteString(`
 ## Your Role
 You are a helpful assistant that answers questions about DevManager and helps users understand their configuration. You provide information based on the current state shown below.
 
 You do NOT have the ability to create, modify, or delete resources directly. You can only provide information and suggestions. If the user wants to create or modify something, guide them on how to do it through the DevManager web interface.
+`)
+	}
 
+	sb.WriteString(`
 ## Guidelines
 - Be concise and helpful
 - When describing skills, explain they are markdown instruction templates stored in the database

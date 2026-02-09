@@ -22,6 +22,7 @@ import (
 	"devmanager/internal/handlers"
 	"devmanager/internal/llm"
 	"devmanager/internal/macro"
+	"devmanager/internal/mcp"
 	"devmanager/internal/notifications"
 	"devmanager/internal/security"
 	"devmanager/internal/session"
@@ -64,6 +65,16 @@ func (dw *debugResponseWriter) Write(b []byte) (int, error) {
 }
 
 func main() {
+	// Handle mcp-serve subcommand before flag parsing
+	if len(os.Args) > 1 && os.Args[1] == "mcp-serve" {
+		apiURL := os.Getenv("DEVMANAGER_API_URL")
+		if apiURL == "" {
+			apiURL = "http://localhost:8080"
+		}
+		mcp.Serve(apiURL)
+		return
+	}
+
 	// Parse command line flags
 	bind := flag.String("bind", "", "Address to bind (default: 0.0.0.0)")
 	port := flag.Int("port", 0, "Port to listen on (default: 8080)")
@@ -188,7 +199,7 @@ func main() {
 	wsHandler := handlers.NewWebSocketHandler(hub, api, webpush)
 
 	// Initialize AI provider
-	aiProvider := initAIProvider(db)
+	aiProvider := initAIProvider(db, fmt.Sprintf("http://localhost:%d", cfg.Port))
 	aiHandler := handlers.NewAIHandler(api, aiProvider)
 
 	// Set up router
@@ -259,6 +270,8 @@ func main() {
 		r.Delete("/projects/{id}", api.DeleteProject)
 		r.Post("/projects/{id}/validate", api.ValidateProject)
 		r.Post("/projects/{id}/sync-config", api.SyncProjectConfig)
+		r.Get("/projects/{id}/files", fileHandler.ListProjectFiles)
+		r.Get("/projects/{id}/files/view/*", fileHandler.ViewProjectFile)
 
 		// Sessions
 		r.Get("/sessions", api.ListSessions)
@@ -499,7 +512,7 @@ func serveMigrationError(cfg *config.Config) {
 }
 
 // initAIProvider creates the appropriate LLM provider based on settings.
-func initAIProvider(db *database.DB) llm.Provider {
+func initAIProvider(db *database.DB, apiURL string) llm.Provider {
 	ctx := context.Background()
 
 	// Check provider setting
@@ -517,8 +530,8 @@ func initAIProvider(db *database.DB) llm.Provider {
 
 	case "claudecode":
 		if llm.IsClaudeCLIAvailable() {
-			log.Printf("[AI] Using Claude Code CLI provider")
-			return llm.NewClaudeCLIProvider()
+			log.Printf("[AI] Using Claude Code CLI provider (MCP tools via %s)", apiURL)
+			return llm.NewClaudeCLIProvider(apiURL)
 		}
 		log.Printf("[AI] Provider set to claudecode but CLI not available")
 		return nil
@@ -526,8 +539,8 @@ func initAIProvider(db *database.DB) llm.Provider {
 	default:
 		// Auto-detect: try Claude CLI first, then API key
 		if llm.IsClaudeCLIAvailable() {
-			log.Printf("[AI] Auto-detected Claude Code CLI provider")
-			return llm.NewClaudeCLIProvider()
+			log.Printf("[AI] Auto-detected Claude Code CLI provider (MCP tools via %s)", apiURL)
+			return llm.NewClaudeCLIProvider(apiURL)
 		}
 		apiKey, _ := db.GetSetting(ctx, "anthropic_api_key")
 		if apiKey != "" {
