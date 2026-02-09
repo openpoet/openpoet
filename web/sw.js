@@ -144,15 +144,11 @@ self.addEventListener('push', (event) => {
     const options = {
         body: data.body,
         icon: '/static/icon-192.png',
-        badge: '/static/icon-192.png',
+        badge: '/static/badge-96.png',
         vibrate: [100, 50, 100],
         data: data.data || {},
         tag: (data.data && data.data.session_id) ? `session-${data.data.session_id}` : undefined,
-        renotify: !!(data.data && data.data.session_id),
-        actions: [
-            { action: 'open', title: 'Open' },
-            { action: 'dismiss', title: 'Dismiss' }
-        ]
+        renotify: !!(data.data && data.data.session_id)
     };
 
     event.waitUntil(
