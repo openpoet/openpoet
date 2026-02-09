@@ -93,6 +93,42 @@ class VoiceInput {
         }
     }
 
+    autoStopRecording() {
+        if (!this.mediaRecorder || !this.isRecording) return;
+        // Stop and transcribe (not cancel/discard)
+        this.stopRecording(false);
+        // Audible beep notification
+        this.playStopBeep();
+        // Vibrate on mobile if supported
+        if (navigator.vibrate) {
+            navigator.vibrate([200, 100, 200]);
+        }
+        // Visual toast
+        app.showToast('Info', 'Recording auto-stopped: 60s limit reached. Transcribing...', 'info');
+    }
+
+    playStopBeep() {
+        try {
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            // Two short beeps
+            [0, 0.2].forEach(offset => {
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.frequency.value = 880;
+                osc.type = 'sine';
+                gain.gain.value = 0.3;
+                osc.start(ctx.currentTime + offset);
+                osc.stop(ctx.currentTime + offset + 0.15);
+            });
+            // Close context after beeps finish
+            setTimeout(() => ctx.close(), 1000);
+        } catch (e) {
+            // Ignore audio errors (e.g. no audio context support)
+        }
+    }
+
     cancelRecording(isTimeout = false) {
         if (this.mediaRecorder && this.isRecording) {
             this.clearTimers();
@@ -116,7 +152,7 @@ class VoiceInput {
             this.recordingSeconds++;
             this.updateTimerDisplay();
         }, 1000);
-        this.timeoutTimer = setTimeout(() => this.cancelRecording(true), 60000);
+        this.timeoutTimer = setTimeout(() => this.autoStopRecording(), 60000);
     }
 
     clearTimers() {

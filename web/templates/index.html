@@ -10,8 +10,8 @@
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
-    <link rel="stylesheet" href="/static/css/app.css?v=13">
-    <link rel="stylesheet" href="/static/css/mobile.css?v=14">
+    <link rel="stylesheet" href="/static/css/app.css?v=14">
+    <link rel="stylesheet" href="/static/css/mobile.css?v=15">
 </head>
 <body>
     <div id="app">
@@ -91,6 +91,28 @@
                 </header>
                 <div id="projects-list" class="card-grid">
                     <!-- Projects will be rendered here -->
+                </div>
+            </section>
+
+            <!-- Project Detail View -->
+            <section id="view-project-detail" class="view">
+                <header class="view-header">
+                    <div class="view-header-left">
+                        <button id="btn-back-projects" class="btn-icon" title="Back to projects">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="19" y1="12" x2="5" y2="12"></line>
+                                <polyline points="12 19 5 12 12 5"></polyline>
+                            </svg>
+                        </button>
+                        <h2 id="project-detail-title">Project</h2>
+                        <span id="project-detail-badge" class="badge"></span>
+                    </div>
+                </header>
+                <div id="project-detail-content" class="project-detail-content">
+                    <!-- Project detail will be rendered here -->
+                </div>
+                <div id="project-detail-actions" class="project-detail-actions-bar">
+                    <!-- Action buttons rendered by JS -->
                 </div>
             </section>
 
@@ -930,7 +952,7 @@
     <script src="/static/vendor/xterm.js"></script>
     <script src="/static/vendor/xterm-addon-fit.js"></script>
     <script src="/static/vendor/xterm-addon-web-links.js"></script>
-    <script src="/static/js/app.js?v=11"></script>
+    <script src="/static/js/app.js?v=12"></script>
     <script src="/static/js/terminal.js?v=6"></script>
     <script src="/static/js/hooks.js?v=8"></script>
     <script src="/static/js/voice.js?v=10"></script>

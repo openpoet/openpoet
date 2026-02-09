@@ -83,6 +83,45 @@
         width: 100%;
     }
 
+    /* Project Detail - mobile */
+    #view-project-detail {
+        padding-bottom: 0;
+    }
+
+    .project-detail-content {
+        padding: 12px;
+    }
+
+    .project-detail-card {
+        padding: 12px;
+    }
+
+    .project-detail-section {
+        margin-bottom: 12px;
+    }
+
+    .project-detail-section-title {
+        margin-bottom: 6px;
+        padding-bottom: 4px;
+    }
+
+    .project-detail-field {
+        padding: 5px 0;
+    }
+
+    .project-detail-actions-bar {
+        padding: 10px 12px;
+        flex-direction: row;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 6px;
+    }
+
+    .project-detail-actions-bar .btn {
+        font-size: 12px;
+        padding: 7px 10px;
+    }
+
     /* Card Grid */
     .card-grid {
         grid-template-columns: 1fr;
