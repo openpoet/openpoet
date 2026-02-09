@@ -594,7 +594,7 @@ func (h *AIHandler) buildSystemPrompt(ctx context.Context) string {
 		mcpNames = append(mcpNames, fmt.Sprintf("[%d] %s", m.ID, m.Name))
 	}
 
-	return llm.ChatSystemPrompt(skillNames, projectNames, mcpNames)
+	return llm.ChatSystemPrompt(skillNames, projectNames, mcpNames, true)
 }
 
 // HandleListConversations lists all conversations.

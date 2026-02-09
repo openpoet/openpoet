@@ -352,6 +352,144 @@ func (h *FileHandler) ViewFile(w http.ResponseWriter, r *http.Request) {
 }
 
 
+// ListProjectFiles lists files in a project directory (read-only, no session required).
+func (h *FileHandler) ListProjectFiles(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(chi.URLParam(r, "id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+	path := r.URL.Query().Get("path")
+
+	project, err := h.api.db.GetProject(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	var fileList []files.FileInfo
+	if project.Type == "local" {
+		fm := files.NewLocalFileManager(project.Path)
+		fileList, err = fm.List(path)
+	} else {
+		fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
+		fileList, err = fm.List(path)
+	}
+
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, fileList)
+}
+
+// ViewProjectFile reads a file from a project (read-only, no session required, 2MB limit, text only).
+func (h *FileHandler) ViewProjectFile(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(chi.URLParam(r, "id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+	filePath := chi.URLParam(r, "*")
+
+	project, err := h.api.db.GetProject(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	const maxSize int64 = 2 * 1024 * 1024 // 2MB limit
+
+	if project.Type == "local" {
+		fm := files.NewLocalFileManager(project.Path)
+		reader, fileInfo, err := fm.ReadStream(filePath)
+		if err != nil {
+			respondError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		defer reader.Close()
+
+		if fileInfo.Size > maxSize {
+			respondError(w, http.StatusRequestEntityTooLarge, "File too large to view (max 2MB)")
+			return
+		}
+
+		content, err := io.ReadAll(io.LimitReader(reader, maxSize+1))
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to read file")
+			return
+		}
+
+		checkLen := len(content)
+		if checkLen > 512 {
+			checkLen = 512
+		}
+		for i := 0; i < checkLen; i++ {
+			if content[i] == 0 {
+				respondError(w, http.StatusUnsupportedMediaType, "Binary file cannot be viewed")
+				return
+			}
+		}
+
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"name":      fileInfo.Name,
+			"path":      fileInfo.Path,
+			"size":      fileInfo.Size,
+			"mime_type": fm.GetMimeType(filePath),
+			"content":   string(content),
+			"mod_time":  fileInfo.ModTime,
+		})
+	} else {
+		fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
+		file, fileInfo, sshClient, sftpClient, err := fm.ReadStream(filePath)
+		if err != nil {
+			respondError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		defer file.Close()
+		defer sftpClient.Close()
+		defer sshClient.Close()
+
+		if fileInfo.Size > maxSize {
+			respondError(w, http.StatusRequestEntityTooLarge, "File too large to view (max 2MB)")
+			return
+		}
+
+		content, err := io.ReadAll(io.LimitReader(file, maxSize+1))
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to read file")
+			return
+		}
+
+		checkLen := len(content)
+		if checkLen > 512 {
+			checkLen = 512
+		}
+		for i := 0; i < checkLen; i++ {
+			if content[i] == 0 {
+				respondError(w, http.StatusUnsupportedMediaType, "Binary file cannot be viewed")
+				return
+			}
+		}
+
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"name":      fileInfo.Name,
+			"path":      fileInfo.Path,
+			"size":      fileInfo.Size,
+			"mime_type": fm.GetMimeType(filePath),
+			"content":   string(content),
+			"mod_time":  fileInfo.ModTime,
+		})
+	}
+}
+
+func parseID(s string) (int64, error) {
+	var id int64
+	_, err := fmt.Sscanf(s, "%d", &id)
+	return id, err
+}
+
 // Simple base64 decoder
 func decodeBase64(src string, dst []byte) (int, error) {
 	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
