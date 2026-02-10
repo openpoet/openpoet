@@ -20,6 +20,7 @@ type RemoteRunner struct {
 	envVars       map[string]string
 	outputHandler func([]byte)
 	decryptFunc   func(string, string) (string, error)
+	cliArgs       []string
 
 	mu              sync.Mutex
 	client          *ssh.Client
@@ -36,12 +37,14 @@ func NewRemoteRunner(
 	envVars map[string]string,
 	outputHandler func([]byte),
 	decryptFunc func(string, string) (string, error),
+	cliArgs []string,
 ) (*RemoteRunner, error) {
 	return &RemoteRunner{
 		project:       project,
 		envVars:       envVars,
 		outputHandler: outputHandler,
 		decryptFunc:   decryptFunc,
+		cliArgs:       cliArgs,
 		done:          make(chan struct{}),
 	}, nil
 }
@@ -124,6 +127,9 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 		cmd += fmt.Sprintf("export %s=%s && ", k, v)
 	}
 	cmd += fmt.Sprintf("cd %s && claude", r.project.Path)
+	for _, arg := range r.cliArgs {
+		cmd += " " + shellQuote(arg)
+	}
 	log.Printf("[remote] Starting command: %s", cmd)
 
 	// Start command
@@ -405,9 +411,15 @@ func ValidateConnection(project *database.Project, decryptFunc func(string, stri
 	return nil
 }
 
+// shellQuote wraps a string in single quotes for safe use in shell commands.
+// Internal single quotes are escaped using the '\'' idiom.
+func shellQuote(s string) string {
+	return "'" + strings.Replace(s, "'", `'\''`, -1) + "'"
+}
+
 // Register factory on init
 func init() {
-	SetRemoteRunnerFactory(func(project *database.Project, envVars map[string]string, outputHandler func([]byte), decryptFunc func(string, string) (string, error)) (Runner, error) {
-		return NewRemoteRunner(project, envVars, outputHandler, decryptFunc)
+	SetRemoteRunnerFactory(func(project *database.Project, envVars map[string]string, outputHandler func([]byte), decryptFunc func(string, string) (string, error), cliArgs []string) (Runner, error) {
+		return NewRemoteRunner(project, envVars, outputHandler, decryptFunc, cliArgs)
 	})
 }

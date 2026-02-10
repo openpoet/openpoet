@@ -33,12 +33,14 @@ type ProjectInput struct {
 }
 
 type Session struct {
-	ID        string       `db:"id" json:"id"`
-	ProjectID int64        `db:"project_id" json:"project_id"`
-	Status    string       `db:"status" json:"status"` // 'starting', 'running', 'stopped', 'error', 'completed'
+	ID        string        `db:"id" json:"id"`
+	ProjectID int64         `db:"project_id" json:"project_id"`
+	Status    string        `db:"status" json:"status"` // 'starting', 'running', 'stopped', 'error', 'completed'
 	PID       sql.NullInt64 `db:"pid" json:"pid,omitempty"`
-	StartTime time.Time    `db:"start_time" json:"start_time"`
-	EndTime   sql.NullTime `db:"end_time" json:"end_time,omitempty"`
+	Name      string        `db:"name" json:"name"`
+	TaskID    sql.NullInt64 `db:"task_id" json:"task_id,omitempty"`
+	StartTime time.Time     `db:"start_time" json:"start_time"`
+	EndTime   sql.NullTime  `db:"end_time" json:"end_time,omitempty"`
 }
 
 type Macro struct {
@@ -116,10 +118,15 @@ type Notification struct {
 }
 
 type AIConversation struct {
-	ID        int64     `db:"id" json:"id"`
-	Title     string    `db:"title" json:"title"`
-	CreatedAt time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+	ID               int64     `db:"id" json:"id"`
+	Title            string    `db:"title" json:"title"`
+	Source           string    `db:"source" json:"source"`                      // 'user' or 'ai'
+	ProactiveLevel   string    `db:"proactive_level" json:"proactive_level"`    // 'critical', 'standard', 'subtle', or ''
+	ProactiveType    string    `db:"proactive_type" json:"proactive_type"`      // 'task_suggestion', 'meta_update', 'insight', 'alert', or ''
+	ProactiveContext string    `db:"proactive_context" json:"proactive_context"` // JSON context for system prompt
+	IsRead           bool      `db:"is_read" json:"is_read"`
+	CreatedAt        time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt        time.Time `db:"updated_at" json:"updated_at"`
 }
 
 type AIMessage struct {
@@ -129,4 +136,75 @@ type AIMessage struct {
 	Content        string    `db:"content" json:"content"`
 	ToolCalls      string    `db:"tool_calls" json:"tool_calls"` // JSON array
 	CreatedAt      time.Time `db:"created_at" json:"created_at"`
+}
+
+type TempDocument struct {
+	ID        string    `db:"id" json:"id"`
+	Title     string    `db:"title" json:"title"`
+	Content   string    `db:"content" json:"content"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
+}
+
+type ProjectTask struct {
+	ID          int64        `db:"id" json:"id"`
+	ProjectID   int64        `db:"project_id" json:"project_id"`
+	ParentID    sql.NullInt64 `db:"parent_id" json:"parent_id,omitempty"`
+	Title       string       `db:"title" json:"title"`
+	Description string       `db:"description" json:"description"`
+	Status      string       `db:"status" json:"status"`       // 'todo', 'in_progress', 'done', 'blocked'
+	Priority    string       `db:"priority" json:"priority"`   // 'low', 'medium', 'high', 'urgent'
+	DueDate     sql.NullTime `db:"due_date" json:"due_date,omitempty"`
+	SortOrder   int          `db:"sort_order" json:"sort_order"`
+	DueNotified bool         `db:"due_notified" json:"due_notified"`
+	CreatedAt   time.Time    `db:"created_at" json:"created_at"`
+	UpdatedAt   time.Time    `db:"updated_at" json:"updated_at"`
+}
+
+type SessionTask struct {
+	ID        int64     `db:"id" json:"id"`
+	SessionID string    `db:"session_id" json:"session_id"`
+	TaskID    int64     `db:"task_id" json:"task_id"`
+	Role      string    `db:"role" json:"role"` // 'works_on', 'created_from', 'registered_as'
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
+}
+
+type AISuggestion struct {
+	ID             int64         `db:"id" json:"id"`
+	SessionID      string        `db:"session_id" json:"session_id"`
+	ProjectID      int64         `db:"project_id" json:"project_id"`
+	Type           string        `db:"type" json:"type"` // 'link_task', 'create_task', 'update_task', 'complete_task'
+	Title          string        `db:"title" json:"title"`
+	Description    string        `db:"description" json:"description"`
+	ContextJSON    string        `db:"context_json" json:"context"`
+	Status         string        `db:"status" json:"status"` // 'pending', 'accepted', 'dismissed'
+	Level          string        `db:"level" json:"level"`   // 'critical', 'standard', 'subtle'
+	ConversationID sql.NullInt64 `db:"conversation_id" json:"conversation_id"`
+	CreatedAt      time.Time     `db:"created_at" json:"created_at"`
+}
+
+type TokenUsage struct {
+	ID                  int64          `db:"id" json:"id"`
+	Source              string         `db:"source" json:"source"`           // 'ai_assistant', 'claude_code'
+	Subcategory         string         `db:"subcategory" json:"subcategory"` // 'chat', 'skill_generate', 'skill_validate', 'meta_eval', 'session_eval'
+	ProjectID           sql.NullInt64  `db:"project_id" json:"project_id,omitempty"`
+	SessionID           sql.NullString `db:"session_id" json:"session_id,omitempty"`
+	ConversationID      sql.NullInt64  `db:"conversation_id" json:"conversation_id,omitempty"`
+	Model               string         `db:"model" json:"model"`
+	InputTokens         int            `db:"input_tokens" json:"input_tokens"`
+	OutputTokens        int            `db:"output_tokens" json:"output_tokens"`
+	CacheReadTokens     int            `db:"cache_read_tokens" json:"cache_read_tokens"`
+	CacheCreationTokens int            `db:"cache_creation_tokens" json:"cache_creation_tokens"`
+	CostUSD             float64        `db:"cost_usd" json:"cost_usd"`
+	CreatedAt           time.Time      `db:"created_at" json:"created_at"`
+}
+
+type ProjectMetaDocument struct {
+	ID            int64          `db:"id" json:"id"`
+	ProjectID     int64          `db:"project_id" json:"project_id"`
+	Content       string         `db:"content" json:"content"`
+	Version       int            `db:"version" json:"version"`
+	LastUpdatedBy string         `db:"last_updated_by" json:"last_updated_by"`
+	Summary       sql.NullString `db:"summary" json:"summary,omitempty"`
+	CreatedAt     time.Time      `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time      `db:"updated_at" json:"updated_at"`
 }

@@ -51,7 +51,7 @@ type anthropicMsg struct {
 func (p *AnthropicProvider) StreamMessage(ctx context.Context, req *Request, callback StreamCallback) (*Response, error) {
 	model := req.Model
 	if model == "" {
-		model = "claude-sonnet-4-5-20250929"
+		model = DefaultModel
 	}
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
@@ -145,8 +145,15 @@ func parseSSEStream(r io.Reader, callback StreamCallback) (*Response, error) {
 
 		switch eventType {
 		case "message_start":
-			if event.Message != nil && event.Message.Usage != nil {
-				result.Usage.InputTokens = event.Message.Usage.InputTokens
+			if event.Message != nil {
+				if event.Message.Model != "" {
+					result.Model = event.Message.Model
+				}
+				if event.Message.Usage != nil {
+					result.Usage.InputTokens = event.Message.Usage.InputTokens
+					result.Usage.CacheReadTokens = event.Message.Usage.CacheReadTokens
+					result.Usage.CacheCreationTokens = event.Message.Usage.CacheCreationTokens
+				}
 			}
 
 		case "content_block_start":
@@ -181,6 +188,9 @@ func parseSSEStream(r io.Reader, callback StreamCallback) (*Response, error) {
 		case "message_delta":
 			if event.Delta != nil {
 				result.StopReason = event.Delta.StopReason
+			}
+			if event.Usage != nil {
+				result.Usage.OutputTokens = event.Usage.OutputTokens
 			}
 
 		case "message_stop":

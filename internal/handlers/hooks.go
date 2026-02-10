@@ -64,25 +64,31 @@ type HookHandler struct {
 	notifService *notifications.Service
 	sessionMgr   *session.Manager
 
-	mu            sync.Mutex
-	pending       map[string]*pendingPermission  // sessionID -> pending permission
-	alwaysAllow   map[string]map[string]bool     // sessionID -> toolName -> true
-	toolEvents    map[string][]toolEventEntry    // sessionID -> recent tool events buffer
-	lastPushSent  map[string]time.Time           // sessionID -> last push timestamp (for rate-limiting)
-	userStopped   map[string]bool                // sessionID -> true if user explicitly stopped
+	// OnEvaluateSession is called asynchronously when a session evaluation is triggered.
+	// Set by main.go to wire AI evaluation into hook events.
+	OnEvaluateSession func(sessionID string, trigger string, outputSnapshot []byte)
+
+	mu              sync.Mutex
+	pending         map[string]*pendingPermission  // sessionID -> pending permission
+	alwaysAllow     map[string]map[string]bool     // sessionID -> toolName -> true
+	toolEvents      map[string][]toolEventEntry    // sessionID -> recent tool events buffer
+	lastPushSent    map[string]time.Time           // sessionID -> last push timestamp (for rate-limiting)
+	userStopped     map[string]bool                // sessionID -> true if user explicitly stopped
+	lastEvaluation  map[string]time.Time           // sessionID -> last evaluation timestamp (3-min cooldown)
 }
 
 // NewHookHandler creates a new hook handler
 func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, sessionMgr *session.Manager) *HookHandler {
 	return &HookHandler{
-		hub:          hub,
-		notifService: notifService,
-		sessionMgr:   sessionMgr,
-		pending:      make(map[string]*pendingPermission),
-		alwaysAllow:  make(map[string]map[string]bool),
-		toolEvents:   make(map[string][]toolEventEntry),
-		lastPushSent: make(map[string]time.Time),
-		userStopped:  make(map[string]bool),
+		hub:            hub,
+		notifService:   notifService,
+		sessionMgr:     sessionMgr,
+		pending:        make(map[string]*pendingPermission),
+		alwaysAllow:    make(map[string]map[string]bool),
+		toolEvents:     make(map[string][]toolEventEntry),
+		lastPushSent:   make(map[string]time.Time),
+		userStopped:    make(map[string]bool),
+		lastEvaluation: make(map[string]time.Time),
 	}
 }
 
@@ -377,6 +383,11 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Trigger plan_accepted evaluation when ExitPlanMode is approved
+		if isExitPlan && decision.Behavior == "allow" {
+			h.triggerSessionEvaluation(sessionID, "plan_accepted")
+		}
+
 		// Return the response in Claude Code's expected envelope format
 		output := hookPermissionOutput{
 			HookSpecificOutput: hookSpecificOutput{
@@ -500,6 +511,8 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		msgType = websocket.MsgTypeHookNotify
 	case "Stop":
 		msgType = websocket.MsgTypeHookStop
+	case "UserPromptSubmit":
+		msgType = websocket.MsgTypeHookNotify
 	default:
 		msgType = websocket.MsgTypeHookNotify
 	}
@@ -560,6 +573,11 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
+	// For UserPromptSubmit events, trigger session evaluation (rate-limited, async)
+	if eventName == "UserPromptSubmit" {
+		h.triggerSessionEvaluation(sessionID, "user_prompt")
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -598,6 +616,35 @@ func (h *HookHandler) MarkUserStopped(sessionID string) {
 	h.userStopped[sessionID] = true
 }
 
+// triggerSessionEvaluation triggers an async AI evaluation for a session with rate limiting.
+// Returns true if the evaluation was triggered, false if rate-limited or unavailable.
+func (h *HookHandler) triggerSessionEvaluation(sessionID, trigger string) bool {
+	if h.OnEvaluateSession == nil {
+		return false
+	}
+
+	h.mu.Lock()
+	if last, ok := h.lastEvaluation[sessionID]; ok && time.Since(last) < 3*time.Minute {
+		h.mu.Unlock()
+		log.Printf("[hooks] Session evaluation rate-limited for %s (trigger=%s, last=%v ago)", sessionID, trigger, time.Since(last).Round(time.Second))
+		return false
+	}
+	h.lastEvaluation[sessionID] = time.Now()
+	h.mu.Unlock()
+
+	// Get session output snapshot
+	var output []byte
+	if h.sessionMgr != nil {
+		if o, err := h.sessionMgr.GetSessionOutput(sessionID); err == nil {
+			output = o
+		}
+	}
+
+	log.Printf("[hooks] Triggering session evaluation: session=%s trigger=%s outputLen=%d", sessionID, trigger, len(output))
+	go h.OnEvaluateSession(sessionID, trigger, output)
+	return true
+}
+
 // ClearSession removes all state for a session (call when session ends)
 func (h *HookHandler) ClearSession(sessionID string) {
 	h.mu.Lock()
@@ -606,6 +653,7 @@ func (h *HookHandler) ClearSession(sessionID string) {
 	delete(h.toolEvents, sessionID)
 	delete(h.lastPushSent, sessionID)
 	delete(h.userStopped, sessionID)
+	delete(h.lastEvaluation, sessionID)
 	if pending, ok := h.pending[sessionID]; ok {
 		pending.cancel()
 		delete(h.pending, sessionID)

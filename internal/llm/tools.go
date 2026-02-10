@@ -99,5 +99,109 @@ func ChatTools() []ToolDefinition {
 				Properties: map[string]ToolPropertySchema{},
 			},
 		},
+		{
+			Name:        "get_project_meta",
+			Description: "Get the meta document for a project. The meta document tracks project goals, progress, and key decisions.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+				},
+				Required: []string{"project_id"},
+			},
+		},
+		{
+			Name:        "update_project_meta",
+			Description: "Update the meta document for a project. You are the sole editor. The content should be a complete markdown document with project goals, progress, decisions, and any relevant context.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"content":    {Type: "string", Description: "Full markdown content for the meta document"},
+					"summary":    {Type: "string", Description: "Brief summary of what changed in this update"},
+				},
+				Required: []string{"project_id", "content"},
+			},
+		},
+		{
+			Name:        "list_tasks",
+			Description: "List all tasks for a project. Shows title, status, priority, due date.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+				},
+				Required: []string{"project_id"},
+			},
+		},
+		{
+			Name:        "create_task",
+			Description: "Create a new task in a project.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id":  {Type: "string", Description: "The project ID (number)"},
+					"title":       {Type: "string", Description: "Task title"},
+					"description": {Type: "string", Description: "Task description"},
+					"status":      {Type: "string", Description: "Status: todo, in_progress, done, blocked (default: todo)"},
+					"priority":    {Type: "string", Description: "Priority: low, medium, high, urgent (default: medium)"},
+					"due_date":    {Type: "string", Description: "Due date in ISO 8601 format (e.g. 2025-01-15T14:00)"},
+					"parent_id":   {Type: "string", Description: "Parent task ID for subtasks"},
+				},
+				Required: []string{"project_id", "title"},
+			},
+		},
+		{
+			Name:        "update_task",
+			Description: "Update an existing task.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id":  {Type: "string", Description: "The project ID (number)"},
+					"task_id":     {Type: "string", Description: "The task ID (number)"},
+					"title":       {Type: "string", Description: "New title"},
+					"description": {Type: "string", Description: "New description"},
+					"status":      {Type: "string", Description: "New status: todo, in_progress, done, blocked"},
+					"priority":    {Type: "string", Description: "New priority: low, medium, high, urgent"},
+					"due_date":    {Type: "string", Description: "New due date (empty string to clear)"},
+				},
+				Required: []string{"project_id", "task_id"},
+			},
+		},
+		{
+			Name:        "delete_task",
+			Description: "Delete a task and its subtasks.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"task_id":    {Type: "string", Description: "The task ID (number)"},
+				},
+				Required: []string{"project_id", "task_id"},
+			},
+		},
+		{
+			Name:        "get_task_report",
+			Description: "Get a task summary report for a project. Shows status counts, overdue tasks, and recommends the next task to work on.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+				},
+				Required: []string{"project_id"},
+			},
+		},
+		{
+			Name:        "create_document",
+			Description: "Create a temporary markdown document and return a clickable link. Use this for ANY response that would be longer than 5 lines — lists, explanations, code, reports, etc. This keeps the chat clean.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"title":   {Type: "string", Description: "Short document title"},
+					"content": {Type: "string", Description: "Full markdown content of the document"},
+				},
+				Required: []string{"title", "content"},
+			},
+		},
 	}
 }

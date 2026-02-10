@@ -1,37 +1,18 @@
 // Service Worker for DevManager PWA
 
-const CACHE_NAME = 'devmanager-v12';
+const CACHE_NAME = 'devmanager-__BUILD_VERSION__';
 const OFFLINE_URL = '/';
 
-// Assets to cache
-const PRECACHE_ASSETS = [
-    '/',
-    '/static/css/app.css?v=8',
-    '/static/css/mobile.css?v=7',
-    '/static/js/app.js?v=8',
-    '/static/js/terminal.js?v=5',
-    '/static/js/voice.js?v=8',
-    '/static/js/files.js?v=8',
-    '/static/js/notifications.js?v=3',
-    '/static/js/hooks.js?v=8',
-    '/static/js/macro-editor.js?v=2',
-    '/static/vendor/xterm.js',
-    '/static/vendor/xterm.css',
-    '/static/vendor/xterm-addon-fit.js',
-    '/static/vendor/xterm-addon-web-links.js',
-    '/manifest.json'
-];
-
-// Install event - cache assets
+// Install event - activate immediately
 self.addEventListener('install', (event) => {
     event.waitUntil(
         caches.open(CACHE_NAME)
-            .then((cache) => cache.addAll(PRECACHE_ASSETS))
+            .then((cache) => cache.add(OFFLINE_URL))
             .then(() => self.skipWaiting())
     );
 });
 
-// Activate event - clean up old caches
+// Activate event - clean up old caches and notify clients
 self.addEventListener('activate', (event) => {
     event.waitUntil(
         caches.keys()
@@ -43,10 +24,21 @@ self.addEventListener('activate', (event) => {
                 );
             })
             .then(() => self.clients.claim())
+            .then(() => {
+                // Notify all clients that a new version is active
+                return self.clients.matchAll({ type: 'window' }).then((clients) => {
+                    clients.forEach((client) => {
+                        client.postMessage({
+                            type: 'sw_updated',
+                            version: CACHE_NAME
+                        });
+                    });
+                });
+            })
     );
 });
 
-// Fetch event - network-first strategy for static assets
+// Fetch event - network-first for app assets, cache-first for vendor/images
 self.addEventListener('fetch', (event) => {
     // Skip non-GET requests
     if (event.request.method !== 'GET') return;
@@ -84,7 +76,7 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // Cache-first strategy for other assets (images, fonts, etc.)
+    // Cache-first strategy for other assets (images, fonts, vendor libs)
     event.respondWith(
         caches.match(event.request)
             .then((cachedResponse) => {

@@ -4,8 +4,11 @@ import (
 	"context"
 	"devmanager/internal/database"
 	"devmanager/internal/websocket"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +37,11 @@ type Manager struct {
 	mu          sync.RWMutex
 	sessions    map[string]*runningSession
 	clientSizes map[string]map[string]TermSize // sessionID -> clientID -> size
+
+	// Callbacks for AI session evaluation
+	OnSessionStart func(sessionID string)
+	OnSessionEnd   func(sessionID string, output []byte)
+	OnSessionFlush func(sessionID string) // Always called on session end (even user-stopped) for OTEL flush
 }
 
 // OutputBuffer is a ring buffer for storing recent terminal output
@@ -90,13 +98,20 @@ type runningSession struct {
 	cancel       context.CancelFunc
 	output       chan []byte
 	outputBuffer *OutputBuffer
+	userStopped  bool // set when user explicitly stops the session
 }
 
 func NewManager(db *database.DB, hub *websocket.Hub, serverAddr string) *Manager {
+	// Normalize 0.0.0.0 to localhost for client connections (OTLP, hooks)
+	// 0.0.0.0 is valid for server bind but not for client connections
+	clientAddr := serverAddr
+	if strings.HasPrefix(clientAddr, "0.0.0.0:") {
+		clientAddr = "localhost:" + strings.TrimPrefix(clientAddr, "0.0.0.0:")
+	}
 	return &Manager{
 		db:          db,
 		hub:         hub,
-		serverAddr:  serverAddr,
+		serverAddr:  clientAddr,
 		sessions:    make(map[string]*runningSession),
 		clientSizes: make(map[string]map[string]TermSize),
 	}
@@ -125,6 +140,20 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	envVars["DEVMANAGER_HOOK_URL"] = "http://" + m.serverAddr
 	envVars["DEVMANAGER_SESSION_ID"] = sessionID
 
+	// Inject OpenTelemetry env vars for Claude Code token tracking
+	envVars["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
+	envVars["OTEL_METRICS_EXPORTER"] = "otlp"
+	envVars["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/json"
+	envVars["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://" + m.serverAddr
+	envVars["OTEL_RESOURCE_ATTRIBUTES"] = "devmanager.session_id=" + sessionID
+	envVars["OTEL_METRIC_EXPORT_INTERVAL"] = "10000" // 10 seconds for faster feedback
+
+	// Build MCP config for --mcp-config CLI flag (additive, preserves project's existing MCPs)
+	var cliArgs []string
+	if mcpJSON := m.buildMCPConfigJSON(ctx); mcpJSON != "" {
+		cliArgs = []string{"--mcp-config", mcpJSON}
+	}
+
 	// Create runner based on project type
 	var runner Runner
 	var err error
@@ -134,7 +163,7 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 			outputBuffer.Write(data)
 			m.hub.BroadcastSessionOutput(sessionID, data)
 			m.checkForNotificationTriggers(sessionID, data)
-		})
+		}, cliArgs)
 	} else {
 		return nil, fmt.Errorf("remote sessions not yet implemented")
 	}
@@ -179,6 +208,11 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	// Monitor session completion
 	go m.monitorSession(sessionID, rs)
 
+	// Trigger AI evaluation for session start
+	if m.OnSessionStart != nil {
+		go m.OnSessionStart(sessionID)
+	}
+
 	return session, nil
 }
 
@@ -191,6 +225,7 @@ func (m *Manager) StopSession(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
+	rs.userStopped = true
 	rs.cancel()
 	if err := rs.runner.Stop(); err != nil {
 		log.Printf("Error stopping runner: %v", err)
@@ -345,12 +380,30 @@ func (m *Manager) ListRunningSessions() []string {
 func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 	err := rs.runner.Wait()
 
+	// Capture output snapshot BEFORE cleanup for AI evaluation
+	var outputSnapshot []byte
+	if rs.outputBuffer != nil {
+		outputSnapshot = rs.outputBuffer.GetAll()
+	}
+
+	// Determine status: user-initiated stops are not errors
+	userStopped := rs.userStopped
+	status := "completed"
+	if userStopped {
+		status = "stopped"
+	} else if err != nil {
+		status = "error"
+	}
+
 	// Send exit message to terminal before cleaning up
 	if rs.outputBuffer != nil {
 		var exitMsg string
-		if err != nil {
+		switch status {
+		case "error":
 			exitMsg = fmt.Sprintf("\r\n\x1b[31mSession exited with error: %v\x1b[0m\r\n", err)
-		} else {
+		case "stopped":
+			exitMsg = "\r\n\x1b[33mSession stopped by user\x1b[0m\r\n"
+		default:
 			exitMsg = "\r\n\x1b[33mSession completed\x1b[0m\r\n"
 		}
 		rs.outputBuffer.Write([]byte(exitMsg))
@@ -362,9 +415,7 @@ func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 	m.mu.Unlock()
 
 	ctx := context.Background()
-	status := "completed"
-	if err != nil {
-		status = "error"
+	if status == "error" {
 		log.Printf("Session %s ended with error: %v", sessionID, err)
 	}
 
@@ -372,11 +423,78 @@ func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 	m.hub.BroadcastSessionStatus(sessionID, status)
 
 	log.Printf("Session %s ended with status: %s", sessionID, status)
+
+	// Always flush OTEL metrics regardless of how the session ended
+	if m.OnSessionFlush != nil {
+		m.OnSessionFlush(sessionID)
+	}
+
+	// Trigger AI evaluation for session end (skip for user-stopped sessions)
+	if m.OnSessionEnd != nil && !userStopped {
+		go m.OnSessionEnd(sessionID, outputSnapshot)
+	}
 }
 
 func (m *Manager) checkForNotificationTriggers(sessionID string, data []byte) {
 	// This will be implemented to parse output for notification triggers
 	// For now, just a placeholder
+}
+
+// buildMCPConfigJSON builds a JSON string for the --mcp-config CLI flag.
+// It includes user-configured MCP servers from the DB plus DevManager's own MCP server.
+func (m *Manager) buildMCPConfigJSON(ctx context.Context) string {
+	mcpServers := make(map[string]interface{})
+
+	// Add user-configured MCP servers from DB
+	servers, err := m.db.ListEnabledMCPServers(ctx)
+	if err != nil {
+		log.Printf("Warning: failed to list MCP servers: %v", err)
+	}
+	for _, server := range servers {
+		var args []string
+		var env map[string]string
+		json.Unmarshal([]byte(server.Args), &args)
+		json.Unmarshal([]byte(server.Env), &env)
+
+		serverConfig := map[string]interface{}{
+			"command": server.Command,
+		}
+		if len(args) > 0 {
+			serverConfig["args"] = args
+		}
+		if len(env) > 0 {
+			serverConfig["env"] = env
+		}
+		mcpServers[server.Name] = serverConfig
+	}
+
+	// Inject DevManager's own MCP server
+	if m.serverAddr != "" {
+		execPath, err := os.Executable()
+		if err == nil {
+			mcpServers["devmanager"] = map[string]interface{}{
+				"command": execPath,
+				"args":    []string{"mcp-serve"},
+				"env": map[string]string{
+					"DEVMANAGER_API_URL": "http://" + m.serverAddr,
+				},
+			}
+		}
+	}
+
+	if len(mcpServers) == 0 {
+		return ""
+	}
+
+	config := map[string]interface{}{
+		"mcpServers": mcpServers,
+	}
+	jsonBytes, err := json.Marshal(config)
+	if err != nil {
+		log.Printf("Warning: failed to marshal MCP config: %v", err)
+		return ""
+	}
+	return string(jsonBytes)
 }
 
 func (m *Manager) StopAll() {
@@ -392,7 +510,7 @@ func (m *Manager) StopAll() {
 
 // SetRemoteRunnerFactory allows setting a factory function for creating remote runners
 // This will be called from the handlers package to inject the remote runner implementation
-type RemoteRunnerFactory func(project *database.Project, envVars map[string]string, outputHandler func([]byte), decryptFunc func(string, string) (string, error)) (Runner, error)
+type RemoteRunnerFactory func(project *database.Project, envVars map[string]string, outputHandler func([]byte), decryptFunc func(string, string) (string, error), cliArgs []string) (Runner, error)
 
 var remoteRunnerFactory RemoteRunnerFactory
 
@@ -424,6 +542,20 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	envVars["DEVMANAGER_HOOK_URL"] = "http://" + m.serverAddr
 	envVars["DEVMANAGER_SESSION_ID"] = sessionID
 
+	// Inject OpenTelemetry env vars for Claude Code token tracking
+	envVars["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
+	envVars["OTEL_METRICS_EXPORTER"] = "otlp"
+	envVars["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/json"
+	envVars["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://" + m.serverAddr
+	envVars["OTEL_RESOURCE_ATTRIBUTES"] = "devmanager.session_id=" + sessionID
+	envVars["OTEL_METRIC_EXPORT_INTERVAL"] = "10000" // 10 seconds for faster feedback
+
+	// Build MCP config for --mcp-config CLI flag
+	var cliArgs []string
+	if mcpJSON := m.buildMCPConfigJSON(ctx); mcpJSON != "" {
+		cliArgs = []string{"--mcp-config", mcpJSON}
+	}
+
 	// Create output buffer (1MB max)
 	outputBuffer := NewOutputBuffer(1024 * 1024)
 
@@ -431,7 +563,7 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 		outputBuffer.Write(data)
 		m.hub.BroadcastSessionOutput(sessionID, data)
 		m.checkForNotificationTriggers(sessionID, data)
-	}, decryptFunc)
+	}, decryptFunc, cliArgs)
 
 	if err != nil {
 		m.db.EndSession(ctx, sessionID, "error")

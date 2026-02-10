@@ -16,8 +16,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 type API struct {
@@ -29,6 +31,12 @@ type API struct {
 	encryptor    *security.Encryptor
 	notifService *notifications.Service
 	hookHandler  *HookHandler
+	aiHandler    *AIHandler
+}
+
+// SetAIHandler sets the AI handler for post-sync meta evaluation.
+func (a *API) SetAIHandler(h *AIHandler) {
+	a.aiHandler = h
 }
 
 func NewAPI(
@@ -309,11 +317,24 @@ func (a *API) SyncProjectConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := a.configSync.SyncToProject(r.Context(), project); err != nil {
+		a.hub.BroadcastSyncProgress(id, "sync", "error", err.Error())
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	a.db.UpdateProjectConfigSyncedAt(r.Context(), id)
+	a.hub.BroadcastSyncProgress(id, "sync", "done", "Configuration synced successfully")
+
+	// Trigger AI meta evaluation in background
+	if a.aiHandler != nil {
+		a.hub.BroadcastSyncProgress(id, "ai_meta", "running", "AI evaluating meta document...")
+		go func() {
+			ctx := context.Background()
+			a.aiHandler.EvaluateProjectMeta(ctx, id)
+			a.hub.BroadcastSyncProgress(id, "ai_meta", "done", "AI evaluation complete")
+		}()
+	}
+
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -334,6 +355,8 @@ func (a *API) ListSessions(w http.ResponseWriter, r *http.Request) {
 func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		ProjectID int64             `json:"project_id"`
+		TaskID    *int64            `json:"task_id,omitempty"`
+		Name      string            `json:"name,omitempty"`
 		EnvVars   map[string]string `json:"env_vars,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -347,11 +370,30 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate task if provided
+	var linkedTask *database.ProjectTask
+	if input.TaskID != nil && *input.TaskID > 0 {
+		linkedTask, err = a.db.GetTask(r.Context(), *input.TaskID)
+		if err != nil || linkedTask.ProjectID != project.ID {
+			respondError(w, http.StatusBadRequest, "Task not found or belongs to different project")
+			return
+		}
+	}
+
 	// Auto-sync config (hooks, skills, mcp) to project before starting session
 	if a.configSync != nil {
 		if syncErr := a.configSync.SyncToProject(r.Context(), project); syncErr != nil {
 			log.Printf("Warning: config sync failed before session start: %v", syncErr)
 		}
+	}
+
+	// Inject task context into env vars
+	if input.EnvVars == nil {
+		input.EnvVars = make(map[string]string)
+	}
+	if linkedTask != nil {
+		input.EnvVars["DEVMANAGER_TASK_ID"] = fmt.Sprintf("%d", linkedTask.ID)
+		input.EnvVars["DEVMANAGER_TASK_TITLE"] = linkedTask.Title
 	}
 
 	var sess *database.Session
@@ -364,6 +406,33 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// Update session name if provided
+	if input.Name != "" {
+		a.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", input.Name, sess.ID)
+		sess.Name = input.Name
+	}
+
+	// Create session-task link if starting from a task
+	if linkedTask != nil {
+		st := &database.SessionTask{
+			SessionID: sess.ID,
+			TaskID:    linkedTask.ID,
+			Role:      "created_from",
+		}
+		a.db.CreateSessionTask(r.Context(), st)
+
+		// Auto-set task status to in_progress if it's currently todo
+		if linkedTask.Status == "todo" {
+			a.db.UpdateTaskStatus(r.Context(), linkedTask.ID, "in_progress")
+			linkedTask.Status = "in_progress"
+			a.hub.BroadcastStateUpdate("task", map[string]interface{}{
+				"action":     "updated",
+				"project_id": linkedTask.ProjectID,
+				"task":       linkedTask,
+			})
+		}
 	}
 
 	respondJSON(w, http.StatusCreated, sess)
@@ -1036,6 +1105,525 @@ func (a *API) MarkNotificationRead(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ============ Project Meta Documents ============
+
+func (a *API) GetProjectMeta(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	doc, err := a.db.GetProjectMeta(r.Context(), id)
+	if err != nil {
+		// Return empty placeholder if none exists
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"project_id": id,
+			"content":    "",
+			"version":    0,
+			"exists":     false,
+		})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"project_id":      doc.ProjectID,
+		"content":         doc.Content,
+		"version":         doc.Version,
+		"last_updated_by": doc.LastUpdatedBy,
+		"summary":         doc.Summary.String,
+		"updated_at":      doc.UpdatedAt,
+		"exists":          true,
+	})
+}
+
+func (a *API) UpdateProjectMeta(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	// Verify project exists
+	_, err = a.db.GetProject(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	var input struct {
+		Content   string `json:"content"`
+		UpdatedBy string `json:"updated_by"`
+		Summary   string `json:"summary"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if input.UpdatedBy == "" {
+		input.UpdatedBy = "user"
+	}
+
+	doc, err := a.db.UpsertProjectMeta(r.Context(), id, input.Content, input.UpdatedBy, input.Summary)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("project_meta", map[string]interface{}{
+		"action":     "updated",
+		"project_id": id,
+		"version":    doc.Version,
+	})
+
+	respondJSON(w, http.StatusOK, doc)
+}
+
+// ============ Temp Documents ============
+
+func (a *API) CreateTempDocument(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Title   string `json:"title"`
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	if strings.TrimSpace(input.Content) == "" {
+		respondError(w, http.StatusBadRequest, "Content is required")
+		return
+	}
+
+	doc := &database.TempDocument{
+		ID:      uuid.New().String()[:8],
+		Title:   input.Title,
+		Content: input.Content,
+	}
+	if err := a.db.CreateTempDocument(r.Context(), doc); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusCreated, map[string]string{
+		"id":   doc.ID,
+		"link": fmt.Sprintf("/app/doc/%s", doc.ID),
+	})
+}
+
+func (a *API) GetTempDocument(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	doc, err := a.db.GetTempDocument(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Document not found")
+		return
+	}
+	respondJSON(w, http.StatusOK, doc)
+}
+
+// ============ Project Tasks ============
+
+func (a *API) ListProjectTasks(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	tasks, err := a.db.ListTasksByProject(r.Context(), projectID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if tasks == nil {
+		tasks = []database.ProjectTask{}
+	}
+	respondJSON(w, http.StatusOK, tasks)
+}
+
+func (a *API) CreateProjectTask(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	// Verify project exists
+	if _, err := a.db.GetProject(r.Context(), projectID); err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	var input struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Status      string `json:"status"`
+		Priority    string `json:"priority"`
+		DueDate     string `json:"due_date"`
+		ParentID    *int64 `json:"parent_id"`
+		SortOrder   int    `json:"sort_order"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if strings.TrimSpace(input.Title) == "" {
+		respondError(w, http.StatusBadRequest, "Title is required")
+		return
+	}
+
+	// Validate status
+	if input.Status == "" {
+		input.Status = "todo"
+	}
+	validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "blocked": true}
+	if !validStatuses[input.Status] {
+		respondError(w, http.StatusBadRequest, "Invalid status. Must be: todo, in_progress, done, blocked")
+		return
+	}
+
+	// Validate priority
+	if input.Priority == "" {
+		input.Priority = "medium"
+	}
+	validPriorities := map[string]bool{"low": true, "medium": true, "high": true, "urgent": true}
+	if !validPriorities[input.Priority] {
+		respondError(w, http.StatusBadRequest, "Invalid priority. Must be: low, medium, high, urgent")
+		return
+	}
+
+	task := &database.ProjectTask{
+		ProjectID:   projectID,
+		Title:       strings.TrimSpace(input.Title),
+		Description: input.Description,
+		Status:      input.Status,
+		Priority:    input.Priority,
+		SortOrder:   input.SortOrder,
+	}
+
+	if input.ParentID != nil {
+		task.ParentID = sql.NullInt64{Int64: *input.ParentID, Valid: true}
+	}
+
+	if input.DueDate != "" {
+		t, err := parseFlexibleTime(input.DueDate)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "Invalid due_date format")
+			return
+		}
+		task.DueDate = sql.NullTime{Time: t, Valid: true}
+	}
+
+	if err := a.db.CreateTask(r.Context(), task); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "created", "project_id": projectID, "task": task})
+	respondJSON(w, http.StatusCreated, task)
+}
+
+func (a *API) GetProjectTask(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	taskID, err := strconv.ParseInt(chi.URLParam(r, "taskId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid task ID")
+		return
+	}
+
+	task, err := a.db.GetTask(r.Context(), taskID)
+	if err != nil || task.ProjectID != projectID {
+		respondError(w, http.StatusNotFound, "Task not found")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, task)
+}
+
+func (a *API) UpdateProjectTask(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	taskID, err := strconv.ParseInt(chi.URLParam(r, "taskId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid task ID")
+		return
+	}
+
+	task, err := a.db.GetTask(r.Context(), taskID)
+	if err != nil || task.ProjectID != projectID {
+		respondError(w, http.StatusNotFound, "Task not found")
+		return
+	}
+
+	var input struct {
+		Title       *string `json:"title"`
+		Description *string `json:"description"`
+		Status      *string `json:"status"`
+		Priority    *string `json:"priority"`
+		DueDate     *string `json:"due_date"`
+		ParentID    *int64  `json:"parent_id"`
+		SortOrder   *int    `json:"sort_order"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if input.Title != nil {
+		if strings.TrimSpace(*input.Title) == "" {
+			respondError(w, http.StatusBadRequest, "Title cannot be empty")
+			return
+		}
+		task.Title = strings.TrimSpace(*input.Title)
+	}
+	if input.Description != nil {
+		task.Description = *input.Description
+	}
+	if input.Status != nil {
+		validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "blocked": true}
+		if !validStatuses[*input.Status] {
+			respondError(w, http.StatusBadRequest, "Invalid status")
+			return
+		}
+		task.Status = *input.Status
+	}
+	if input.Priority != nil {
+		validPriorities := map[string]bool{"low": true, "medium": true, "high": true, "urgent": true}
+		if !validPriorities[*input.Priority] {
+			respondError(w, http.StatusBadRequest, "Invalid priority")
+			return
+		}
+		task.Priority = *input.Priority
+	}
+	if input.DueDate != nil {
+		if *input.DueDate == "" {
+			task.DueDate = sql.NullTime{}
+		} else {
+			t, err := parseFlexibleTime(*input.DueDate)
+			if err != nil {
+				respondError(w, http.StatusBadRequest, "Invalid due_date format")
+				return
+			}
+			task.DueDate = sql.NullTime{Time: t, Valid: true}
+			task.DueNotified = false // Reset notification on date change
+		}
+	}
+	if input.ParentID != nil {
+		task.ParentID = sql.NullInt64{Int64: *input.ParentID, Valid: *input.ParentID > 0}
+	}
+	if input.SortOrder != nil {
+		task.SortOrder = *input.SortOrder
+	}
+
+	if err := a.db.UpdateTask(r.Context(), task); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
+	respondJSON(w, http.StatusOK, task)
+}
+
+func (a *API) UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	taskID, err := strconv.ParseInt(chi.URLParam(r, "taskId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid task ID")
+		return
+	}
+
+	task, err := a.db.GetTask(r.Context(), taskID)
+	if err != nil || task.ProjectID != projectID {
+		respondError(w, http.StatusNotFound, "Task not found")
+		return
+	}
+
+	var input struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "blocked": true}
+	if !validStatuses[input.Status] {
+		respondError(w, http.StatusBadRequest, "Invalid status")
+		return
+	}
+
+	if err := a.db.UpdateTaskStatus(r.Context(), taskID, input.Status); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	task.Status = input.Status
+	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
+	respondJSON(w, http.StatusOK, task)
+}
+
+func (a *API) DeleteProjectTask(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	taskID, err := strconv.ParseInt(chi.URLParam(r, "taskId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid task ID")
+		return
+	}
+
+	task, err := a.db.GetTask(r.Context(), taskID)
+	if err != nil || task.ProjectID != projectID {
+		respondError(w, http.StatusNotFound, "Task not found")
+		return
+	}
+
+	if err := a.db.DeleteTask(r.Context(), taskID); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "deleted", "project_id": projectID, "id": taskID})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) DuplicateProjectTask(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	taskID, err := strconv.ParseInt(chi.URLParam(r, "taskId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid task ID")
+		return
+	}
+
+	task, err := a.db.GetTask(r.Context(), taskID)
+	if err != nil || task.ProjectID != projectID {
+		respondError(w, http.StatusNotFound, "Task not found")
+		return
+	}
+
+	clone, err := a.db.DuplicateTask(r.Context(), taskID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "created", "project_id": projectID, "task": clone})
+	respondJSON(w, http.StatusCreated, clone)
+}
+
+// parseFlexibleTime parses time strings in multiple formats.
+func parseFlexibleTime(s string) (time.Time, error) {
+	formats := []string{
+		time.RFC3339,
+		"2006-01-02T15:04",
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unrecognized time format: %s", s)
+}
+
+// GetSessionLinkedTask returns the primary task linked to a session
+func (a *API) GetSessionLinkedTask(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+
+	task, err := a.db.GetTaskForSession(r.Context(), sessionID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "No task linked to this session")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, task)
+}
+
+// TriggerSessionEvaluation triggers an AI evaluation for the current session
+func (a *API) TriggerSessionEvaluation(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+
+	if !a.sessionMgr.IsSessionRunning(sessionID) {
+		respondError(w, http.StatusNotFound, "Session not running")
+		return
+	}
+
+	output, err := a.sessionMgr.GetSessionOutput(sessionID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to read session output")
+		return
+	}
+
+	if a.aiHandler != nil {
+		go a.aiHandler.EvaluateSession(context.Background(), sessionID, "session_request", output)
+	}
+
+	respondJSON(w, http.StatusAccepted, map[string]string{
+		"status":  "accepted",
+		"message": "AI evaluation triggered",
+	})
+}
+
+// ListTaskSessions returns all sessions linked to a specific task
+func (a *API) ListTaskSessions(w http.ResponseWriter, r *http.Request) {
+	taskID, err := strconv.ParseInt(chi.URLParam(r, "taskId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid task ID")
+		return
+	}
+
+	sessions, err := a.db.GetSessionsForTask(r.Context(), taskID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to fetch sessions")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, sessions)
+}
+
+// GetTaskSessionSummary returns session counts per task for a project (batch)
+func (a *API) GetTaskSessionSummary(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	summary, err := a.db.GetTaskSessionSummary(r.Context(), projectID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to fetch session summary")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, summary)
+}
+
 // DecryptFunc returns the decrypt function for use by other components
 func (a *API) DecryptFunc() func(string, string) (string, error) {
 	return a.encryptor.Decrypt
@@ -1049,4 +1637,170 @@ func (a *API) GetDB() *database.DB {
 // Context helper for API
 func (a *API) Context() context.Context {
 	return context.Background()
+}
+
+// GetTokenUsageSummary handles GET /api/token-usage/summary
+// Query params: since (ISO date), project_id (optional), days (7|30|90, default 30)
+func (a *API) GetTokenUsageSummary(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Parse time range
+	days := 30
+	if d := r.URL.Query().Get("days"); d != "" {
+		if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 365 {
+			days = n
+		}
+	}
+	since := time.Now().AddDate(0, 0, -days)
+	if s := r.URL.Query().Get("since"); s != "" {
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			since = t
+		}
+	}
+
+	// Parse optional project_id
+	var projectID *int64
+	if pid := r.URL.Query().Get("project_id"); pid != "" {
+		if n, err := strconv.ParseInt(pid, 10, 64); err == nil {
+			projectID = &n
+		}
+	}
+
+	// Fetch all data in parallel-ish (sequential but fast on SQLite)
+	summary, err := a.db.GetTokenUsageSummary(ctx, since, projectID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to get token usage summary")
+		return
+	}
+
+	bySource, err := a.db.GetTokenUsageBySource(ctx, since, projectID)
+	if err != nil {
+		log.Printf("[API] GetTokenUsageBySource error: %v", err)
+	}
+	byModel, err := a.db.GetTokenUsageByModel(ctx, since, projectID)
+	if err != nil {
+		log.Printf("[API] GetTokenUsageByModel error: %v", err)
+	}
+	daily, err := a.db.GetTokenUsageDaily(ctx, since, projectID)
+	if err != nil {
+		log.Printf("[API] GetTokenUsageDaily error: %v", err)
+	}
+
+	// Build per-project and per-AI-subcategory breakdowns (only when no project filter)
+	var byProject []database.TokenUsageByProject
+	var byProjectModel []database.TokenUsageByProjectModel
+	var byAISubcategory []database.TokenUsageBySubcategory
+	if projectID == nil {
+		byProject, err = a.db.GetTokenUsageByProject(ctx, since)
+		if err != nil {
+			log.Printf("[API] GetTokenUsageByProject error: %v", err)
+		}
+		byProjectModel, err = a.db.GetTokenUsageByProjectModel(ctx, since)
+		if err != nil {
+			log.Printf("[API] GetTokenUsageByProjectModel error: %v", err)
+		}
+		byAISubcategory, err = a.db.GetTokenUsageByAISubcategory(ctx, since)
+		if err != nil {
+			log.Printf("[API] GetTokenUsageByAISubcategory error: %v", err)
+		}
+	}
+
+	result := map[string]interface{}{
+		"period_start": since.Format(time.RFC3339),
+		"period_days":  days,
+		"summary":      summary,
+		"by_source":    bySource,
+		"by_model":     byModel,
+		"daily":        daily,
+	}
+	if byProject != nil {
+		result["by_project"] = byProject
+	}
+	if byProjectModel != nil {
+		result["by_project_model"] = byProjectModel
+	}
+	if byAISubcategory != nil {
+		result["by_ai_subcategory"] = byAISubcategory
+	}
+
+	respondJSON(w, http.StatusOK, result)
+}
+
+// ClearTokenUsage handles DELETE /api/token-usage
+func (a *API) ClearTokenUsage(w http.ResponseWriter, r *http.Request) {
+	deleted, err := a.db.ClearTokenUsage(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to clear token usage data")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"deleted": deleted,
+	})
+}
+
+// SeedTokenUsage handles POST /api/test/seed-token-usage (test mode only).
+// Inserts a token_usage record directly into the database for testing purposes.
+func (a *API) SeedTokenUsage(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Source              string  `json:"source"`
+		Subcategory         string  `json:"subcategory"`
+		ProjectID           *int64  `json:"project_id"`
+		SessionID           *string `json:"session_id"`
+		ConversationID      *int64  `json:"conversation_id"`
+		Model               string  `json:"model"`
+		InputTokens         int     `json:"input_tokens"`
+		OutputTokens        int     `json:"output_tokens"`
+		CacheReadTokens     int     `json:"cache_read_tokens"`
+		CacheCreationTokens int     `json:"cache_creation_tokens"`
+		CostUSD             float64 `json:"cost_usd"`
+		CreatedAt           string  `json:"created_at"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	if req.Source == "" {
+		req.Source = "ai_assistant"
+	}
+	if req.Model == "" {
+		req.Model = "test-model"
+	}
+
+	tu := &database.TokenUsage{
+		Source:              req.Source,
+		Subcategory:         req.Subcategory,
+		Model:               req.Model,
+		InputTokens:         req.InputTokens,
+		OutputTokens:        req.OutputTokens,
+		CacheReadTokens:     req.CacheReadTokens,
+		CacheCreationTokens: req.CacheCreationTokens,
+		CostUSD:             req.CostUSD,
+	}
+	if req.ProjectID != nil {
+		tu.ProjectID = sql.NullInt64{Int64: *req.ProjectID, Valid: true}
+	}
+	if req.SessionID != nil {
+		tu.SessionID = sql.NullString{String: *req.SessionID, Valid: true}
+	}
+	if req.ConversationID != nil {
+		tu.ConversationID = sql.NullInt64{Int64: *req.ConversationID, Valid: true}
+	}
+
+	if err := a.db.CreateTokenUsage(r.Context(), tu); err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to seed token usage: "+err.Error())
+		return
+	}
+
+	// If created_at was specified, update it (SQLite DEFAULT CURRENT_TIMESTAMP was used)
+	if req.CreatedAt != "" {
+		_, err := a.db.ExecContext(r.Context(), `UPDATE token_usage SET created_at = ? WHERE id = ?`, req.CreatedAt, tu.ID)
+		if err != nil {
+			log.Printf("[TEST] Failed to set created_at for seeded record: %v", err)
+		}
+	}
+
+	respondJSON(w, http.StatusCreated, map[string]interface{}{
+		"id":      tu.ID,
+		"message": "Token usage record seeded",
+	})
 }

@@ -39,14 +39,22 @@ class DevManager {
         // Restore tabs from previous session (after a delay to ensure sessions are loaded)
         setTimeout(() => this.restoreTabsFromStorage(), 1000);
 
-        // Listen for service worker messages (e.g. navigate to session from push notification click)
+        // Load any pending AI suggestions
+        setTimeout(() => this._loadPendingSuggestions(), 2000);
+
+        // Listen for service worker messages
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.addEventListener('message', (event) => {
                 if (event.data && event.data.type === 'navigate_to_session') {
                     this.openTerminal(event.data.session_id);
+                } else if (event.data && event.data.type === 'sw_updated') {
+                    this.showUpdateBanner();
                 }
             });
         }
+
+        // Setup auto-update version check
+        this.setupVersionCheck();
     }
 
     // Navigation
@@ -151,6 +159,15 @@ class DevManager {
             case 'notification':
                 this.showToast(msg.data.title, msg.data.body, msg.data.type);
                 break;
+            case 'sync_progress':
+                this.handleSyncProgress(msg.data);
+                break;
+            case 'ai_proactive':
+                this.handleAIProactive(msg.data);
+                break;
+            case 'ai_suggestion':
+                this.handleAIProactive(this._normalizeProactive(msg.data));
+                break;
             case 'ping':
                 this.ws.send(JSON.stringify({ type: 'pong' }));
                 break;
@@ -173,6 +190,11 @@ class DevManager {
                     }
                 });
                 break;
+            case 'project_meta':
+                if (this.currentView === 'project-detail' && this._detailProject && data.data?.project_id === this._detailProject.id) {
+                    this.loadProjectMeta(this._detailProject.id);
+                }
+                break;
             case 'session':
                 this.loadSessions();
                 if (this.currentSession === data.id) {
@@ -181,6 +203,11 @@ class DevManager {
                 break;
             case 'macro':
                 this.loadMacros();
+                break;
+            case 'task':
+                if (this.currentView === 'project-detail' && this._detailProject && data.data?.project_id === this._detailProject.id) {
+                    this.loadProjectTasks(this._detailProject.id);
+                }
                 break;
             case 'skill':
             case 'mcp':
@@ -298,7 +325,7 @@ class DevManager {
         if (!customName) return; // User cancelled
 
         try {
-            const session = await this.api('POST', '/sessions', { project_id: projectId });
+            const session = await this.api('POST', '/sessions', { project_id: projectId, name: customName });
             this.showToast('Success', 'Session started', 'success');
             this.openTerminal(session.id, session, customName);
         } catch (error) {
@@ -357,11 +384,92 @@ class DevManager {
     }
 
     async syncProjectConfig(projectId) {
+        this.showSyncModal(projectId);
         try {
             await this.api('POST', `/projects/${projectId}/sync-config`);
-            this.showToast('Success', 'Config synced', 'success');
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this.updateSyncStep('sync', 'error', error.message);
+        }
+    }
+
+    showSyncModal(projectId) {
+        this._syncProjectId = projectId;
+        const steps = [
+            { id: 'hooks', label: 'Hook Scripts' },
+            { id: 'skills', label: 'Skills' },
+            { id: 'mcps', label: 'MCP Servers' },
+            { id: 'settings', label: 'Settings' },
+            { id: 'ai_meta', label: 'AI Meta Evaluation' },
+        ];
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay active';
+        overlay.id = 'sync-modal-overlay';
+        overlay.innerHTML = `
+            <div class="modal sync-modal" style="max-width:400px;">
+                <div class="modal-header">
+                    <h3>Syncing Configuration</h3>
+                </div>
+                <div class="modal-body">
+                    <div class="sync-modal-steps">
+                        ${steps.map(s => `
+                            <div class="sync-step" id="sync-step-${s.id}" data-status="pending">
+                                <span class="sync-step-icon">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="12" cy="12" r="10"></circle>
+                                    </svg>
+                                </span>
+                                <span class="sync-step-label">${s.label}</span>
+                                <span class="sync-step-detail"></span>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary btn-sm" id="sync-modal-close" style="display:none;" onclick="app.closeSyncModal()">Close</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+    }
+
+    closeSyncModal() {
+        const overlay = document.getElementById('sync-modal-overlay');
+        if (overlay) overlay.remove();
+        this._syncProjectId = null;
+    }
+
+    handleSyncProgress(data) {
+        if (data.project_id !== this._syncProjectId) return;
+        this.updateSyncStep(data.step, data.status, data.detail);
+    }
+
+    updateSyncStep(step, status, detail) {
+        const stepEl = document.getElementById(`sync-step-${step}`);
+        if (!stepEl) return;
+
+        stepEl.dataset.status = status;
+        const iconEl = stepEl.querySelector('.sync-step-icon');
+        const detailEl = stepEl.querySelector('.sync-step-detail');
+
+        if (detailEl) detailEl.textContent = detail || '';
+
+        if (status === 'running') {
+            iconEl.innerHTML = '<span class="sync-spinner"></span>';
+        } else if (status === 'done') {
+            iconEl.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-success)" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>`;
+        } else if (status === 'error') {
+            iconEl.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-danger-light)" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+        }
+
+        // Show close button when all done or any error
+        if (status === 'done' && (step === 'ai_meta' || step === 'sync')) {
+            const closeBtn = document.getElementById('sync-modal-close');
+            if (closeBtn) closeBtn.style.display = '';
+        }
+        if (status === 'error') {
+            const closeBtn = document.getElementById('sync-modal-close');
+            if (closeBtn) closeBtn.style.display = '';
         }
     }
 
@@ -455,9 +563,60 @@ class DevManager {
                 </div>
 
             </div>
+
+            <div class="project-detail-card">
+                <div class="project-detail-section">
+                    <div class="project-detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                        <span>Meta Document</span>
+                        <button class="meta-ai-btn" onclick="app.editProjectMetaWithAI(${project.id})" title="Edit with AI">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                                <path d="M2 17l10 5 10-5"/>
+                                <path d="M2 12l10 5 10-5"/>
+                            </svg>
+                            Edit with AI
+                        </button>
+                    </div>
+                    <div id="project-meta-content" class="project-meta-content">
+                        <div class="meta-empty">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="project-detail-card">
+                <div class="project-detail-section">
+                    <div class="project-tasks-header">
+                        <div class="project-detail-section-title">Tasks</div>
+                        <div class="project-tasks-summary" id="project-tasks-summary"></div>
+                    </div>
+                    <div id="project-tasks-list" class="project-tasks-list">
+                        <div class="task-empty">Loading...</div>
+                    </div>
+                    <button class="btn-add-task" onclick="app.showTaskModal(${project.id})" style="margin-top: 8px;">+ Add Task</button>
+                </div>
+            </div>
+
+            <div class="project-detail-card">
+                <div class="project-detail-section">
+                    <div class="project-detail-section-title">Token Usage</div>
+                    <div class="token-usage-period-selector">
+                        <button class="token-usage-period-btn" data-days="7" onclick="app.loadProjectTokenUsage(${project.id}, 7)">7d</button>
+                        <button class="token-usage-period-btn active" data-days="30" onclick="app.loadProjectTokenUsage(${project.id}, 30)">30d</button>
+                        <button class="token-usage-period-btn" data-days="90" onclick="app.loadProjectTokenUsage(${project.id}, 90)">90d</button>
+                    </div>
+                    <div id="project-token-usage">
+                        <div class="meta-empty">Loading...</div>
+                    </div>
+                </div>
+            </div>
         `;
 
         container.innerHTML = html;
+
+        // Load meta document, tasks, and token usage
+        this.loadProjectMeta(project.id);
+        this.loadProjectTasks(project.id);
+        this.loadProjectTokenUsage(project.id, 30);
 
         // Render actions in the fixed bottom bar
         const actionsBar = document.getElementById('project-detail-actions');
@@ -503,6 +662,320 @@ class DevManager {
         if (this.currentView !== 'project-detail') {
             this.showView('project-detail');
         }
+    }
+
+    async loadProjectMeta(projectId) {
+        const container = document.getElementById('project-meta-content');
+        if (!container) return;
+        try {
+            const meta = await this.api('GET', `/projects/${projectId}/meta`);
+            if (meta.exists && meta.content) {
+                let rendered = meta.content;
+                if (typeof marked !== 'undefined') {
+                    try { rendered = marked.parse(meta.content); } catch (e) { /* fallback to raw */ }
+                }
+                container.innerHTML = `<div class="meta-rendered">${rendered}</div>
+                    <div class="meta-info">v${meta.version} &middot; Updated by ${this.escapeHtml(meta.last_updated_by || '?')}</div>`;
+            } else {
+                container.innerHTML = '<div class="meta-empty">No meta document yet. Use the AI assistant or the voice button to add project goals.</div>';
+            }
+        } catch (e) {
+            container.innerHTML = '<div class="meta-empty">Failed to load meta document.</div>';
+        }
+    }
+
+    async loadProjectTokenUsage(projectId, days = 30) {
+        const container = document.getElementById('project-token-usage');
+        if (!container) return;
+
+        // Update period selector active state
+        document.querySelectorAll('.token-usage-period-btn').forEach(btn => {
+            btn.classList.toggle('active', parseInt(btn.dataset.days) === days);
+        });
+
+        try {
+            const data = await this.api('GET', `/token-usage/summary?project_id=${projectId}&days=${days}`);
+            const s = data.summary;
+
+            if (!s || (s.total_requests === 0)) {
+                container.innerHTML = '<div class="meta-empty">No token usage data for this period.</div>';
+                return;
+            }
+
+            const totalTokens = (s.total_input_tokens || 0) + (s.total_output_tokens || 0);
+
+            let html = `
+                <div class="token-usage-grid">
+                    <div class="token-usage-stat">
+                        <div class="label">Total Tokens</div>
+                        <div class="value">${totalTokens.toLocaleString()}</div>
+                    </div>
+                    <div class="token-usage-stat">
+                        <div class="label">Custo Estimado</div>
+                        <div class="value cost">$${(s.total_cost_usd || 0).toFixed(4)}</div>
+                    </div>
+                    <div class="token-usage-stat">
+                        <div class="label">Input Tokens</div>
+                        <div class="value">${(s.total_input_tokens || 0).toLocaleString()}</div>
+                    </div>
+                    <div class="token-usage-stat">
+                        <div class="label">Output Tokens</div>
+                        <div class="value">${(s.total_output_tokens || 0).toLocaleString()}</div>
+                    </div>
+                </div>`;
+
+            // By Model table
+            if (data.by_model && data.by_model.length > 0) {
+                html += `<div class="token-usage-table-wrap"><table class="token-usage-model-table">
+                    <thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Custo</th><th>Reqs</th></tr></thead>
+                    <tbody>`;
+                for (const m of data.by_model) {
+                    const shortModel = (m.model || 'unknown').replace(/^claude-/, '').replace(/-\d{8}$/, '');
+                    html += `<tr>
+                        <td>${this.escapeHtml(shortModel)}</td>
+                        <td>${(m.total_input_tokens || 0).toLocaleString()}</td>
+                        <td>${(m.total_output_tokens || 0).toLocaleString()}</td>
+                        <td>$${(m.total_cost_usd || 0).toFixed(4)}</td>
+                        <td>${m.total_requests || 0}</td>
+                    </tr>`;
+                }
+                html += '</tbody></table></div>';
+            }
+
+            // Daily bars (last N days)
+            if (data.daily && data.daily.length > 0) {
+                const maxTokens = Math.max(...data.daily.map(d => (d.total_input_tokens || 0) + (d.total_output_tokens || 0)));
+                html += '<div style="margin-top:12px">';
+                for (const d of data.daily.slice(0, 7)) {
+                    const dayTokens = (d.total_input_tokens || 0) + (d.total_output_tokens || 0);
+                    const pct = maxTokens > 0 ? (dayTokens / maxTokens * 100) : 0;
+                    const shortDate = d.date ? d.date.slice(5) : '?';
+                    html += `<div class="token-usage-bar-row">
+                        <span class="bar-label">${shortDate}</span>
+                        <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+                        <span class="bar-value">${dayTokens.toLocaleString()}</span>
+                    </div>`;
+                }
+                html += '</div>';
+            }
+
+            container.innerHTML = html;
+        } catch (e) {
+            container.innerHTML = '<div class="meta-empty">Failed to load token usage data.</div>';
+        }
+    }
+
+    async loadGlobalTokenUsage(days = 30) {
+        const container = document.getElementById('token-usage-global-content');
+        if (!container) return;
+
+        container.innerHTML = '<div class="meta-empty">Loading...</div>';
+
+        try {
+            const data = await this.api('GET', `/token-usage/summary?days=${days}`);
+            const s = data.summary;
+
+            if (!s || s.total_requests === 0) {
+                container.innerHTML = `
+                    <div class="token-usage-period-selector" style="padding:0 16px;margin-top:12px">
+                        <button class="token-usage-period-btn${days===7?' active':''}" onclick="app.loadGlobalTokenUsage(7)">7d</button>
+                        <button class="token-usage-period-btn${days===30?' active':''}" onclick="app.loadGlobalTokenUsage(30)">30d</button>
+                        <button class="token-usage-period-btn${days===90?' active':''}" onclick="app.loadGlobalTokenUsage(90)">90d</button>
+                    </div>
+                    <div class="meta-empty">No token usage data for this period.</div>`;
+                return;
+            }
+
+            const totalTokens = (s.total_input_tokens || 0) + (s.total_output_tokens || 0);
+
+            let html = `<div style="padding:0 16px">
+                <div class="token-usage-period-selector" style="margin-top:12px">
+                    <button class="token-usage-period-btn${days===7?' active':''}" onclick="app.loadGlobalTokenUsage(7)">7d</button>
+                    <button class="token-usage-period-btn${days===30?' active':''}" onclick="app.loadGlobalTokenUsage(30)">30d</button>
+                    <button class="token-usage-period-btn${days===90?' active':''}" onclick="app.loadGlobalTokenUsage(90)">90d</button>
+                </div>
+
+                <div class="token-usage-grid">
+                    <div class="token-usage-stat">
+                        <div class="label">Total Tokens</div>
+                        <div class="value">${totalTokens.toLocaleString()}</div>
+                    </div>
+                    <div class="token-usage-stat">
+                        <div class="label">Custo Estimado</div>
+                        <div class="value cost">$${(s.total_cost_usd || 0).toFixed(4)}</div>
+                    </div>
+                    <div class="token-usage-stat">
+                        <div class="label">Input Tokens</div>
+                        <div class="value">${(s.total_input_tokens || 0).toLocaleString()}</div>
+                    </div>
+                    <div class="token-usage-stat">
+                        <div class="label">Output Tokens</div>
+                        <div class="value">${(s.total_output_tokens || 0).toLocaleString()}</div>
+                    </div>
+                </div>`;
+
+            // By Model (one row per model, aggregated across all sources)
+            if (data.by_model && data.by_model.length > 0) {
+                html += '<h3 style="font-size:14px;margin:16px 0 8px;color:var(--color-text-secondary)">By Model</h3>';
+                html += `<div class="token-usage-table-wrap"><table class="token-usage-model-table">
+                    <thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Custo</th><th>Reqs</th></tr></thead>
+                    <tbody>`;
+                for (const m of data.by_model) {
+                    const shortModel = (m.model || 'unknown').replace(/^claude-/, '').replace(/-\d{8}$/, '');
+                    html += `<tr>
+                        <td>${this.escapeHtml(shortModel)}</td>
+                        <td>${(m.total_input_tokens || 0).toLocaleString()}</td>
+                        <td>${(m.total_output_tokens || 0).toLocaleString()}</td>
+                        <td>$${(m.total_cost_usd || 0).toFixed(4)}</td>
+                        <td>${m.total_requests || 0}</td>
+                    </tr>`;
+                }
+                html += '</tbody></table></div>';
+            }
+
+            // AI Assistant section
+            if (data.by_ai_subcategory && data.by_ai_subcategory.length > 0) {
+                const subcatLabels = {
+                    'chat': 'Chat',
+                    'skill_generate': 'Gerar Skill',
+                    'skill_validate': 'Validar Skill',
+                    'meta_eval': 'Avaliar Meta',
+                    'session_eval': 'Avaliar Sessão',
+                    '': 'Outro',
+                };
+                // Calculate AI totals
+                let aiInput = 0, aiOutput = 0, aiCost = 0, aiReqs = 0;
+                for (const s of data.by_ai_subcategory) {
+                    aiInput += s.total_input_tokens || 0;
+                    aiOutput += s.total_output_tokens || 0;
+                    aiCost += s.total_cost_usd || 0;
+                    aiReqs += s.total_requests || 0;
+                }
+                html += `<h3 style="font-size:14px;margin:16px 0 8px;color:var(--color-text-secondary)">AI Assistant</h3>`;
+                html += `<div class="token-project-card">
+                    <div class="token-project-header">
+                        <span class="token-project-name">AI Assistant</span>
+                        <span class="token-project-cost">$${aiCost.toFixed(4)}</span>
+                    </div>
+                    <div class="token-project-stats">
+                        <span>${(aiInput + aiOutput).toLocaleString()} tokens</span>
+                        <span>${aiReqs} reqs</span>
+                        <span>In: ${aiInput.toLocaleString()}</span>
+                        <span>Out: ${aiOutput.toLocaleString()}</span>
+                    </div>`;
+                html += `<div class="token-usage-table-wrap"><table class="token-usage-model-table token-project-model-table">
+                    <thead><tr><th>Tipo</th><th>Model</th><th>Input</th><th>Output</th><th>Custo</th><th>Reqs</th></tr></thead>
+                    <tbody>`;
+                for (const s of data.by_ai_subcategory) {
+                    const shortModel = (s.model || 'unknown').replace(/^claude-/, '').replace(/-\d{8}$/, '');
+                    const label = subcatLabels[s.subcategory] || s.subcategory || 'Outro';
+                    html += `<tr>
+                        <td>${this.escapeHtml(label)}</td>
+                        <td>${this.escapeHtml(shortModel)}</td>
+                        <td>${(s.total_input_tokens || 0).toLocaleString()}</td>
+                        <td>${(s.total_output_tokens || 0).toLocaleString()}</td>
+                        <td>$${(s.total_cost_usd || 0).toFixed(4)}</td>
+                        <td>${s.total_requests || 0}</td>
+                    </tr>`;
+                }
+                html += '</tbody></table></div></div>';
+            }
+
+            // By Project (with inline model breakdown)
+            if (data.by_project && data.by_project.length > 0) {
+                const projectModels = {};
+                if (data.by_project_model) {
+                    for (const pm of data.by_project_model) {
+                        if (!projectModels[pm.project_id]) projectModels[pm.project_id] = [];
+                        projectModels[pm.project_id].push(pm);
+                    }
+                }
+
+                html += '<h3 style="font-size:14px;margin:16px 0 8px;color:var(--color-text-secondary)">By Project</h3>';
+
+                for (const p of data.by_project) {
+                    const totalTokens = (p.total_input_tokens || 0) + (p.total_output_tokens || 0);
+                    html += `<div class="token-project-card">
+                        <div class="token-project-header">
+                            <span class="token-project-name">${this.escapeHtml(p.project_name)}</span>
+                            <span class="token-project-cost">$${(p.total_cost_usd || 0).toFixed(4)}</span>
+                        </div>
+                        <div class="token-project-stats">
+                            <span>${totalTokens.toLocaleString()} tokens</span>
+                            <span>${(p.total_requests || 0)} reqs</span>
+                            <span>In: ${(p.total_input_tokens || 0).toLocaleString()}</span>
+                            <span>Out: ${(p.total_output_tokens || 0).toLocaleString()}</span>
+                        </div>`;
+
+                    const models = projectModels[p.project_id];
+                    if (models && models.length > 0) {
+                        html += `<div class="token-usage-table-wrap"><table class="token-usage-model-table token-project-model-table">
+                            <thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Custo</th><th>Reqs</th></tr></thead>
+                            <tbody>`;
+                        for (const m of models) {
+                            const shortModel = (m.model || 'unknown').replace(/^claude-/, '').replace(/-\d{8}$/, '');
+                            html += `<tr>
+                                <td>${this.escapeHtml(shortModel)}</td>
+                                <td>${(m.total_input_tokens || 0).toLocaleString()}</td>
+                                <td>${(m.total_output_tokens || 0).toLocaleString()}</td>
+                                <td>$${(m.total_cost_usd || 0).toFixed(4)}</td>
+                                <td>${m.total_requests || 0}</td>
+                            </tr>`;
+                        }
+                        html += '</tbody></table></div>';
+                    }
+
+                    html += '</div>';
+                }
+            }
+
+            // Daily bars
+            if (data.daily && data.daily.length > 0) {
+                html += '<h3 style="font-size:14px;margin:16px 0 8px;color:var(--color-text-secondary)">Daily Usage</h3>';
+                const maxTokens = Math.max(...data.daily.map(d => (d.total_input_tokens || 0) + (d.total_output_tokens || 0)));
+                for (const d of data.daily.slice(0, 14)) {
+                    const dayTokens = (d.total_input_tokens || 0) + (d.total_output_tokens || 0);
+                    const pct = maxTokens > 0 ? (dayTokens / maxTokens * 100) : 0;
+                    const shortDate = d.date ? d.date.slice(5) : '?';
+                    html += `<div class="token-usage-bar-row">
+                        <span class="bar-label">${shortDate}</span>
+                        <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+                        <span class="bar-value">${dayTokens.toLocaleString()}</span>
+                    </div>`;
+                }
+            }
+
+            html += '</div>';
+            container.innerHTML = html;
+        } catch (e) {
+            container.innerHTML = '<div class="meta-empty">Failed to load token usage data.</div>';
+        }
+    }
+
+    clearTokenUsage() {
+        showConfirmModal(
+            'Limpar dados de tokens?',
+            'Todos os registros de uso de tokens serão removidos permanentemente. Esta ação não pode ser desfeita.',
+            async () => {
+                try {
+                    const result = await this.api('DELETE', '/token-usage');
+                    this.showToast(`${result.deleted} registros removidos`, 'success');
+                    this.loadGlobalTokenUsage(30);
+                } catch (e) {
+                    this.showToast('Erro ao limpar dados: ' + e.message, 'error');
+                }
+            },
+            'Limpar'
+        );
+    }
+
+    editProjectMetaWithAI(projectId) {
+        const project = this.projects.find(p => p.id === projectId) || this._detailProject;
+        if (!project || !window.aiChat) return;
+        window.aiChat.open();
+        window.aiChat.newConversation();
+        const msg = `I want to edit the meta document for the project "${project.name}" (ID: ${projectId}). Please show me the current document and ask what I'd like to change.`;
+        window.aiChat.sendPreset(msg);
     }
 
     duplicateProject(projectId) {
@@ -1846,9 +2319,22 @@ class DevManager {
             case 'settings':
                 content = this.renderSettingsConfig();
                 break;
+            case 'tokens':
+                content = `<div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px;margin-bottom:12px">
+                    <h2 style="margin:0;font-size:1.2rem">Token Usage</h2>
+                    <button class="btn btn-danger-outline btn-sm" onclick="app.clearTokenUsage()" title="Limpar dados de uso de tokens">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                        Limpar
+                    </button>
+                </div>
+                <div id="token-usage-global-content"></div>`;
+                break;
         }
 
         container.innerHTML = content;
+        if (activeTab === 'tokens') {
+            this.loadGlobalTokenUsage(30);
+        }
     }
 
     renderSkillsConfig() {
@@ -2001,7 +2487,34 @@ class DevManager {
             pushBtnAction = 'app.togglePushNotifications(true)';
         }
 
+        // Build theme picker
+        const themes = window.devManagerTheme ? window.devManagerTheme.THEMES : {};
+        const currentTheme = window.devManagerTheme ? window.devManagerTheme.getCurrentThemeId() : 'dark';
+        let themeSwatches = '';
+        for (const [id, theme] of Object.entries(themes)) {
+            const active = id === currentTheme ? ' active' : '';
+            themeSwatches += `
+                <button class="theme-swatch${active}" data-theme="${id}" onclick="window.devManagerTheme.applyTheme('${id}')" title="${theme.name}">
+                    <div class="theme-swatch-preview">
+                        <div class="swatch-bar" style="background:${theme.preview[0]}"></div>
+                        <div class="swatch-bar" style="background:${theme.preview[1]}"></div>
+                        <div class="swatch-bar" style="background:${theme.preview[2]}"></div>
+                    </div>
+                    <span class="theme-swatch-label">${theme.name}</span>
+                </button>`;
+        }
+
         const html = `
+            <div class="card" style="margin-bottom: 16px;">
+                <div class="card-header">
+                    <div class="card-title">Theme</div>
+                </div>
+                <div class="card-body">
+                    <div class="theme-picker">
+                        ${themeSwatches}
+                    </div>
+                </div>
+            </div>
             <div class="card" style="margin-bottom: 16px;">
                 <div class="card-header">
                     <div class="card-title">Push Notifications</div>
@@ -2229,22 +2742,72 @@ class DevManager {
         }
     }
 
-    async deleteProject(projectId) {
-        if (!confirm('Are you sure you want to delete this project?')) return;
+    deleteProject(projectId) {
+        showConfirmModal(
+            'Excluir projeto?',
+            'O projeto será removido permanentemente. Esta ação não pode ser desfeita.',
+            async () => {
+                try {
+                    await this.api('DELETE', `/projects/${projectId}`);
+                    this.hideModal();
+                    this.showToast('Success', 'Project deleted', 'success');
+                    if (this.currentView === 'project-detail') {
+                        this._detailProject = null;
+                        this.showView('projects');
+                    } else {
+                        this.loadProjects();
+                    }
+                } catch (error) {
+                    this.showToast('Error', error.message, 'error');
+                }
+            },
+            'Excluir'
+        );
+    }
 
-        try {
-            await this.api('DELETE', `/projects/${projectId}`);
-            this.hideModal();
-            this.showToast('Success', 'Project deleted', 'success');
-            if (this.currentView === 'project-detail') {
-                this._detailProject = null;
-                this.showView('projects');
-            } else {
-                this.loadProjects();
+    // Auto-update version check
+    setupVersionCheck() {
+        this.appVersion = document.querySelector('meta[name="app-version"]')?.content || '';
+        this._updateBannerShown = false;
+
+        // Check for updates every 60 seconds
+        setInterval(() => this.checkForUpdate(), 60000);
+
+        // Check when page becomes visible (user returns to tab/app)
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                this.checkForUpdate();
             }
-        } catch (error) {
-            this.showToast('Error', error.message, 'error');
+        });
+    }
+
+    async checkForUpdate() {
+        if (this._updateBannerShown || !this.appVersion) return;
+        try {
+            const resp = await fetch('/api/version');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (data.version && data.version !== this.appVersion) {
+                this.showUpdateBanner();
+            }
+        } catch (e) {
+            // Network error — ignore
         }
+    }
+
+    showUpdateBanner() {
+        if (this._updateBannerShown) return;
+        this._updateBannerShown = true;
+
+        const banner = document.createElement('div');
+        banner.id = 'update-banner';
+        banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:10000;background:linear-gradient(135deg,var(--color-gradient-start,#667eea),var(--color-gradient-end,#764ba2));color:#fff;padding:12px 20px;display:flex;align-items:center;justify-content:center;gap:12px;font-size:14px;font-weight:500;box-shadow:0 2px 12px rgba(0,0,0,0.3);';
+        banner.innerHTML = `
+            <span>Nova vers\u00e3o dispon\u00edvel</span>
+            <button onclick="window.location.reload()" style="background:#fff;color:var(--color-gradient-end,#764ba2);border:none;padding:6px 16px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px;">Atualizar</button>
+            <button onclick="this.parentElement.remove()" style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.4);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:13px;">Depois</button>
+        `;
+        document.body.prepend(banner);
     }
 
     // Toast notifications
@@ -2451,7 +3014,13 @@ class DevManager {
 
     closeSkillModal() {
         if (this._skillModalDirty) {
-            if (!confirm('You have unsaved changes. Discard?')) return;
+            showConfirmModal(
+                'Descartar alterações?',
+                'Você tem alterações não salvas. Deseja descartá-las?',
+                () => { this.hideModal(); },
+                'Descartar'
+            );
+            return;
         }
         this.hideModal();
     }
@@ -2551,15 +3120,21 @@ class DevManager {
         if (skill) this.showSkillModal(skill);
     }
 
-    async deleteSkill(skillId) {
-        if (!confirm('Delete this skill? This action cannot be undone.')) return;
-        try {
-            await this.api('DELETE', `/config/skills/${skillId}`);
-            this.showToast('Success', 'Skill deleted', 'success');
-            this.loadConfig();
-        } catch (error) {
-            this.showToast('Error', error.message, 'error');
-        }
+    deleteSkill(skillId) {
+        showConfirmModal(
+            'Excluir skill?',
+            'A skill será removida permanentemente. Esta ação não pode ser desfeita.',
+            async () => {
+                try {
+                    await this.api('DELETE', `/config/skills/${skillId}`);
+                    this.showToast('Success', 'Skill deleted', 'success');
+                    this.loadConfig();
+                } catch (error) {
+                    this.showToast('Error', error.message, 'error');
+                }
+            },
+            'Excluir'
+        );
     }
 
     async toggleSkill(skillId, enabled) {
@@ -2664,16 +3239,22 @@ class DevManager {
         }
     }
 
-    async restoreSkillVersion(skillId, versionId) {
-        if (!confirm('Restore this version? Current content will be saved as a new version.')) return;
-        try {
-            await this.api('POST', `/config/skills/${skillId}/versions/${versionId}/restore`);
-            this.hideModal();
-            this.showToast('Success', 'Version restored', 'success');
-            this.loadConfig();
-        } catch (error) {
-            this.showToast('Error', error.message, 'error');
-        }
+    restoreSkillVersion(skillId, versionId) {
+        showConfirmModal(
+            'Restaurar versão?',
+            'O conteúdo atual será salvo como uma nova versão antes de restaurar.',
+            async () => {
+                try {
+                    await this.api('POST', `/config/skills/${skillId}/versions/${versionId}/restore`);
+                    this.hideModal();
+                    this.showToast('Success', 'Version restored', 'success');
+                    this.loadConfig();
+                } catch (error) {
+                    this.showToast('Error', error.message, 'error');
+                }
+            },
+            'Restaurar'
+        );
     }
 
     showMCPModal(mcp = null) {
@@ -2740,15 +3321,21 @@ class DevManager {
         if (mcp) this.showMCPModal(mcp);
     }
 
-    async deleteMCP(mcpId) {
-        if (!confirm('Delete this MCP server?')) return;
-        try {
-            await this.api('DELETE', `/config/mcps/${mcpId}`);
-            this.showToast('Success', 'MCP server deleted', 'success');
-            this.loadConfig();
-        } catch (error) {
-            this.showToast('Error', error.message, 'error');
-        }
+    deleteMCP(mcpId) {
+        showConfirmModal(
+            'Excluir servidor MCP?',
+            'O servidor MCP será removido permanentemente.',
+            async () => {
+                try {
+                    await this.api('DELETE', `/config/mcps/${mcpId}`);
+                    this.showToast('Success', 'MCP server deleted', 'success');
+                    this.loadConfig();
+                } catch (error) {
+                    this.showToast('Error', error.message, 'error');
+                }
+            },
+            'Excluir'
+        );
     }
 
     async toggleMCP(mcpId, enabled) {
@@ -2931,7 +3518,693 @@ class DevManager {
             this.showToast('Error', e.message, 'error');
         }
     }
+    // ============ Project Tasks ============
+
+    async loadProjectTasks(projectId) {
+        const container = document.getElementById('project-tasks-list');
+        const summaryEl = document.getElementById('project-tasks-summary');
+        if (!container) return;
+
+        try {
+            const [tasks, sessionSummaryRaw] = await Promise.all([
+                this.api('GET', `/projects/${projectId}/tasks`),
+                this.api('GET', `/projects/${projectId}/tasks/session-summary`).catch(() => [])
+            ]);
+            // Build lookup: taskID -> {session_count, active_count, latest_session}
+            this._taskSessionSummary = {};
+            (sessionSummaryRaw || []).forEach(s => { this._taskSessionSummary[s.task_id] = s; });
+
+            // Build summary
+            if (summaryEl) {
+                const counts = { todo: 0, in_progress: 0, done: 0, blocked: 0 };
+                tasks.forEach(t => { if (counts[t.status] !== undefined) counts[t.status]++; });
+                summaryEl.innerHTML = `
+                    <span class="summary-item"><span class="badge-todo task-status-badge" style="cursor:default">${counts.todo}</span> todo</span>
+                    <span class="summary-item"><span class="badge-in_progress task-status-badge" style="cursor:default">${counts.in_progress}</span> prog</span>
+                    <span class="summary-item"><span class="badge-done task-status-badge" style="cursor:default">${counts.done}</span> done</span>
+                    ${counts.blocked > 0 ? `<span class="summary-item"><span class="badge-blocked task-status-badge" style="cursor:default">${counts.blocked}</span> block</span>` : ''}
+                `;
+            }
+
+            if (tasks.length === 0) {
+                container.innerHTML = '<div class="task-empty">No tasks yet. Click "+ Add Task" to create one.</div>';
+                return;
+            }
+
+            // Group by parent
+            const topLevel = tasks.filter(t => !t.parent_id?.Valid);
+            const children = {};
+            tasks.filter(t => t.parent_id?.Valid).forEach(t => {
+                const pid = t.parent_id.Int64;
+                if (!children[pid]) children[pid] = [];
+                children[pid].push(t);
+            });
+
+            let html = '';
+            for (const task of topLevel) {
+                html += this.renderTaskCard(task, projectId);
+                if (children[task.id]) {
+                    html += '<div class="task-subtasks">';
+                    for (const sub of children[task.id]) {
+                        html += this.renderTaskCard(sub, projectId);
+                    }
+                    html += `<button class="btn-add-task" onclick="app.showTaskModal(${projectId}, null, ${task.id})" style="margin-top:4px;padding:4px 8px;font-size:11px;">+ Subtask</button>`;
+                    html += '</div>';
+                }
+            }
+            container.innerHTML = html;
+        } catch (e) {
+            container.innerHTML = '<div class="task-empty">Failed to load tasks.</div>';
+        }
+    }
+
+    renderTaskCard(task, projectId) {
+        const now = new Date();
+        const isOverdue = task.due_date?.Valid && new Date(task.due_date.Time) < now && task.status !== 'done';
+        const isDone = task.status === 'done';
+        const isSubtask = task.parent_id?.Valid;
+
+        const priorityClass = `priority-${task.priority}`;
+        const overdueClass = isOverdue ? ' task-overdue' : '';
+        const doneClass = isDone ? ' task-done' : '';
+
+        let dueDateHtml = '';
+        if (task.due_date?.Valid) {
+            const d = new Date(task.due_date.Time);
+            const dateStr = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+            const timeStr = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+            const overdueTag = isOverdue ? ' overdue' : '';
+            dueDateHtml = `<span class="task-due${overdueTag}">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                ${dateStr} ${timeStr}
+            </span>`;
+        }
+
+        const descPreview = task.description ? `<span class="task-description-preview">${this.escapeHtml(task.description.substring(0, 80))}</span>` : '';
+
+        // Session indicator
+        const sessSummary = this._taskSessionSummary?.[task.id];
+        let sessionIndicatorHtml = '';
+        if (sessSummary?.active_count > 0) {
+            sessionIndicatorHtml = `<span class="task-session-indicator active" title="${sessSummary.active_count} active session(s)">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            </span>`;
+        } else if (sessSummary?.session_count > 0) {
+            sessionIndicatorHtml = `<span class="task-session-indicator past" title="${sessSummary.session_count} past session(s)">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+            </span>`;
+        }
+
+        // Start session button (only for non-done tasks)
+        const startSessionBtn = !isDone ? `
+            <button class="btn-icon btn-start-session" onclick="event.stopPropagation();app.startSessionFromTask(${projectId}, ${task.id})" title="Start Session">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            </button>` : '';
+
+        return `
+            <div class="task-card${overdueClass}${doneClass}" data-task-id="${task.id}">
+                <div class="task-priority-indicator ${priorityClass}"></div>
+                <div class="task-card-body">
+                    <div class="task-card-top">
+                        <span class="task-title" onclick="app.showTaskModal(${projectId}, ${task.id})" style="cursor:pointer;">${this.escapeHtml(task.title)}</span>
+                        ${sessionIndicatorHtml}
+                        <span class="task-status-badge badge-${task.status}" onclick="app.cycleTaskStatus(${projectId}, ${task.id}, '${task.status}')">${task.status.replace('_', ' ')}</span>
+                    </div>
+                    <div class="task-card-meta">
+                        ${dueDateHtml}
+                        ${descPreview}
+                    </div>
+                </div>
+                <div class="task-card-actions">
+                    ${startSessionBtn}
+                    <button class="btn-icon" onclick="app.showTaskModal(${projectId}, ${task.id})" title="Edit">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                    </button>
+                    <button class="btn-icon" onclick="app.duplicateTask(${projectId}, ${task.id})" title="Duplicate">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                    </button>
+                    <button class="btn-icon" onclick="app.deleteTask(${projectId}, ${task.id})" title="Delete">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
+    async cycleTaskStatus(projectId, taskId, currentStatus) {
+        const cycle = { 'todo': 'in_progress', 'in_progress': 'done', 'done': 'todo', 'blocked': 'todo' };
+        const newStatus = cycle[currentStatus] || 'todo';
+        try {
+            await this.api('PATCH', `/projects/${projectId}/tasks/${taskId}/status`, { status: newStatus });
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    deleteTask(projectId, taskId) {
+        showConfirmModal(
+            'Excluir tarefa?',
+            'A tarefa e suas subtarefas serão removidas permanentemente.',
+            async () => {
+                try {
+                    await this.api('DELETE', `/projects/${projectId}/tasks/${taskId}`);
+                    this.showToast('Success', 'Task deleted', 'success');
+                } catch (e) {
+                    this.showToast('Error', e.message, 'error');
+                }
+            },
+            'Excluir'
+        );
+    }
+
+    async duplicateTask(projectId, taskId) {
+        try {
+            await this.api('POST', `/projects/${projectId}/tasks/${taskId}/duplicate`);
+            this.showToast('Success', 'Task duplicated', 'success');
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    showTaskModal(projectId, taskId = null, parentId = null) {
+        const isEdit = taskId !== null;
+        const title = isEdit ? 'Edit Task' : (parentId ? 'Add Subtask' : 'Add Task');
+
+        const loadAndShow = async () => {
+            let task = null;
+            if (isEdit) {
+                try {
+                    task = await this.api('GET', `/projects/${projectId}/tasks/${taskId}`);
+                } catch (e) {
+                    this.showToast('Error', 'Failed to load task', 'error');
+                    return;
+                }
+            }
+
+            const dueDateValue = task?.due_date?.Valid ? new Date(task.due_date.Time).toISOString().slice(0, 16) : '';
+
+            // Load session history for existing tasks
+            let sessionHistoryHtml = '';
+            if (isEdit) {
+                try {
+                    const sessions = await this.api('GET', `/projects/${projectId}/tasks/${taskId}/sessions`);
+                    if (sessions && sessions.length > 0) {
+                        const sessItems = sessions.map(s => {
+                            const date = new Date(s.start_time).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+                            const isActive = s.status === 'running' || s.status === 'starting';
+                            const badge = isActive ? '<span class="badge badge-running">running</span>' : `<span class="badge badge-${s.status}">${s.status}</span>`;
+                            const nameLabel = s.name ? this.escapeHtml(s.name) : s.id.substring(0, 8);
+                            const clickAction = isActive ? `onclick="app.hideModal();app.openTerminal('${s.id}')"` : '';
+                            return `<div class="task-session-item ${isActive ? 'active' : ''}" ${clickAction} style="${isActive ? 'cursor:pointer' : ''}">
+                                ${badge} <span class="task-session-name">${nameLabel}</span> <span class="task-session-date">${date}</span>
+                            </div>`;
+                        }).join('');
+                        sessionHistoryHtml = `
+                            <div class="form-group">
+                                <label class="form-label">Sessions</label>
+                                <div class="task-session-history">${sessItems}</div>
+                            </div>`;
+                    }
+                } catch (e) { /* ignore */ }
+            }
+
+            const content = `
+                <form id="task-form">
+                    <div class="form-group">
+                        <label class="form-label">Title</label>
+                        <input type="text" class="form-input" name="title" value="${this.escapeHtml(task?.title || '')}" required placeholder="Task title...">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Description</label>
+                        <textarea class="form-input" name="description" rows="3" placeholder="Optional description...">${this.escapeHtml(task?.description || '')}</textarea>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">Status</label>
+                            <select class="form-input" name="status">
+                                <option value="todo" ${task?.status === 'todo' ? 'selected' : ''}>Todo</option>
+                                <option value="in_progress" ${task?.status === 'in_progress' ? 'selected' : ''}>In Progress</option>
+                                <option value="done" ${task?.status === 'done' ? 'selected' : ''}>Done</option>
+                                <option value="blocked" ${task?.status === 'blocked' ? 'selected' : ''}>Blocked</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Priority</label>
+                            <select class="form-input" name="priority">
+                                <option value="low" ${task?.priority === 'low' ? 'selected' : ''}>Low</option>
+                                <option value="medium" ${(task?.priority === 'medium' || !task) ? 'selected' : ''}>Medium</option>
+                                <option value="high" ${task?.priority === 'high' ? 'selected' : ''}>High</option>
+                                <option value="urgent" ${task?.priority === 'urgent' ? 'selected' : ''}>Urgent</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Due Date</label>
+                        <input type="datetime-local" class="form-input" name="due_date" value="${dueDateValue}">
+                    </div>
+                    ${sessionHistoryHtml}
+                </form>
+            `;
+
+            const actions = `
+                <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="app.saveTask(${projectId}, ${taskId}, ${parentId})">
+                    ${isEdit ? 'Update' : 'Create'}
+                </button>
+            `;
+
+            this.showModal(title, content, actions);
+        };
+
+        loadAndShow();
+    }
+
+    async saveTask(projectId, taskId, parentId) {
+        const form = document.getElementById('task-form');
+        if (!form) return;
+
+        const formData = new FormData(form);
+        const data = {
+            title: formData.get('title'),
+            description: formData.get('description'),
+            status: formData.get('status'),
+            priority: formData.get('priority'),
+            due_date: formData.get('due_date') || '',
+        };
+
+        if (parentId) {
+            data.parent_id = parentId;
+        }
+
+        try {
+            if (taskId) {
+                await this.api('PUT', `/projects/${projectId}/tasks/${taskId}`, data);
+                this.showToast('Success', 'Task updated', 'success');
+            } else {
+                await this.api('POST', `/projects/${projectId}/tasks`, data);
+                this.showToast('Success', 'Task created', 'success');
+            }
+            this.hideModal();
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+        }
+    }
+    // ============ Session-Task Integration ============
+
+    async startSessionFromTask(projectId, taskId) {
+        try {
+            const task = await this.api('GET', `/projects/${projectId}/tasks/${taskId}`);
+            const defaultName = `Task: ${task.title}`;
+            const customName = await this.showSessionNameModal(defaultName);
+            if (!customName) return;
+
+            const session = await this.api('POST', '/sessions', {
+                project_id: projectId,
+                task_id: taskId,
+                name: customName
+            });
+            this.showToast('Success', 'Session started from task', 'success');
+            this.openTerminal(session.id, session, customName);
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    // ============ AI Proactive Suggestions ============
+
+    async _loadPendingSuggestions() {
+        try {
+            const suggestions = await this.api('GET', '/ai/suggestions');
+            this._pendingSuggestions = (suggestions || []).map(s => this._normalizeProactive(s));
+            this._updateProactiveBadge();
+            if (this._pendingSuggestions.length > 0) {
+                this._pendingSuggestions.slice(0, 3).reverse().forEach(s => this.showAISuggestion(s));
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    _updateSuggestionBadge() {
+        // Delegate to the proactive badge which uses the server-side unread count
+        this._updateProactiveBadge();
+    }
+
+    // === AI Proactive Interaction Framework ===
+
+    // Canonical proactive format:
+    // { level, proactive_type, title, body, conversation_id, suggestion_id, actions[] }
+    // This normalizes legacy AISuggestion DB records to the canonical format.
+    _normalizeProactive(raw) {
+        // Already in canonical format (from ai_proactive WebSocket)
+        if (raw.proactive_type !== undefined && raw.suggestion_id !== undefined) {
+            return raw;
+        }
+        // Legacy AISuggestion from DB: { id, type, title, description, level, conversation_id, ... }
+        const typeMap = {
+            link_task: 'task_suggestion',
+            create_task: 'task_suggestion',
+            update_task: 'task_suggestion',
+            complete_task: 'task_suggestion',
+        };
+        return {
+            level: raw.level || 'standard',
+            proactive_type: typeMap[raw.type] || raw.type || 'task_suggestion',
+            title: raw.title || '',
+            body: raw.description || '',
+            conversation_id: raw.conversation_id?.Int64 ?? raw.conversation_id ?? null,
+            suggestion_id: raw.id || null,
+            actions: [
+                {label: 'Aceitar', action: 'accept', style: 'primary'},
+                {label: 'Discutir', action: 'discuss', style: 'outline'},
+                {label: 'Ignorar', action: 'dismiss', style: 'secondary'},
+            ],
+        };
+    }
+
+    handleAIProactive(data) {
+        // Track as pending for badge
+        if (!this._pendingSuggestions) this._pendingSuggestions = [];
+        if (data.suggestion_id) {
+            this._pendingSuggestions.push(data);
+        }
+        this._updateProactiveBadge();
+
+        // Dispatch based on urgency level
+        switch (data.level) {
+            case 'critical':
+                this._showProactiveCritical(data);
+                break;
+            case 'subtle':
+                this._showProactiveSubtle(data);
+                break;
+            case 'standard':
+            default:
+                this.showAISuggestion(data);
+                break;
+        }
+
+        if (window.aiChat?.isOpen) window.aiChat.refreshPendingSuggestions?.();
+    }
+
+    _showProactiveCritical(data) {
+        const overlay = document.createElement('div');
+        overlay.className = 'ai-proactive-overlay ai-proactive-critical';
+        overlay.id = `ai-proactive-critical-${data.conversation_id || Date.now()}`;
+        overlay.innerHTML = `
+            <div class="ai-proactive-modal ai-proactive-modal-critical">
+                <div class="ai-proactive-icon">
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--color-danger)" stroke-width="2">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                        <line x1="12" y1="9" x2="12" y2="13"/>
+                        <line x1="12" y1="17" x2="12.01" y2="17"/>
+                    </svg>
+                </div>
+                <h2 class="ai-proactive-title">${this.escapeHtml(data.title)}</h2>
+                <div class="ai-proactive-body">${this.escapeHtml(data.body || '').replace(/\n/g, '<br>')}</div>
+                <div class="ai-proactive-actions">
+                    ${(data.actions || []).map(a =>
+                        `<button class="btn btn-${a.style || 'primary'} btn-sm" data-action="${a.action}">${this.escapeHtml(a.label)}</button>`
+                    ).join('')}
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        overlay.querySelectorAll('[data-action]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const action = btn.dataset.action;
+                overlay.remove();
+                this._handleProactiveAction(action, data);
+            });
+        });
+    }
+
+    _showProactiveSubtle(data) {
+        const container = this._ensureSuggestionContainer();
+
+        const toast = document.createElement('div');
+        toast.className = 'ai-proactive-toast';
+        toast.id = `ai-proactive-toast-${data.conversation_id || Date.now()}`;
+        toast.innerHTML = `
+            <div class="ai-proactive-toast-content">
+                <span class="ai-proactive-toast-title">${this.escapeHtml(data.title)}</span>
+                ${data.conversation_id ? `<a href="#" class="ai-proactive-toast-link" data-conv-id="${data.conversation_id}">Ver</a>` : ''}
+                <button class="ai-proactive-toast-close">&times;</button>
+            </div>
+        `;
+
+        container.appendChild(toast);
+
+        const link = toast.querySelector('.ai-proactive-toast-link');
+        if (link) {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                this.openProactiveConversation(parseInt(link.dataset.convId));
+                toast.remove();
+            });
+        }
+
+        toast.querySelector('.ai-proactive-toast-close')?.addEventListener('click', () => {
+            toast.classList.add('ai-proactive-toast-exit');
+            setTimeout(() => toast.remove(), 300);
+        });
+
+        // Auto-dismiss after 10s
+        setTimeout(() => {
+            if (toast.parentNode) {
+                toast.classList.add('ai-proactive-toast-exit');
+                setTimeout(() => toast.remove(), 300);
+            }
+        }, 10000);
+    }
+
+    _handleProactiveAction(action, data) {
+        // Always remove the visual notification element from DOM
+        this._removeProactiveElement(data);
+
+        switch (action) {
+            case 'accept':
+                if (data.suggestion_id) this.acceptSuggestion(data.suggestion_id);
+                break;
+            case 'discuss':
+                if (data.suggestion_id) this.discussSuggestion(data.suggestion_id);
+                else if (data.conversation_id) this.openProactiveConversation(data.conversation_id);
+                break;
+            case 'dismiss':
+                if (data.suggestion_id) this.dismissSuggestion(data.suggestion_id);
+                break;
+            case 'open':
+                if (data.conversation_id) this.openProactiveConversation(data.conversation_id);
+                break;
+        }
+    }
+
+    _removeProactiveElement(data) {
+        const candidates = [
+            data.suggestion_id ? `ai-suggestion-${data.suggestion_id}` : null,
+            data.conversation_id ? `ai-proactive-critical-${data.conversation_id}` : null,
+            data.conversation_id ? `ai-proactive-toast-${data.conversation_id}` : null,
+            'ai-suggestion-null',
+            'ai-suggestion-undefined',
+        ].filter(Boolean);
+        for (const id of candidates) {
+            const el = document.getElementById(id);
+            if (el) {
+                el.classList.add('ai-suggestion-exit');
+                setTimeout(() => el.remove(), 300);
+                return;
+            }
+        }
+    }
+
+    openProactiveConversation(conversationId) {
+        if (window.aiChat) {
+            window.aiChat.open();
+            window.aiChat.loadConversation(conversationId);
+        }
+    }
+
+    async _updateProactiveBadge() {
+        try {
+            const result = await this.api('GET', '/ai/unread-count');
+            const count = result?.count || 0;
+            let badge = document.getElementById('ai-suggestion-badge');
+            const toggleBtn = document.getElementById('ai-chat-toggle');
+            if (!toggleBtn) return;
+
+            if (count > 0) {
+                if (!badge) {
+                    badge = document.createElement('span');
+                    badge.id = 'ai-suggestion-badge';
+                    badge.className = 'ai-suggestion-badge';
+                    toggleBtn.appendChild(badge);
+                }
+                badge.textContent = count > 9 ? '9+' : count;
+                badge.style.display = '';
+            } else if (badge) {
+                badge.style.display = 'none';
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    _ensureSuggestionContainer() {
+        let container = document.getElementById('ai-suggestions-container');
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'ai-suggestions-container';
+            container.className = 'ai-suggestions-container';
+            document.body.appendChild(container);
+        }
+        return container;
+    }
+
+    // Renders a standard-level proactive notification card.
+    // Expects canonical format: { level, proactive_type, title, body, conversation_id, suggestion_id, actions[] }
+    showAISuggestion(data) {
+        const container = this._ensureSuggestionContainer();
+        const sugId = data.suggestion_id;
+
+        // Store for discuss/accept/dismiss
+        if (!this._suggestionCache) this._suggestionCache = {};
+        if (sugId) this._suggestionCache[sugId] = data;
+
+        // Limit visible cards to 3
+        while (container.children.length >= 3) {
+            container.removeChild(container.firstChild);
+        }
+
+        const typeLabels = {
+            task_suggestion: 'Sugestao de Tarefa',
+            meta_update: 'Meta Doc',
+            insight: 'Insight',
+            alert: 'Alerta'
+        };
+        const typeLabel = typeLabels[data.proactive_type] || data.proactive_type || 'AI';
+
+        const card = document.createElement('div');
+        card.className = 'ai-suggestion-card';
+        card.id = `ai-suggestion-${sugId}`;
+
+        card.innerHTML = `
+            <div class="ai-suggestion-header">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a7 7 0 0 1 7 7c0 2.5-1.5 4.5-3 6-1 1-1.5 2.5-1.5 4h-5c0-1.5-.5-3-1.5-4-1.5-1.5-3-3.5-3-6a7 7 0 0 1 7-7z"/><path d="M9 21h6"/><path d="M10 24h4"/></svg>
+                <span class="ai-suggestion-type">${typeLabel}</span>
+                <button class="ai-suggestion-close" onclick="app._handleProactiveAction('dismiss', ${JSON.stringify({suggestion_id: sugId, conversation_id: data.conversation_id}).replace(/"/g, '&quot;')})">&times;</button>
+            </div>
+            <div class="ai-suggestion-body">
+                <div class="ai-suggestion-title">${this.escapeHtml(data.title)}</div>
+                ${data.body ? `<div class="ai-suggestion-desc">${this.escapeHtml(data.body)}</div>` : ''}
+            </div>
+            <div class="ai-suggestion-actions">
+                ${(data.actions || []).map(a =>
+                    `<button class="btn btn-${a.style || 'primary'} btn-sm" onclick="app._handleProactiveAction('${a.action}', ${JSON.stringify({suggestion_id: sugId, conversation_id: data.conversation_id}).replace(/"/g, '&quot;')})">${this.escapeHtml(a.label)}</button>`
+                ).join('')}
+            </div>
+        `;
+
+        container.appendChild(card);
+
+        // Auto-hide card after 30s (stays accessible via AI panel history)
+        setTimeout(() => {
+            const el = document.getElementById(`ai-suggestion-${sugId}`);
+            if (el) {
+                el.classList.add('ai-suggestion-exit');
+                setTimeout(() => el.remove(), 300);
+            }
+        }, 30000);
+    }
+
+    async acceptSuggestion(id) {
+        try {
+            await this.api('POST', `/ai/suggestions/${id}/accept`);
+            this._removeSuggestionFromPending(id);
+            const el = document.getElementById(`ai-suggestion-${id}`);
+            if (el) {
+                el.classList.add('ai-suggestion-exit');
+                setTimeout(() => el.remove(), 300);
+            }
+            this.showToast('AI Suggestion', 'Sugestao aceita', 'success');
+            // Refresh suggestions in chat panel if open
+            if (window.aiChat?.isOpen) window.aiChat.refreshPendingSuggestions?.();
+        } catch (e) {
+            this.showToast('Erro', e.message, 'error');
+        }
+    }
+
+    async dismissSuggestion(id) {
+        try {
+            await this.api('POST', `/ai/suggestions/${id}/dismiss`);
+        } catch (e) { /* ignore */ }
+        this._removeSuggestionFromPending(id);
+        const el = document.getElementById(`ai-suggestion-${id}`);
+        if (el) {
+            el.classList.add('ai-suggestion-exit');
+            setTimeout(() => el.remove(), 300);
+        }
+        // Refresh suggestions in chat panel if open
+        if (window.aiChat?.isOpen) window.aiChat.refreshPendingSuggestions?.();
+    }
+
+    async discussSuggestion(id) {
+        if (!window.aiChat) return;
+
+        try {
+            // Server creates/returns a proactive conversation with the assistant's first message
+            const result = await this.api('POST', `/ai/suggestions/${id}/discuss`);
+            if (result?.conversation_id) {
+                window.aiChat.open();
+                await window.aiChat.loadConversation(result.conversation_id);
+            }
+        } catch (e) {
+            this.showToast('Erro', e.message || 'Falha ao abrir discussao', 'error');
+        }
+
+        // Remove the card (chat takes over)
+        this._removeSuggestionFromPending(id);
+        const el = document.getElementById(`ai-suggestion-${id}`);
+        if (el) {
+            el.classList.add('ai-suggestion-exit');
+            setTimeout(() => el.remove(), 300);
+        }
+    }
+
+    _removeSuggestionFromPending(id) {
+        if (this._pendingSuggestions) {
+            this._pendingSuggestions = this._pendingSuggestions.filter(s => s.id !== id);
+            this._updateSuggestionBadge();
+        }
+        if (this._suggestionCache) {
+            delete this._suggestionCache[id];
+        }
+    }
 }
+
+// Global confirm modal - replaces native confirm() across the entire system
+function showConfirmModal(title, message, onConfirm, confirmLabel = 'Confirmar') {
+    document.querySelector('.confirm-modal-overlay')?.remove();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-modal-overlay';
+    overlay.innerHTML = `
+        <div class="confirm-modal">
+            <div class="confirm-modal-title">${title}</div>
+            <div class="confirm-modal-message">${message}</div>
+            <div class="confirm-modal-actions">
+                <button class="confirm-modal-cancel">Cancelar</button>
+                <button class="confirm-modal-confirm">${confirmLabel}</button>
+            </div>
+        </div>
+    `;
+
+    overlay.querySelector('.confirm-modal-cancel').addEventListener('click', () => overlay.remove());
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    overlay.querySelector('.confirm-modal-confirm').addEventListener('click', async () => {
+        overlay.remove();
+        await onConfirm();
+    });
+
+    document.body.appendChild(overlay);
+}
+window.showConfirmModal = showConfirmModal;
 
 // Initialize app
 const app = new DevManager();

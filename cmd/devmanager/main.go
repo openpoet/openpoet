@@ -31,6 +31,9 @@ import (
 	"devmanager/web"
 )
 
+// BuildVersion is injected at build time via -ldflags
+var BuildVersion = "dev"
+
 // debugResponseWriter wraps http.ResponseWriter to capture status and size for logging
 type debugResponseWriter struct {
 	http.ResponseWriter
@@ -145,7 +148,7 @@ func main() {
 	macroExec := macro.NewExecutor(db, hub, encryptor.Decrypt)
 
 	// Initialize config syncer
-	configSync := macro.NewConfigSyncer(db, encryptor.Decrypt)
+	configSync := macro.NewConfigSyncer(db, encryptor.Decrypt, cfg.Address())
 
 	// Initialize built-in macros
 	if err := macro.InitBuiltinMacros(context.Background(), db); err != nil {
@@ -198,9 +201,37 @@ func main() {
 	})
 	wsHandler := handlers.NewWebSocketHandler(hub, api, webpush)
 
+	// Wire hub into config syncer for live progress
+	configSync.SetHub(hub)
+
 	// Initialize AI provider
 	aiProvider := initAIProvider(db, fmt.Sprintf("http://localhost:%d", cfg.Port))
 	aiHandler := handlers.NewAIHandler(api, aiProvider)
+
+	// Wire AI handler into API for post-sync meta evaluation
+	api.SetAIHandler(aiHandler)
+
+	// Initialize OTEL handler for Claude Code token tracking
+	otelHandler := handlers.NewOTELHandler(db)
+
+	// Wire AI evaluation callbacks into session manager
+	sessionMgr.OnSessionStart = func(sessionID string) {
+		log.Printf("[AI-Session] >>> OnSessionStart callback fired for session %s", sessionID[:8])
+		aiHandler.EvaluateSession(context.Background(), sessionID, "session_start", nil)
+	}
+	sessionMgr.OnSessionFlush = func(sessionID string) {
+		log.Printf("[OTEL] >>> OnSessionFlush callback fired for session %s", sessionID[:8])
+		otelHandler.FlushSession(sessionID)
+	}
+	sessionMgr.OnSessionEnd = func(sessionID string, output []byte) {
+		log.Printf("[AI-Session] >>> OnSessionEnd callback fired for session %s (outputLen=%d)", sessionID[:8], len(output))
+		aiHandler.EvaluateSession(context.Background(), sessionID, "session_end", output)
+	}
+
+	// Wire AI evaluation callback into hook handler for mid-session triggers
+	hookHandler.OnEvaluateSession = func(sessionID string, trigger string, outputSnapshot []byte) {
+		aiHandler.EvaluateSession(context.Background(), sessionID, trigger, outputSnapshot)
+	}
 
 	// Set up router
 	r := chi.NewRouter()
@@ -262,6 +293,13 @@ func main() {
 	})
 
 	r.Route("/api", func(r chi.Router) {
+		// Version
+		r.Get("/version", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-cache")
+			json.NewEncoder(w).Encode(map[string]string{"version": BuildVersion})
+		})
+
 		// Projects
 		r.Get("/projects", api.ListProjects)
 		r.Post("/projects", api.CreateProject)
@@ -271,6 +309,19 @@ func main() {
 		r.Post("/projects/{id}/duplicate", api.DuplicateProject)
 		r.Post("/projects/{id}/validate", api.ValidateProject)
 		r.Post("/projects/{id}/sync-config", api.SyncProjectConfig)
+		r.Get("/projects/{id}/meta", api.GetProjectMeta)
+		r.Put("/projects/{id}/meta", api.UpdateProjectMeta)
+		// Project Tasks
+		r.Get("/projects/{id}/tasks", api.ListProjectTasks)
+		r.Post("/projects/{id}/tasks", api.CreateProjectTask)
+		r.Get("/projects/{id}/tasks/session-summary", api.GetTaskSessionSummary)
+		r.Get("/projects/{id}/tasks/{taskId}", api.GetProjectTask)
+		r.Put("/projects/{id}/tasks/{taskId}", api.UpdateProjectTask)
+		r.Patch("/projects/{id}/tasks/{taskId}/status", api.UpdateTaskStatus)
+		r.Delete("/projects/{id}/tasks/{taskId}", api.DeleteProjectTask)
+		r.Post("/projects/{id}/tasks/{taskId}/duplicate", api.DuplicateProjectTask)
+		r.Get("/projects/{id}/tasks/{taskId}/sessions", api.ListTaskSessions)
+
 		r.Get("/projects/{id}/files", fileHandler.ListProjectFiles)
 		r.Get("/projects/{id}/files/view/*", fileHandler.ViewProjectFile)
 
@@ -280,6 +331,10 @@ func main() {
 		r.Get("/sessions/{id}", api.GetSession)
 		r.Get("/sessions/{id}/output", api.GetSessionOutput)
 		r.Delete("/sessions/{id}", api.DeleteSession)
+
+		// Session-Task integration
+		r.Get("/sessions/{id}/task", api.GetSessionLinkedTask)
+		r.Post("/sessions/{id}/evaluate", api.TriggerSessionEvaluation)
 
 		// Session files
 		r.Get("/sessions/{id}/files", fileHandler.ListFiles)
@@ -340,15 +395,44 @@ func main() {
 		r.Post("/hooks/event", hookHandler.HandleEvent)
 		r.Get("/hooks/pending/{sessionId}", hookHandler.HandleGetPending)
 
+		// Temp Documents
+		r.Post("/documents", api.CreateTempDocument)
+		r.Get("/documents/{id}", api.GetTempDocument)
+
 		// AI
 		r.Get("/ai/status", aiHandler.HandleStatus)
 		r.Post("/ai/chat", aiHandler.HandleChat)
 		r.Get("/ai/conversations", aiHandler.HandleListConversations)
+		r.Delete("/ai/conversations", aiHandler.HandleDeleteAllConversations)
 		r.Get("/ai/conversations/{id}", aiHandler.HandleGetConversation)
 		r.Delete("/ai/conversations/{id}", aiHandler.HandleDeleteConversation)
 		r.Post("/ai/generate-skill", aiHandler.HandleGenerateSkill)
 		r.Post("/ai/validate-skill", aiHandler.HandleValidateSkill)
+
+		// AI Suggestions
+		r.Get("/ai/suggestions", aiHandler.ListSuggestions)
+		r.Post("/ai/suggestions/{id}/accept", aiHandler.AcceptSuggestion)
+		r.Post("/ai/suggestions/{id}/dismiss", aiHandler.DismissSuggestion)
+		r.Post("/ai/suggestions/{id}/discuss", aiHandler.HandleDiscussSuggestion)
+
+		// AI Proactive
+		r.Post("/ai/conversations/{id}/read", aiHandler.HandleMarkRead)
+		r.Get("/ai/unread-count", aiHandler.HandleUnreadCount)
+		r.Post("/ai/test-proactive", aiHandler.HandleTestProactive)
+
+		// Token usage
+		r.Get("/token-usage/summary", api.GetTokenUsageSummary)
+		r.Delete("/token-usage", api.ClearTokenUsage)
 	})
+
+	// Test-only endpoints (only available when DEVMANAGER_TEST_MODE=1)
+	if os.Getenv("DEVMANAGER_TEST_MODE") == "1" {
+		log.Printf("[TEST] Test mode enabled — test endpoints available")
+		r.Post("/api/test/seed-token-usage", api.SeedTokenUsage)
+	}
+
+	// OTLP metrics endpoint (standard path for OpenTelemetry HTTP/JSON)
+	r.Post("/v1/metrics", otelHandler.HandleMetrics)
 
 	// WebSocket routes
 	r.Get("/ws/session/{id}", wsHandler.HandleSessionWS)
@@ -362,11 +446,13 @@ func main() {
 	staticFS, _ := fs.Sub(webFS, "static")
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 
-	// Serve service worker and manifest
+	// Serve service worker with version injection
 	r.Get("/sw.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript")
+		w.Header().Set("Cache-Control", "no-cache")
 		data, _ := fs.ReadFile(webFS, "sw.js")
-		w.Write(data)
+		content := strings.ReplaceAll(string(data), "__BUILD_VERSION__", BuildVersion)
+		w.Write([]byte(content))
 	})
 
 	r.Get("/manifest.json", func(w http.ResponseWriter, r *http.Request) {
@@ -375,16 +461,21 @@ func main() {
 		w.Write(data)
 	})
 
-	// Serve index.html for all other routes (SPA)
+	// Serve index.html with version injection for all SPA routes
 	r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Cache-Control", "no-cache")
 		data, err := fs.ReadFile(webFS, "templates/index.html")
 		if err != nil {
 			http.Error(w, "Not Found", http.StatusNotFound)
 			return
 		}
-		w.Write(data)
+		content := strings.ReplaceAll(string(data), "__BUILD_VERSION__", BuildVersion)
+		w.Write([]byte(content))
 	})
+
+	// Start task due date checker goroutine
+	go runTaskDueChecker(db, notifService, hub)
 
 	// Create server
 	// WriteTimeout is 600s to support long-polling hook permission requests (up to 590s)
@@ -558,7 +649,8 @@ func recoverDataFromBackup(db *database.DB, backupPath string) {
 	tables := []string{
 		"projects", "sessions", "macros", "skills",
 		"mcp_servers", "settings", "push_subscriptions", "notifications",
-		"ai_conversations", "ai_messages",
+		"ai_conversations", "ai_messages", "project_meta_documents",
+		"temp_documents", "project_tasks",
 	}
 
 	_, err := db.Exec(fmt.Sprintf("ATTACH DATABASE '%s' AS old_db", backupPath))
@@ -576,6 +668,53 @@ func recoverDataFromBackup(db *database.DB, backupPath string) {
 		}
 		if rows, _ := result.RowsAffected(); rows > 0 {
 			log.Printf("[DB] Recovery: table %s — %d rows recovered", table, rows)
+		}
+	}
+}
+
+// runTaskDueChecker runs every 60s checking for overdue and upcoming tasks.
+func runTaskDueChecker(db *database.DB, notifService *notifications.Service, hub *websocket.Hub) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		ctx := context.Background()
+
+		// Check overdue tasks
+		overdue, err := db.ListOverdueTasks(ctx)
+		if err != nil {
+			continue
+		}
+		for _, task := range overdue {
+			// Get project name for notification
+			project, err := db.GetProject(ctx, task.ProjectID)
+			projectName := fmt.Sprintf("project %d", task.ProjectID)
+			if err == nil {
+				projectName = project.Name
+			}
+
+			title := fmt.Sprintf("Task Overdue: %s", task.Title)
+			body := fmt.Sprintf("Task in %s is past due", projectName)
+			notifService.Send(ctx, "", "warning", title, body)
+			db.MarkTaskDueNotified(ctx, task.ID)
+		}
+
+		// Check upcoming tasks (due within 30 minutes)
+		upcoming, err := db.ListUpcomingTasks(ctx, 30*time.Minute)
+		if err != nil {
+			continue
+		}
+		for _, task := range upcoming {
+			project, err := db.GetProject(ctx, task.ProjectID)
+			projectName := fmt.Sprintf("project %d", task.ProjectID)
+			if err == nil {
+				projectName = project.Name
+			}
+
+			title := fmt.Sprintf("Task Due Soon: %s", task.Title)
+			body := fmt.Sprintf("Task in %s is due within 30 minutes", projectName)
+			notifService.Send(ctx, "", "info", title, body)
+			db.MarkTaskDueNotified(ctx, task.ID)
 		}
 	}
 }
