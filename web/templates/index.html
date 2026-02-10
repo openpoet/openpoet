@@ -4,14 +4,17 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="theme-color" content="#1a1a2e">
+    <script>(function(){var t=localStorage.getItem('devmanager-theme')||'dark';document.documentElement.setAttribute('data-theme',t);var m={dark:'#1a1a2e',light:'#ffffff',nord:'#3b4252',dracula:'#21222c',solarized:'#073642'};var c=document.querySelector('meta[name="theme-color"]');if(c&&m[t])c.setAttribute('content',m[t]);})()</script>
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="app-version" content="__BUILD_VERSION__">
     <title>DevManager - Claude Code Orchestrator</title>
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
-    <link rel="stylesheet" href="/static/css/app.css?v=14">
-    <link rel="stylesheet" href="/static/css/mobile.css?v=15">
+    <link rel="stylesheet" href="/static/css/app.css?v=__BUILD_VERSION__">
+    <link rel="stylesheet" href="/static/css/mobile.css?v=__BUILD_VERSION__">
+    <link rel="stylesheet" href="/static/css/themes.css?v=__BUILD_VERSION__">
 </head>
 <body>
     <div id="app">
@@ -439,11 +442,13 @@
                     <button class="tab-btn active" data-tab="skills">Skills</button>
                     <button class="tab-btn" data-tab="mcps">MCP Servers</button>
                     <button class="tab-btn" data-tab="settings">Settings</button>
+                    <button class="tab-btn" data-tab="tokens">Tokens</button>
                 </div>
                 <div id="config-content" class="config-content">
                     <!-- Config content will be rendered here -->
                 </div>
             </section>
+
         </main>
 
         <!-- AI Chat Toggle Button (floating) -->
@@ -468,6 +473,12 @@
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <circle cx="12" cy="12" r="10"/>
                                 <polyline points="12 6 12 12 16 14"/>
+                            </svg>
+                        </button>
+                        <button id="ai-chat-delete-current" class="btn-icon btn-sm" title="Excluir conversa atual" style="display:none;">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"/>
+                                <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
                             </svg>
                         </button>
                         <button id="ai-chat-new" class="btn-icon btn-sm" title="New chat">
@@ -952,15 +963,16 @@
     <script src="/static/vendor/xterm.js"></script>
     <script src="/static/vendor/xterm-addon-fit.js"></script>
     <script src="/static/vendor/xterm-addon-web-links.js"></script>
-    <script src="/static/js/app.js?v=12"></script>
-    <script src="/static/js/terminal.js?v=6"></script>
-    <script src="/static/js/hooks.js?v=8"></script>
-    <script src="/static/js/voice.js?v=10"></script>
+    <script src="/static/js/theme.js?v=__BUILD_VERSION__"></script>
+    <script src="/static/js/app.js?v=__BUILD_VERSION__"></script>
+    <script src="/static/js/terminal.js?v=__BUILD_VERSION__"></script>
+    <script src="/static/js/hooks.js?v=__BUILD_VERSION__"></script>
+    <script src="/static/js/voice.js?v=__BUILD_VERSION__"></script>
     <script src="/static/vendor/marked.min.js"></script>
-    <script src="/static/js/files.js?v=10"></script>
-    <script src="/static/js/file-viewer.js?v=3"></script>
-    <script src="/static/js/notifications.js?v=3"></script>
-    <script src="/static/js/macro-editor.js?v=2"></script>
-    <script src="/static/js/ai-chat.js?v=2"></script>
+    <script src="/static/js/files.js?v=__BUILD_VERSION__"></script>
+    <script src="/static/js/file-viewer.js?v=__BUILD_VERSION__"></script>
+    <script src="/static/js/notifications.js?v=__BUILD_VERSION__"></script>
+    <script src="/static/js/macro-editor.js?v=__BUILD_VERSION__"></script>
+    <script src="/static/js/ai-chat.js?v=__BUILD_VERSION__"></script>
 </body>
 </html>

@@ -29,16 +29,28 @@ func (p *ClaudeCLIProvider) Name() string { return "claudecode" }
 //
 //	{"type":"system", "subtype":"init", ...}
 //	{"type":"assistant", "message":{"content":[{"type":"text","text":"..."}], ...}}
-//	{"type":"result", "subtype":"success", "result":"full text", ...}
+//	{"type":"result", "subtype":"success", "result":"full text", "model":"...", "cost_usd":0.01, "usage":{...}}
 type claudeCLIEvent struct {
-	Type    string          `json:"type"`
-	Subtype string          `json:"subtype,omitempty"`
-	Message json.RawMessage `json:"message,omitempty"` // for "assistant"
-	Result  string          `json:"result,omitempty"`  // for "result"
+	Type       string          `json:"type"`
+	Subtype    string          `json:"subtype,omitempty"`
+	Message    json.RawMessage `json:"message,omitempty"` // for "assistant"
+	Result     string          `json:"result,omitempty"`  // for "result"
+	CostUSD    float64         `json:"cost_usd,omitempty"`
+	Usage      *cliResultUsage `json:"usage,omitempty"`
+	ModelUsage map[string]json.RawMessage `json:"modelUsage,omitempty"` // for "result": model -> usage
+}
+
+// cliResultUsage is the usage object inside a Claude CLI "result" event.
+type cliResultUsage struct {
+	InputTokens         int `json:"input_tokens"`
+	OutputTokens        int `json:"output_tokens"`
+	CacheReadTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationTokens int `json:"cache_creation_input_tokens"`
 }
 
 // claudeCLIMessage is the message object inside an "assistant" event.
 type claudeCLIMessage struct {
+	Model   string `json:"model,omitempty"`
 	Content []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -92,28 +104,46 @@ func (p *ClaudeCLIProvider) StreamMessage(ctx context.Context, req *Request, cal
 
 	args := []string{
 		"--print", "--verbose", "--output-format", "stream-json",
-		"--tools", "",                          // disable built-in tools (Bash, Edit, etc.)
 		"--strict-mcp-config",                  // only use MCP servers from --mcp-config
 		"--mcp-config", mcpConfig,              // inject DevManager MCP server
 		"--allowedTools", "mcp__devmanager__*", // auto-approve all devmanager MCP tools
 	}
-	if req.Model != "" {
-		args = append(args, "--model", req.Model)
+	model := req.Model
+	if model == "" {
+		model = DefaultModel
 	}
-	args = append(args, prompt)
+	args = append(args, "--model", model)
+	// Pass prompt via stdin (more robust than CLI argument for long prompts)
+	args = append(args, "-")
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdin pipe: %w", err)
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
 
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start claude CLI: %w", err)
 	}
 
+	// Write prompt to stdin and close it
+	go func() {
+		stdin.Write([]byte(prompt))
+		stdin.Close()
+	}()
+
 	var fullText strings.Builder
+	var resultUsage Usage
+	var resultModel string
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 
@@ -139,6 +169,11 @@ func (p *ClaudeCLIProvider) StreamMessage(ctx context.Context, req *Request, cal
 			var msg claudeCLIMessage
 			if err := json.Unmarshal(cliEvent.Message, &msg); err != nil {
 				continue
+			}
+
+			// Capture model from assistant message
+			if msg.Model != "" && resultModel == "" {
+				resultModel = msg.Model
 			}
 
 			for _, block := range msg.Content {
@@ -199,6 +234,20 @@ func (p *ClaudeCLIProvider) StreamMessage(ctx context.Context, req *Request, cal
 					Index: 0,
 				})
 			}
+			// Capture token usage from result event
+			if cliEvent.Usage != nil {
+				resultUsage.InputTokens = cliEvent.Usage.InputTokens
+				resultUsage.OutputTokens = cliEvent.Usage.OutputTokens
+				resultUsage.CacheReadTokens = cliEvent.Usage.CacheReadTokens
+				resultUsage.CacheCreationTokens = cliEvent.Usage.CacheCreationTokens
+			}
+			// Extract model from modelUsage map keys (e.g. {"claude-opus-4-6": {...}})
+			if resultModel == "" && len(cliEvent.ModelUsage) > 0 {
+				for model := range cliEvent.ModelUsage {
+					resultModel = model
+					break
+				}
+			}
 
 		case "error":
 			errMsg := cliEvent.Result
@@ -217,12 +266,18 @@ func (p *ClaudeCLIProvider) StreamMessage(ctx context.Context, req *Request, cal
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		stderr := stderrBuf.String()
+		if stderr != "" {
+			return nil, fmt.Errorf("claude CLI exited with error: %w\nstderr: %s", err, stderr)
+		}
 		return nil, fmt.Errorf("claude CLI exited with error: %w", err)
 	}
 
 	return &Response{
 		Content:    []ContentBlock{{Type: "text", Text: fullText.String()}},
 		StopReason: "end_turn",
+		Usage:      resultUsage,
+		Model:      resultModel,
 	}, nil
 }
 

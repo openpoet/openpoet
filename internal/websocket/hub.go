@@ -21,6 +21,9 @@ const (
 	MsgTypePing          MessageType = "ping"
 	MsgTypePong          MessageType = "pong"
 
+	// Sync progress
+	MsgTypeSyncProgress MessageType = "sync_progress"
+
 	// Hook message types
 	MsgTypeHookPermission         MessageType = "hook_permission_request"
 	MsgTypeHookPermissionResolved MessageType = "hook_permission_resolved"
@@ -31,6 +34,10 @@ const (
 	MsgTypeHookStop               MessageType = "hook_stop"
 	MsgTypeHookAskUser            MessageType = "hook_ask_user"
 	MsgTypeHookExitPlan           MessageType = "hook_exit_plan"
+
+	// AI proactive suggestions
+	MsgTypeAISuggestion MessageType = "ai_suggestion"
+	MsgTypeAIProactive  MessageType = "ai_proactive"
 )
 
 type Message struct {
@@ -117,7 +124,7 @@ func (h *Hub) Run() {
 							select {
 							case client.send <- msg:
 							default:
-								// Client buffer full, skip
+								log.Printf("Dropping message for client %s: send buffer full (type=%s)", clientID[:8], msg.Type)
 							}
 						}
 					}
@@ -128,7 +135,7 @@ func (h *Hub) Run() {
 					select {
 					case client.send <- msg:
 					default:
-						// Client buffer full, skip
+						log.Printf("Dropping message for client %s: send buffer full (type=%s)", client.ID[:8], msg.Type)
 					}
 				}
 			}
@@ -262,6 +269,20 @@ func (h *Hub) BroadcastStateUpdate(entity string, data interface{}) {
 	})
 }
 
+func (h *Hub) BroadcastAISuggestion(suggestion interface{}) {
+	h.BroadcastToChannel("events", &Message{
+		Type: MsgTypeAISuggestion,
+		Data: suggestion,
+	})
+}
+
+func (h *Hub) BroadcastAIProactive(data interface{}) {
+	h.BroadcastToChannel("events", &Message{
+		Type: MsgTypeAIProactive,
+		Data: data,
+	})
+}
+
 func (h *Hub) GetClientCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -287,6 +308,19 @@ func UnmarshalMessage(data []byte) (*Message, error) {
 	var msg Message
 	err := json.Unmarshal(data, &msg)
 	return &msg, err
+}
+
+// BroadcastSyncProgress sends a sync progress update to all event subscribers.
+func (h *Hub) BroadcastSyncProgress(projectID int64, step, status, detail string) {
+	h.BroadcastToChannel("events", &Message{
+		Type: MsgTypeSyncProgress,
+		Data: map[string]interface{}{
+			"project_id": projectID,
+			"step":       step,
+			"status":     status,
+			"detail":     detail,
+		},
+	})
 }
 
 // BroadcastHookEvent sends a hook event to clients subscribed to the hooks channel for a session.

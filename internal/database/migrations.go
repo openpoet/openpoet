@@ -20,6 +20,13 @@ var migrations = []Migration{
 	{Version: 2, Description: "notifications: add permission and hook_notification types", Up: migrateV2},
 	{Version: 3, Description: "skills: add category, sort_order, sync_count; add synced_skill_files and skill_versions tables", Up: migrateV3},
 	{Version: 4, Description: "ai: add ai_conversations and ai_messages tables", Up: migrateV4},
+	{Version: 5, Description: "meta: add project_meta_documents table", Up: migrateV5},
+	{Version: 6, Description: "docs: add temp_documents table", Up: migrateV6},
+	{Version: 7, Description: "tasks: add project_tasks table", Up: migrateV7},
+	{Version: 8, Description: "session-task integration: session_tasks, ai_suggestions tables, session name/task_id columns", Up: migrateV8},
+	{Version: 9, Description: "ai proactive: add source/level/context columns to ai_conversations and ai_suggestions", Up: migrateV9},
+	{Version: 10, Description: "tokens: add token_usage table for tracking AI and Claude Code token consumption", Up: migrateV10},
+	{Version: 11, Description: "tokens: add subcategory column for AI assistant usage breakdown", Up: migrateV11},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -241,6 +248,193 @@ func migrateV3(tx *sqlx.Tx) error {
 		`CREATE INDEX IF NOT EXISTS idx_skill_versions_skill ON skill_versions(skill_id)`,
 	}
 
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("statement failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV6 adds the temp_documents table for AI-generated temporary documents.
+func migrateV6(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS temp_documents (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("statement failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV5 adds the project_meta_documents table for per-project meta docs.
+func migrateV5(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS project_meta_documents (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+			content TEXT NOT NULL DEFAULT '',
+			version INTEGER NOT NULL DEFAULT 1,
+			last_updated_by TEXT NOT NULL DEFAULT '',
+			summary TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_project_meta_project ON project_meta_documents(project_id)`,
+	}
+
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("statement failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV7 adds the project_tasks table for per-project task management.
+func migrateV7(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS project_tasks (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			parent_id INTEGER REFERENCES project_tasks(id) ON DELETE CASCADE,
+			title TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo', 'in_progress', 'done', 'blocked')),
+			priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('low', 'medium', 'high', 'urgent')),
+			due_date TIMESTAMP,
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			due_notified BOOLEAN NOT NULL DEFAULT 0,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks(project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_tasks_parent ON project_tasks(parent_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_tasks_status ON project_tasks(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_tasks_due_date ON project_tasks(due_date)`,
+	}
+
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("statement failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV8 adds session-task integration tables and columns.
+func migrateV8(tx *sqlx.Tx) error {
+	stmts := []string{
+		// Add name and task_id columns to sessions
+		`ALTER TABLE sessions ADD COLUMN name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN task_id INTEGER REFERENCES project_tasks(id) ON DELETE SET NULL`,
+
+		// Junction table: session <-> task relationship
+		`CREATE TABLE IF NOT EXISTS session_tasks (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			task_id INTEGER NOT NULL REFERENCES project_tasks(id) ON DELETE CASCADE,
+			role TEXT NOT NULL DEFAULT 'works_on' CHECK(role IN ('works_on', 'created_from', 'registered_as')),
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(session_id, task_id, role)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_tasks_session ON session_tasks(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_tasks_task ON session_tasks(task_id)`,
+
+		// AI suggestions table
+		`CREATE TABLE IF NOT EXISTS ai_suggestions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+			project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+			type TEXT NOT NULL CHECK(type IN ('link_task', 'create_task', 'update_task', 'complete_task')),
+			title TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			context_json TEXT NOT NULL DEFAULT '{}',
+			status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'accepted', 'dismissed')),
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+	}
+
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("statement failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV9 adds proactive AI interaction framework columns.
+func migrateV9(tx *sqlx.Tx) error {
+	stmts := []string{
+		// ai_conversations: track source (user vs ai-initiated)
+		`ALTER TABLE ai_conversations ADD COLUMN source TEXT NOT NULL DEFAULT 'user'`,
+		`ALTER TABLE ai_conversations ADD COLUMN proactive_level TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE ai_conversations ADD COLUMN proactive_type TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE ai_conversations ADD COLUMN proactive_context TEXT NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE ai_conversations ADD COLUMN is_read INTEGER NOT NULL DEFAULT 1`,
+
+		// ai_suggestions: add level and link to conversation
+		`ALTER TABLE ai_suggestions ADD COLUMN level TEXT NOT NULL DEFAULT 'standard'`,
+		`ALTER TABLE ai_suggestions ADD COLUMN conversation_id INTEGER REFERENCES ai_conversations(id) ON DELETE SET NULL`,
+
+		// Indexes
+		`CREATE INDEX IF NOT EXISTS idx_ai_conversations_source ON ai_conversations(source)`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_suggestions_conversation ON ai_suggestions(conversation_id)`,
+	}
+
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("statement failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV10 adds the token_usage table for tracking token consumption.
+func migrateV10(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS token_usage (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			source TEXT NOT NULL CHECK(source IN ('ai_assistant', 'claude_code')),
+			project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+			session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+			conversation_id INTEGER REFERENCES ai_conversations(id) ON DELETE SET NULL,
+			model TEXT NOT NULL DEFAULT '',
+			input_tokens INTEGER NOT NULL DEFAULT 0,
+			output_tokens INTEGER NOT NULL DEFAULT 0,
+			cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+			cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+			cost_usd REAL NOT NULL DEFAULT 0,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_token_usage_source ON token_usage(source)`,
+		`CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_token_usage_conversation ON token_usage(conversation_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_token_usage_created ON token_usage(created_at)`,
+	}
+
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("statement failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV11 adds subcategory column to token_usage for AI assistant breakdown.
+func migrateV11(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE token_usage ADD COLUMN subcategory TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_token_usage_subcategory ON token_usage(subcategory)`,
+	}
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("statement failed: %w\nSQL: %s", err, s)

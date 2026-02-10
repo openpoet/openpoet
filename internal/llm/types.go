@@ -1,5 +1,8 @@
 package llm
 
+// DefaultModel is the fallback model used when no model is configured.
+const DefaultModel = "claude-sonnet-4-5-20250929"
+
 // Message represents a conversation message.
 type Message struct {
 	Role    string         `json:"role"` // "user", "assistant"
@@ -74,6 +77,9 @@ type StreamEvent struct {
 	// For message_start
 	Message *StreamMessage `json:"message,omitempty"`
 
+	// For message_delta (top-level usage with output_tokens)
+	Usage *Usage `json:"usage,omitempty"`
+
 	// For error
 	Error *StreamError `json:"error,omitempty"`
 }
@@ -89,6 +95,7 @@ type StreamDelta struct {
 // StreamMessage is a partial message in a stream start event.
 type StreamMessage struct {
 	ID         string `json:"id"`
+	Model      string `json:"model,omitempty"`
 	Role       string `json:"role"`
 	StopReason string `json:"stop_reason,omitempty"`
 	Usage      *Usage `json:"usage,omitempty"`
@@ -102,8 +109,10 @@ type StreamError struct {
 
 // Usage tracks token usage.
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens         int `json:"input_tokens"`
+	OutputTokens        int `json:"output_tokens"`
+	CacheReadTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationTokens int `json:"cache_creation_input_tokens"`
 }
 
 // Request is the input to a provider call.
@@ -120,6 +129,7 @@ type Response struct {
 	Content    []ContentBlock
 	StopReason string // "end_turn", "tool_use", "max_tokens"
 	Usage      Usage
+	Model      string // model used (populated by ClaudeCLIProvider)
 }
 
 // StreamCallback is called for each streaming event.

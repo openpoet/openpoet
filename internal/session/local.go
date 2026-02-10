@@ -16,6 +16,7 @@ type LocalRunner struct {
 	workDir       string
 	envVars       map[string]string
 	outputHandler func([]byte)
+	cliArgs       []string
 
 	mu     sync.Mutex
 	cmd    *exec.Cmd
@@ -25,7 +26,7 @@ type LocalRunner struct {
 	done   chan struct{}
 }
 
-func NewLocalRunner(workDir string, envVars map[string]string, outputHandler func([]byte)) (*LocalRunner, error) {
+func NewLocalRunner(workDir string, envVars map[string]string, outputHandler func([]byte), cliArgs []string) (*LocalRunner, error) {
 	// Verify work directory exists
 	if _, err := os.Stat(workDir); os.IsNotExist(err) {
 		return nil, fmt.Errorf("work directory does not exist: %s", workDir)
@@ -35,6 +36,7 @@ func NewLocalRunner(workDir string, envVars map[string]string, outputHandler fun
 		workDir:       workDir,
 		envVars:       envVars,
 		outputHandler: outputHandler,
+		cliArgs:       cliArgs,
 		done:          make(chan struct{}),
 	}, nil
 }
@@ -61,8 +63,8 @@ func (r *LocalRunner) Start(ctx context.Context) error {
 		r.outputHandler([]byte(startMsg))
 	}
 
-	// Create command to run claude
-	r.cmd = exec.CommandContext(r.ctx, "claude")
+	// Create command to run claude with optional CLI args (e.g. --mcp-config)
+	r.cmd = exec.CommandContext(r.ctx, "claude", r.cliArgs...)
 	r.cmd.Dir = r.workDir
 
 	// Set environment variables

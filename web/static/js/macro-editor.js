@@ -68,18 +68,23 @@ class MacroEditor {
         }
     }
 
-    async delete() {
+    delete() {
         if (!this.currentMacro?.id) return;
-        if (!confirm('Delete this macro?')) return;
-
-        try {
-            await app.api('DELETE', `/macros/${this.currentMacro.id}`);
-            app.hideModal();
-            app.showToast('Success', 'Macro deleted', 'success');
-            app.loadMacros();
-        } catch (error) {
-            app.showToast('Error', error.message, 'error');
-        }
+        showConfirmModal(
+            'Excluir macro?',
+            'A macro será removida permanentemente. Esta ação não pode ser desfeita.',
+            async () => {
+                try {
+                    await app.api('DELETE', `/macros/${this.currentMacro.id}`);
+                    app.hideModal();
+                    app.showToast('Success', 'Macro deleted', 'success');
+                    app.loadMacros();
+                } catch (error) {
+                    app.showToast('Error', error.message, 'error');
+                }
+            },
+            'Excluir'
+        );
     }
 
     escapeHtml(text) {
