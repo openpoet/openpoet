@@ -5,6 +5,7 @@ import (
 	"devmanager/internal/database"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,15 +14,34 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// SyncProgressReporter is an interface for reporting sync progress.
+type SyncProgressReporter interface {
+	BroadcastSyncProgress(projectID int64, step, status, detail string)
+}
+
 type ConfigSyncer struct {
 	db          *database.DB
 	decryptFunc func(string, string) (string, error)
+	hub         SyncProgressReporter
+	serverAddr  string
 }
 
-func NewConfigSyncer(db *database.DB, decryptFunc func(string, string) (string, error)) *ConfigSyncer {
+func NewConfigSyncer(db *database.DB, decryptFunc func(string, string) (string, error), serverAddr string) *ConfigSyncer {
 	return &ConfigSyncer{
 		db:          db,
 		decryptFunc: decryptFunc,
+		serverAddr:  serverAddr,
+	}
+}
+
+// SetHub sets the WebSocket hub for broadcasting sync progress.
+func (cs *ConfigSyncer) SetHub(hub SyncProgressReporter) {
+	cs.hub = hub
+}
+
+func (cs *ConfigSyncer) reportProgress(projectID int64, step, status, detail string) {
+	if cs.hub != nil {
+		cs.hub.BroadcastSyncProgress(projectID, step, status, detail)
 	}
 }
 
@@ -48,40 +68,42 @@ func (cs *ConfigSyncer) syncToLocal(ctx context.Context, project *database.Proje
 	}
 
 	// Sync bridge.sh hook script
+	cs.reportProgress(project.ID, "hooks", "running", "Syncing hook scripts...")
 	if err := cs.syncBridgeScriptLocal(hooksDir); err != nil {
+		cs.reportProgress(project.ID, "hooks", "error", err.Error())
 		return fmt.Errorf("failed to sync bridge.sh: %w", err)
 	}
+	cs.reportProgress(project.ID, "hooks", "done", "Hook scripts synced")
 
 	// Sync skills with smart tracking
+	cs.reportProgress(project.ID, "skills", "running", "Syncing skills...")
 	if err := cs.syncSkillsToLocal(ctx, skillsDir, projectPath); err != nil {
+		cs.reportProgress(project.ID, "skills", "error", err.Error())
 		return fmt.Errorf("failed to sync skills: %w", err)
 	}
+	cs.reportProgress(project.ID, "skills", "done", "Skills synced")
 
-	// Sync MCP servers
-	mcpServers, err := cs.db.ListEnabledMCPServers(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to list MCP servers: %w", err)
-	}
+	// MCP servers are passed via --mcp-config CLI flag at session start.
+	// No file writing needed — this preserves any MCPs the user configured manually in the project.
+	cs.reportProgress(project.ID, "mcps", "done", "MCP servers configured via CLI flag at session start")
 
-	mcpConfig := cs.buildMCPConfig(mcpServers)
-	mcpPath := filepath.Join(claudeDir, "mcp.json")
-	mcpJSON, _ := json.MarshalIndent(mcpConfig, "", "  ")
-	if err := os.WriteFile(mcpPath, mcpJSON, 0644); err != nil {
-		return fmt.Errorf("failed to write mcp.json: %w", err)
-	}
-
-	// Sync settings
-	settings, err := cs.db.GetAllSettings(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get settings: %w", err)
-	}
-
-	settingsConfig := cs.buildSettingsConfig(settings)
+	// Sync hooks into settings.json (merge, preserving user's other settings)
+	cs.reportProgress(project.ID, "settings", "running", "Syncing hooks to settings...")
 	settingsPath := filepath.Join(claudeDir, "settings.json")
-	settingsJSON, _ := json.MarshalIndent(settingsConfig, "", "  ")
+
+	existing := make(map[string]interface{})
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		json.Unmarshal(data, &existing)
+	}
+
+	existing["hooks"] = cs.buildHooksConfig()
+
+	settingsJSON, _ := json.MarshalIndent(existing, "", "  ")
 	if err := os.WriteFile(settingsPath, settingsJSON, 0644); err != nil {
+		cs.reportProgress(project.ID, "settings", "error", err.Error())
 		return fmt.Errorf("failed to write settings.json: %w", err)
 	}
+	cs.reportProgress(project.ID, "settings", "done", "Hooks synced")
 
 	return nil
 }
@@ -117,46 +139,47 @@ func (cs *ConfigSyncer) syncToRemote(ctx context.Context, project *database.Proj
 	sftpClient.MkdirAll(hooksDir)
 
 	// Sync bridge.sh hook script to remote
+	cs.reportProgress(project.ID, "hooks", "running", "Syncing hook scripts to remote...")
 	if err := cs.syncBridgeScriptRemote(client, sftpClient, hooksDir); err != nil {
+		cs.reportProgress(project.ID, "hooks", "error", err.Error())
 		return fmt.Errorf("failed to sync bridge.sh to remote: %w", err)
 	}
+	cs.reportProgress(project.ID, "hooks", "done", "Hook scripts synced")
 
 	// Sync skills with smart tracking
+	cs.reportProgress(project.ID, "skills", "running", "Syncing skills to remote...")
 	if err := cs.syncSkillsToRemote(ctx, sftpClient, skillsDir, project); err != nil {
+		cs.reportProgress(project.ID, "skills", "error", err.Error())
 		return fmt.Errorf("failed to sync skills to remote: %w", err)
 	}
+	cs.reportProgress(project.ID, "skills", "done", "Skills synced")
 
-	// Sync MCP config
-	mcpServers, err := cs.db.ListEnabledMCPServers(ctx)
-	if err != nil {
-		return err
-	}
+	// MCP servers are passed via --mcp-config CLI flag at session start.
+	// No file writing needed — this preserves any MCPs the user configured manually in the project.
+	cs.reportProgress(project.ID, "mcps", "done", "MCP servers configured via CLI flag at session start")
 
-	mcpConfig := cs.buildMCPConfig(mcpServers)
-	mcpJSON, _ := json.MarshalIndent(mcpConfig, "", "  ")
-	mcpPath := filepath.Join(claudeDir, "mcp.json")
-	f, err := sftpClient.Create(mcpPath)
-	if err != nil {
-		return fmt.Errorf("failed to create mcp.json: %w", err)
-	}
-	f.Write(mcpJSON)
-	f.Close()
-
-	// Sync settings
-	settings, err := cs.db.GetAllSettings(ctx)
-	if err != nil {
-		return err
-	}
-
-	settingsConfig := cs.buildSettingsConfig(settings)
-	settingsJSON, _ := json.MarshalIndent(settingsConfig, "", "  ")
+	// Sync hooks into settings.json (merge, preserving user's other settings)
+	cs.reportProgress(project.ID, "settings", "running", "Syncing hooks to remote settings...")
 	settingsPath := filepath.Join(claudeDir, "settings.json")
-	f, err = sftpClient.Create(settingsPath)
+
+	existing := make(map[string]interface{})
+	if f, err := sftpClient.Open(settingsPath); err == nil {
+		data, _ := io.ReadAll(f)
+		f.Close()
+		json.Unmarshal(data, &existing)
+	}
+
+	existing["hooks"] = cs.buildHooksConfig()
+
+	settingsJSON, _ := json.MarshalIndent(existing, "", "  ")
+	f, err := sftpClient.Create(settingsPath)
 	if err != nil {
+		cs.reportProgress(project.ID, "settings", "error", err.Error())
 		return fmt.Errorf("failed to create settings.json: %w", err)
 	}
 	f.Write(settingsJSON)
 	f.Close()
+	cs.reportProgress(project.ID, "settings", "done", "Hooks synced")
 
 	return nil
 }
@@ -336,57 +359,9 @@ func buildSkillMD(name string, content string) string {
 	return sb.String()
 }
 
-func (cs *ConfigSyncer) buildMCPConfig(servers []database.MCPServer) map[string]interface{} {
-	mcpServers := make(map[string]interface{})
-
-	for _, server := range servers {
-		var args []string
-		var env map[string]string
-
-		json.Unmarshal([]byte(server.Args), &args)
-		json.Unmarshal([]byte(server.Env), &env)
-
-		serverConfig := map[string]interface{}{
-			"command": server.Command,
-		}
-		if len(args) > 0 {
-			serverConfig["args"] = args
-		}
-		if len(env) > 0 {
-			serverConfig["env"] = env
-		}
-
-		mcpServers[server.Name] = serverConfig
-	}
-
-	return map[string]interface{}{
-		"mcpServers": mcpServers,
-	}
-}
-
-func (cs *ConfigSyncer) buildSettingsConfig(settings map[string]string) map[string]interface{} {
-	result := make(map[string]interface{})
-
-	for key, value := range settings {
-		// Skip internal settings
-		if key == "openai_api_key" || key == "vapid_private_key" || key == "vapid_public_key" {
-			continue
-		}
-		// Skip groq_api_key and whisper_provider (internal)
-		if key == "groq_api_key" || key == "whisper_provider" || key == "voice_auto_submit" {
-			continue
-		}
-
-		// Try to parse as JSON
-		var jsonVal interface{}
-		if err := json.Unmarshal([]byte(value), &jsonVal); err == nil {
-			result[key] = jsonVal
-		} else {
-			result[key] = value
-		}
-	}
-
-	// Add hooks configuration pointing to bridge.sh
+// buildHooksConfig returns the hooks configuration that DevManager manages.
+// This is the only section DevManager writes to a project's settings.json.
+func (cs *ConfigSyncer) buildHooksConfig() map[string]interface{} {
 	hookCommand := map[string]interface{}{
 		"type":    "command",
 		"command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/bridge.sh",
@@ -397,16 +372,15 @@ func (cs *ConfigSyncer) buildSettingsConfig(settings map[string]string) map[stri
 		},
 	}
 
-	result["hooks"] = map[string]interface{}{
+	return map[string]interface{}{
 		"PermissionRequest":  hookEntry,
 		"PreToolUse":         hookEntry,
 		"PostToolUse":        hookEntry,
 		"PostToolUseFailure": hookEntry,
 		"Notification":       hookEntry,
 		"Stop":               hookEntry,
+		"UserPromptSubmit":   hookEntry,
 	}
-
-	return result
 }
 
 // syncBridgeScriptLocal copies bridge.sh to the project's .claude/hooks/ directory
@@ -442,7 +416,7 @@ case "$EVENT" in
             echo "$RESPONSE"
         fi
         ;;
-    PreToolUse|PostToolUse|PostToolUseFailure|Notification|Stop)
+    PreToolUse|PostToolUse|PostToolUseFailure|Notification|Stop|UserPromptSubmit)
         curl -s -X POST "${HOOK_URL}/api/hooks/event" \
             -H "Content-Type: application/json" \
             -H "X-Session-ID: ${SESSION_ID}" \
@@ -489,7 +463,7 @@ case "$EVENT" in
             echo "$RESPONSE"
         fi
         ;;
-    PreToolUse|PostToolUse|PostToolUseFailure|Notification|Stop)
+    PreToolUse|PostToolUse|PostToolUseFailure|Notification|Stop|UserPromptSubmit)
         curl -s -X POST "${HOOK_URL}/api/hooks/event" \
             -H "Content-Type: application/json" \
             -H "X-Session-ID: ${SESSION_ID}" \

@@ -37,12 +37,13 @@ func Serve(apiURL string) {
 	log.SetOutput(os.Stderr)
 	log.SetPrefix("[mcp] ")
 
+	sessionID := os.Getenv("DEVMANAGER_SESSION_ID")
 	client := NewAPIClient(apiURL)
 
 	reader := bufio.NewReader(os.Stdin)
 	writer := os.Stdout
 
-	log.Printf("MCP server started, API URL: %s", apiURL)
+	log.Printf("MCP server started, API URL: %s, Session ID: %s", apiURL, sessionID)
 
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -74,7 +75,7 @@ func Serve(apiURL string) {
 			continue
 		}
 
-		resp := handleRequest(client, &req)
+		resp := handleRequest(client, &req, sessionID)
 		respBytes, err := json.Marshal(resp)
 		if err != nil {
 			log.Printf("marshal error: %v", err)
@@ -89,7 +90,7 @@ func Serve(apiURL string) {
 	}
 }
 
-func handleRequest(client *APIClient, req *jsonRPCRequest) *jsonRPCResponse {
+func handleRequest(client *APIClient, req *jsonRPCRequest, sessionID string) *jsonRPCResponse {
 	switch req.Method {
 	case "initialize":
 		return &jsonRPCResponse{
@@ -117,7 +118,7 @@ func handleRequest(client *APIClient, req *jsonRPCRequest) *jsonRPCResponse {
 		}
 
 	case "tools/call":
-		return handleToolCall(client, req)
+		return handleToolCall(client, req, sessionID)
 
 	default:
 		return &jsonRPCResponse{
@@ -131,7 +132,7 @@ func handleRequest(client *APIClient, req *jsonRPCRequest) *jsonRPCResponse {
 	}
 }
 
-func handleToolCall(client *APIClient, req *jsonRPCRequest) *jsonRPCResponse {
+func handleToolCall(client *APIClient, req *jsonRPCRequest, sessionID string) *jsonRPCResponse {
 	var params struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -149,7 +150,7 @@ func handleToolCall(client *APIClient, req *jsonRPCRequest) *jsonRPCResponse {
 
 	log.Printf("tool call: %s args=%s", params.Name, string(params.Arguments))
 
-	result, err := executeTool(client, params.Name, params.Arguments)
+	result, err := executeTool(client, params.Name, params.Arguments, sessionID)
 	if err != nil {
 		log.Printf("tool error: %s: %v", params.Name, err)
 		return &jsonRPCResponse{

@@ -61,15 +61,7 @@
         padding-bottom: var(--mobile-nav-height);
     }
 
-    /* Ensure all views have bottom padding for mobile nav */
-    .view {
-        padding-bottom: calc(var(--mobile-nav-height) + 16px);
-    }
-
-    /* Main container in app */
-    main {
-        padding-bottom: calc(var(--mobile-nav-height) + 16px);
-    }
+    /* Bottom padding handled by .main-content padding-bottom above */
 
     /* View Header */
     .view-header {
@@ -243,7 +235,7 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        background-color: rgba(30, 30, 50, 0.85);
+        background-color: rgba(var(--color-primary-rgb), 0.15);
         border: 1px solid var(--color-border);
         border-radius: 50%;
         color: var(--color-text-secondary);
@@ -311,19 +303,19 @@
     }
 
     .mobile-session-status[data-status="running"] {
-        background-color: #4caf50;
+        background-color: var(--color-status-running);
     }
 
     .mobile-session-status[data-status="disconnected"] {
-        background-color: #ff9800;
+        background-color: var(--color-status-disconnected);
     }
 
     .mobile-session-status[data-status="error"] {
-        background-color: #f44336;
+        background-color: var(--color-status-error);
     }
 
     .mobile-session-status[data-status="stopped"] {
-        background-color: #9e9e9e;
+        background-color: var(--color-status-stopped);
     }
 
     /* Session name */
@@ -406,13 +398,13 @@
     .mobile-session-group-toggle {
         margin-right: 8px;
         font-size: 10px;
-        color: #888;
+        color: var(--color-tab-group-toggle);
     }
 
     .mobile-session-group-name {
         font-size: 12px;
         font-weight: 600;
-        color: #999;
+        color: var(--color-tab-group-text);
         text-transform: uppercase;
     }
 
@@ -458,19 +450,19 @@
     }
 
     .mobile-session-item-status[data-status="running"] {
-        background-color: #4caf50;
+        background-color: var(--color-status-running);
     }
 
     .mobile-session-item-status[data-status="disconnected"] {
-        background-color: #ff9800;
+        background-color: var(--color-status-disconnected);
     }
 
     .mobile-session-item-status[data-status="error"] {
-        background-color: #f44336;
+        background-color: var(--color-status-error);
     }
 
     .mobile-session-item-status[data-status="stopped"] {
-        background-color: #9e9e9e;
+        background-color: var(--color-status-stopped);
     }
 
     /* Session item name */
@@ -897,8 +889,8 @@
     }
 
     .mobile-key-btn-accent:active {
-        background-color: #4338ca;
-        border-color: #4338ca;
+        background-color: var(--color-primary-active);
+        border-color: var(--color-primary-active);
         color: white;
     }
 
@@ -1072,7 +1064,7 @@
         color: white !important;
         border-radius: 12px;
         margin: 6px 2px;
-        box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4);
+        box-shadow: 0 2px 8px rgba(var(--color-primary-rgb), 0.4);
     }
 
     .mobile-nav-ai:hover,
@@ -1284,3 +1276,39 @@
     }
 }
 
+/* Token Usage - mobile layout */
+@media (max-width: 768px) {
+    .token-usage-grid {
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+    }
+    .token-usage-stat {
+        padding: 8px 6px;
+    }
+    .token-usage-stat .value {
+        font-size: 16px;
+    }
+    .token-usage-table-wrap {
+        margin: 0 -12px;
+        padding: 0 12px;
+    }
+    .token-usage-model-table {
+        font-size: 11px;
+        min-width: 420px;
+    }
+    .token-usage-model-table th,
+    .token-usage-model-table td {
+        padding: 6px 6px;
+    }
+    .token-project-stats {
+        gap: 8px;
+        font-size: 10px;
+    }
+    .token-project-model-table {
+        font-size: 10px;
+        min-width: 380px;
+    }
+    .token-project-card {
+        padding: 8px 10px;
+    }
+}

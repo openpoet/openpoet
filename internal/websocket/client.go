@@ -36,7 +36,7 @@ func NewClient(hub *Hub, conn *websocket.Conn) *Client {
 		ID:       uuid.New().String(),
 		hub:      hub,
 		conn:     conn,
-		send:     make(chan *Message, 256),
+		send:     make(chan *Message, 2048),
 		channels: make(map[string]bool),
 	}
 }
@@ -161,22 +161,85 @@ func (c *Client) WritePump(ctx context.Context) {
 				return
 			}
 
-			ctx, cancel := context.WithTimeout(ctx, writeWait)
-			data, err := json.Marshal(msg)
-			if err != nil {
-				cancel()
-				log.Printf("Failed to marshal message: %v", err)
-				continue
+			// Drain all pending messages from the channel to batch them
+			batch := []*Message{msg}
+		drain:
+			for {
+				select {
+				case next, ok := <-c.send:
+					if !ok {
+						break drain
+					}
+					batch = append(batch, next)
+				default:
+					break drain
+				}
 			}
 
-			if err := c.conn.Write(ctx, websocket.MessageText, data); err != nil {
+			// Coalesce consecutive session_output messages to reduce WebSocket frames
+			coalesced := coalesceMessages(batch)
+
+			// Write all coalesced messages
+			for _, m := range coalesced {
+				wctx, cancel := context.WithTimeout(ctx, writeWait)
+				data, err := json.Marshal(m)
+				if err != nil {
+					cancel()
+					log.Printf("Failed to marshal message: %v", err)
+					continue
+				}
+
+				if err := c.conn.Write(wctx, websocket.MessageText, data); err != nil {
+					cancel()
+					log.Printf("WebSocket write error: %v", err)
+					return
+				}
 				cancel()
-				log.Printf("WebSocket write error: %v", err)
-				return
 			}
-			cancel()
 		}
 	}
+}
+
+// coalesceMessages merges consecutive session_output messages with the same
+// ChannelID into a single message by concatenating their Data strings.
+// Non-session_output messages and messages with different channels act as
+// boundaries, preserving message ordering.
+func coalesceMessages(msgs []*Message) []*Message {
+	if len(msgs) <= 1 {
+		return msgs
+	}
+
+	result := make([]*Message, 0, len(msgs))
+	var acc *Message // accumulator for session_output coalescing
+
+	for _, m := range msgs {
+		if m.Type == MsgTypeSessionOutput {
+			if acc != nil && acc.ChannelID == m.ChannelID {
+				// Same type+channel: concatenate data strings
+				accStr, _ := acc.Data.(string)
+				mStr, _ := m.Data.(string)
+				acc.Data = accStr + mStr
+			} else {
+				// Different channel or first output msg: flush previous, start new
+				if acc != nil {
+					result = append(result, acc)
+				}
+				cpy := *m
+				acc = &cpy
+			}
+		} else {
+			// Non-output message: flush accumulator, pass through
+			if acc != nil {
+				result = append(result, acc)
+				acc = nil
+			}
+			result = append(result, m)
+		}
+	}
+	if acc != nil {
+		result = append(result, acc)
+	}
+	return result
 }
 
 func (c *Client) Send(msg *Message) {

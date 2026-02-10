@@ -43,29 +43,16 @@ class TerminalManager {
             return;
         }
 
+        const termTheme = window.devManagerTheme ? window.devManagerTheme.getTerminalTheme() : {
+            background: '#0f0f1a', foreground: '#e4e4e7', cursor: '#6366f1',
+            selection: 'rgba(99, 102, 241, 0.3)', black: '#1a1a2e', red: '#ef4444',
+            green: '#22c55e', yellow: '#f59e0b', blue: '#3b82f6', magenta: '#a855f7',
+            cyan: '#06b6d4', white: '#e4e4e7', brightBlack: '#3a3a5a', brightRed: '#f87171',
+            brightGreen: '#4ade80', brightYellow: '#fbbf24', brightBlue: '#60a5fa',
+            brightMagenta: '#c084fc', brightCyan: '#22d3ee', brightWhite: '#ffffff'
+        };
         const terminal = new Terminal({
-            theme: {
-                background: '#0f0f1a',
-                foreground: '#e4e4e7',
-                cursor: '#6366f1',
-                selection: 'rgba(99, 102, 241, 0.3)',
-                black: '#1a1a2e',
-                red: '#ef4444',
-                green: '#22c55e',
-                yellow: '#f59e0b',
-                blue: '#3b82f6',
-                magenta: '#a855f7',
-                cyan: '#06b6d4',
-                white: '#e4e4e7',
-                brightBlack: '#3a3a5a',
-                brightRed: '#f87171',
-                brightGreen: '#4ade80',
-                brightYellow: '#fbbf24',
-                brightBlue: '#60a5fa',
-                brightMagenta: '#c084fc',
-                brightCyan: '#22d3ee',
-                brightWhite: '#ffffff'
-            },
+            theme: termTheme,
             fontFamily: '"Monaco", "Menlo", "Ubuntu Mono", "Consolas", monospace',
             fontSize: 14,
             lineHeight: 1.2,

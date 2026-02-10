@@ -1,0 +1,338 @@
+/* ============================================
+   Theme System - CSS Variable Overrides
+   ============================================ */
+
+/* Default dark theme (Midnight) inherits from :root in app.css.
+   Only non-dark themes need overrides here. */
+
+/* ---- Daylight (Light Theme) ---- */
+[data-theme="light"] {
+    --color-bg: #f0f0f5;
+    --color-bg-secondary: #ffffff;
+    --color-bg-tertiary: #e4e4ec;
+    --color-surface: #d8d8e0;
+    --color-border: #c0c0cc;
+    --color-text: #1a1a2e;
+    --color-text-secondary: #52525b;
+    --color-text-muted: #71717a;
+    --color-primary: #4f46e5;
+    --color-primary-hover: #6366f1;
+    --color-primary-active: #4338ca;
+    --color-primary-rgb: 79, 70, 229;
+    --color-success: #16a34a;
+    --color-success-hover: #15803d;
+    --color-success-rgb: 22, 163, 74;
+    --color-warning: #d97706;
+    --color-warning-rgb: 217, 119, 6;
+    --color-danger: #dc2626;
+    --color-danger-active: #b91c1c;
+    --color-danger-rgb: 220, 38, 38;
+    --color-info: #2563eb;
+    --color-info-rgb: 37, 99, 235;
+
+    /* Tab sidebar */
+    --color-tab-sidebar-bg: #e8e8f0;
+    --color-tab-border: #c0c0cc;
+    --color-tab-header-text: #52525b;
+    --color-tab-text: #71717a;
+    --color-tab-text-active: #1a1a2e;
+    --color-tab-hover-bg: #d8d8e4;
+    --color-tab-active-bg: #d0d0dc;
+    --color-tab-accent: #4f46e5;
+    --color-tab-group-bg: #dcdce8;
+    --color-tab-group-text: #71717a;
+    --color-tab-group-toggle: #a1a1aa;
+    --color-tab-input-bg: #d0d0dc;
+
+    /* Terminal */
+    --color-terminal-bg: #1e1e2e;
+
+    /* Status */
+    --color-status-running: #16a34a;
+    --color-status-disconnected: #d97706;
+    --color-status-error: #dc2626;
+    --color-status-stopped: #9e9e9e;
+
+    /* Overlay */
+    --color-overlay-bg: rgba(0, 0, 0, 0.35);
+
+    /* Accents */
+    --color-accent-purple: #7c3aed;
+    --color-accent-purple-light: #8b5cf6;
+    --color-gradient-start: #4f46e5;
+    --color-gradient-end: #7c3aed;
+
+    /* Badges */
+    --color-badge-todo-bg: rgba(100, 116, 139, 0.15);
+    --color-badge-todo-text: #64748b;
+    --color-badge-progress-text: #2563eb;
+    --color-badge-done-text: #16a34a;
+    --color-badge-blocked-text: #dc2626;
+
+    /* Priority */
+    --color-priority-high: #d97706;
+    --color-priority-medium: #ca8a04;
+}
+
+/* ---- Nord ---- */
+[data-theme="nord"] {
+    --color-bg: #2e3440;
+    --color-bg-secondary: #3b4252;
+    --color-bg-tertiary: #434c5e;
+    --color-surface: #4c566a;
+    --color-border: #4c566a;
+    --color-text: #eceff4;
+    --color-text-secondary: #d8dee9;
+    --color-text-muted: #81a1c1;
+    --color-primary: #88c0d0;
+    --color-primary-hover: #8fbcbb;
+    --color-primary-active: #7ab0c0;
+    --color-primary-rgb: 136, 192, 208;
+    --color-success: #a3be8c;
+    --color-success-hover: #8faa78;
+    --color-success-rgb: 163, 190, 140;
+    --color-warning: #ebcb8b;
+    --color-warning-rgb: 235, 203, 139;
+    --color-danger: #bf616a;
+    --color-danger-active: #a9545c;
+    --color-danger-rgb: 191, 97, 106;
+    --color-info: #81a1c1;
+    --color-info-rgb: 129, 161, 193;
+
+    /* Tab sidebar */
+    --color-tab-sidebar-bg: #2e3440;
+    --color-tab-border: #434c5e;
+    --color-tab-header-text: #d8dee9;
+    --color-tab-text: #81a1c1;
+    --color-tab-text-active: #eceff4;
+    --color-tab-hover-bg: #3b4252;
+    --color-tab-active-bg: #434c5e;
+    --color-tab-accent: #88c0d0;
+    --color-tab-group-bg: #3b4252;
+    --color-tab-group-text: #81a1c1;
+    --color-tab-group-toggle: #81a1c1;
+    --color-tab-input-bg: #434c5e;
+
+    /* Terminal */
+    --color-terminal-bg: #2e3440;
+
+    /* Status */
+    --color-status-running: #a3be8c;
+    --color-status-disconnected: #ebcb8b;
+    --color-status-error: #bf616a;
+    --color-status-stopped: #81a1c1;
+
+    /* Overlay */
+    --color-overlay-bg: rgba(46, 52, 64, 0.7);
+
+    /* Accents */
+    --color-accent-purple: #b48ead;
+    --color-accent-purple-light: #c49dbd;
+    --color-gradient-start: #88c0d0;
+    --color-gradient-end: #b48ead;
+
+    /* Badges */
+    --color-badge-todo-bg: rgba(129, 161, 193, 0.2);
+    --color-badge-todo-text: #81a1c1;
+    --color-badge-progress-text: #88c0d0;
+    --color-badge-done-text: #a3be8c;
+    --color-badge-blocked-text: #bf616a;
+
+    /* Priority */
+    --color-priority-high: #ebcb8b;
+    --color-priority-medium: #d8c07b;
+}
+
+/* ---- Dracula ---- */
+[data-theme="dracula"] {
+    --color-bg: #282a36;
+    --color-bg-secondary: #21222c;
+    --color-bg-tertiary: #343746;
+    --color-surface: #44475a;
+    --color-border: #44475a;
+    --color-text: #f8f8f2;
+    --color-text-secondary: #c0c0d0;
+    --color-text-muted: #6272a4;
+    --color-primary: #bd93f9;
+    --color-primary-hover: #caa8fc;
+    --color-primary-active: #a87cf0;
+    --color-primary-rgb: 189, 147, 249;
+    --color-success: #50fa7b;
+    --color-success-hover: #40d868;
+    --color-success-rgb: 80, 250, 123;
+    --color-warning: #f1fa8c;
+    --color-warning-rgb: 241, 250, 140;
+    --color-danger: #ff5555;
+    --color-danger-active: #e04848;
+    --color-danger-rgb: 255, 85, 85;
+    --color-info: #8be9fd;
+    --color-info-rgb: 139, 233, 253;
+
+    /* Tab sidebar */
+    --color-tab-sidebar-bg: #21222c;
+    --color-tab-border: #44475a;
+    --color-tab-header-text: #c0c0d0;
+    --color-tab-text: #6272a4;
+    --color-tab-text-active: #f8f8f2;
+    --color-tab-hover-bg: #343746;
+    --color-tab-active-bg: #44475a;
+    --color-tab-accent: #bd93f9;
+    --color-tab-group-bg: #343746;
+    --color-tab-group-text: #6272a4;
+    --color-tab-group-toggle: #6272a4;
+    --color-tab-input-bg: #44475a;
+
+    /* Terminal */
+    --color-terminal-bg: #282a36;
+
+    /* Status */
+    --color-status-running: #50fa7b;
+    --color-status-disconnected: #f1fa8c;
+    --color-status-error: #ff5555;
+    --color-status-stopped: #6272a4;
+
+    /* Overlay */
+    --color-overlay-bg: rgba(33, 34, 44, 0.7);
+
+    /* Accents */
+    --color-accent-purple: #ff79c6;
+    --color-accent-purple-light: #ff92d0;
+    --color-gradient-start: #bd93f9;
+    --color-gradient-end: #ff79c6;
+
+    /* Badges */
+    --color-badge-todo-bg: rgba(98, 114, 164, 0.2);
+    --color-badge-todo-text: #6272a4;
+    --color-badge-progress-text: #8be9fd;
+    --color-badge-done-text: #50fa7b;
+    --color-badge-blocked-text: #ff5555;
+
+    /* Priority */
+    --color-priority-high: #f1fa8c;
+    --color-priority-medium: #e0e87c;
+}
+
+/* ---- Solarized Dark ---- */
+[data-theme="solarized"] {
+    --color-bg: #002b36;
+    --color-bg-secondary: #073642;
+    --color-bg-tertiary: #0a4050;
+    --color-surface: #1a5060;
+    --color-border: #2a6070;
+    --color-text: #93a1a1;
+    --color-text-secondary: #839496;
+    --color-text-muted: #657b83;
+    --color-primary: #268bd2;
+    --color-primary-hover: #2aa0f0;
+    --color-primary-active: #2079b8;
+    --color-primary-rgb: 38, 139, 210;
+    --color-success: #859900;
+    --color-success-hover: #6d7e00;
+    --color-success-rgb: 133, 153, 0;
+    --color-warning: #b58900;
+    --color-warning-rgb: 181, 137, 0;
+    --color-danger: #dc322f;
+    --color-danger-active: #c22825;
+    --color-danger-rgb: 220, 50, 47;
+    --color-info: #2aa198;
+    --color-info-rgb: 42, 161, 152;
+
+    /* Tab sidebar */
+    --color-tab-sidebar-bg: #002b36;
+    --color-tab-border: #0a4050;
+    --color-tab-header-text: #839496;
+    --color-tab-text: #657b83;
+    --color-tab-text-active: #93a1a1;
+    --color-tab-hover-bg: #073642;
+    --color-tab-active-bg: #0a4050;
+    --color-tab-accent: #268bd2;
+    --color-tab-group-bg: #073642;
+    --color-tab-group-text: #657b83;
+    --color-tab-group-toggle: #657b83;
+    --color-tab-input-bg: #0a4050;
+
+    /* Terminal */
+    --color-terminal-bg: #002b36;
+
+    /* Status */
+    --color-status-running: #859900;
+    --color-status-disconnected: #b58900;
+    --color-status-error: #dc322f;
+    --color-status-stopped: #657b83;
+
+    /* Overlay */
+    --color-overlay-bg: rgba(0, 43, 54, 0.7);
+
+    /* Accents */
+    --color-accent-purple: #6c71c4;
+    --color-accent-purple-light: #7c81d4;
+    --color-gradient-start: #268bd2;
+    --color-gradient-end: #6c71c4;
+
+    /* Badges */
+    --color-badge-todo-bg: rgba(101, 123, 131, 0.2);
+    --color-badge-todo-text: #657b83;
+    --color-badge-progress-text: #268bd2;
+    --color-badge-done-text: #859900;
+    --color-badge-blocked-text: #dc322f;
+
+    /* Priority */
+    --color-priority-high: #b58900;
+    --color-priority-medium: #a37c00;
+}
+
+/* ============================================
+   Theme Picker UI Styles
+   ============================================ */
+
+.theme-picker {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.theme-swatch {
+    width: 90px;
+    border: 2px solid var(--color-border);
+    border-radius: var(--border-radius);
+    cursor: pointer;
+    padding: 10px 8px 8px;
+    background: var(--color-bg-tertiary);
+    transition: border-color var(--transition), transform var(--transition);
+    text-align: center;
+}
+
+.theme-swatch:hover {
+    border-color: var(--color-text-muted);
+    transform: translateY(-2px);
+}
+
+.theme-swatch.active {
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 1px var(--color-primary);
+}
+
+.theme-swatch-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-bottom: 8px;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.swatch-bar {
+    height: 10px;
+}
+
+.theme-swatch-label {
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    display: block;
+    white-space: nowrap;
+}
+
+.theme-swatch.active .theme-swatch-label {
+    color: var(--color-primary);
+    font-weight: 600;
+}
