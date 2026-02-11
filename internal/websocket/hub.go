@@ -32,6 +32,7 @@ const (
 	MsgTypeHookStop               MessageType = "hook_stop"
 	MsgTypeHookAskUser            MessageType = "hook_ask_user"
 	MsgTypeHookExitPlan           MessageType = "hook_exit_plan"
+	MsgTypeHookTaskLoaded         MessageType = "hook_task_loaded"
 
 	// AI proactive suggestions
 	MsgTypeAISuggestion MessageType = "ai_suggestion"
