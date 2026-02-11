@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"devmanager/internal/database"
+	"devmanager/internal/files"
 	"devmanager/internal/llm"
 
 	"github.com/go-chi/chi/v5"
@@ -22,6 +24,62 @@ import (
 
 var docLinkRe = regexp.MustCompile(`/app/doc/([a-zA-Z0-9-]+)`)
 
+// sseEvent represents a Server-Sent Event for broadcasting to reconnected clients.
+type sseEvent struct {
+	Type string
+	Data interface{}
+}
+
+// activeStreamInfo holds the cancel function and broadcast subscribers for an active stream.
+type activeStreamInfo struct {
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	subs   []chan sseEvent
+}
+
+func (a *activeStreamInfo) broadcast(eventType string, data interface{}) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	evt := sseEvent{Type: eventType, Data: data}
+	for _, ch := range a.subs {
+		select {
+		case ch <- evt:
+		default:
+			// subscriber too slow, skip
+		}
+	}
+}
+
+func (a *activeStreamInfo) subscribe() (<-chan sseEvent, func()) {
+	ch := make(chan sseEvent, 64)
+	a.mu.Lock()
+	a.subs = append(a.subs, ch)
+	a.mu.Unlock()
+	unsub := func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		for i, s := range a.subs {
+			if s == ch {
+				a.subs = append(a.subs[:i], a.subs[i+1:]...)
+				break
+			}
+		}
+		// drain channel
+		for range ch {
+		}
+	}
+	return ch, unsub
+}
+
+func (a *activeStreamInfo) closeAll() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, ch := range a.subs {
+		close(ch)
+	}
+	a.subs = nil
+}
+
 // AIHandler handles all AI-related endpoints.
 type AIHandler struct {
 	api      *API
@@ -29,15 +87,139 @@ type AIHandler struct {
 
 	mu          sync.RWMutex
 	rateLimiter map[string][]time.Time // simple per-minute rate limiting
+
+	activeStreams   map[int64]*activeStreamInfo
+	activeStreamsMu sync.Mutex
 }
 
 // NewAIHandler creates a new AI handler.
 func NewAIHandler(api *API, provider llm.Provider) *AIHandler {
 	return &AIHandler{
-		api:         api,
-		provider:    provider,
-		rateLimiter: make(map[string][]time.Time),
+		api:          api,
+		provider:     provider,
+		rateLimiter:  make(map[string][]time.Time),
+		activeStreams: make(map[int64]*activeStreamInfo),
 	}
+}
+
+func (h *AIHandler) registerStream(convID int64, cancel context.CancelFunc) {
+	h.activeStreamsMu.Lock()
+	defer h.activeStreamsMu.Unlock()
+	// Cancel any existing stream for this conversation
+	if existing, ok := h.activeStreams[convID]; ok {
+		existing.cancel()
+		existing.closeAll()
+	}
+	h.activeStreams[convID] = &activeStreamInfo{cancel: cancel}
+}
+
+func (h *AIHandler) unregisterStream(convID int64) {
+	h.activeStreamsMu.Lock()
+	defer h.activeStreamsMu.Unlock()
+	if info, ok := h.activeStreams[convID]; ok {
+		info.closeAll()
+		delete(h.activeStreams, convID)
+	}
+}
+
+func (h *AIHandler) stopStream(convID int64) {
+	h.activeStreamsMu.Lock()
+	defer h.activeStreamsMu.Unlock()
+	if info, ok := h.activeStreams[convID]; ok {
+		info.cancel()
+		info.closeAll()
+		delete(h.activeStreams, convID)
+	}
+}
+
+// broadcastToStream sends an SSE event to all subscribers of a conversation's active stream.
+func (h *AIHandler) broadcastToStream(convID int64, eventType string, data interface{}) {
+	h.activeStreamsMu.Lock()
+	info, ok := h.activeStreams[convID]
+	h.activeStreamsMu.Unlock()
+	if ok {
+		info.broadcast(eventType, data)
+	}
+}
+
+// HandleActiveStream returns the conversation ID if there's an active LLM stream.
+func (h *AIHandler) HandleActiveStream(w http.ResponseWriter, r *http.Request) {
+	h.activeStreamsMu.Lock()
+	defer h.activeStreamsMu.Unlock()
+	for convID := range h.activeStreams {
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"active":          true,
+			"conversation_id": convID,
+		})
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"active": false,
+	})
+}
+
+// HandleStreamReconnect allows a client to subscribe to an active stream via SSE.
+func (h *AIHandler) HandleStreamReconnect(w http.ResponseWriter, r *http.Request) {
+	convID, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if convID <= 0 {
+		respondError(w, http.StatusBadRequest, "Invalid conversation ID")
+		return
+	}
+
+	h.activeStreamsMu.Lock()
+	info, ok := h.activeStreams[convID]
+	h.activeStreamsMu.Unlock()
+	if !ok {
+		respondJSON(w, http.StatusOK, map[string]interface{}{"active": false})
+		return
+	}
+
+	// Set SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		respondError(w, http.StatusInternalServerError, "Streaming not supported")
+		return
+	}
+
+	ch, unsub := info.subscribe()
+	defer unsub()
+
+	// Send initial ping so the client knows the connection is established
+	h.sendSSE(w, flusher, "reconnected", map[string]interface{}{
+		"conversation_id": convID,
+	})
+
+	for {
+		select {
+		case evt, ok := <-ch:
+			if !ok {
+				// Channel closed — stream ended
+				h.sendSSE(w, flusher, "done", map[string]interface{}{
+					"conversation_id": convID,
+				})
+				return
+			}
+			h.sendSSE(w, flusher, evt.Type, evt.Data)
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+// HandleStopChat cancels an active LLM stream for a conversation.
+func (h *AIHandler) HandleStopChat(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if id <= 0 {
+		respondError(w, http.StatusBadRequest, "Invalid conversation ID")
+		return
+	}
+	h.stopStream(id)
+	respondJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }
 
 // SetProvider updates the provider (e.g. when settings change).
@@ -176,9 +358,12 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert to LLM messages
+	// Convert to LLM messages — skip non-completed assistant messages (partial/errored)
 	var messages []llm.Message
 	for _, m := range dbMessages {
+		if m.Role == "assistant" && m.Status != "completed" {
+			continue
+		}
 		messages = append(messages, llm.NewTextMessage(m.Role, m.Content))
 	}
 
@@ -187,7 +372,21 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	if conv.Source == "ai" && conv.ProactiveContext != "" && conv.ProactiveContext != "{}" {
 		proactiveCtx = conv.ProactiveContext
 	}
-	systemPrompt := h.buildSystemPromptWithContext(ctx, proactiveCtx)
+
+	// Check if this is a planning conversation — use specialized prompt and tools
+	isPlanning := conv.ProactiveType == "planning"
+
+	var systemPrompt string
+	if isPlanning {
+		var projectNames []string
+		projects, _ := h.api.db.ListProjects(ctx)
+		for _, pr := range projects {
+			projectNames = append(projectNames, fmt.Sprintf("[%d] %s (%s)", pr.ID, pr.Name, pr.Type))
+		}
+		systemPrompt = llm.PlanningSystemPrompt(projectNames, p.Name() == "apikey", proactiveCtx)
+	} else {
+		systemPrompt = h.buildSystemPromptWithContext(ctx, proactiveCtx)
+	}
 
 	// Get model — empty string means "let the provider use its own default"
 	model, _ := h.api.db.GetSetting(ctx, "ai_model")
@@ -195,7 +394,11 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	// Determine if we should use tools (only with apikey provider — claudecli doesn't support native tools)
 	var tools []llm.ToolDefinition
 	if p.Name() == "apikey" {
-		tools = llm.ChatTools()
+		if isPlanning {
+			tools = llm.PlanningTools()
+		} else {
+			tools = llm.ChatTools()
+		}
 	}
 
 	// Set SSE headers
@@ -210,31 +413,119 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SSE tolerant to disconnection — streaming continues even if browser disconnects
+	var sseDisconnected bool
+	var sseMu sync.Mutex
+	safeSendSSE := func(eventType string, data interface{}) {
+		// Always broadcast to reconnected subscribers
+		h.broadcastToStream(conv.ID, eventType, data)
+		// Send to original HTTP writer if still connected
+		sseMu.Lock()
+		defer sseMu.Unlock()
+		if sseDisconnected {
+			return
+		}
+		h.sendSSE(w, flusher, eventType, data)
+	}
+
+	// Detect HTTP disconnection (page refresh, tab close)
+	go func() {
+		<-r.Context().Done()
+		sseMu.Lock()
+		sseDisconnected = true
+		sseMu.Unlock()
+	}()
+
 	// Send conversation ID
-	h.sendSSE(w, flusher, "conversation", map[string]interface{}{
+	safeSendSSE("conversation", map[string]interface{}{
 		"id":    conv.ID,
 		"title": conv.Title,
 	})
 
-	// Stream response (2048 tokens keeps answers concise)
+	// Stream response — planning mode gets more tokens for detailed responses
+	maxTokens := 2048
+	if isPlanning {
+		maxTokens = 4096
+	}
 	req := &llm.Request{
 		System:         systemPrompt,
 		Messages:       messages,
 		Tools:          tools,
-		MaxTokens:      2048,
+		MaxTokens:      maxTokens,
 		Model:          model,
 		ConversationID: conv.ID,
 	}
 
 	var assistantText strings.Builder
 	var toolCalls []map[string]interface{}
+	var textMu sync.Mutex // protects assistantText and toolCalls from concurrent access
 
-	resp, err := p.StreamMessage(ctx, req, func(event llm.StreamEvent) error {
+	// Create assistant message in DB immediately with status='streaming'
+	assistantMsg := &database.AIMessage{
+		ConversationID: conv.ID,
+		Role:           "assistant",
+		Content:        "",
+		ToolCalls:      "[]",
+		Status:         "streaming",
+	}
+	if err := h.api.db.CreateAIMessage(ctx, assistantMsg); err != nil {
+		log.Printf("[AI] Failed to create streaming message: %v", err)
+	}
+
+	safeSendSSE("message_id", map[string]interface{}{
+		"id": assistantMsg.ID,
+	})
+
+	// Start debounced flusher to persist streaming content every 2 seconds
+	sf := newStreamFlusher(h.api.db, assistantMsg.ID, func() string {
+		textMu.Lock()
+		defer textMu.Unlock()
+		return assistantText.String()
+	}, func() string {
+		textMu.Lock()
+		defer textMu.Unlock()
+		j, _ := json.Marshal(toolCalls)
+		return string(j)
+	})
+
+	// Create independent context for LLM streaming (not tied to HTTP request lifecycle)
+	streamCtx, streamCancel := context.WithCancel(context.Background())
+	h.registerStream(conv.ID, streamCancel)
+
+	// Track streaming error for defer
+	var streamErr string
+	var resp *llm.Response
+	var totalUsage llm.Usage
+
+	// Defer: always persist final state of the assistant message
+	defer func() {
+		h.unregisterStream(conv.ID)
+		sf.stop()
+
+		textMu.Lock()
+		finalContent := assistantText.String()
+		toolCallsJSON, _ := json.Marshal(toolCalls)
+		finalToolCalls := string(toolCallsJSON)
+		textMu.Unlock()
+
+		saveCtx, saveCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer saveCancel()
+
+		if streamErr != "" {
+			h.api.db.UpdateAIMessageStatus(saveCtx, assistantMsg.ID, "error", finalContent, finalToolCalls, streamErr)
+		} else {
+			h.api.db.UpdateAIMessageStatus(saveCtx, assistantMsg.ID, "completed", finalContent, finalToolCalls, "")
+		}
+		h.api.db.TouchAIConversation(saveCtx, conv.ID)
+	}()
+
+	var streamingErr error
+	resp, streamingErr = p.StreamMessage(streamCtx, req, func(event llm.StreamEvent) error {
 		switch event.Type {
 		case "content_block_start":
 			if event.ContentBlock != nil {
 				if event.ContentBlock.Type == "tool_use" {
-					h.sendSSE(w, flusher, "tool_start", map[string]interface{}{
+					safeSendSSE("tool_start", map[string]interface{}{
 						"id":   event.ContentBlock.ID,
 						"name": event.ContentBlock.Name,
 					})
@@ -242,35 +533,50 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			}
 		case "content_block_delta":
 			if event.Delta != nil && event.Delta.Type == "text_delta" {
-				h.sendSSE(w, flusher, "text", map[string]interface{}{
+				safeSendSSE("text", map[string]interface{}{
 					"text": event.Delta.Text,
 				})
+				textMu.Lock()
 				assistantText.WriteString(event.Delta.Text)
+				textMu.Unlock()
 			}
 		}
 		return nil
 	})
 
-	if err != nil {
-		log.Printf("[AI] Stream error: %v", err)
-		h.sendSSE(w, flusher, "error", map[string]interface{}{
-			"message": err.Error(),
+	if streamingErr != nil {
+		log.Printf("[AI] Stream error: %v", streamingErr)
+		if streamCtx.Err() == context.Canceled {
+			streamErr = "aborted"
+		} else {
+			streamErr = streamingErr.Error()
+		}
+		safeSendSSE("error", map[string]interface{}{
+			"message": streamingErr.Error(),
 		})
 		return
 	}
 
 	// Track total token usage across all streaming calls
-	var totalUsage llm.Usage
 	if resp != nil {
 		totalUsage = resp.Usage
 	}
 
-	// Handle tool use loop
+	// Handle tool use loop — planning mode gets more iterations for file exploration + task creation
+	maxIter := 5
+	if isPlanning {
+		maxIter = 15
+	}
 	if resp != nil && resp.StopReason == "tool_use" {
-		loopUsage, loopErr := h.handleToolLoop(ctx, w, flusher, p, req, resp, conv, &assistantText, &toolCalls)
+		loopUsage, loopErr := h.handleToolLoop(streamCtx, safeSendSSE, p, req, resp, conv, &assistantText, &toolCalls, &textMu, maxIter)
 		if loopErr != nil {
 			log.Printf("[AI] Tool loop error: %v", loopErr)
-			h.sendSSE(w, flusher, "error", map[string]interface{}{
+			if streamCtx.Err() == context.Canceled {
+				streamErr = "aborted"
+			} else {
+				streamErr = loopErr.Error()
+			}
+			safeSendSSE("error", map[string]interface{}{
 				"message": loopErr.Error(),
 			})
 			return
@@ -281,18 +587,9 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		totalUsage.CacheCreationTokens += loopUsage.CacheCreationTokens
 	}
 
-	// Save assistant message
-	toolCallsJSON, _ := json.Marshal(toolCalls)
-	assistantMsg := &database.AIMessage{
-		ConversationID: conv.ID,
-		Role:           "assistant",
-		Content:        assistantText.String(),
-		ToolCalls:      string(toolCallsJSON),
-	}
-	h.api.db.CreateAIMessage(ctx, assistantMsg)
-	h.api.db.TouchAIConversation(ctx, conv.ID)
-
 	// Record token usage — prefer model from response (actual model used)
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dbCancel()
 	var costUSD float64
 	if totalUsage.InputTokens > 0 || totalUsage.OutputTokens > 0 {
 		usageModel := model
@@ -303,7 +600,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			usageModel = "unknown"
 		}
 		costUSD = llm.CalculateCost(usageModel, totalUsage.InputTokens, totalUsage.OutputTokens)
-		h.api.db.CreateTokenUsage(ctx, &database.TokenUsage{
+		h.api.db.CreateTokenUsage(dbCtx, &database.TokenUsage{
 			Source:              "ai_assistant",
 			Subcategory:         "chat",
 			ConversationID:      sql.NullInt64{Int64: conv.ID, Valid: true},
@@ -316,7 +613,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	h.sendSSE(w, flusher, "done", map[string]interface{}{
+	safeSendSSE("done", map[string]interface{}{
 		"conversation_id": conv.ID,
 		"usage": map[string]interface{}{
 			"input_tokens":  totalUsage.InputTokens,
@@ -327,21 +624,76 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// streamFlusher periodically persists streaming content to the database.
+type streamFlusher struct {
+	db           *database.DB
+	msgID        int64
+	getText      func() string
+	getToolCalls func() string
+	lastFlushed  int
+	ticker       *time.Ticker
+	done         chan struct{}
+	mu           sync.Mutex
+}
+
+func newStreamFlusher(db *database.DB, msgID int64, getText func() string, getToolCalls func() string) *streamFlusher {
+	f := &streamFlusher{
+		db:           db,
+		msgID:        msgID,
+		getText:      getText,
+		getToolCalls: getToolCalls,
+		ticker:       time.NewTicker(2 * time.Second),
+		done:         make(chan struct{}),
+	}
+	go f.run()
+	return f
+}
+
+func (f *streamFlusher) run() {
+	for {
+		select {
+		case <-f.ticker.C:
+			f.flush()
+		case <-f.done:
+			return
+		}
+	}
+}
+
+func (f *streamFlusher) flush() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	content := f.getText()
+	if len(content) == f.lastFlushed {
+		return
+	}
+	f.lastFlushed = len(content)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	f.db.UpdateAIMessageContent(ctx, f.msgID, content, f.getToolCalls())
+}
+
+func (f *streamFlusher) stop() {
+	f.ticker.Stop()
+	close(f.done)
+	f.flush()
+}
+
 // handleToolLoop executes tool use requests and continues the conversation.
 // Returns accumulated token usage from all iterations.
 func (h *AIHandler) handleToolLoop(
 	ctx context.Context,
-	w http.ResponseWriter,
-	flusher http.Flusher,
+	sendSSE func(string, interface{}),
 	p llm.Provider,
 	req *llm.Request,
 	resp *llm.Response,
 	conv *database.AIConversation,
 	assistantText *strings.Builder,
 	toolCalls *[]map[string]interface{},
+	textMu *sync.Mutex,
+	maxIterations int,
 ) (llm.Usage, error) {
 	var accumulated llm.Usage
-	maxIterations := 5
 
 	for i := 0; i < maxIterations && resp.StopReason == "tool_use"; i++ {
 		// Process tool calls from the response
@@ -357,23 +709,27 @@ func (h *AIHandler) handleToolLoop(
 				inputMap = make(map[string]interface{})
 			}
 
+			textMu.Lock()
 			*toolCalls = append(*toolCalls, map[string]interface{}{
 				"id":    block.ID,
 				"name":  block.Name,
 				"input": inputMap,
 			})
+			textMu.Unlock()
 
-			h.sendSSE(w, flusher, "tool_executing", map[string]interface{}{
+			sendSSE("tool_executing", map[string]interface{}{
 				"id":   block.ID,
 				"name": block.Name,
 			})
 
-			result, err := h.executeTool(ctx, block.Name, inputMap, conv.ID)
+			toolCtx, toolCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			result, err := h.executeTool(toolCtx, block.Name, inputMap, conv.ID)
+			toolCancel()
 			if err != nil {
 				result = fmt.Sprintf("Error: %s", err.Error())
 			}
 
-			h.sendSSE(w, flusher, "tool_result", map[string]interface{}{
+			sendSSE("tool_result", map[string]interface{}{
 				"id":     block.ID,
 				"name":   block.Name,
 				"result": result,
@@ -381,7 +737,7 @@ func (h *AIHandler) handleToolLoop(
 
 			// Emit native doc_card for document-related tools
 			if card := h.buildDocCard(block.Name, result, inputMap); card != nil {
-				h.sendSSE(w, flusher, "doc_card", card)
+				sendSSE("doc_card", card)
 			}
 
 			toolResults = append(toolResults, llm.ContentBlock{
@@ -405,16 +761,18 @@ func (h *AIHandler) handleToolLoop(
 		var err error
 		resp, err = p.StreamMessage(ctx, req, func(event llm.StreamEvent) error {
 			if event.Type == "content_block_start" && event.ContentBlock != nil && event.ContentBlock.Type == "tool_use" {
-				h.sendSSE(w, flusher, "tool_start", map[string]interface{}{
+				sendSSE("tool_start", map[string]interface{}{
 					"id":   event.ContentBlock.ID,
 					"name": event.ContentBlock.Name,
 				})
 			}
 			if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
-				h.sendSSE(w, flusher, "text", map[string]interface{}{
+				sendSSE("text", map[string]interface{}{
 					"text": event.Delta.Text,
 				})
+				textMu.Lock()
 				assistantText.WriteString(event.Delta.Text)
+				textMu.Unlock()
 			}
 			return nil
 		})
@@ -954,6 +1312,239 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 
 		return fmt.Sprintf("Documento criado com sucesso. Um botão 'Ver Documento' foi exibido automaticamente no chat. NÃO gere links — o usuário usará o botão nativo. Link interno: /app/doc/%s", doc.ID), nil
 
+	case "list_directory":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		project, err := h.api.db.GetProject(ctx, projectID)
+		if err != nil {
+			return "", fmt.Errorf("project not found")
+		}
+		path, _ := input["path"].(string)
+
+		var fileList []files.FileInfo
+		if project.Type == "local" {
+			fm := files.NewLocalFileManager(project.Path)
+			fileList, err = fm.List(path)
+		} else {
+			fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
+			fileList, err = fm.List(path)
+		}
+		if err != nil {
+			return "", err
+		}
+
+		var sb strings.Builder
+		if path == "" {
+			sb.WriteString(fmt.Sprintf("Directory listing for project %s (root):\n", project.Name))
+		} else {
+			sb.WriteString(fmt.Sprintf("Directory listing for %s:\n", path))
+		}
+		for _, f := range fileList {
+			if f.IsDir {
+				sb.WriteString(fmt.Sprintf("  [DIR]  %s/\n", f.Name))
+			} else {
+				sb.WriteString(fmt.Sprintf("  %6d  %s\n", f.Size, f.Name))
+			}
+		}
+		if len(fileList) == 0 {
+			sb.WriteString("  (empty directory)\n")
+		}
+		return sb.String(), nil
+
+	case "read_file":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		project, err := h.api.db.GetProject(ctx, projectID)
+		if err != nil {
+			return "", fmt.Errorf("project not found")
+		}
+		filePath, _ := input["path"].(string)
+		if filePath == "" {
+			return "", fmt.Errorf("path is required")
+		}
+
+		const maxSize int64 = 2 * 1024 * 1024
+		var content []byte
+
+		if project.Type == "local" {
+			fm := files.NewLocalFileManager(project.Path)
+			reader, fileInfo, err := fm.ReadStream(filePath)
+			if err != nil {
+				return "", err
+			}
+			defer reader.Close()
+			if fileInfo.Size > maxSize {
+				return "", fmt.Errorf("file too large (max 2MB, file is %d bytes)", fileInfo.Size)
+			}
+			content, err = io.ReadAll(io.LimitReader(reader, maxSize+1))
+			if err != nil {
+				return "", err
+			}
+		} else {
+			fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
+			file, fileInfo, sshClient, sftpClient, err := fm.ReadStream(filePath)
+			if err != nil {
+				return "", err
+			}
+			defer file.Close()
+			defer sftpClient.Close()
+			defer sshClient.Close()
+			if fileInfo.Size > maxSize {
+				return "", fmt.Errorf("file too large (max 2MB, file is %d bytes)", fileInfo.Size)
+			}
+			content, err = io.ReadAll(io.LimitReader(file, maxSize+1))
+			if err != nil {
+				return "", err
+			}
+		}
+
+		// Apply offset/limit if provided
+		offset := 0
+		limit := 0
+		if v, _ := input["offset"].(string); v != "" {
+			offset, _ = strconv.Atoi(v)
+		} else if v, ok := input["offset"].(float64); ok {
+			offset = int(v)
+		}
+		if v, _ := input["limit"].(string); v != "" {
+			limit, _ = strconv.Atoi(v)
+		} else if v, ok := input["limit"].(float64); ok {
+			limit = int(v)
+		}
+
+		lines := strings.Split(string(content), "\n")
+		totalLines := len(lines)
+
+		if offset > 0 {
+			offset-- // convert from 1-based to 0-based
+			if offset >= totalLines {
+				return fmt.Sprintf("--- %s (%d lines total) ---\nOffset %d is beyond end of file.", filePath, totalLines, offset+1), nil
+			}
+			lines = lines[offset:]
+		}
+		if limit > 0 && limit < len(lines) {
+			lines = lines[:limit]
+		}
+
+		var sb strings.Builder
+		startLine := offset + 1
+		if offset <= 0 {
+			startLine = 1
+		}
+		sb.WriteString(fmt.Sprintf("--- %s (%d lines total) ---\n", filePath, totalLines))
+		for i, line := range lines {
+			sb.WriteString(fmt.Sprintf("%4d | %s\n", startLine+i, line))
+		}
+		return sb.String(), nil
+
+	case "find_files":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		project, err := h.api.db.GetProject(ctx, projectID)
+		if err != nil {
+			return "", fmt.Errorf("project not found")
+		}
+		pattern, _ := input["pattern"].(string)
+		if pattern == "" {
+			return "", fmt.Errorf("pattern is required")
+		}
+
+		var results []string
+		if project.Type == "local" {
+			fm := files.NewLocalFileManager(project.Path)
+			results, err = fm.Glob(pattern)
+		} else {
+			fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
+			results, err = fm.Glob(pattern)
+		}
+		if err != nil {
+			return "", err
+		}
+
+		if len(results) == 0 {
+			return fmt.Sprintf("No files matching '%s' found in project %s.", pattern, project.Name), nil
+		}
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Found %d file(s) matching '%s':\n", len(results), pattern))
+		for _, r := range results {
+			sb.WriteString(fmt.Sprintf("  %s\n", r))
+		}
+		return sb.String(), nil
+
+	case "grep_content":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		project, err := h.api.db.GetProject(ctx, projectID)
+		if err != nil {
+			return "", fmt.Errorf("project not found")
+		}
+		pattern, _ := input["pattern"].(string)
+		if pattern == "" {
+			return "", fmt.Errorf("pattern is required")
+		}
+		searchPath, _ := input["path"].(string)
+		fileGlob, _ := input["glob"].(string)
+
+		var results []files.GrepResult
+		if project.Type == "local" {
+			fm := files.NewLocalFileManager(project.Path)
+			results, err = fm.Grep(pattern, searchPath, fileGlob)
+		} else {
+			fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
+			results, err = fm.Grep(pattern, searchPath, fileGlob)
+		}
+		if err != nil {
+			return "", err
+		}
+
+		if len(results) == 0 {
+			return fmt.Sprintf("No matches for '%s' found in project %s.", pattern, project.Name), nil
+		}
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Found %d match(es) for '%s':\n", len(results), pattern))
+		for _, r := range results {
+			// Truncate long lines
+			line := r.Content
+			if len(line) > 200 {
+				line = line[:200] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("  %s:%d: %s\n", r.File, r.Line, line))
+		}
+		return sb.String(), nil
+
+	case "activate_planning_mode":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		project, err := h.api.db.GetProject(ctx, projectID)
+		if err != nil {
+			return "", fmt.Errorf("project not found")
+		}
+
+		// Update conversation to planning mode
+		proactiveData, _ := json.Marshal(map[string]interface{}{
+			"intent":       "planning",
+			"project_id":   projectID,
+			"project_name": project.Name,
+		})
+		err = h.api.db.UpdateAIConversationMode(ctx, conversationID, "planning", string(proactiveData))
+		if err != nil {
+			return "", fmt.Errorf("failed to activate planning mode: %w", err)
+		}
+
+		return fmt.Sprintf("Planning mode activated for project **%s** (ID: %d). "+
+			"On the next message, you will have access to file exploration tools (list_directory, read_file, find_files, grep_content) and the planning system prompt. "+
+			"Tell the user that planning mode is now active and ask them to describe what they want to implement.", project.Name, projectID), nil
+
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
@@ -1095,6 +1686,55 @@ func (h *AIHandler) HandleInitiateMemoryDocEdit(w http.ResponseWriter, r *http.R
 
 	title := fmt.Sprintf("Edit Memory Doc: %s", project.Name)
 	conv, err := h.api.db.CreateProactiveConversation(ctx, title, "standard", "memory_doc_edit", string(proactiveCtx), assistantMsg)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to create conversation")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+}
+
+// HandleInitiatePlanning creates an AI-initiated conversation for planning tasks.
+func (h *AIHandler) HandleInitiatePlanning(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		ProjectID int64 `json:"project_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if input.ProjectID <= 0 {
+		respondError(w, http.StatusBadRequest, "project_id is required")
+		return
+	}
+
+	ctx := r.Context()
+	project, err := h.api.db.GetProject(ctx, input.ProjectID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	proactiveCtx, _ := json.Marshal(map[string]interface{}{
+		"intent":       "planning",
+		"project_id":   input.ProjectID,
+		"project_name": project.Name,
+	})
+
+	assistantMsg := fmt.Sprintf(
+		"Modo de planejamento ativado para o projeto **%s**.\n\n"+
+			"Descreva o que você gostaria de implementar ou melhorar, e eu vou:\n"+
+			"1. Explorar o código do projeto\n"+
+			"2. Entender a arquitetura\n"+
+			"3. Quebrar o trabalho em tarefas detalhadas\n\n"+
+			"O que você tem em mente?",
+		project.Name)
+
+	title := fmt.Sprintf("Planejamento: %s", project.Name)
+	conv, err := h.api.db.CreateProactiveConversation(ctx, title, "standard", "planning", string(proactiveCtx), assistantMsg)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to create conversation")
 		return
@@ -1778,6 +2418,16 @@ func (h *AIHandler) AcceptSuggestion(w http.ResponseWriter, r *http.Request) {
 		if err := h.api.db.CreateSessionTask(r.Context(), st); err != nil {
 			respondError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		// Rename session to task title
+		if linkedTask, err := h.api.db.GetTask(r.Context(), *ctx.TaskID); err == nil && linkedTask != nil {
+			newName := "Task: " + linkedTask.Title
+			h.api.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, suggestion.SessionID)
+			h.api.hub.BroadcastStateUpdate("session", map[string]interface{}{
+				"action":     "renamed",
+				"session_id": suggestion.SessionID,
+				"name":       newName,
+			})
 		}
 		resultMsg = fmt.Sprintf("Session linked to task %d", *ctx.TaskID)
 

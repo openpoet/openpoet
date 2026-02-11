@@ -28,6 +28,7 @@ class AIChatManager {
         if (this.panel) {
             this.setupEventListeners();
             this.checkStatus();
+            this.checkActiveStream();
         }
     }
 
@@ -170,6 +171,19 @@ class AIChatManager {
         }
     }
 
+    async checkActiveStream() {
+        try {
+            const resp = await fetch('/api/ai/active-stream');
+            const data = await resp.json();
+            if (data.active && data.conversation_id) {
+                // Auto-load the active streaming conversation
+                await this.loadConversation(data.conversation_id);
+            }
+        } catch (e) {
+            // Ignore — no active stream
+        }
+    }
+
     updateStatusDisplay() {
         if (!this.statusEl) return;
         if (this.configured) {
@@ -210,6 +224,8 @@ class AIChatManager {
     }
 
     newConversation() {
+        if (this._pollInterval) { clearInterval(this._pollInterval); this._pollInterval = null; }
+        if (this.abortController) { this.abortController.abort(); this.abortController = null; }
         this.currentConversationId = null;
         this._updateDeleteCurrentBtn();
         this.messagesContainer.innerHTML = '';
@@ -382,6 +398,10 @@ class AIChatManager {
                             case 'conversation':
                                 this.currentConversationId = event.data.id;
                                 this._updateDeleteCurrentBtn();
+                                break;
+
+                            case 'message_id':
+                                this.currentStreamingMessageId = event.data.id;
                                 break;
 
                             case 'text':
@@ -591,6 +611,11 @@ class AIChatManager {
             'update_task': 'Updating task',
             'delete_task': 'Deleting task',
             'get_task_report': 'Generating task report',
+            'list_directory': 'Browsing files',
+            'read_file': 'Reading file',
+            'find_files': 'Searching files',
+            'grep_content': 'Searching content',
+            'activate_planning_mode': 'Activating planning mode',
         };
         return labels[name] || name;
     }
@@ -603,10 +628,16 @@ class AIChatManager {
     }
 
     stopStreaming() {
+        // Abort the SSE connection (original or reconnected)
         if (this.abortController) {
             this.abortController.abort();
             this.abortController = null;
         }
+        // Tell the backend to cancel the LLM stream
+        if (this.currentConversationId) {
+            fetch(`/api/ai/conversations/${this.currentConversationId}/stop`, { method: 'POST' });
+        }
+        this.setStreaming(false);
     }
 
     async toggleHistory() {
@@ -697,6 +728,10 @@ class AIChatManager {
     }
 
     async loadConversation(id) {
+        // Clear any active polling/SSE from previous conversation
+        if (this._pollInterval) { clearInterval(this._pollInterval); this._pollInterval = null; }
+        if (this.abortController) { this.abortController.abort(); this.abortController = null; }
+
         try {
             const resp = await fetch(`/api/ai/conversations/${id}`);
             const data = await resp.json();
@@ -707,7 +742,34 @@ class AIChatManager {
             this.hideHistory();
 
             for (const msg of data.messages) {
-                this.addMessage(msg.role, msg.content);
+                const el = this.addMessage(msg.role, msg.content);
+
+                // Show status indicators for incomplete assistant messages
+                if (msg.role === 'assistant' && el) {
+                    const contentEl = el.querySelector('.ai-chat-msg-content');
+                    if (contentEl && msg.status === 'streaming') {
+                        const indicator = document.createElement('div');
+                        indicator.className = 'ai-chat-status-indicator ai-chat-status-streaming';
+                        indicator.innerHTML = '<em>Processando...</em>';
+                        contentEl.appendChild(indicator);
+                    } else if (contentEl && msg.status === 'error') {
+                        const indicator = document.createElement('div');
+                        indicator.className = 'ai-chat-status-indicator ai-chat-status-error';
+                        if (msg.error_info === 'aborted') {
+                            indicator.innerHTML = '<em>[Resposta parada pelo usuário]</em>';
+                        } else {
+                            indicator.innerHTML = `<em>[Erro: ${this.escapeHtml(msg.error_info || 'Erro desconhecido')}]</em>`;
+                            this._addRetryButton(el, msg);
+                        }
+                        contentEl.appendChild(indicator);
+                    }
+                }
+            }
+
+            // If last message is still streaming, reconnect to SSE stream
+            const lastMsg = data.messages[data.messages.length - 1];
+            if (lastMsg && lastMsg.role === 'assistant' && lastMsg.status === 'streaming') {
+                this._reconnectToStream(id);
             }
 
             // Render persisted doc cards inside the last assistant message
@@ -735,6 +797,160 @@ class AIChatManager {
             }
         } catch (e) {
             console.error('Failed to load conversation:', e);
+        }
+    }
+
+    _reconnectToStream(convId) {
+        this.setStreaming(true);
+        const contentEl = this.messagesContainer.querySelector('.ai-chat-msg-assistant:last-child .ai-chat-msg-content');
+        if (!contentEl) return;
+
+        // Get current text from the rendered content as baseline
+        let fullText = contentEl.textContent || '';
+
+        // Remove any streaming indicator
+        const oldIndicator = contentEl.querySelector('.ai-chat-status-indicator');
+        if (oldIndicator) oldIndicator.remove();
+
+        this.abortController = new AbortController();
+
+        fetch(`/api/ai/conversations/${convId}/stream`, {
+            signal: this.abortController.signal,
+        }).then(async (resp) => {
+            if (!resp.ok) {
+                // No active stream — fall back to loading the final state
+                this.setStreaming(false);
+                await this.loadConversation(convId);
+                return;
+            }
+
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let pendingDocCards = [];
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const jsonStr = line.slice(6);
+                    if (!jsonStr) continue;
+
+                    try {
+                        const event = JSON.parse(jsonStr);
+                        switch (event.type) {
+                            case 'reconnected':
+                                // Connection established — re-fetch content baseline from DB
+                                try {
+                                    const convResp = await fetch(`/api/ai/conversations/${convId}`);
+                                    const convData = await convResp.json();
+                                    const lastMsg = convData.messages[convData.messages.length - 1];
+                                    if (lastMsg && lastMsg.role === 'assistant') {
+                                        fullText = lastMsg.content;
+                                        contentEl.innerHTML = this.renderMarkdown(fullText);
+                                    }
+                                } catch (_) {}
+                                break;
+
+                            case 'text':
+                                fullText += event.data.text;
+                                contentEl.innerHTML = this.renderMarkdown(fullText);
+                                this.scrollToBottom();
+                                break;
+
+                            case 'tool_start':
+                                this.addToolIndicator(contentEl, event.data.name, 'running');
+                                break;
+
+                            case 'tool_executing':
+                                this.updateToolIndicator(contentEl, event.data.name, 'executing');
+                                break;
+
+                            case 'tool_result':
+                                this.updateToolIndicator(contentEl, event.data.name, 'done', event.data.result);
+                                break;
+
+                            case 'doc_card':
+                                pendingDocCards.push(event.data);
+                                break;
+
+                            case 'error':
+                                fullText += `\n\n**Error:** ${event.data.message}`;
+                                contentEl.innerHTML = this.renderMarkdown(fullText);
+                                break;
+
+                            case 'done':
+                                for (const cardData of pendingDocCards) {
+                                    this.addDocCard(contentEl, cardData);
+                                }
+                                if (event.data?.usage) {
+                                    const u = event.data.usage;
+                                    const totalTokens = (u.input_tokens || 0) + (u.output_tokens || 0);
+                                    if (totalTokens > 0) {
+                                        const tokenInfo = document.createElement('div');
+                                        tokenInfo.className = 'ai-chat-token-info';
+                                        const cost = u.cost_usd || 0;
+                                        tokenInfo.textContent = `${totalTokens.toLocaleString()} tokens (~$${cost.toFixed(4)})`;
+                                        contentEl.parentElement.appendChild(tokenInfo);
+                                    }
+                                }
+                                break;
+                        }
+                    } catch (_) {}
+                }
+            }
+
+            this.setStreaming(false);
+            this.scrollToBottom();
+            // Re-render full conversation for final state
+            await this.loadConversation(convId);
+        }).catch((e) => {
+            if (e.name !== 'AbortError') {
+                console.error('Stream reconnect error:', e);
+            }
+            this.setStreaming(false);
+        });
+    }
+
+    _addRetryButton(messageEl, msg) {
+        const retryBtn = document.createElement('button');
+        retryBtn.className = 'ai-chat-retry-btn';
+        retryBtn.textContent = 'Tentar novamente';
+        retryBtn.addEventListener('click', () => this.retryMessage(msg));
+        messageEl.appendChild(retryBtn);
+    }
+
+    async retryMessage(failedMsg) {
+        if (!this.currentConversationId || this.isStreaming) return;
+
+        try {
+            // Find the last user message in the conversation
+            const resp = await fetch(`/api/ai/conversations/${this.currentConversationId}`);
+            const data = await resp.json();
+            const messages = data.messages || [];
+
+            let lastUserMsg = null;
+            for (let i = messages.length - 1; i >= 0; i--) {
+                if (messages[i].role === 'user') {
+                    lastUserMsg = messages[i];
+                    break;
+                }
+            }
+
+            if (!lastUserMsg) return;
+
+            // Reload the conversation to get clean state, then re-send
+            await this.loadConversation(this.currentConversationId);
+            this.input.value = lastUserMsg.content;
+            this.sendMessage();
+        } catch (e) {
+            console.error('Retry failed:', e);
         }
     }
 
