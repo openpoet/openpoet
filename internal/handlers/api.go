@@ -712,7 +712,7 @@ func (a *API) ReopenSession(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 
-	if err := a.sessionMgr.ReopenSession(r.Context(), sess, project, envVars); err != nil {
+	if err := a.sessionMgr.ReopenSession(r.Context(), sess, project, envVars, a.encryptor.Decrypt); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
