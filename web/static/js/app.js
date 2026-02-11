@@ -2882,14 +2882,15 @@ class DevManager {
                         <label class="form-label">Provider</label>
                         <select class="form-input" id="ai-provider">
                             <option value="">Auto-detect</option>
-                            <option value="claudecode">Claude Code CLI (Max plan)</option>
+                            <option value="gosdk">Agent SDK (Claude CLI)</option>
+                            <option value="nodesdk">Agent SDK (Node.js)</option>
                             <option value="apikey">Anthropic API Key</option>
                         </select>
                     </div>
                     <div class="form-group">
                         <label class="form-label">Anthropic API Key</label>
                         <input type="password" class="form-input" id="anthropic-key" placeholder="sk-ant-...">
-                        <small style="color: var(--color-text-muted); font-size: 11px;">Only needed if using API Key provider. Key is stored securely and never exposed to the frontend.</small>
+                        <small style="color: var(--color-text-muted); font-size: 11px;">Only needed for API Key or Node.js SDK provider. Key is stored securely and never exposed to the frontend.</small>
                     </div>
                     <div class="form-group">
                         <label class="form-label">Model</label>
@@ -3648,10 +3649,11 @@ class DevManager {
             const resp = await fetch('/api/ai/status');
             const data = await resp.json();
             if (data.configured) {
-                const provider = data.provider === 'apikey' ? 'API Key' : 'Claude Code CLI';
+                const providerNames = { apikey: 'API Key', gosdk: 'Agent SDK (Go)', nodesdk: 'Agent SDK (Node.js)', claudecode: 'Claude CLI' };
+                const provider = providerNames[data.provider] || data.provider;
                 if (resultEl) resultEl.innerHTML = `<span style="color: var(--color-success);">Connected (${provider}, model: ${data.model})</span>`;
             } else {
-                if (resultEl) resultEl.innerHTML = '<span style="color: var(--color-danger);">Not configured. Set an API key or install Claude Code CLI.</span>';
+                if (resultEl) resultEl.innerHTML = '<span style="color: var(--color-danger);">Not configured. Select a provider and configure it in settings.</span>';
             }
         } catch (e) {
             if (resultEl) resultEl.innerHTML = `<span style="color: var(--color-danger);">Error: ${e.message}</span>`;

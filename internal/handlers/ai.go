@@ -358,13 +358,19 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert to LLM messages — skip non-completed assistant messages (partial/errored)
+	// Convert to LLM messages — session providers only need the latest message
 	var messages []llm.Message
-	for _, m := range dbMessages {
-		if m.Role == "assistant" && m.Status != "completed" {
-			continue
+	if sp, ok := p.(llm.SessionProvider); ok && sp.HasActiveSession(conv.ID) {
+		// Session provider with active session: only send latest user message
+		messages = []llm.Message{llm.NewTextMessage("user", input.Message)}
+	} else {
+		// Stateless provider or first message: send full history
+		for _, m := range dbMessages {
+			if m.Role == "assistant" && m.Status != "completed" {
+				continue
+			}
+			messages = append(messages, llm.NewTextMessage(m.Role, m.Content))
 		}
-		messages = append(messages, llm.NewTextMessage(m.Role, m.Content))
 	}
 
 	// Build system prompt with current state (inject proactive context if AI-initiated)
@@ -375,6 +381,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Check if this is a planning conversation — use specialized prompt and tools
 	isPlanning := conv.ProactiveType == "planning"
+	_, isSessionProvider := p.(llm.SessionProvider)
 
 	var systemPrompt string
 	if isPlanning {
@@ -383,7 +390,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		for _, pr := range projects {
 			projectNames = append(projectNames, fmt.Sprintf("[%d] %s (%s)", pr.ID, pr.Name, pr.Type))
 		}
-		systemPrompt = llm.PlanningSystemPrompt(projectNames, p.Name() == "apikey", proactiveCtx)
+		systemPrompt = llm.PlanningSystemPrompt(projectNames, proactiveCtx)
 	} else {
 		systemPrompt = h.buildSystemPromptWithContext(ctx, proactiveCtx)
 	}
@@ -391,9 +398,11 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	// Get model — empty string means "let the provider use its own default"
 	model, _ := h.api.db.GetSetting(ctx, "ai_model")
 
-	// Determine if we should use tools (only with apikey provider — claudecli doesn't support native tools)
+	// Determine if we should use tools:
+	// - Session providers (gosdk, nodesdk) handle tools internally via MCP — no tools in request
+	// - API key provider uses native Anthropic tool definitions
 	var tools []llm.ToolDefinition
-	if p.Name() == "apikey" {
+	if !isSessionProvider && p.Name() == "apikey" {
 		if isPlanning {
 			tools = llm.PlanningTools()
 		} else {
@@ -562,12 +571,12 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		totalUsage = resp.Usage
 	}
 
-	// Handle tool use loop — planning mode gets more iterations for file exploration + task creation
+	// Handle tool use loop — session providers handle tools internally, skip for them
 	maxIter := 5
 	if isPlanning {
 		maxIter = 15
 	}
-	if resp != nil && resp.StopReason == "tool_use" {
+	if resp != nil && resp.StopReason == "tool_use" && !isSessionProvider {
 		loopUsage, loopErr := h.handleToolLoop(streamCtx, safeSendSSE, p, req, resp, conv, &assistantText, &toolCalls, &textMu, maxIter)
 		if loopErr != nil {
 			log.Printf("[AI] Tool loop error: %v", loopErr)
@@ -789,6 +798,12 @@ func (h *AIHandler) handleToolLoop(
 	}
 
 	return accumulated, nil
+}
+
+// ExecuteTool implements llm.ToolExecutor. It wraps the private executeTool method
+// so that SDK providers can call DevManager tools from their in-process MCP servers.
+func (h *AIHandler) ExecuteTool(ctx context.Context, name string, input map[string]any, conversationID int64) (string, error) {
+	return h.executeTool(ctx, name, input, conversationID)
 }
 
 // executeTool runs a tool and returns the result as a string.
@@ -1550,6 +1565,49 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 	}
 }
 
+// HandleExecuteTool is an HTTP endpoint that Node.js SDK sidecar calls to execute
+// DevManager tools. It proxies tool calls to the existing executeTool implementation.
+func (h *AIHandler) HandleExecuteTool(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Name           string                 `json:"name"`
+		Args           map[string]interface{} `json:"args"`
+		ConversationID int64                  `json:"conversation_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if input.Name == "" {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Tool name is required"})
+		return
+	}
+	if input.Args == nil {
+		input.Args = make(map[string]interface{})
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	result, err := h.executeTool(ctx, input.Name, input.Args, input.ConversationID)
+	if err != nil {
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"result": "",
+			"error":  err.Error(),
+		})
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"result": result,
+		"error":  "",
+	})
+}
+
+// HandleToolDefinitions returns the chat tool definitions as JSON.
+// Used by the Node.js SDK sidecar to register tools at startup.
+func (h *AIHandler) HandleToolDefinitions(w http.ResponseWriter, r *http.Request) {
+	respondJSON(w, http.StatusOK, llm.ChatTools())
+}
+
 // buildDocCard checks if a tool execution produced a document link and returns
 // metadata for a native doc_card SSE event. Returns nil if not applicable.
 func (h *AIHandler) buildDocCard(toolName, result string, input map[string]interface{}) map[string]interface{} {
@@ -1613,7 +1671,7 @@ func (h *AIHandler) buildSystemPrompt(ctx context.Context) string {
 		mcpNames = append(mcpNames, fmt.Sprintf("[%d] %s", m.ID, m.Name))
 	}
 
-	return llm.ChatSystemPrompt(skillNames, projectNames, mcpNames, true)
+	return llm.ChatSystemPrompt(skillNames, projectNames, mcpNames)
 }
 
 // buildSystemPromptWithContext builds system prompt, optionally with proactive conversation context.
@@ -1640,7 +1698,7 @@ func (h *AIHandler) buildSystemPromptWithContext(ctx context.Context, proactiveC
 		mcpNames = append(mcpNames, fmt.Sprintf("[%d] %s", m.ID, m.Name))
 	}
 
-	return llm.ChatSystemPromptWithProactiveContext(skillNames, projectNames, mcpNames, true, proactiveCtx)
+	return llm.ChatSystemPromptWithProactiveContext(skillNames, projectNames, mcpNames, proactiveCtx)
 }
 
 // HandleInitiateMemoryDocEdit creates an AI-initiated conversation for editing a project's memory doc.
