@@ -117,11 +117,12 @@ type Usage struct {
 
 // Request is the input to a provider call.
 type Request struct {
-	System    string
-	Messages  []Message
-	Tools     []ToolDefinition
-	MaxTokens int
-	Model     string
+	System         string
+	Messages       []Message
+	Tools          []ToolDefinition
+	MaxTokens      int
+	Model          string
+	ConversationID int64 // Optional: passed to MCP subprocess for correlation
 }
 
 // Response is the output of a non-streaming provider call.

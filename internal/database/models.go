@@ -43,17 +43,6 @@ type Session struct {
 	EndTime   sql.NullTime  `db:"end_time" json:"end_time,omitempty"`
 }
 
-type Macro struct {
-	ID          int64  `db:"id" json:"id"`
-	Name        string `db:"name" json:"name"`
-	Description string `db:"description" json:"description"`
-	Script      string `db:"script" json:"script"`
-	TargetType  string `db:"target_type" json:"target_type"` // 'local', 'remote', 'any'
-	IsBuiltin   bool   `db:"is_builtin" json:"is_builtin"`
-	CreatedAt   time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
-}
-
 type Skill struct {
 	ID        int64     `db:"id" json:"id"`
 	Name      string    `db:"name" json:"name"`
@@ -122,7 +111,7 @@ type AIConversation struct {
 	Title            string    `db:"title" json:"title"`
 	Source           string    `db:"source" json:"source"`                      // 'user' or 'ai'
 	ProactiveLevel   string    `db:"proactive_level" json:"proactive_level"`    // 'critical', 'standard', 'subtle', or ''
-	ProactiveType    string    `db:"proactive_type" json:"proactive_type"`      // 'task_suggestion', 'meta_update', 'insight', 'alert', or ''
+	ProactiveType    string    `db:"proactive_type" json:"proactive_type"`      // 'task_suggestion', 'memory_doc_update', 'insight', 'alert', or ''
 	ProactiveContext string    `db:"proactive_context" json:"proactive_context"` // JSON context for system prompt
 	IsRead           bool      `db:"is_read" json:"is_read"`
 	CreatedAt        time.Time `db:"created_at" json:"created_at"`
@@ -139,10 +128,13 @@ type AIMessage struct {
 }
 
 type TempDocument struct {
-	ID        string    `db:"id" json:"id"`
-	Title     string    `db:"title" json:"title"`
-	Content   string    `db:"content" json:"content"`
-	CreatedAt time.Time `db:"created_at" json:"created_at"`
+	ID             string        `db:"id" json:"id"`
+	Title          string        `db:"title" json:"title"`
+	Content        string        `db:"content" json:"content"`
+	ConversationID sql.NullInt64 `db:"conversation_id" json:"conversation_id,omitempty"`
+	Summary        string        `db:"summary" json:"summary"`
+	Status         string        `db:"status" json:"status"`
+	CreatedAt      time.Time     `db:"created_at" json:"created_at"`
 }
 
 type ProjectTask struct {
@@ -198,7 +190,7 @@ type TokenUsage struct {
 	CreatedAt           time.Time      `db:"created_at" json:"created_at"`
 }
 
-type ProjectMetaDocument struct {
+type MemoryDoc struct {
 	ID            int64          `db:"id" json:"id"`
 	ProjectID     int64          `db:"project_id" json:"project_id"`
 	Content       string         `db:"content" json:"content"`

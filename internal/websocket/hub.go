@@ -13,8 +13,6 @@ type MessageType string
 const (
 	MsgTypeSessionOutput MessageType = "session_output"
 	MsgTypeSessionStatus MessageType = "session_status"
-	MsgTypeMacroOutput   MessageType = "macro_output"
-	MsgTypeMacroStatus   MessageType = "macro_status"
 	MsgTypeNotification  MessageType = "notification"
 	MsgTypeStateUpdate   MessageType = "state_update"
 	MsgTypeError         MessageType = "error"
@@ -38,6 +36,7 @@ const (
 	// AI proactive suggestions
 	MsgTypeAISuggestion MessageType = "ai_suggestion"
 	MsgTypeAIProactive  MessageType = "ai_proactive"
+	MsgTypeChatDocCard  MessageType = "chat_doc_card"
 )
 
 type Message struct {
@@ -238,20 +237,6 @@ func (h *Hub) BroadcastSessionStatus(sessionID, status string) {
 	})
 }
 
-func (h *Hub) BroadcastMacroOutput(executionID string, data []byte) {
-	h.BroadcastToChannel("macro:"+executionID, &Message{
-		Type: MsgTypeMacroOutput,
-		Data: string(data),
-	})
-}
-
-func (h *Hub) BroadcastMacroStatus(executionID, status string) {
-	h.BroadcastToChannel("macro:"+executionID, &Message{
-		Type: MsgTypeMacroStatus,
-		Data: map[string]string{"execution_id": executionID, "status": status},
-	})
-}
-
 func (h *Hub) BroadcastNotification(notification interface{}) {
 	h.BroadcastToChannel("events", &Message{
 		Type: MsgTypeNotification,
@@ -279,6 +264,13 @@ func (h *Hub) BroadcastAISuggestion(suggestion interface{}) {
 func (h *Hub) BroadcastAIProactive(data interface{}) {
 	h.BroadcastToChannel("events", &Message{
 		Type: MsgTypeAIProactive,
+		Data: data,
+	})
+}
+
+func (h *Hub) BroadcastChatDocCard(data interface{}) {
+	h.BroadcastToChannel("events", &Message{
+		Type: MsgTypeChatDocCard,
 		Data: data,
 	})
 }

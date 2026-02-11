@@ -127,50 +127,16 @@ class AIChatManager {
                 return;
             }
 
-            // /app/doc/{id} → open document viewer modal
+            // /app/doc/{id} → open document viewer overlay
             const docMatch = href.match(/^\/app\/doc\/([a-zA-Z0-9-]+)$/);
             if (docMatch) {
                 e.preventDefault();
-                this.openDocumentViewer(docMatch[1]);
+                if (window.docViewer) {
+                    window.docViewer.open(docMatch[1]);
+                }
                 return;
             }
         });
-    }
-
-    async openDocumentViewer(docId) {
-        try {
-            const resp = await fetch(`/api/documents/${docId}`);
-            if (!resp.ok) throw new Error('Document not found');
-            const doc = await resp.json();
-
-            // Remove existing viewer if any
-            document.getElementById('doc-viewer-modal')?.remove();
-
-            const modal = document.createElement('div');
-            modal.id = 'doc-viewer-modal';
-            modal.className = 'doc-viewer-modal';
-            modal.innerHTML = `
-                <div class="doc-viewer-container">
-                    <div class="doc-viewer-header">
-                        <h3>${this.escapeHtml(doc.title || 'Documento')}</h3>
-                        <button class="doc-viewer-close" title="Fechar">&times;</button>
-                    </div>
-                    <div class="doc-viewer-body meta-rendered">
-                        ${this.renderMarkdown(doc.content)}
-                    </div>
-                </div>
-            `;
-
-            document.body.appendChild(modal);
-
-            // Close handlers
-            modal.querySelector('.doc-viewer-close').addEventListener('click', () => modal.remove());
-            modal.addEventListener('click', (e) => {
-                if (e.target === modal) modal.remove();
-            });
-        } catch (e) {
-            console.error('Failed to open document:', e);
-        }
     }
 
     openEditor() {
@@ -300,7 +266,7 @@ class AIChatManager {
 
             const typeLabels = {
                 task_suggestion: 'Tarefa',
-                meta_update: 'Meta Doc',
+                memory_doc_update: 'Memory Doc',
                 insight: 'Insight',
                 alert: 'Alerta'
             };
@@ -395,6 +361,7 @@ class AIChatManager {
             const decoder = new TextDecoder();
             let buffer = '';
             let fullText = '';
+            let pendingDocCards = [];
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -435,12 +402,27 @@ class AIChatManager {
                                 this.updateToolIndicator(contentEl, event.data.name, 'done', event.data.result);
                                 break;
 
+                            case 'doc_card':
+                                pendingDocCards.push(event.data);
+                                break;
+
                             case 'error':
                                 fullText += `\n\n**Error:** ${event.data.message}`;
                                 contentEl.innerHTML = this.renderMarkdown(fullText);
                                 break;
 
                             case 'done':
+                                // Render doc cards inside content (after text is finalized)
+                                for (const cardData of pendingDocCards) {
+                                    this.addDocCard(contentEl, cardData);
+                                }
+                                // Render doc cards queued from WebSocket (MCP propose flow)
+                                if (this._pendingWSDocCards) {
+                                    for (const cardData of this._pendingWSDocCards) {
+                                        this.addDocCard(contentEl, cardData);
+                                    }
+                                    this._pendingWSDocCards = [];
+                                }
                                 // Show token usage below the message
                                 if (event.data?.usage) {
                                     const u = event.data.usage;
@@ -510,6 +492,86 @@ class AIChatManager {
         }
     }
 
+    addDocCard(contentEl, data) {
+        const card = document.createElement('div');
+        card.className = `ai-chat-doc-card ai-chat-doc-card-${data.type || 'document'}`;
+        if (data.doc_id) card.dataset.docId = data.doc_id;
+
+        const isProposal = data.type === 'proposal';
+        const status = data.status || 'pending';
+        const icon = isProposal
+            ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>'
+            : '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="11" x2="15" y2="11"/></svg>';
+
+        const title = this.escapeHtml(data.title || 'Documento');
+        const summary = data.summary ? `<div class="ai-chat-doc-card-summary">${this.escapeHtml(data.summary)}</div>` : '';
+
+        let actionHtml;
+        if (status === 'approved') {
+            actionHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-approved">Aprovado</span>';
+        } else if (status === 'rejected') {
+            actionHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-rejected">Rejeitado</span>';
+        } else {
+            const btnLabel = isProposal ? 'Revisar Proposta' : 'Ver Documento';
+            actionHtml = `<button class="ai-chat-doc-card-btn">${btnLabel}</button>`;
+        }
+
+        card.innerHTML = `
+            <div class="ai-chat-doc-card-icon">${icon}</div>
+            <div class="ai-chat-doc-card-info">
+                <div class="ai-chat-doc-card-title">${title}</div>
+                ${summary}
+            </div>
+            ${actionHtml}
+        `;
+
+        const btn = card.querySelector('.ai-chat-doc-card-btn');
+        if (btn) {
+            btn.addEventListener('click', () => {
+                if (window.docViewer && data.doc_id) {
+                    window.docViewer.open(data.doc_id);
+                }
+            });
+        }
+
+        contentEl.appendChild(card);
+        this.scrollToBottom();
+    }
+
+    // Called by doc viewer after approve/reject to update the card status immediately.
+    updateDocCardStatus(docId, status) {
+        const card = this.messagesContainer?.querySelector(`.ai-chat-doc-card[data-doc-id="${docId}"]`);
+        if (!card) return;
+
+        // Remove existing button
+        const btn = card.querySelector('.ai-chat-doc-card-btn');
+        if (btn) btn.remove();
+
+        // Remove existing badge (in case of double-call)
+        const oldBadge = card.querySelector('.ai-chat-doc-card-badge');
+        if (oldBadge) oldBadge.remove();
+
+        let badgeHtml;
+        if (status === 'approved') {
+            badgeHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-approved">Aprovado</span>';
+        } else if (status === 'rejected') {
+            badgeHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-rejected">Rejeitado</span>';
+        }
+        if (badgeHtml) {
+            card.insertAdjacentHTML('beforeend', badgeHtml);
+        }
+    }
+
+    // Called by WebSocket handler when a chat_doc_card event arrives (e.g. from MCP propose endpoint).
+    // Queues the card for injection when the stream ends (to avoid being wiped by innerHTML updates).
+    injectDocCardFromWS(data) {
+        // Only queue if the conversation_id matches the current chat conversation
+        const convId = data.conversation_id;
+        if (convId && String(convId) !== String(this.currentConversationId)) return;
+        if (!this._pendingWSDocCards) this._pendingWSDocCards = [];
+        this._pendingWSDocCards.push(data);
+    }
+
     formatToolName(name) {
         const labels = {
             'create_skill': 'Creating skill',
@@ -521,8 +583,8 @@ class AIChatManager {
             'create_mcp_server': 'Creating MCP server',
             'update_setting': 'Updating setting',
             'sync_config': 'Syncing configuration',
-            'get_project_meta': 'Reading meta document',
-            'update_project_meta': 'Updating meta document',
+            'get_memory_doc': 'Reading memory doc',
+            'update_memory_doc': 'Updating memory doc',
             'create_document': 'Creating document',
             'list_tasks': 'Listing tasks',
             'create_task': 'Creating task',
@@ -646,6 +708,23 @@ class AIChatManager {
 
             for (const msg of data.messages) {
                 this.addMessage(msg.role, msg.content);
+            }
+
+            // Render persisted doc cards inside the last assistant message
+            if (data.doc_cards?.length) {
+                const assistantMsgs = this.messagesContainer.querySelectorAll('.ai-chat-msg-assistant .ai-chat-msg-content');
+                const lastAssistant = assistantMsgs.length > 0 ? assistantMsgs[assistantMsgs.length - 1] : null;
+                if (lastAssistant) {
+                    for (const doc of data.doc_cards) {
+                        this.addDocCard(lastAssistant, {
+                            doc_id: doc.id,
+                            type: 'proposal',
+                            title: doc.title,
+                            summary: doc.summary,
+                            status: doc.status,
+                        });
+                    }
+                }
             }
 
             this.scrollToBottom();

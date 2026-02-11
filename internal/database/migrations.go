@@ -27,6 +27,10 @@ var migrations = []Migration{
 	{Version: 9, Description: "ai proactive: add source/level/context columns to ai_conversations and ai_suggestions", Up: migrateV9},
 	{Version: 10, Description: "tokens: add token_usage table for tracking AI and Claude Code token consumption", Up: migrateV10},
 	{Version: 11, Description: "tokens: add subcategory column for AI assistant usage breakdown", Up: migrateV11},
+	{Version: 12, Description: "rename project_meta_documents to memory_docs", Up: migrateV12},
+	{Version: 13, Description: "docs: add conversation_id to temp_documents", Up: migrateV13},
+	{Version: 14, Description: "remove macros table", Up: migrateV14},
+	{Version: 15, Description: "docs: add summary and status to temp_documents", Up: migrateV15},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -116,16 +120,6 @@ func migrateV1(tx *sqlx.Tx) error {
 			pid INTEGER,
 			start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			end_time TIMESTAMP
-		)`,
-		`CREATE TABLE IF NOT EXISTS macros (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT UNIQUE NOT NULL,
-			description TEXT NOT NULL DEFAULT '',
-			script TEXT NOT NULL,
-			target_type TEXT NOT NULL CHECK(target_type IN ('local', 'remote', 'any')),
-			is_builtin BOOLEAN NOT NULL DEFAULT 0,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS skills (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -434,6 +428,55 @@ func migrateV11(tx *sqlx.Tx) error {
 	stmts := []string{
 		`ALTER TABLE token_usage ADD COLUMN subcategory TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_token_usage_subcategory ON token_usage(subcategory)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("statement failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV12 renames project_meta_documents to memory_docs.
+func migrateV12(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE project_meta_documents RENAME TO memory_docs`,
+		`DROP INDEX IF EXISTS idx_project_meta_project`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_docs_project ON memory_docs(project_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("statement failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV13 adds conversation_id to temp_documents for cleanup on conversation deletion.
+func migrateV13(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE temp_documents ADD COLUMN conversation_id INTEGER`,
+		`CREATE INDEX IF NOT EXISTS idx_temp_documents_conversation ON temp_documents(conversation_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("statement failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV14 removes the macros table.
+func migrateV14(tx *sqlx.Tx) error {
+	_, err := tx.Exec(`DROP TABLE IF EXISTS macros`)
+	return err
+}
+
+// migrateV15 adds summary and status columns to temp_documents for persistence in chat history.
+func migrateV15(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE temp_documents ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE temp_documents ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'`,
 	}
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
