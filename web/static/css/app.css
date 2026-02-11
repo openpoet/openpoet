@@ -1785,6 +1785,70 @@ body {
     flex: 1;
 }
 
+/* Task Loaded Dialog */
+.hook-task-loaded-container {
+    background-color: var(--color-bg-secondary);
+    border: 2px solid var(--color-success);
+    border-radius: 12px;
+    max-width: 520px;
+    width: 100%;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(var(--color-success-rgb, 46, 160, 67), 0.2);
+    animation: slideUp 0.3s ease;
+}
+
+.hook-task-loaded-body {
+    padding: 20px;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.task-loaded-info {
+    font-size: 14px;
+    color: var(--color-text-secondary);
+    margin-bottom: 16px;
+    line-height: 1.5;
+}
+
+.task-loaded-details {
+    background: var(--color-bg-tertiary);
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 16px;
+}
+
+.task-loaded-details .hook-detail-code {
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.task-loaded-extra {
+    margin-top: 12px;
+}
+
+.task-loaded-extra .hook-input-label-row {
+    align-items: flex-start;
+}
+
+.task-loaded-textarea {
+    width: 100%;
+    resize: vertical;
+    min-height: 60px;
+    font-size: 14px;
+    flex: 1;
+}
+
+.task-loaded-extra .btn-block {
+    width: 100%;
+    margin-top: 10px;
+}
+
+.btn-block {
+    width: 100%;
+}
+
 .ask-user-question {
     margin-bottom: 20px;
 }

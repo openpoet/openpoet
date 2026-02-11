@@ -75,6 +75,7 @@ type HookHandler struct {
 	lastPushSent    map[string]time.Time           // sessionID -> last push timestamp (for rate-limiting)
 	userStopped     map[string]bool                // sessionID -> true if user explicitly stopped
 	lastEvaluation  map[string]time.Time           // sessionID -> last evaluation timestamp (3-min cooldown)
+	taskNotifs      map[string]map[string]interface{} // sessionID -> task notification data (pending until user responds)
 }
 
 // NewHookHandler creates a new hook handler
@@ -89,6 +90,7 @@ func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, ses
 		lastPushSent:   make(map[string]time.Time),
 		userStopped:    make(map[string]bool),
 		lastEvaluation: make(map[string]time.Time),
+		taskNotifs:     make(map[string]map[string]interface{}),
 	}
 }
 
@@ -687,8 +689,54 @@ func (h *HookHandler) HandleGetPending(w http.ResponseWriter, r *http.Request) {
 	} else {
 		result["tool_events"] = []toolEventEntry{}
 	}
+
+	// Include pending task notification
+	if notif, ok := h.taskNotifs[sessionID]; ok {
+		result["task_notification"] = notif
+	}
 	h.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
+}
+
+// SetTaskNotification stores and broadcasts a task-loaded notification for a session.
+// Called by the API handler when a session is created from a task.
+func (h *HookHandler) SetTaskNotification(sessionID string, taskID int64, taskTitle, taskDescription string) {
+	data := map[string]interface{}{
+		"session_id":  sessionID,
+		"task_id":     taskID,
+		"task_title":  taskTitle,
+		"description": taskDescription,
+	}
+
+	h.mu.Lock()
+	h.taskNotifs[sessionID] = data
+	h.mu.Unlock()
+
+	// Broadcast to connected clients
+	h.hub.BroadcastHookEvent(sessionID, &websocket.Message{
+		Type: websocket.MsgTypeHookTaskLoaded,
+		Data: data,
+	})
+}
+
+// ClearTaskNotification removes a pending task notification for a session.
+func (h *HookHandler) ClearTaskNotification(sessionID string) {
+	h.mu.Lock()
+	delete(h.taskNotifs, sessionID)
+	h.mu.Unlock()
+}
+
+// HandleTaskNotificationRespond handles POST /api/hooks/task-notification/{sessionId}/respond
+// Clears the pending task notification. The actual terminal input is sent by the frontend.
+func (h *HookHandler) HandleTaskNotificationRespond(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "sessionId")
+	if sessionID == "" {
+		respondError(w, http.StatusBadRequest, "Missing session ID")
+		return
+	}
+
+	h.ClearTaskNotification(sessionID)
+	w.WriteHeader(http.StatusOK)
 }

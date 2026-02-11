@@ -177,6 +177,23 @@ class HookManager {
             this.dismissDialog('askUser');
         });
 
+        // Task Loaded dialog buttons
+        document.getElementById('hook-task-loaded-start')?.addEventListener('click', () => {
+            this.respondToTaskLoaded('start');
+        });
+        document.getElementById('hook-task-loaded-plan')?.addEventListener('click', () => {
+            this.respondToTaskLoaded('plan');
+        });
+        document.getElementById('hook-task-loaded-add-prompt')?.addEventListener('click', () => {
+            this.toggleTaskLoadedExtra();
+        });
+        document.getElementById('hook-task-loaded-send-extra')?.addEventListener('click', () => {
+            this.respondToTaskLoaded('custom');
+        });
+        document.getElementById('hook-task-loaded-dismiss')?.addEventListener('click', () => {
+            this.respondToTaskLoaded('start');
+        });
+
         // Tool panel toggle
         document.getElementById('btn-tool-activity')?.addEventListener('click', () => {
             this.toggleToolPanel();
@@ -193,6 +210,10 @@ class HookManager {
         this.setupVoiceButton(
             document.getElementById('hook-plan-voice-btn'),
             document.getElementById('hook-plan-feedback')
+        );
+        this.setupVoiceButton(
+            document.getElementById('hook-task-loaded-voice-btn'),
+            document.getElementById('hook-task-loaded-extra-prompt')
         );
     }
 
@@ -292,6 +313,9 @@ class HookManager {
             case 'hook_stop':
                 this.handleStop(msg.data);
                 break;
+            case 'hook_task_loaded':
+                this._handleTaskLoaded(msg.data);
+                break;
         }
     }
 
@@ -361,6 +385,8 @@ class HookManager {
             label = 'Plan ready for review';
         } else if (dialogType === 'askUser') {
             label = 'Question from Claude';
+        } else if (dialogType === 'taskLoaded') {
+            label = `Task loaded: ${event.task_title || 'Task'}`;
         }
         this._showHookToast(sessionId, label, entry.id);
 
@@ -499,6 +525,11 @@ class HookManager {
                 // Not active: dismiss to background with toast
                 this._dismissToBackground(data, pp.msg_type);
             }
+        }
+
+        // Restore pending task notification (shown when session starts from a task)
+        if (state.task_notification && !this.pendingPermission) {
+            this.showTaskLoadedDialog(state.task_notification);
         }
 
         this.renderToolPanel();
@@ -993,6 +1024,115 @@ class HookManager {
         this.hideAskUserDialog();
     }
 
+    // ==================== TASK LOADED DIALOG ====================
+
+    _handleTaskLoaded(data) {
+        const sessionId = data.session_id;
+        console.log('[HookManager] _handleTaskLoaded session:', sessionId);
+        // Always show dialog directly — no toast/dismiss for task loaded
+        this.showTaskLoadedDialog(data);
+    }
+
+    showTaskLoadedDialog(data) {
+        const dialog = document.getElementById('hook-task-loaded-dialog');
+        if (!dialog) return;
+
+        const sessionId = data.session_id;
+
+        this.pendingPermission = {
+            sessionId: sessionId,
+            event: data,
+            dialogType: 'taskLoaded',
+            timestamp: Date.now()
+        };
+
+        // Show session label
+        this._updateDialogSessionLabel('hook-task-loaded-session-label', sessionId);
+
+        // Populate task info
+        const titleEl = document.getElementById('hook-task-loaded-title');
+        if (titleEl) titleEl.textContent = data.task_title || 'Untitled Task';
+
+        const descEl = document.getElementById('hook-task-loaded-description');
+        const descSection = document.getElementById('hook-task-loaded-description-section');
+        if (data.description) {
+            if (descEl) descEl.textContent = data.description;
+            if (descSection) descSection.style.display = '';
+        } else {
+            if (descSection) descSection.style.display = 'none';
+        }
+
+        // Reset extra prompt input
+        const extraInput = document.getElementById('hook-task-loaded-extra-prompt');
+        if (extraInput) extraInput.value = '';
+        const extraSection = document.getElementById('hook-task-loaded-extra-section');
+        if (extraSection) extraSection.classList.add('hidden');
+
+        dialog.classList.remove('hidden');
+
+        if (navigator.vibrate) {
+            navigator.vibrate([100, 50, 100]);
+        }
+    }
+
+    hideTaskLoadedDialog() {
+        const dialog = document.getElementById('hook-task-loaded-dialog');
+        if (dialog) dialog.classList.add('hidden');
+
+        if (this.pendingPermission && this.pendingPermission.dialogType === 'taskLoaded') {
+            this.hidePendingBadge(this.pendingPermission.sessionId);
+            this.pendingPermission = null;
+        }
+    }
+
+    // Toggle the extra prompt input section
+    toggleTaskLoadedExtra() {
+        const section = document.getElementById('hook-task-loaded-extra-section');
+        if (section) {
+            section.classList.toggle('hidden');
+            if (!section.classList.contains('hidden')) {
+                const input = document.getElementById('hook-task-loaded-extra-prompt');
+                if (input) input.focus();
+            }
+        }
+    }
+
+    async respondToTaskLoaded(mode) {
+        // mode: 'start' | 'custom' | 'plan'
+        if (!this.pendingPermission || this.pendingPermission.dialogType !== 'taskLoaded') return;
+
+        const sessionId = this.pendingPermission.sessionId;
+
+        // Clear the notification on the backend
+        try {
+            await fetch(`/api/hooks/task-notification/${sessionId}/respond`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+        } catch (err) {
+            console.error('Failed to clear task notification:', err);
+        }
+
+        let prompt;
+        if (mode === 'custom') {
+            // User's custom prompt replaces the default entirely
+            const extraInput = document.getElementById('hook-task-loaded-extra-prompt');
+            prompt = extraInput ? extraInput.value.trim() : '';
+            if (!prompt) prompt = 'Start working on the assigned task.';
+        } else if (mode === 'plan') {
+            prompt = 'Plan the implementation for the assigned task. Enter plan mode and present the plan before making any changes.';
+        } else {
+            prompt = 'Start working on the assigned task.';
+        }
+
+        // Use the canonical terminal input function (Ctrl+U, text, Enter with delay)
+        if (window.app) {
+            window.app.sendQuickCommand(prompt);
+        }
+
+        this.hideTaskLoadedDialog();
+    }
+
     // ==================== DISMISS / REOPEN ====================
 
     dismissDialog(dialogType) {
@@ -1074,6 +1214,8 @@ class HookManager {
             this.showExitPlanDialog(data);
         } else if (entry.dialogType === 'askUser') {
             this.showAskUserDialog(data);
+        } else if (entry.dialogType === 'taskLoaded') {
+            this.showTaskLoadedDialog(entry.event);
         }
 
         this.renderToolPanel();
