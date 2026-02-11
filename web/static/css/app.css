@@ -3253,6 +3253,9 @@ body {
     color: var(--color-text-secondary);
     display: none;
 }
+#ai-chat-voice {
+    display: flex;
+}
 .ai-chat-action-btn:hover {
     color: var(--color-text);
     border-color: var(--color-text-secondary);
