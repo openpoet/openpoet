@@ -154,6 +154,12 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 		cliArgs = []string{"--mcp-config", mcpJSON}
 	}
 
+	// Inject task system prompt if present (set by API handler when session starts from a task)
+	if prompt, ok := envVars["DEVMANAGER_APPEND_SYSTEM_PROMPT"]; ok && prompt != "" {
+		cliArgs = append(cliArgs, "--append-system-prompt", prompt)
+		delete(envVars, "DEVMANAGER_APPEND_SYSTEM_PROMPT") // don't leak as env var
+	}
+
 	// Create runner based on project type
 	var runner Runner
 	var err error
@@ -554,6 +560,12 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	var cliArgs []string
 	if mcpJSON := m.buildMCPConfigJSON(ctx); mcpJSON != "" {
 		cliArgs = []string{"--mcp-config", mcpJSON}
+	}
+
+	// Inject task system prompt if present (set by API handler when session starts from a task)
+	if prompt, ok := envVars["DEVMANAGER_APPEND_SYSTEM_PROMPT"]; ok && prompt != "" {
+		cliArgs = append(cliArgs, "--append-system-prompt", prompt)
+		delete(envVars, "DEVMANAGER_APPEND_SYSTEM_PROMPT") // don't leak as env var
 	}
 
 	// Create output buffer (1MB max)

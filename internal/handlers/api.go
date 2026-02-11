@@ -541,6 +541,21 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 	if linkedTask != nil {
 		input.EnvVars["DEVMANAGER_TASK_ID"] = fmt.Sprintf("%d", linkedTask.ID)
 		input.EnvVars["DEVMANAGER_TASK_TITLE"] = linkedTask.Title
+
+		// Build system prompt so Claude Code starts with full task context
+		description := linkedTask.Description
+		if description == "" {
+			description = "(no description provided)"
+		}
+		input.EnvVars["DEVMANAGER_APPEND_SYSTEM_PROMPT"] = fmt.Sprintf(
+			"You have been assigned the following task by DevManager:\n\n"+
+				"Title: %s\n\n"+
+				"Description:\n%s\n\n"+
+				"IMPORTANT: Communicate with the user in the same language used in the task title and description above. "+
+				"If the task is written in Portuguese, respond in Portuguese. If in English, respond in English. Match the language naturally.\n\n"+
+				"You can use the devmanager_get_my_task MCP tool to fetch updated task details or the devmanager_request_task_evaluation tool when you believe you have completed significant work.",
+			linkedTask.Title, description,
+		)
 	}
 
 	var sess *database.Session
@@ -579,6 +594,11 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 				"project_id": linkedTask.ProjectID,
 				"task":       linkedTask,
 			})
+		}
+
+		// Broadcast task-loaded notification so the frontend shows a decision dialog
+		if a.hookHandler != nil {
+			a.hookHandler.SetTaskNotification(sess.ID, linkedTask.ID, linkedTask.Title, linkedTask.Description)
 		}
 	}
 

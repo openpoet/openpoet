@@ -845,6 +845,54 @@
         </div>
     </div>
 
+    <!-- Task Loaded Dialog -->
+    <div id="hook-task-loaded-dialog" class="hook-permission-overlay hidden">
+        <div class="hook-task-loaded-container">
+            <div class="hook-permission-header">
+                <div class="hook-permission-icon" style="color: var(--color-success);">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 11l3 3L22 4"></path>
+                        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+                    </svg>
+                </div>
+                <h3>Task Loaded</h3>
+                <button id="hook-task-loaded-dismiss" class="hook-permission-close" title="Start immediately">&times;</button>
+            </div>
+            <div class="hook-task-loaded-body">
+                <div id="hook-task-loaded-session-label" class="hook-session-label hidden"></div>
+                <p class="task-loaded-info">This session was started from a task. The task context has been injected into Claude Code.</p>
+                <div class="task-loaded-details">
+                    <div class="hook-detail-label">Task:</div>
+                    <div id="hook-task-loaded-title" class="hook-detail-value"></div>
+                    <div id="hook-task-loaded-description-section">
+                        <div class="hook-detail-label">Description:</div>
+                        <pre id="hook-task-loaded-description" class="hook-detail-code"></pre>
+                    </div>
+                </div>
+                <div id="hook-task-loaded-extra-section" class="task-loaded-extra hidden">
+                    <div class="hook-detail-label">Custom prompt:</div>
+                    <div class="hook-input-label-row">
+                        <textarea id="hook-task-loaded-extra-prompt" class="form-input task-loaded-textarea" rows="3" placeholder="Type or record your instructions..."></textarea>
+                        <button id="hook-task-loaded-voice-btn" class="btn-icon btn-sm hook-voice-btn" title="Record voice message">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                <line x1="12" y1="19" x2="12" y2="23"></line>
+                                <line x1="8" y1="23" x2="16" y2="23"></line>
+                            </svg>
+                        </button>
+                    </div>
+                    <button id="hook-task-loaded-send-extra" class="btn btn-success btn-block">Start with custom prompt</button>
+                </div>
+            </div>
+            <div class="hook-permission-actions">
+                <button id="hook-task-loaded-add-prompt" class="btn btn-secondary">Custom prompt</button>
+                <button id="hook-task-loaded-plan" class="btn btn-primary">Plan first</button>
+                <button id="hook-task-loaded-start" class="btn btn-success">Start task</button>
+            </div>
+        </div>
+    </div>
+
     <!-- DEBUG: Global error handler + fetch interceptor + showToast interceptor -->
     <script>
     // Capture uncaught errors
