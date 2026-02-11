@@ -443,6 +443,8 @@ class AIChatManager {
                                     }
                                     this._pendingWSDocCards = [];
                                 }
+                                // Render mermaid diagrams now that streaming is complete
+                                if (typeof FileViewer !== 'undefined') FileViewer.renderMermaid(contentEl);
                                 // Show token usage below the message
                                 if (event.data?.usage) {
                                     const u = event.data.usage;
@@ -482,6 +484,10 @@ class AIChatManager {
             <div class="ai-chat-msg-content">${role === 'user' ? this.escapeHtml(text) : this.renderMarkdown(text)}</div>
         `;
         this.messagesContainer?.appendChild(el);
+        if (role === 'assistant') {
+            const contentEl = el.querySelector('.ai-chat-msg-content');
+            if (contentEl && typeof FileViewer !== 'undefined') FileViewer.renderMermaid(contentEl);
+        }
         this.scrollToBottom();
         return el;
     }
@@ -889,6 +895,7 @@ class AIChatManager {
                                 for (const cardData of pendingDocCards) {
                                     this.addDocCard(contentEl, cardData);
                                 }
+                                if (typeof FileViewer !== 'undefined') FileViewer.renderMermaid(contentEl);
                                 if (event.data?.usage) {
                                     const u = event.data.usage;
                                     const totalTokens = (u.input_tokens || 0) + (u.output_tokens || 0);

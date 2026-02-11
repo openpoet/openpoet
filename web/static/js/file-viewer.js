@@ -322,18 +322,39 @@ class FileViewer {
 
     renderMarkdown(content) {
         if (typeof marked !== 'undefined') {
-            // Configure marked for safe rendering
-            marked.setOptions({
-                breaks: true,
-                gfm: true,
-            });
+            FileViewer._initMarked();
             this.markdownEl.innerHTML = marked.parse(content);
+            FileViewer.renderMermaid(this.markdownEl);
         } else {
             // Fallback: render as code if marked is not available
             this.renderCode(content);
             return;
         }
         this.showState('markdown');
+    }
+
+    static _markedInitialized = false;
+
+    static _initMarked() {
+        if (FileViewer._markedInitialized) return;
+        FileViewer._markedInitialized = true;
+        marked.use({
+            renderer: {
+                code({ text, lang }) {
+                    if (lang === 'mermaid') {
+                        return `<div class="mermaid">${text}</div>`;
+                    }
+                    return false;
+                }
+            }
+        });
+        marked.setOptions({ breaks: true, gfm: true });
+    }
+
+    static renderMermaid(container) {
+        if (typeof mermaid !== 'undefined' && container.querySelector('.mermaid')) {
+            mermaid.run({ nodes: container.querySelectorAll('.mermaid') });
+        }
     }
 
     renderCode(content) {

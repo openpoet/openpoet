@@ -88,6 +88,7 @@ class DocViewer {
 
         this.nameEl.textContent = title || 'Documento';
         this.contentEl.innerHTML = this._renderMarkdown(content || '');
+        if (typeof FileViewer !== 'undefined') FileViewer.renderMermaid(this.contentEl);
 
         // Build footer actions
         this.footerEl.innerHTML = '';
