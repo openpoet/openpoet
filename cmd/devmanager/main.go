@@ -617,6 +617,19 @@ func serveMigrationError(cfg *config.Config) {
 	server.Shutdown(shutdownCtx)
 }
 
+// newGoSDKWithBudget creates a GoSDKProvider with optional budget from settings.
+func newGoSDKWithBudget(db *database.DB, apiURL string) *llm.GoSDKProvider {
+	p := llm.NewGoSDKProvider(apiURL)
+	if budgetStr, _ := db.GetSetting(context.Background(), "ai_budget_usd"); budgetStr != "" {
+		var budget float64
+		if _, err := fmt.Sscanf(budgetStr, "%f", &budget); err == nil && budget > 0 {
+			p.SetBudgetUSD(budget)
+			log.Printf("[AI] Budget limit: $%.2f per query", budget)
+		}
+	}
+	return p
+}
+
 // initAIProvider creates the appropriate LLM provider based on settings.
 func initAIProvider(db *database.DB, apiURL string) llm.Provider {
 	ctx := context.Background()
@@ -636,8 +649,8 @@ func initAIProvider(db *database.DB, apiURL string) llm.Provider {
 
 	case "gosdk":
 		if llm.IsClaudeCLIAvailable() {
-			log.Printf("[AI] Using Go Agent SDK provider (session-based)")
-			return llm.NewGoSDKProvider(apiURL)
+			log.Printf("[AI] Using Go Agent SDK provider (streaming, session-based)")
+			return newGoSDKWithBudget(db, apiURL)
 		}
 		log.Printf("[AI] Provider set to gosdk but Claude CLI not available")
 		return nil
@@ -650,7 +663,7 @@ func initAIProvider(db *database.DB, apiURL string) llm.Provider {
 		// Legacy: redirect to gosdk
 		if llm.IsClaudeCLIAvailable() {
 			log.Printf("[AI] Legacy claudecode provider redirected to Go Agent SDK")
-			return llm.NewGoSDKProvider(apiURL)
+			return newGoSDKWithBudget(db, apiURL)
 		}
 		log.Printf("[AI] Provider set to claudecode but CLI not available")
 		return nil
@@ -658,8 +671,8 @@ func initAIProvider(db *database.DB, apiURL string) llm.Provider {
 	default:
 		// Auto-detect: try Go SDK (Claude CLI) first, then API key
 		if llm.IsClaudeCLIAvailable() {
-			log.Printf("[AI] Auto-detected Go Agent SDK provider (session-based)")
-			return llm.NewGoSDKProvider(apiURL)
+			log.Printf("[AI] Auto-detected Go Agent SDK provider (streaming, session-based)")
+			return newGoSDKWithBudget(db, apiURL)
 		}
 		apiKey, _ := db.GetSetting(ctx, "anthropic_api_key")
 		if apiKey != "" {
