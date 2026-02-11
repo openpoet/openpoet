@@ -271,6 +271,41 @@ func ChatTools() []ToolDefinition {
 	}
 }
 
+// ConvertInputSchema converts a ToolDefinitionInput to a generic map[string]any,
+// suitable for use with the Go Agent SDK's MCP tool registration.
+func ConvertInputSchema(schema ToolDefinitionInput) map[string]any {
+	props := make(map[string]any)
+	for name, prop := range schema.Properties {
+		propMap := map[string]any{"type": prop.Type}
+		if prop.Description != "" {
+			propMap["description"] = prop.Description
+		}
+		if len(prop.Enum) > 0 {
+			propMap["enum"] = prop.Enum
+		}
+		if len(prop.Properties) > 0 {
+			nested := make(map[string]any)
+			for nk, nv := range prop.Properties {
+				np := map[string]any{"type": nv.Type}
+				if nv.Description != "" {
+					np["description"] = nv.Description
+				}
+				nested[nk] = np
+			}
+			propMap["properties"] = nested
+		}
+		props[name] = propMap
+	}
+	result := map[string]any{
+		"type":       schema.Type,
+		"properties": props,
+	}
+	if len(schema.Required) > 0 {
+		result["required"] = schema.Required
+	}
+	return result
+}
+
 // PlanningTools returns the subset of tools available in planning mode.
 func PlanningTools() []ToolDefinition {
 	all := ChatTools()

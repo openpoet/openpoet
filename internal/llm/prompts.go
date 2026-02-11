@@ -7,8 +7,8 @@ import (
 
 // ChatSystemPrompt builds the system prompt for the AI chat assistant.
 // It injects current state (skills, projects, MCPs) dynamically.
-// When hasTools is true, the prompt tells the model it can use devmanager_* tools.
-func ChatSystemPrompt(skills []string, projects []string, mcps []string, hasTools bool) string {
+// All providers support tools (via native API or MCP).
+func ChatSystemPrompt(skills []string, projects []string, mcps []string) string {
 	var sb strings.Builder
 
 	sb.WriteString(`You are the DevManager AI Assistant.
@@ -36,8 +36,7 @@ Example of a DevManager skill content:
 """
 `)
 
-	if hasTools {
-		sb.WriteString(`
+	sb.WriteString(`
 ## Your Role
 You are a helpful assistant that manages DevManager resources. You have access to tools (prefixed with devmanager_) that let you create, update, delete, and list skills, projects, MCP servers, and settings.
 
@@ -108,14 +107,6 @@ Each project can have tasks with title, description, status (todo/in_progress/do
 - **devmanager_delete_task**: When the user wants to remove a task.
 - **get_task_report**: When the user asks "what should I work on?", "give me a summary", or wants a project status overview. This tool recommends the next task based on priority and due date.
 `)
-	} else {
-		sb.WriteString(`
-## Your Role
-You are a helpful assistant that answers questions about DevManager and helps users understand their configuration. You provide information based on the current state shown below.
-
-You do NOT have the ability to create, modify, or delete resources directly. You can only provide information and suggestions. If the user wants to create or modify something, guide them on how to do it through the DevManager web interface.
-`)
-	}
 
 	sb.WriteString(`
 ## Guidelines — BREVITY IS MANDATORY
@@ -160,8 +151,8 @@ You do NOT have the ability to create, modify, or delete resources directly. You
 
 // ChatSystemPromptWithProactiveContext wraps ChatSystemPrompt and appends proactive conversation context.
 // Used when the user is responding to an AI-initiated conversation.
-func ChatSystemPromptWithProactiveContext(skills, projects, mcps []string, hasTools bool, proactiveCtx string) string {
-	base := ChatSystemPrompt(skills, projects, mcps, hasTools)
+func ChatSystemPromptWithProactiveContext(skills, projects, mcps []string, proactiveCtx string) string {
+	base := ChatSystemPrompt(skills, projects, mcps)
 	if proactiveCtx == "" {
 		return base
 	}
@@ -177,7 +168,7 @@ Continue the conversation naturally. The user may want to discuss, modify, accep
 }
 
 // PlanningSystemPrompt builds the system prompt for the AI Planning Assistant mode.
-func PlanningSystemPrompt(projects []string, hasTools bool, proactiveCtx string) string {
+func PlanningSystemPrompt(projects []string, proactiveCtx string) string {
 	var sb strings.Builder
 
 	sb.WriteString(`You are the DevManager Planning Assistant. Your role is to help users plan development work by exploring project code, understanding architecture, and creating detailed tasks.
@@ -225,8 +216,7 @@ Follow this workflow rigorously:
 - Status for new tasks should be "todo" unless otherwise specified
 `)
 
-	if hasTools {
-		sb.WriteString(`
+	sb.WriteString(`
 ## Available Tools
 - list_projects: List all projects in DevManager
 - list_directory: Browse files and directories in a project (project_id, path)
@@ -239,7 +229,6 @@ Follow this workflow rigorously:
 - get_task_report: Get task summary report for a project
 - create_document: Create a temporary document for long content
 `)
-	}
 
 	if len(projects) > 0 {
 		sb.WriteString("\n## Available Projects\n")
