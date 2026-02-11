@@ -208,6 +208,11 @@ func main() {
 	// Wire AI handler into API for AI chat functionality
 	api.SetAIHandler(aiHandler)
 
+	// Wire tool executor into SDK providers (lazy binding — provider created before handler)
+	if goSDK, ok := aiProvider.(*llm.GoSDKProvider); ok {
+		goSDK.SetToolExecutor(aiHandler)
+	}
+
 	// Initialize OTEL handler for Claude Code token tracking
 	otelHandler := handlers.NewOTELHandler(db)
 
@@ -411,6 +416,8 @@ func main() {
 		r.Post("/ai/initiate-planning", aiHandler.HandleInitiatePlanning)
 		r.Post("/ai/generate-skill", aiHandler.HandleGenerateSkill)
 		r.Post("/ai/validate-skill", aiHandler.HandleValidateSkill)
+		r.Post("/ai/execute-tool", aiHandler.HandleExecuteTool)
+		r.Get("/ai/tool-definitions", aiHandler.HandleToolDefinitions)
 
 		// AI Suggestions
 		r.Get("/ai/suggestions", aiHandler.ListSuggestions)
@@ -503,6 +510,11 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down...")
+
+	// Close AI provider sessions (SDK providers may have persistent subprocesses)
+	if sp, ok := aiProvider.(llm.SessionProvider); ok {
+		sp.CloseAllSessions()
+	}
 
 	// Stop all sessions
 	sessionMgr.StopAll()
@@ -622,19 +634,32 @@ func initAIProvider(db *database.DB, apiURL string) llm.Provider {
 		log.Printf("[AI] Provider set to apikey but no API key configured")
 		return nil
 
-	case "claudecode":
+	case "gosdk":
 		if llm.IsClaudeCLIAvailable() {
-			log.Printf("[AI] Using Claude Code CLI provider (MCP tools via %s)", apiURL)
-			return llm.NewClaudeCLIProvider(apiURL)
+			log.Printf("[AI] Using Go Agent SDK provider (session-based)")
+			return llm.NewGoSDKProvider(apiURL)
+		}
+		log.Printf("[AI] Provider set to gosdk but Claude CLI not available")
+		return nil
+
+	case "nodesdk":
+		log.Printf("[AI] Using Node.js Agent SDK sidecar provider")
+		return llm.NewNodeSDKProvider(apiURL)
+
+	case "claudecode":
+		// Legacy: redirect to gosdk
+		if llm.IsClaudeCLIAvailable() {
+			log.Printf("[AI] Legacy claudecode provider redirected to Go Agent SDK")
+			return llm.NewGoSDKProvider(apiURL)
 		}
 		log.Printf("[AI] Provider set to claudecode but CLI not available")
 		return nil
 
 	default:
-		// Auto-detect: try Claude CLI first, then API key
+		// Auto-detect: try Go SDK (Claude CLI) first, then API key
 		if llm.IsClaudeCLIAvailable() {
-			log.Printf("[AI] Auto-detected Claude Code CLI provider (MCP tools via %s)", apiURL)
-			return llm.NewClaudeCLIProvider(apiURL)
+			log.Printf("[AI] Auto-detected Go Agent SDK provider (session-based)")
+			return llm.NewGoSDKProvider(apiURL)
 		}
 		apiKey, _ := db.GetSetting(ctx, "anthropic_api_key")
 		if apiKey != "" {
