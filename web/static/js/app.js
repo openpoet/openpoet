@@ -2847,6 +2847,20 @@ class DevManager {
                     ${pushBtnText ? `<button class="${pushBtnClass}" onclick="${pushBtnAction}">${pushBtnText}</button>` : ''}
                 </div>
             </div>
+            <div class="card" style="margin-bottom: 16px;">
+                <div class="card-header">
+                    <div class="card-title">Task Auto-Evaluation</div>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: 12px; color: var(--text-secondary, #999); font-size: 13px;">
+                        When enabled, the AI assistant automatically evaluates sessions on start, end, prompt submit, and plan acceptance to suggest task actions (create, link, update, complete).
+                    </p>
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" id="task-auto-eval" onchange="app.saveTaskAutoEval(this.checked)">
+                        <span style="font-size: 13px;">Enable automatic task evaluation</span>
+                    </label>
+                </div>
+            </div>
             <div class="card">
                 <div class="card-header">
                     <div class="card-title">Voice Transcription</div>
@@ -2912,6 +2926,10 @@ class DevManager {
         // Populate settings after render
         setTimeout(() => {
             if (this.settings) {
+                const autoEvalCheckbox = document.getElementById('task-auto-eval');
+                if (autoEvalCheckbox) {
+                    autoEvalCheckbox.checked = this.settings.task_auto_eval_enabled === 'true';
+                }
                 const providerSelect = document.getElementById('whisper-provider');
                 if (providerSelect && this.settings.whisper_provider) {
                     providerSelect.value = this.settings.whisper_provider;
@@ -3601,6 +3619,17 @@ class DevManager {
         const mcp = this.mcpServers.find(m => m.id === mcpId);
         if (mcp) {
             await this.api('PUT', `/config/mcps/${mcpId}`, { ...mcp, enabled });
+        }
+    }
+
+    async saveTaskAutoEval(enabled) {
+        try {
+            await this.api('PUT', '/config/settings', {
+                task_auto_eval_enabled: enabled ? 'true' : 'false'
+            });
+            this.showToast('Success', `Task auto-evaluation ${enabled ? 'enabled' : 'disabled'}`, 'success');
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
         }
     }
 

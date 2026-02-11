@@ -67,6 +67,28 @@ func (p *NodeSDKProvider) sidecarDir() string {
 	return "scripts/nodesdk-sidecar"
 }
 
+// ensureDependencies runs npm install if node_modules is missing.
+func (p *NodeSDKProvider) ensureDependencies() error {
+	dir := p.sidecarDir()
+	nodeModules := filepath.Join(dir, "node_modules")
+	if _, err := os.Stat(nodeModules); err == nil {
+		return nil // already installed
+	}
+	log.Printf("[NodeSDK] Installing sidecar dependencies...")
+	npmPath, err := exec.LookPath("npm")
+	if err != nil {
+		return fmt.Errorf("npm not found in PATH: %w", err)
+	}
+	cmd := exec.Command(npmPath, "install", "--production")
+	cmd.Dir = dir
+	cmd.Stderr = os.Stderr
+	if out, err := cmd.Output(); err != nil {
+		return fmt.Errorf("npm install failed: %w (output: %s)", err, string(out))
+	}
+	log.Printf("[NodeSDK] Dependencies installed")
+	return nil
+}
+
 // Start launches the Node.js sidecar process.
 func (p *NodeSDKProvider) Start() error {
 	if p.started {
@@ -77,6 +99,11 @@ func (p *NodeSDKProvider) Start() error {
 	nodePath, err := exec.LookPath("node")
 	if err != nil {
 		return fmt.Errorf("node not found in PATH: %w", err)
+	}
+
+	// Ensure npm dependencies are installed
+	if err := p.ensureDependencies(); err != nil {
+		return fmt.Errorf("sidecar dependencies: %w", err)
 	}
 
 	// Allocate a random port

@@ -2627,6 +2627,17 @@ body {
     margin: 24px 0;
 }
 
+/* Mermaid diagrams */
+.mermaid {
+    display: flex;
+    justify-content: center;
+    margin: 16px 0;
+    overflow-x: auto;
+}
+.mermaid svg {
+    max-width: 100%;
+}
+
 /* ============ AI Chat Panel ============ */
 
 .ai-chat-toggle-btn {

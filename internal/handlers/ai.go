@@ -2098,6 +2098,15 @@ func (h *AIHandler) EvaluateSession(ctx context.Context, sessionID string, trigg
 	}
 	log.Printf("[AI-Session] Provider OK: %T", p)
 
+	// Skip automatic evaluations if disabled in settings (manual "session_request" always allowed)
+	if trigger != "session_request" {
+		val, _ := h.api.db.GetSetting(ctx, "task_auto_eval_enabled")
+		if val != "true" {
+			log.Printf("[AI-Session] Auto task evaluation disabled (trigger=%s), skipping", trigger)
+			return
+		}
+	}
+
 	sess, err := h.api.db.GetSession(ctx, sessionID)
 	if err != nil {
 		log.Printf("[AI-Session] Session %s not found: %v", sessionID, err)
