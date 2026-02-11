@@ -100,7 +100,11 @@ func (p *ClaudeCLIProvider) StreamMessage(ctx context.Context, req *Request, cal
 	// Build MCP config JSON that tells Claude CLI to launch our MCP server subprocess.
 	// The MCP server calls back into the DevManager HTTP API for tool execution.
 	execPath, _ := os.Executable()
-	mcpConfig := fmt.Sprintf(`{"mcpServers":{"devmanager":{"command":"%s","args":["mcp-serve"],"env":{"DEVMANAGER_API_URL":"%s"}}}}`, execPath, p.apiURL)
+	convIDStr := ""
+	if req.ConversationID > 0 {
+		convIDStr = fmt.Sprintf("%d", req.ConversationID)
+	}
+	mcpConfig := fmt.Sprintf(`{"mcpServers":{"devmanager":{"command":"%s","args":["mcp-serve"],"env":{"DEVMANAGER_API_URL":"%s","DEVMANAGER_CONTEXT":"chat","DEVMANAGER_CONVERSATION_ID":"%s"}}}}`, execPath, p.apiURL, convIDStr)
 
 	args := []string{
 		"--print", "--verbose", "--output-format", "stream-json",

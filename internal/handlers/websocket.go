@@ -59,20 +59,6 @@ func (h *WebSocketHandler) HandleSessionWS(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// HandleMacroWS handles WebSocket connections for macro output
-func (h *WebSocketHandler) HandleMacroWS(w http.ResponseWriter, r *http.Request) {
-	executionID := chi.URLParam(r, "execution_id")
-
-	client, err := websocket.UpgradeAndServe(h.hub, w, r)
-	if err != nil {
-		log.Printf("WebSocket upgrade failed: %v", err)
-		return
-	}
-
-	// Subscribe to macro channel
-	client.Subscribe("macro:" + executionID)
-}
-
 // HandleEventsWS handles WebSocket connections for global events
 func (h *WebSocketHandler) HandleEventsWS(w http.ResponseWriter, r *http.Request) {
 	client, err := websocket.UpgradeAndServe(h.hub, w, r)

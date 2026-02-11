@@ -21,7 +21,7 @@ import (
 	"devmanager/internal/database"
 	"devmanager/internal/handlers"
 	"devmanager/internal/llm"
-	"devmanager/internal/macro"
+	"devmanager/internal/configsync"
 	"devmanager/internal/mcp"
 	"devmanager/internal/notifications"
 	"devmanager/internal/security"
@@ -144,16 +144,8 @@ func main() {
 	// Initialize session manager
 	sessionMgr := session.NewManager(db, hub, cfg.Address())
 
-	// Initialize macro executor
-	macroExec := macro.NewExecutor(db, hub, encryptor.Decrypt)
-
 	// Initialize config syncer
-	configSync := macro.NewConfigSyncer(db, encryptor.Decrypt, cfg.Address())
-
-	// Initialize built-in macros
-	if err := macro.InitBuiltinMacros(context.Background(), db); err != nil {
-		log.Printf("Warning: Failed to initialize built-in macros: %v", err)
-	}
+	configSync := configsync.NewConfigSyncer(db, encryptor.Decrypt, cfg.Address())
 
 	// Initialize web push service
 	webpush, err := notifications.NewWebPushService(db, cfg.VAPIDEmail)
@@ -168,7 +160,7 @@ func main() {
 	hookHandler := handlers.NewHookHandler(hub, notifService, sessionMgr)
 
 	// Initialize API handlers
-	api := handlers.NewAPI(db, hub, sessionMgr, macroExec, configSync, encryptor, notifService, hookHandler)
+	api := handlers.NewAPI(db, hub, sessionMgr, configSync, encryptor, notifService, hookHandler)
 
 	// Initialize other handlers
 	fileHandler := handlers.NewFileHandler(api)
@@ -208,7 +200,7 @@ func main() {
 	aiProvider := initAIProvider(db, fmt.Sprintf("http://localhost:%d", cfg.Port))
 	aiHandler := handlers.NewAIHandler(api, aiProvider)
 
-	// Wire AI handler into API for post-sync meta evaluation
+	// Wire AI handler into API for AI chat functionality
 	api.SetAIHandler(aiHandler)
 
 	// Initialize OTEL handler for Claude Code token tracking
@@ -309,8 +301,12 @@ func main() {
 		r.Post("/projects/{id}/duplicate", api.DuplicateProject)
 		r.Post("/projects/{id}/validate", api.ValidateProject)
 		r.Post("/projects/{id}/sync-config", api.SyncProjectConfig)
-		r.Get("/projects/{id}/meta", api.GetProjectMeta)
-		r.Put("/projects/{id}/meta", api.UpdateProjectMeta)
+		r.Get("/projects/{id}/memory-doc", api.GetMemoryDoc)
+		r.Put("/projects/{id}/memory-doc", api.UpdateMemoryDoc)
+		// Memory Doc approval (AI-proposed edits)
+		r.Post("/memory-doc/propose", api.ProposeMemoryDoc)
+		r.Post("/memory-doc/approve/{docId}", api.ApproveMemoryDoc)
+		r.Post("/memory-doc/reject/{docId}", api.RejectMemoryDoc)
 		// Project Tasks
 		r.Get("/projects/{id}/tasks", api.ListProjectTasks)
 		r.Post("/projects/{id}/tasks", api.CreateProjectTask)
@@ -321,6 +317,9 @@ func main() {
 		r.Delete("/projects/{id}/tasks/{taskId}", api.DeleteProjectTask)
 		r.Post("/projects/{id}/tasks/{taskId}/duplicate", api.DuplicateProjectTask)
 		r.Get("/projects/{id}/tasks/{taskId}/sessions", api.ListTaskSessions)
+
+		// Global Tasks (cross-project)
+		r.Get("/tasks", api.ListAllTasks)
 
 		r.Get("/projects/{id}/files", fileHandler.ListProjectFiles)
 		r.Get("/projects/{id}/files/view/*", fileHandler.ViewProjectFile)
@@ -343,14 +342,6 @@ func main() {
 		r.Post("/sessions/{id}/files", fileHandler.UploadFiles)
 		r.Post("/sessions/{id}/files/paste", fileHandler.PasteImage)
 
-
-		// Macros
-		r.Get("/macros", api.ListMacros)
-		r.Post("/macros", api.CreateMacro)
-		r.Get("/macros/{id}", api.GetMacro)
-		r.Put("/macros/{id}", api.UpdateMacro)
-		r.Delete("/macros/{id}", api.DeleteMacro)
-		r.Post("/macros/{id}/run", api.RunMacro)
 
 		// Config - Skills
 		r.Get("/config/skills", api.ListSkills)
@@ -406,6 +397,7 @@ func main() {
 		r.Delete("/ai/conversations", aiHandler.HandleDeleteAllConversations)
 		r.Get("/ai/conversations/{id}", aiHandler.HandleGetConversation)
 		r.Delete("/ai/conversations/{id}", aiHandler.HandleDeleteConversation)
+		r.Post("/ai/initiate-memory-doc-edit", aiHandler.HandleInitiateMemoryDocEdit)
 		r.Post("/ai/generate-skill", aiHandler.HandleGenerateSkill)
 		r.Post("/ai/validate-skill", aiHandler.HandleValidateSkill)
 
@@ -436,7 +428,6 @@ func main() {
 
 	// WebSocket routes
 	r.Get("/ws/session/{id}", wsHandler.HandleSessionWS)
-	r.Get("/ws/macro/{execution_id}", wsHandler.HandleMacroWS)
 	r.Get("/ws/events", wsHandler.HandleEventsWS)
 
 	// Static files and SPA - use web.FS from embed
@@ -647,9 +638,9 @@ func initAIProvider(db *database.DB, apiURL string) llm.Provider {
 // recoverDataFromBackup copies data from an old DB backup into the fresh DB.
 func recoverDataFromBackup(db *database.DB, backupPath string) {
 	tables := []string{
-		"projects", "sessions", "macros", "skills",
+		"projects", "sessions", "skills",
 		"mcp_servers", "settings", "push_subscriptions", "notifications",
-		"ai_conversations", "ai_messages", "project_meta_documents",
+		"ai_conversations", "ai_messages", "memory_docs",
 		"temp_documents", "project_tasks",
 	}
 

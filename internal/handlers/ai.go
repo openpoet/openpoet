@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
+
+var docLinkRe = regexp.MustCompile(`/app/doc/([a-zA-Z0-9-]+)`)
 
 // AIHandler handles all AI-related endpoints.
 type AIHandler struct {
@@ -215,11 +218,12 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Stream response (2048 tokens keeps answers concise)
 	req := &llm.Request{
-		System:    systemPrompt,
-		Messages:  messages,
-		Tools:     tools,
-		MaxTokens: 2048,
-		Model:     model,
+		System:         systemPrompt,
+		Messages:       messages,
+		Tools:          tools,
+		MaxTokens:      2048,
+		Model:          model,
+		ConversationID: conv.ID,
 	}
 
 	var assistantText strings.Builder
@@ -364,7 +368,7 @@ func (h *AIHandler) handleToolLoop(
 				"name": block.Name,
 			})
 
-			result, err := h.executeTool(ctx, block.Name, inputMap)
+			result, err := h.executeTool(ctx, block.Name, inputMap, conv.ID)
 			if err != nil {
 				result = fmt.Sprintf("Error: %s", err.Error())
 			}
@@ -374,6 +378,11 @@ func (h *AIHandler) handleToolLoop(
 				"name":   block.Name,
 				"result": result,
 			})
+
+			// Emit native doc_card for document-related tools
+			if card := h.buildDocCard(block.Name, result, inputMap); card != nil {
+				h.sendSSE(w, flusher, "doc_card", card)
+			}
 
 			toolResults = append(toolResults, llm.ContentBlock{
 				Type:      "tool_result",
@@ -425,7 +434,7 @@ func (h *AIHandler) handleToolLoop(
 }
 
 // executeTool runs a tool and returns the result as a string.
-func (h *AIHandler) executeTool(ctx context.Context, name string, input map[string]interface{}) (string, error) {
+func (h *AIHandler) executeTool(ctx context.Context, name string, input map[string]interface{}, conversationID int64) (string, error) {
 	switch name {
 	case "create_skill":
 		skillName, _ := input["name"].(string)
@@ -616,18 +625,42 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		}
 		return "Configuration synced to all projects.", nil
 
-	case "get_project_meta":
+	case "get_memory_doc":
 		projectID, err := parseIDParam(input, "project_id")
 		if err != nil {
 			return "", err
 		}
-		doc, err := h.api.db.GetProjectMeta(ctx, projectID)
+		doc, err := h.api.db.GetMemoryDoc(ctx, projectID)
 		if err != nil {
-			return fmt.Sprintf("No meta document exists for project %d yet. You can create one with update_project_meta.", projectID), nil
+			return fmt.Sprintf("No memory doc exists for project %d yet. Sync the project to load its CLAUDE.md.", projectID), nil
 		}
-		return fmt.Sprintf("## Meta Document (v%d)\nLast updated by: %s\n\n%s", doc.Version, doc.LastUpdatedBy, doc.Content), nil
 
-	case "update_project_meta":
+		// Create temp document so user can view in the doc viewer
+		docID := uuid.New().String()[:8]
+		project, _ := h.api.db.GetProject(ctx, projectID)
+		projectName := fmt.Sprintf("Project %d", projectID)
+		if project != nil {
+			projectName = project.Name
+		}
+		tempDoc := &database.TempDocument{
+			ID:      docID,
+			Title:   fmt.Sprintf("Memory Doc: %s (v%d)", projectName, doc.Version),
+			Content: doc.Content,
+		}
+		if err := h.api.db.CreateTempDocument(ctx, tempDoc); err != nil {
+			// Fallback: return link to project page if temp doc creation fails
+			return fmt.Sprintf("Memory doc loaded (v%d). [Ver Memory Doc: %s](/app/project/%d)", doc.Version, projectName, projectID), nil
+		}
+
+		// Return viewer link + internal-only content for AI editing reference
+		// The doc_card SSE event is sent automatically by handleToolLoop
+		return fmt.Sprintf(
+			"Memory doc do projeto %s carregado (v%d). Um botão 'Ver Documento' foi exibido automaticamente no chat. NÃO gere links.\n\n"+
+				"<internal_reference>\n%s\n</internal_reference>\n\nLink interno: /app/doc/%s",
+			projectName, doc.Version, doc.Content, docID,
+		), nil
+
+	case "update_memory_doc":
 		projectID, err := parseIDParam(input, "project_id")
 		if err != nil {
 			return "", err
@@ -644,17 +677,30 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			return "", fmt.Errorf("project not found")
 		}
 
-		doc, err := h.api.db.UpsertProjectMeta(ctx, projectID, content, "ai", summary)
-		if err != nil {
+		// Create a temp document for user review instead of saving directly
+		docID := uuid.New().String()[:8]
+		tempDoc := &database.TempDocument{
+			ID:             docID,
+			Title:          fmt.Sprintf("Memory Doc: %s", project.Name),
+			Content:        content,
+			ConversationID: sql.NullInt64{Int64: conversationID, Valid: conversationID > 0},
+			Summary:        summary,
+		}
+		if err := h.api.db.CreateTempDocument(ctx, tempDoc); err != nil {
 			return "", err
 		}
 
-		h.api.hub.BroadcastStateUpdate("project_meta", map[string]interface{}{
-			"action":     "updated",
-			"project_id": projectID,
-			"version":    doc.Version,
-		})
-		return fmt.Sprintf("Meta document for project '%s' updated (v%d)", project.Name, doc.Version), nil
+		// Store pending approval metadata
+		h.api.storePendingMemoryDoc(docID, projectID, content, summary)
+
+		return fmt.Sprintf(
+			"IMPORTANTE: O conteúdo NÃO foi salvo ainda. Uma prévia foi criada para o usuário revisar.\n"+
+				"Um botão 'Revisar Proposta' foi exibido automaticamente no chat.\n"+
+				"NÃO diga que a alteração foi feita — ela AGUARDA aprovação do usuário.\n"+
+				"Informe ao usuário que a proposta para o projeto %s está disponível para revisão.\n"+
+				"Alterações propostas: %s\n"+
+				"Link interno: /app/doc/%s",
+			project.Name, summary, docID), nil
 
 	case "list_tasks":
 		projectID, err := parseIDParam(input, "project_id")
@@ -897,18 +943,58 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		}
 
 		doc := &database.TempDocument{
-			ID:      uuid.New().String()[:8],
-			Title:   title,
-			Content: content,
+			ID:             uuid.New().String()[:8],
+			Title:          title,
+			Content:        content,
+			ConversationID: sql.NullInt64{Int64: conversationID, Valid: conversationID > 0},
 		}
 		if err := h.api.db.CreateTempDocument(ctx, doc); err != nil {
 			return "", err
 		}
 
-		return fmt.Sprintf("Document created. Link: [📄 %s](/app/doc/%s)", title, doc.ID), nil
+		return fmt.Sprintf("Documento criado com sucesso. Um botão 'Ver Documento' foi exibido automaticamente no chat. NÃO gere links — o usuário usará o botão nativo. Link interno: /app/doc/%s", doc.ID), nil
 
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
+	}
+}
+
+// buildDocCard checks if a tool execution produced a document link and returns
+// metadata for a native doc_card SSE event. Returns nil if not applicable.
+func (h *AIHandler) buildDocCard(toolName, result string, input map[string]interface{}) map[string]interface{} {
+	matches := docLinkRe.FindStringSubmatch(result)
+	if len(matches) < 2 {
+		return nil
+	}
+	docID := matches[1]
+
+	switch toolName {
+	case "update_memory_doc":
+		summary, _ := input["summary"].(string)
+		return map[string]interface{}{
+			"doc_id":  docID,
+			"type":    "proposal",
+			"title":   "Proposta de alteração",
+			"summary": summary,
+		}
+	case "get_memory_doc":
+		return map[string]interface{}{
+			"doc_id": docID,
+			"type":   "view",
+			"title":  "Memory Doc",
+		}
+	case "create_document":
+		title, _ := input["title"].(string)
+		if title == "" {
+			title = "Documento"
+		}
+		return map[string]interface{}{
+			"doc_id": docID,
+			"type":   "document",
+			"title":  title,
+		}
+	default:
+		return nil
 	}
 }
 
@@ -966,6 +1052,59 @@ func (h *AIHandler) buildSystemPromptWithContext(ctx context.Context, proactiveC
 	return llm.ChatSystemPromptWithProactiveContext(skillNames, projectNames, mcpNames, true, proactiveCtx)
 }
 
+// HandleInitiateMemoryDocEdit creates an AI-initiated conversation for editing a project's memory doc.
+func (h *AIHandler) HandleInitiateMemoryDocEdit(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		ProjectID int64 `json:"project_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	ctx := r.Context()
+	project, err := h.api.db.GetProject(ctx, input.ProjectID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	doc, err := h.api.db.GetMemoryDoc(ctx, input.ProjectID)
+	docContent := ""
+	if err == nil {
+		docContent = doc.Content
+	}
+
+	proactiveCtx, _ := json.Marshal(map[string]interface{}{
+		"project_id":   input.ProjectID,
+		"project_name": project.Name,
+		"memory_doc":   docContent,
+		"intent":       "edit_memory_doc",
+	})
+
+	var assistantMsg string
+	if docContent != "" {
+		preview := docContent
+		if len(preview) > 300 {
+			preview = preview[:300] + "..."
+		}
+		assistantMsg = fmt.Sprintf("Carreguei o memory doc do projeto **%s**.\n\nPrevia do conteudo atual:\n> %s\n\nO que voce gostaria de alterar?", project.Name, preview)
+	} else {
+		assistantMsg = fmt.Sprintf("O projeto **%s** ainda nao tem um memory doc. Deseja que eu crie um?", project.Name)
+	}
+
+	title := fmt.Sprintf("Edit Memory Doc: %s", project.Name)
+	conv, err := h.api.db.CreateProactiveConversation(ctx, title, "standard", "memory_doc_edit", string(proactiveCtx), assistantMsg)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to create conversation")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+}
+
 // HandleListConversations lists all conversations.
 func (h *AIHandler) HandleListConversations(w http.ResponseWriter, r *http.Request) {
 	// Auto-prune: keep only the last 15 conversations
@@ -1011,9 +1150,15 @@ func (h *AIHandler) HandleGetConversation(w http.ResponseWriter, r *http.Request
 		messages = []database.AIMessage{}
 	}
 
+	docCards, _ := h.api.db.ListTempDocumentsByConversation(r.Context(), id)
+	if docCards == nil {
+		docCards = []database.TempDocument{}
+	}
+
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"conversation": conv,
 		"messages":     messages,
+		"doc_cards":    docCards,
 	})
 }
 
@@ -1241,167 +1386,6 @@ func parseIDParam(input map[string]interface{}, key string) (int64, error) {
 		return int64(id), nil
 	}
 	return 0, fmt.Errorf("invalid %s type", key)
-}
-
-// EvaluateProjectMeta uses AI to decide if a project's meta doc needs updating after sync.
-// If updated, it saves to DB, creates a notification, and creates a new AI conversation with summary.
-func (h *AIHandler) EvaluateProjectMeta(ctx context.Context, projectID int64) {
-	p := h.getProvider()
-	if p == nil {
-		return
-	}
-
-	project, err := h.api.db.GetProject(ctx, projectID)
-	if err != nil {
-		log.Printf("[AI-Meta] Project %d not found: %v", projectID, err)
-		return
-	}
-
-	// Get current meta doc (may not exist)
-	currentContent := ""
-	doc, err := h.api.db.GetProjectMeta(ctx, projectID)
-	if err == nil {
-		currentContent = doc.Content
-	}
-
-	// Get project context: skills, MCPs
-	skills, _ := h.api.db.ListSkills(ctx)
-	mcps, _ := h.api.db.ListMCPServers(ctx)
-
-	var skillList string
-	for _, s := range skills {
-		if s.Enabled {
-			skillList += fmt.Sprintf("- %s (%s)\n", s.Name, s.Category)
-		}
-	}
-	var mcpList string
-	for _, m := range mcps {
-		if m.Enabled {
-			mcpList += fmt.Sprintf("- %s: %s\n", m.Name, m.Command)
-		}
-	}
-
-	prompt := fmt.Sprintf(`You are evaluating the meta document for project "%s" (type: %s, path: %s) after a configuration sync.
-
-Current meta document:
-%s
-
-Project skills:
-%s
-
-Project MCP servers:
-%s
-
-Instructions:
-- If there is no current meta document (empty), create an initial one with project overview, goals placeholder, and current configuration summary.
-- If the meta document exists, evaluate if it needs updating based on the current configuration. Only update if there are meaningful changes.
-- Respond with a JSON object: {"needs_update": true/false, "content": "full markdown content", "summary": "brief description of changes"}
-- If needs_update is false, content and summary can be empty strings.
-- The meta document should be in markdown format with sections like: Overview, Goals, Configuration, Notes.
-- Use Portuguese (pt-BR) for the content.`, project.Name, project.Type, project.Path, currentContent, skillList, mcpList)
-
-	model, _ := h.api.db.GetSetting(ctx, "ai_model")
-
-	req := &llm.Request{
-		System: "You are a project documentation assistant. Respond ONLY with valid JSON, no markdown code blocks.",
-		Messages: []llm.Message{
-			llm.NewTextMessage("user", prompt),
-		},
-		MaxTokens: 4096,
-		Model:     model,
-	}
-
-	var fullText strings.Builder
-	resp, err := p.StreamMessage(ctx, req, func(event llm.StreamEvent) error {
-		if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
-			fullText.WriteString(event.Delta.Text)
-		}
-		return nil
-	})
-
-	if err != nil {
-		log.Printf("[AI-Meta] Failed to evaluate meta for project %d: %v", projectID, err)
-		return
-	}
-
-	// Record token usage
-	if resp != nil && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
-		usageModel := model
-		if resp.Model != "" {
-			usageModel = resp.Model
-		}
-		if usageModel == "" {
-			usageModel = "unknown"
-		}
-		h.api.db.CreateTokenUsage(ctx, &database.TokenUsage{
-			Source:              "ai_assistant",
-			Subcategory:         "meta_eval",
-			Model:               usageModel,
-			InputTokens:         resp.Usage.InputTokens,
-			OutputTokens:        resp.Usage.OutputTokens,
-			CacheReadTokens:     resp.Usage.CacheReadTokens,
-			CacheCreationTokens: resp.Usage.CacheCreationTokens,
-			CostUSD:             llm.CalculateCost(usageModel, resp.Usage.InputTokens, resp.Usage.OutputTokens),
-		})
-	}
-
-	// Parse response
-	var result struct {
-		NeedsUpdate bool   `json:"needs_update"`
-		Content     string `json:"content"`
-		Summary     string `json:"summary"`
-	}
-
-	responseText := strings.TrimSpace(fullText.String())
-	// Strip markdown code block if present
-	if strings.HasPrefix(responseText, "```") {
-		lines := strings.Split(responseText, "\n")
-		if len(lines) > 2 {
-			responseText = strings.Join(lines[1:len(lines)-1], "\n")
-		}
-	}
-
-	if err := json.Unmarshal([]byte(responseText), &result); err != nil {
-		log.Printf("[AI-Meta] Failed to parse AI response for project %d: %v", projectID, err)
-		return
-	}
-
-	if !result.NeedsUpdate || result.Content == "" {
-		log.Printf("[AI-Meta] No update needed for project %d", projectID)
-		return
-	}
-
-	// Save updated meta doc
-	updatedDoc, err := h.api.db.UpsertProjectMeta(ctx, projectID, result.Content, "ai-sync", result.Summary)
-	if err != nil {
-		log.Printf("[AI-Meta] Failed to save meta for project %d: %v", projectID, err)
-		return
-	}
-
-	log.Printf("[AI-Meta] Updated meta for project '%s' (v%d): %s", project.Name, updatedDoc.Version, result.Summary)
-
-	// Broadcast update
-	h.api.hub.BroadcastStateUpdate("project_meta", map[string]interface{}{
-		"action":     "updated",
-		"project_id": projectID,
-		"version":    updatedDoc.Version,
-	})
-
-	// Create proactive notification for meta update
-	summaryMsg := fmt.Sprintf("Atualizei o documento meta do projeto **%s** (v%d).\n\n**Alteracoes:** %s\n\n[Ver Documento Meta](/app/project/%d)",
-		project.Name, updatedDoc.Version, result.Summary, projectID)
-
-	h.CreateProactiveNotification(ctx, "subtle", "meta_update",
-		fmt.Sprintf("Meta Doc: %s", project.Name),
-		summaryMsg,
-		[]ProactiveAction{
-			{Label: "Ver", Action: "open", Style: "outline"},
-		},
-		map[string]interface{}{
-			"project_id": projectID,
-			"version":    updatedDoc.Version,
-		},
-	)
 }
 
 // EvaluateSession uses AI to evaluate a session and proactively suggest task actions.
@@ -1727,7 +1711,7 @@ Instructions:
 			"level":          "standard",
 			"proactive_type": "task_suggestion",
 			"title":          s.Title,
-			"body":           assistantMsg,
+			"body":           s.Description,
 			"suggestion_id":  suggestion.ID,
 			"actions":        actions,
 		}
@@ -2077,9 +2061,9 @@ func (h *AIHandler) HandleTestProactive(w http.ResponseWriter, r *http.Request) 
 			{Label: "Ignorar", Action: "dismiss", Style: "secondary"},
 		}
 	case "subtle":
-		pType = "meta_update"
-		title = "Meta Doc atualizado"
-		body = "Atualizei o documento meta do projeto com as novas configuracoes sincronizadas."
+		pType = "memory_doc_update"
+		title = "Memory Doc atualizado"
+		body = "O memory doc do projeto foi atualizado com o conteudo do CLAUDE.md."
 		actions = []ProactiveAction{
 			{Label: "Ver", Action: "open", Style: "outline"},
 		}

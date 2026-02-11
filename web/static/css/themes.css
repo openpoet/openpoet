@@ -281,6 +281,558 @@
     --color-priority-medium: #a37c00;
 }
 
+/* ---- Monokai ---- */
+[data-theme="monokai"] {
+    --color-bg: #272822;
+    --color-bg-secondary: #1e1f1c;
+    --color-bg-tertiary: #3e3d32;
+    --color-surface: #49483e;
+    --color-border: #49483e;
+    --color-text: #f8f8f2;
+    --color-text-secondary: #cfcfc2;
+    --color-text-muted: #75715e;
+    --color-primary: #f92672;
+    --color-primary-hover: #fb4d8c;
+    --color-primary-active: #e01e65;
+    --color-primary-rgb: 249, 38, 114;
+    --color-success: #a6e22e;
+    --color-success-hover: #8ec420;
+    --color-success-rgb: 166, 226, 46;
+    --color-warning: #e6db74;
+    --color-warning-rgb: 230, 219, 116;
+    --color-danger: #f92672;
+    --color-danger-active: #e01e65;
+    --color-danger-rgb: 249, 38, 114;
+    --color-info: #66d9ef;
+    --color-info-rgb: 102, 217, 239;
+
+    /* Tab sidebar */
+    --color-tab-sidebar-bg: #1e1f1c;
+    --color-tab-border: #49483e;
+    --color-tab-header-text: #cfcfc2;
+    --color-tab-text: #75715e;
+    --color-tab-text-active: #f8f8f2;
+    --color-tab-hover-bg: #3e3d32;
+    --color-tab-active-bg: #49483e;
+    --color-tab-accent: #f92672;
+    --color-tab-group-bg: #3e3d32;
+    --color-tab-group-text: #75715e;
+    --color-tab-group-toggle: #75715e;
+    --color-tab-input-bg: #49483e;
+
+    /* Terminal */
+    --color-terminal-bg: #272822;
+
+    /* Status */
+    --color-status-running: #a6e22e;
+    --color-status-disconnected: #e6db74;
+    --color-status-error: #f92672;
+    --color-status-stopped: #75715e;
+
+    /* Overlay */
+    --color-overlay-bg: rgba(30, 31, 28, 0.7);
+
+    /* Accents */
+    --color-accent-purple: #ae81ff;
+    --color-accent-purple-light: #c0a0ff;
+    --color-gradient-start: #f92672;
+    --color-gradient-end: #ae81ff;
+
+    /* Badges */
+    --color-badge-todo-bg: rgba(117, 113, 94, 0.2);
+    --color-badge-todo-text: #75715e;
+    --color-badge-progress-text: #66d9ef;
+    --color-badge-done-text: #a6e22e;
+    --color-badge-blocked-text: #f92672;
+
+    /* Priority */
+    --color-priority-high: #e6db74;
+    --color-priority-medium: #d6cb64;
+}
+
+/* ---- Gruvbox Dark ---- */
+[data-theme="gruvbox"] {
+    --color-bg: #282828;
+    --color-bg-secondary: #1d2021;
+    --color-bg-tertiary: #3c3836;
+    --color-surface: #504945;
+    --color-border: #504945;
+    --color-text: #ebdbb2;
+    --color-text-secondary: #d5c4a1;
+    --color-text-muted: #928374;
+    --color-primary: #fe8019;
+    --color-primary-hover: #fe9a3e;
+    --color-primary-active: #e07016;
+    --color-primary-rgb: 254, 128, 25;
+    --color-success: #b8bb26;
+    --color-success-hover: #98971a;
+    --color-success-rgb: 184, 187, 38;
+    --color-warning: #fabd2f;
+    --color-warning-rgb: 250, 189, 47;
+    --color-danger: #fb4934;
+    --color-danger-active: #cc241d;
+    --color-danger-rgb: 251, 73, 52;
+    --color-info: #83a598;
+    --color-info-rgb: 131, 165, 152;
+
+    /* Tab sidebar */
+    --color-tab-sidebar-bg: #1d2021;
+    --color-tab-border: #504945;
+    --color-tab-header-text: #d5c4a1;
+    --color-tab-text: #928374;
+    --color-tab-text-active: #ebdbb2;
+    --color-tab-hover-bg: #3c3836;
+    --color-tab-active-bg: #504945;
+    --color-tab-accent: #fe8019;
+    --color-tab-group-bg: #3c3836;
+    --color-tab-group-text: #928374;
+    --color-tab-group-toggle: #928374;
+    --color-tab-input-bg: #504945;
+
+    /* Terminal */
+    --color-terminal-bg: #282828;
+
+    /* Status */
+    --color-status-running: #b8bb26;
+    --color-status-disconnected: #fabd2f;
+    --color-status-error: #fb4934;
+    --color-status-stopped: #928374;
+
+    /* Overlay */
+    --color-overlay-bg: rgba(29, 32, 33, 0.7);
+
+    /* Accents */
+    --color-accent-purple: #d3869b;
+    --color-accent-purple-light: #e0a0b0;
+    --color-gradient-start: #fe8019;
+    --color-gradient-end: #d3869b;
+
+    /* Badges */
+    --color-badge-todo-bg: rgba(146, 131, 116, 0.2);
+    --color-badge-todo-text: #928374;
+    --color-badge-progress-text: #83a598;
+    --color-badge-done-text: #b8bb26;
+    --color-badge-blocked-text: #fb4934;
+
+    /* Priority */
+    --color-priority-high: #fabd2f;
+    --color-priority-medium: #d79921;
+}
+
+/* ---- Tokyo Night ---- */
+[data-theme="tokyonight"] {
+    --color-bg: #1a1b26;
+    --color-bg-secondary: #16161e;
+    --color-bg-tertiary: #24283b;
+    --color-surface: #414868;
+    --color-border: #3b4261;
+    --color-text: #c0caf5;
+    --color-text-secondary: #a9b1d6;
+    --color-text-muted: #565f89;
+    --color-primary: #7aa2f7;
+    --color-primary-hover: #89b0fc;
+    --color-primary-active: #6a92e7;
+    --color-primary-rgb: 122, 162, 247;
+    --color-success: #9ece6a;
+    --color-success-hover: #89b85a;
+    --color-success-rgb: 158, 206, 106;
+    --color-warning: #e0af68;
+    --color-warning-rgb: 224, 175, 104;
+    --color-danger: #f7768e;
+    --color-danger-active: #e0607a;
+    --color-danger-rgb: 247, 118, 142;
+    --color-info: #7dcfff;
+    --color-info-rgb: 125, 207, 255;
+
+    /* Tab sidebar */
+    --color-tab-sidebar-bg: #16161e;
+    --color-tab-border: #3b4261;
+    --color-tab-header-text: #a9b1d6;
+    --color-tab-text: #565f89;
+    --color-tab-text-active: #c0caf5;
+    --color-tab-hover-bg: #24283b;
+    --color-tab-active-bg: #3b4261;
+    --color-tab-accent: #7aa2f7;
+    --color-tab-group-bg: #24283b;
+    --color-tab-group-text: #565f89;
+    --color-tab-group-toggle: #565f89;
+    --color-tab-input-bg: #3b4261;
+
+    /* Terminal */
+    --color-terminal-bg: #1a1b26;
+
+    /* Status */
+    --color-status-running: #9ece6a;
+    --color-status-disconnected: #e0af68;
+    --color-status-error: #f7768e;
+    --color-status-stopped: #565f89;
+
+    /* Overlay */
+    --color-overlay-bg: rgba(22, 22, 30, 0.7);
+
+    /* Accents */
+    --color-accent-purple: #bb9af7;
+    --color-accent-purple-light: #c9adfa;
+    --color-gradient-start: #7aa2f7;
+    --color-gradient-end: #bb9af7;
+
+    /* Badges */
+    --color-badge-todo-bg: rgba(86, 95, 137, 0.2);
+    --color-badge-todo-text: #565f89;
+    --color-badge-progress-text: #7dcfff;
+    --color-badge-done-text: #9ece6a;
+    --color-badge-blocked-text: #f7768e;
+
+    /* Priority */
+    --color-priority-high: #e0af68;
+    --color-priority-medium: #d0a058;
+}
+
+/* ---- Sakura (Cherry Blossom Light) ---- */
+[data-theme="sakura"] {
+    --color-bg: #fef2f4;
+    --color-bg-secondary: #ffffff;
+    --color-bg-tertiary: #fce4ec;
+    --color-surface: #f8bbd0;
+    --color-border: #f48fb1;
+    --color-text: #3e2723;
+    --color-text-secondary: #5d4037;
+    --color-text-muted: #8d6e63;
+    --color-primary: #d81b60;
+    --color-primary-hover: #e91e63;
+    --color-primary-active: #c2185b;
+    --color-primary-rgb: 216, 27, 96;
+    --color-success: #2e7d32;
+    --color-success-hover: #1b5e20;
+    --color-success-rgb: 46, 125, 50;
+    --color-warning: #ef6c00;
+    --color-warning-rgb: 239, 108, 0;
+    --color-danger: #c62828;
+    --color-danger-active: #b71c1c;
+    --color-danger-rgb: 198, 40, 40;
+    --color-info: #6a1b9a;
+    --color-info-rgb: 106, 27, 154;
+
+    /* Tab sidebar */
+    --color-tab-sidebar-bg: #fce4ec;
+    --color-tab-border: #f48fb1;
+    --color-tab-header-text: #5d4037;
+    --color-tab-text: #8d6e63;
+    --color-tab-text-active: #3e2723;
+    --color-tab-hover-bg: #f8bbd0;
+    --color-tab-active-bg: #f48fb1;
+    --color-tab-accent: #d81b60;
+    --color-tab-group-bg: #fce4ec;
+    --color-tab-group-text: #8d6e63;
+    --color-tab-group-toggle: #ad1457;
+    --color-tab-input-bg: #f8bbd0;
+
+    /* Terminal */
+    --color-terminal-bg: #2b1520;
+
+    /* Status */
+    --color-status-running: #2e7d32;
+    --color-status-disconnected: #ef6c00;
+    --color-status-error: #c62828;
+    --color-status-stopped: #9e9e9e;
+
+    /* Overlay */
+    --color-overlay-bg: rgba(62, 39, 35, 0.3);
+
+    /* Accents */
+    --color-accent-purple: #8e24aa;
+    --color-accent-purple-light: #ab47bc;
+    --color-gradient-start: #d81b60;
+    --color-gradient-end: #8e24aa;
+
+    /* Badges */
+    --color-badge-todo-bg: rgba(141, 110, 99, 0.15);
+    --color-badge-todo-text: #8d6e63;
+    --color-badge-progress-text: #6a1b9a;
+    --color-badge-done-text: #2e7d32;
+    --color-badge-blocked-text: #c62828;
+
+    /* Priority */
+    --color-priority-high: #ef6c00;
+    --color-priority-medium: #e65100;
+}
+
+/* ---- Cafe (Coffee Light) ---- */
+[data-theme="cafe"] {
+    --color-bg: #faf6f0;
+    --color-bg-secondary: #ffffff;
+    --color-bg-tertiary: #f0e8da;
+    --color-surface: #e0d5c4;
+    --color-border: #c8b9a5;
+    --color-text: #3e2723;
+    --color-text-secondary: #5d4037;
+    --color-text-muted: #8d6e63;
+    --color-primary: #8b5e3c;
+    --color-primary-hover: #a0704d;
+    --color-primary-active: #6d4c33;
+    --color-primary-rgb: 139, 94, 60;
+    --color-success: #558b2f;
+    --color-success-hover: #33691e;
+    --color-success-rgb: 85, 139, 47;
+    --color-warning: #f57f17;
+    --color-warning-rgb: 245, 127, 23;
+    --color-danger: #bf360c;
+    --color-danger-active: #a62e09;
+    --color-danger-rgb: 191, 54, 12;
+    --color-info: #4e6e58;
+    --color-info-rgb: 78, 110, 88;
+
+    /* Tab sidebar */
+    --color-tab-sidebar-bg: #f0e8da;
+    --color-tab-border: #c8b9a5;
+    --color-tab-header-text: #5d4037;
+    --color-tab-text: #8d6e63;
+    --color-tab-text-active: #3e2723;
+    --color-tab-hover-bg: #e8dece;
+    --color-tab-active-bg: #e0d5c4;
+    --color-tab-accent: #8b5e3c;
+    --color-tab-group-bg: #f0e8da;
+    --color-tab-group-text: #8d6e63;
+    --color-tab-group-toggle: #8d6e63;
+    --color-tab-input-bg: #e0d5c4;
+
+    /* Terminal */
+    --color-terminal-bg: #2a1f16;
+
+    /* Status */
+    --color-status-running: #558b2f;
+    --color-status-disconnected: #f57f17;
+    --color-status-error: #bf360c;
+    --color-status-stopped: #9e9e9e;
+
+    /* Overlay */
+    --color-overlay-bg: rgba(62, 39, 35, 0.3);
+
+    /* Accents */
+    --color-accent-purple: #795548;
+    --color-accent-purple-light: #8d6e63;
+    --color-gradient-start: #8b5e3c;
+    --color-gradient-end: #d4840a;
+
+    /* Badges */
+    --color-badge-todo-bg: rgba(141, 110, 99, 0.15);
+    --color-badge-todo-text: #8d6e63;
+    --color-badge-progress-text: #4e6e58;
+    --color-badge-done-text: #558b2f;
+    --color-badge-blocked-text: #bf360c;
+
+    /* Priority */
+    --color-priority-high: #f57f17;
+    --color-priority-medium: #e65100;
+}
+
+/* ---- Arctic (Ice Light) ---- */
+[data-theme="arctic"] {
+    --color-bg: #f0f7ff;
+    --color-bg-secondary: #ffffff;
+    --color-bg-tertiary: #e1eefa;
+    --color-surface: #c5ddf0;
+    --color-border: #90caf9;
+    --color-text: #0d1b2a;
+    --color-text-secondary: #1b3a5c;
+    --color-text-muted: #5c7a99;
+    --color-primary: #0288d1;
+    --color-primary-hover: #039be5;
+    --color-primary-active: #0277bd;
+    --color-primary-rgb: 2, 136, 209;
+    --color-success: #00897b;
+    --color-success-hover: #00695c;
+    --color-success-rgb: 0, 137, 123;
+    --color-warning: #f57c00;
+    --color-warning-rgb: 245, 124, 0;
+    --color-danger: #e53935;
+    --color-danger-active: #c62828;
+    --color-danger-rgb: 229, 57, 53;
+    --color-info: #00838f;
+    --color-info-rgb: 0, 131, 143;
+
+    /* Tab sidebar */
+    --color-tab-sidebar-bg: #e1eefa;
+    --color-tab-border: #90caf9;
+    --color-tab-header-text: #1b3a5c;
+    --color-tab-text: #5c7a99;
+    --color-tab-text-active: #0d1b2a;
+    --color-tab-hover-bg: #d0e4f5;
+    --color-tab-active-bg: #c5ddf0;
+    --color-tab-accent: #0288d1;
+    --color-tab-group-bg: #e1eefa;
+    --color-tab-group-text: #5c7a99;
+    --color-tab-group-toggle: #5c7a99;
+    --color-tab-input-bg: #c5ddf0;
+
+    /* Terminal */
+    --color-terminal-bg: #0d1b2a;
+
+    /* Status */
+    --color-status-running: #00897b;
+    --color-status-disconnected: #f57c00;
+    --color-status-error: #e53935;
+    --color-status-stopped: #9e9e9e;
+
+    /* Overlay */
+    --color-overlay-bg: rgba(13, 27, 42, 0.3);
+
+    /* Accents */
+    --color-accent-purple: #5c6bc0;
+    --color-accent-purple-light: #7986cb;
+    --color-gradient-start: #0288d1;
+    --color-gradient-end: #00bcd4;
+
+    /* Badges */
+    --color-badge-todo-bg: rgba(92, 122, 153, 0.15);
+    --color-badge-todo-text: #5c7a99;
+    --color-badge-progress-text: #0288d1;
+    --color-badge-done-text: #00897b;
+    --color-badge-blocked-text: #e53935;
+
+    /* Priority */
+    --color-priority-high: #f57c00;
+    --color-priority-medium: #ef6c00;
+}
+
+/* ---- Paper (Ink & Parchment Light) ---- */
+[data-theme="paper"] {
+    --color-bg: #f5f0e8;
+    --color-bg-secondary: #faf7f2;
+    --color-bg-tertiary: #ece5d8;
+    --color-surface: #ddd5c4;
+    --color-border: #c8bfb0;
+    --color-text: #1a1a1a;
+    --color-text-secondary: #404040;
+    --color-text-muted: #808080;
+    --color-primary: #c41e3a;
+    --color-primary-hover: #d63050;
+    --color-primary-active: #a51830;
+    --color-primary-rgb: 196, 30, 58;
+    --color-success: #2d6a4f;
+    --color-success-hover: #1b4332;
+    --color-success-rgb: 45, 106, 79;
+    --color-warning: #b45309;
+    --color-warning-rgb: 180, 83, 9;
+    --color-danger: #991b1b;
+    --color-danger-active: #7f1d1d;
+    --color-danger-rgb: 153, 27, 27;
+    --color-info: #3a6ea5;
+    --color-info-rgb: 58, 110, 165;
+
+    /* Tab sidebar */
+    --color-tab-sidebar-bg: #ece5d8;
+    --color-tab-border: #c8bfb0;
+    --color-tab-header-text: #404040;
+    --color-tab-text: #808080;
+    --color-tab-text-active: #1a1a1a;
+    --color-tab-hover-bg: #e4dccf;
+    --color-tab-active-bg: #ddd5c4;
+    --color-tab-accent: #c41e3a;
+    --color-tab-group-bg: #ece5d8;
+    --color-tab-group-text: #808080;
+    --color-tab-group-toggle: #808080;
+    --color-tab-input-bg: #ddd5c4;
+
+    /* Terminal */
+    --color-terminal-bg: #1c1b18;
+
+    /* Status */
+    --color-status-running: #2d6a4f;
+    --color-status-disconnected: #b45309;
+    --color-status-error: #991b1b;
+    --color-status-stopped: #9e9e9e;
+
+    /* Overlay */
+    --color-overlay-bg: rgba(26, 26, 26, 0.3);
+
+    /* Accents */
+    --color-accent-purple: #7b4b8a;
+    --color-accent-purple-light: #9b6da8;
+    --color-gradient-start: #c41e3a;
+    --color-gradient-end: #7b4b8a;
+
+    /* Badges */
+    --color-badge-todo-bg: rgba(128, 128, 128, 0.15);
+    --color-badge-todo-text: #808080;
+    --color-badge-progress-text: #3a6ea5;
+    --color-badge-done-text: #2d6a4f;
+    --color-badge-blocked-text: #991b1b;
+
+    /* Priority */
+    --color-priority-high: #b45309;
+    --color-priority-medium: #92400e;
+}
+
+/* ---- Brasil (Azul, Verde e Amarelo) ---- */
+[data-theme="brasil"] {
+    --color-bg: #041e42;
+    --color-bg-secondary: #021430;
+    --color-bg-tertiary: #0a2a58;
+    --color-surface: #143870;
+    --color-border: #1a4580;
+    --color-text: #d0e0d8;
+    --color-text-secondary: #90b8c8;
+    --color-text-muted: #4a80a0;
+    --color-primary: #009c3b;
+    --color-primary-hover: #10b84a;
+    --color-primary-active: #008030;
+    --color-primary-rgb: 0, 156, 59;
+    --color-success: #30cc50;
+    --color-success-hover: #25a840;
+    --color-success-rgb: 48, 204, 80;
+    --color-warning: #ffdf00;
+    --color-warning-rgb: 255, 223, 0;
+    --color-danger: #e84040;
+    --color-danger-active: #cc3030;
+    --color-danger-rgb: 232, 64, 64;
+    --color-info: #4090d8;
+    --color-info-rgb: 64, 144, 216;
+
+    /* Tab sidebar */
+    --color-tab-sidebar-bg: #021430;
+    --color-tab-border: #1a4580;
+    --color-tab-header-text: #90b8c8;
+    --color-tab-text: #4a80a0;
+    --color-tab-text-active: #d0e0d8;
+    --color-tab-hover-bg: #0a2a58;
+    --color-tab-active-bg: #143870;
+    --color-tab-accent: #009c3b;
+    --color-tab-group-bg: #0a2a58;
+    --color-tab-group-text: #4a80a0;
+    --color-tab-group-toggle: #4a80a0;
+    --color-tab-input-bg: #143870;
+
+    /* Terminal */
+    --color-terminal-bg: #041e42;
+
+    /* Status */
+    --color-status-running: #30cc50;
+    --color-status-disconnected: #ffdf00;
+    --color-status-error: #e84040;
+    --color-status-stopped: #4a80a0;
+
+    /* Overlay */
+    --color-overlay-bg: rgba(2, 20, 48, 0.7);
+
+    /* Accents */
+    --color-accent-purple: #4090d8;
+    --color-accent-purple-light: #5aa8f0;
+    --color-gradient-start: #009c3b;
+    --color-gradient-end: #4090d8;
+
+    /* Badges */
+    --color-badge-todo-bg: rgba(74, 128, 160, 0.2);
+    --color-badge-todo-text: #4a80a0;
+    --color-badge-progress-text: #4090d8;
+    --color-badge-done-text: #30cc50;
+    --color-badge-blocked-text: #e84040;
+
+    /* Priority */
+    --color-priority-high: #ffdf00;
+    --color-priority-medium: #e0c400;
+}
+
 /* ============================================
    Theme Picker UI Styles
    ============================================ */

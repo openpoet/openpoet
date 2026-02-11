@@ -6,7 +6,6 @@ class DevManager {
         this.currentSession = null;
         this.projects = [];
         this.sessions = [];
-        this.macros = [];
         this.skills = [];
         this.mcpServers = [];
 
@@ -29,6 +28,9 @@ class DevManager {
         this.setupEventListeners();
         this.setupKeyboardShortcuts();
         this.setupStatusListener();
+
+        // Setup all tasks filters
+        this.setupAllTasksFilters();
 
         // Setup mobile session dropdown
         this.setupMobileSessionDropdown();
@@ -84,6 +86,12 @@ class DevManager {
     }
 
     showView(viewName) {
+        // Intercept 'sessions' view: go directly to terminal with most recent session
+        if (viewName === 'sessions') {
+            this._goToMostRecentSession();
+            return;
+        }
+
         // Hide all views
         document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
 
@@ -106,6 +114,71 @@ class DevManager {
         this.refreshViewData(viewName);
     }
 
+    async _goToMostRecentSession() {
+        // Close sidebar on mobile
+        document.getElementById('sidebar')?.classList.remove('open');
+
+        try {
+            // Fetch fresh session data
+            this.sessions = await this.api('GET', '/sessions');
+            const activeSessions = this.sessions.filter(s => s.status === 'running' || s.status === 'starting');
+
+            if (activeSessions.length === 0) {
+                this._showSessionsEmptyState();
+                return;
+            }
+
+            // Sort by start_time descending to get most recent
+            activeSessions.sort((a, b) => new Date(b.start_time) - new Date(a.start_time));
+            const mostRecent = activeSessions[0];
+
+            // If already on terminal view with this session active, just ensure nav state
+            if (this.currentView === 'terminal' && this.currentSession === mostRecent.id) {
+                this._updateNavForTerminal();
+                return;
+            }
+
+            // Open terminal directly
+            await this.openTerminal(mostRecent.id);
+            this._updateNavForTerminal();
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    _showSessionsEmptyState() {
+        // Show the sessions view with empty state
+        document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+        document.getElementById('view-sessions').classList.add('active');
+        this.currentView = 'sessions-empty';
+
+        // Highlight sessions nav
+        document.querySelectorAll('.nav-item, .mobile-nav-item').forEach(item => {
+            item.classList.toggle('active', item.dataset.view === 'sessions');
+        });
+
+        // Render empty state content
+        const container = document.getElementById('sessions-list');
+        if (container) {
+            container.innerHTML = `
+                <div class="empty-state">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="4 17 10 11 4 5"></polyline>
+                        <line x1="12" y1="19" x2="20" y2="19"></line>
+                    </svg>
+                    <h3>No active sessions</h3>
+                    <p>Start a session from the Projects view</p>
+                </div>
+            `;
+        }
+    }
+
+    _updateNavForTerminal() {
+        document.querySelectorAll('.nav-item, .mobile-nav-item').forEach(item => {
+            item.classList.toggle('active', item.dataset.view === 'sessions');
+        });
+    }
+
     refreshViewData(viewName) {
         switch (viewName) {
             case 'projects':
@@ -117,8 +190,8 @@ class DevManager {
             case 'sessions':
                 this.loadSessions();
                 break;
-            case 'macros':
-                this.loadMacros();
+            case 'tasks':
+                this.loadAllTasks();
                 break;
             case 'config':
                 this.loadConfig();
@@ -165,6 +238,9 @@ class DevManager {
             case 'ai_proactive':
                 this.handleAIProactive(msg.data);
                 break;
+            case 'chat_doc_card':
+                window.aiChat?.injectDocCardFromWS(msg.data);
+                break;
             case 'ai_suggestion':
                 this.handleAIProactive(this._normalizeProactive(msg.data));
                 break;
@@ -190,9 +266,9 @@ class DevManager {
                     }
                 });
                 break;
-            case 'project_meta':
+            case 'memory_doc':
                 if (this.currentView === 'project-detail' && this._detailProject && data.data?.project_id === this._detailProject.id) {
-                    this.loadProjectMeta(this._detailProject.id);
+                    this.loadMemoryDoc(this._detailProject.id);
                 }
                 break;
             case 'session':
@@ -201,12 +277,12 @@ class DevManager {
                     // Update terminal status
                 }
                 break;
-            case 'macro':
-                this.loadMacros();
-                break;
             case 'task':
                 if (this.currentView === 'project-detail' && this._detailProject && data.data?.project_id === this._detailProject.id) {
                     this.loadProjectTasks(this._detailProject.id);
+                }
+                if (this.currentView === 'tasks') {
+                    this.loadAllTasks();
                 }
                 break;
             case 'skill':
@@ -246,8 +322,7 @@ class DevManager {
     async loadInitialData() {
         await Promise.all([
             this.loadProjects(),
-            this.loadSessions(),
-            this.loadMacros()
+            this.loadSessions()
         ]);
 
         // Now that sessions are loaded, clean up stale dismissed requests and auto-reopen valid ones
@@ -399,7 +474,7 @@ class DevManager {
             { id: 'skills', label: 'Skills' },
             { id: 'mcps', label: 'MCP Servers' },
             { id: 'settings', label: 'Settings' },
-            { id: 'ai_meta', label: 'AI Meta Evaluation' },
+            { id: 'memory_doc', label: 'Memory Doc' },
         ];
 
         const overlay = document.createElement('div');
@@ -463,7 +538,7 @@ class DevManager {
         }
 
         // Show close button when all done or any error
-        if (status === 'done' && (step === 'ai_meta' || step === 'sync')) {
+        if (status === 'done' && (step === 'memory_doc' || step === 'sync')) {
             const closeBtn = document.getElementById('sync-modal-close');
             if (closeBtn) closeBtn.style.display = '';
         }
@@ -567,8 +642,8 @@ class DevManager {
             <div class="project-detail-card">
                 <div class="project-detail-section">
                     <div class="project-detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
-                        <span>Meta Document</span>
-                        <button class="meta-ai-btn" onclick="app.editProjectMetaWithAI(${project.id})" title="Edit with AI">
+                        <span>Memory Doc</span>
+                        <button class="meta-ai-btn" onclick="app.editMemoryDocWithAI(${project.id})" title="Edit with AI">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M12 2L2 7l10 5 10-5-10-5z"/>
                                 <path d="M2 17l10 5 10-5"/>
@@ -577,7 +652,7 @@ class DevManager {
                             Edit with AI
                         </button>
                     </div>
-                    <div id="project-meta-content" class="project-meta-content">
+                    <div id="memory-doc-content" class="memory-doc-content">
                         <div class="meta-empty">Loading...</div>
                     </div>
                 </div>
@@ -613,8 +688,8 @@ class DevManager {
 
         container.innerHTML = html;
 
-        // Load meta document, tasks, and token usage
-        this.loadProjectMeta(project.id);
+        // Load memory doc, tasks, and token usage
+        this.loadMemoryDoc(project.id);
         this.loadProjectTasks(project.id);
         this.loadProjectTokenUsage(project.id, 30);
 
@@ -664,11 +739,11 @@ class DevManager {
         }
     }
 
-    async loadProjectMeta(projectId) {
-        const container = document.getElementById('project-meta-content');
+    async loadMemoryDoc(projectId) {
+        const container = document.getElementById('memory-doc-content');
         if (!container) return;
         try {
-            const meta = await this.api('GET', `/projects/${projectId}/meta`);
+            const meta = await this.api('GET', `/projects/${projectId}/memory-doc`);
             if (meta.exists && meta.content) {
                 let rendered = meta.content;
                 if (typeof marked !== 'undefined') {
@@ -677,10 +752,10 @@ class DevManager {
                 container.innerHTML = `<div class="meta-rendered">${rendered}</div>
                     <div class="meta-info">v${meta.version} &middot; Updated by ${this.escapeHtml(meta.last_updated_by || '?')}</div>`;
             } else {
-                container.innerHTML = '<div class="meta-empty">No meta document yet. Use the AI assistant or the voice button to add project goals.</div>';
+                container.innerHTML = '<div class="meta-empty">No memory doc yet. Sync the project to load its CLAUDE.md.</div>';
             }
         } catch (e) {
-            container.innerHTML = '<div class="meta-empty">Failed to load meta document.</div>';
+            container.innerHTML = '<div class="meta-empty">Failed to load memory doc.</div>';
         }
     }
 
@@ -839,7 +914,7 @@ class DevManager {
                     'chat': 'Chat',
                     'skill_generate': 'Gerar Skill',
                     'skill_validate': 'Validar Skill',
-                    'meta_eval': 'Avaliar Meta',
+                    'meta_eval': 'Avaliar Meta (legado)',
                     'session_eval': 'Avaliar Sessão',
                     '': 'Outro',
                 };
@@ -969,13 +1044,18 @@ class DevManager {
         );
     }
 
-    editProjectMetaWithAI(projectId) {
+    async editMemoryDocWithAI(projectId) {
         const project = this.projects.find(p => p.id === projectId) || this._detailProject;
         if (!project || !window.aiChat) return;
-        window.aiChat.open();
-        window.aiChat.newConversation();
-        const msg = `I want to edit the meta document for the project "${project.name}" (ID: ${projectId}). Please show me the current document and ask what I'd like to change.`;
-        window.aiChat.sendPreset(msg);
+        try {
+            const result = await this.api('POST', '/ai/initiate-memory-doc-edit', { project_id: projectId });
+            if (result?.conversation_id) {
+                window.aiChat.open();
+                window.aiChat.loadConversation(result.conversation_id);
+            }
+        } catch (e) {
+            this.showToast('Erro ao iniciar edicao do memory doc', 'error');
+        }
     }
 
     duplicateProject(projectId) {
@@ -1136,6 +1216,7 @@ class DevManager {
             document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
             document.getElementById('view-terminal').classList.add('active');
             this.currentView = 'terminal';
+            this._updateNavForTerminal();
         }
 
         // Refresh sessions to sync tabs (this will create tab if needed)
@@ -1177,10 +1258,15 @@ class DevManager {
             await this.api('DELETE', `/sessions/${sessionId}`);
             this.showToast('Success', 'Session stopped', 'success');
 
-            // Close tab if open
-            if (this.openTabs.has(sessionId)) {
-                this.closeTab(sessionId);
-            }
+            // Remove tab without switching to another session
+            const tabElement = document.querySelector(`.terminal-tab[data-session-id="${sessionId}"]`);
+            if (tabElement) tabElement.remove();
+            this.openTabs.delete(sessionId);
+            window.terminalManager.disconnect(sessionId);
+            this.saveTabsToStorage();
+
+            // Always show empty state after stopping a session
+            this._showSessionsEmptyState();
 
             await this.loadSessions();
         } catch (error) {
@@ -1408,9 +1494,9 @@ class DevManager {
             this.updateMobileSessionTrigger(nextSessionId);
         }
 
-        // If no tabs left, return to sessions view
+        // If no tabs left, show empty sessions state
         if (this.openTabs.size === 0) {
-            this.showView('sessions');
+            this._showSessionsEmptyState();
         }
     }
 
@@ -1459,17 +1545,9 @@ class DevManager {
             }
         });
 
-        // If tabs were removed, navigate accordingly
+        // If tabs were removed, show empty sessions state
         if (tabsRemoved) {
-            if (this.openTabs.size > 0) {
-                // Switch to the next available session
-                const nextSessionId = Array.from(this.openTabs.keys())[0];
-                window.terminalManager.switchToSession(nextSessionId);
-                this.updateMobileSessionTrigger(nextSessionId);
-            } else if (this.currentView === 'terminal') {
-                // No tabs left and we're on terminal view - go to sessions
-                this.showView('sessions');
-            }
+            this._showSessionsEmptyState();
         }
     }
 
@@ -2167,6 +2245,14 @@ class DevManager {
             // Restore tab order
             this.restoreTabOrder();
 
+            // If tabs were restored, switch to terminal view
+            if (this.openTabs.size > 0) {
+                document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+                document.getElementById('view-terminal').classList.add('active');
+                this.currentView = 'terminal';
+                this._updateNavForTerminal();
+            }
+
         } catch (e) {
             console.error('Failed to restore tabs from storage:', e);
             localStorage.removeItem('devmanager-tabs-state');
@@ -2248,46 +2334,6 @@ class DevManager {
             window.terminalManager.switchToSession(sessionIds[index]);
             this.updateTabActiveState(sessionIds[index]);
         }
-    }
-
-    // Macros
-    async loadMacros() {
-        try {
-            this.macros = await this.api('GET', '/macros');
-            this.renderMacros();
-        } catch (error) {
-            this.showToast('Error', error.message, 'error');
-        }
-    }
-
-    renderMacros() {
-        const container = document.getElementById('macros-list');
-        if (!container) return;
-
-        container.innerHTML = this.macros.map(macro => `
-            <div class="card" data-macro-id="${macro.id}">
-                <div class="card-header">
-                    <div>
-                        <div class="card-title">${this.escapeHtml(macro.name)}</div>
-                        <div class="card-subtitle">${this.escapeHtml(macro.description)}</div>
-                    </div>
-                    ${macro.is_builtin ? '<span class="badge badge-builtin">Built-in</span>' : ''}
-                </div>
-                <div class="card-body">
-                    <div class="text-muted">Target: ${macro.target_type}</div>
-                </div>
-                <div class="card-actions">
-                    <button class="btn btn-primary btn-sm" onclick="app.showRunMacroModal(${macro.id})">
-                        Run
-                    </button>
-                    ${!macro.is_builtin ? `
-                        <button class="btn btn-secondary btn-sm" onclick="app.editMacro(${macro.id})">
-                            Edit
-                        </button>
-                    ` : ''}
-                </div>
-            </div>
-        `).join('');
     }
 
     // Config
@@ -2851,11 +2897,6 @@ class DevManager {
             this.showProjectModal();
         });
 
-        // Add macro button
-        document.getElementById('btn-add-macro')?.addEventListener('click', () => {
-            this.showMacroModal();
-        });
-
         // Config tabs
         document.querySelectorAll('.tab-btn').forEach(btn => {
             btn.addEventListener('click', () => {
@@ -2882,7 +2923,7 @@ class DevManager {
 
         // Terminal back button
         document.getElementById('btn-back-sessions')?.addEventListener('click', () => {
-            this.showView('sessions');
+            this.showView('projects');
         });
 
         // Stop session button
@@ -2911,61 +2952,6 @@ class DevManager {
                 this.hideModal();
             }
         });
-    }
-
-    // Additional methods for macros, skills, MCPs...
-    showRunMacroModal(macroId) {
-        const macro = this.macros.find(m => m.id === macroId);
-        if (!macro) return;
-
-        const filteredProjects = this.projects.filter(p =>
-            macro.target_type === 'any' || macro.target_type === p.type
-        );
-
-        const content = `
-            <form id="run-macro-form">
-                <div class="form-group">
-                    <label class="form-label">Select Project</label>
-                    <select class="form-select" name="project_id" required>
-                        ${filteredProjects.map(p => `
-                            <option value="${p.id}">${this.escapeHtml(p.name)}</option>
-                        `).join('')}
-                    </select>
-                </div>
-            </form>
-        `;
-
-        const actions = `
-            <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
-            <button class="btn btn-primary" onclick="app.runMacro(${macroId})">Run</button>
-        `;
-
-        this.showModal(`Run Macro: ${macro.name}`, content, actions);
-    }
-
-    async runMacro(macroId) {
-        const form = document.getElementById('run-macro-form');
-        const projectId = parseInt(form.querySelector('select[name="project_id"]').value);
-
-        try {
-            const result = await this.api('POST', `/macros/${macroId}/run`, { project_id: projectId });
-            this.hideModal();
-            this.showToast('Success', 'Macro started', 'success');
-            // Could open macro output view here
-        } catch (error) {
-            this.showToast('Error', error.message, 'error');
-        }
-    }
-
-    showMacroModal(macro = null) {
-        if (window.macroEditor) {
-            window.macroEditor.show(macro);
-        }
-    }
-
-    editMacro(macroId) {
-        const macro = this.macros.find(m => m.id === macroId);
-        if (macro) this.showMacroModal(macro);
     }
 
     showSkillModal(skill = null) {
@@ -3626,7 +3612,7 @@ class DevManager {
                 <div class="task-priority-indicator ${priorityClass}"></div>
                 <div class="task-card-body">
                     <div class="task-card-top">
-                        <span class="task-title" onclick="app.showTaskModal(${projectId}, ${task.id})" style="cursor:pointer;">${this.escapeHtml(task.title)}</span>
+                        <span class="task-title" onclick="app.viewTaskDetail(${projectId}, ${task.id})" style="cursor:pointer;">${this.escapeHtml(task.title)}</span>
                         ${sessionIndicatorHtml}
                         <span class="task-status-badge badge-${task.status}" onclick="app.cycleTaskStatus(${projectId}, ${task.id}, '${task.status}')">${task.status.replace('_', ' ')}</span>
                     </div>
@@ -3779,6 +3765,101 @@ class DevManager {
         loadAndShow();
     }
 
+    async viewTaskDetail(projectId, taskId) {
+        try {
+            const [task, sessions] = await Promise.all([
+                this.api('GET', `/projects/${projectId}/tasks/${taskId}`),
+                this.api('GET', `/projects/${projectId}/tasks/${taskId}/sessions`).catch(() => [])
+            ]);
+
+            let md = '';
+
+            // Status & Priority
+            const statusLabel = (task.status || 'todo').replace('_', ' ');
+            const priorityLabel = task.priority || 'medium';
+            md += `**Status:** ${statusLabel} &nbsp;|&nbsp; **Prioridade:** ${priorityLabel}\n\n`;
+
+            // Due date
+            if (task.due_date?.Valid) {
+                const d = new Date(task.due_date.Time);
+                const dateStr = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+                const isOverdue = d < new Date() && task.status !== 'done';
+                md += `**Prazo:** ${dateStr}${isOverdue ? ' **(ATRASADO)**' : ''}\n\n`;
+            }
+
+            // Description
+            if (task.description) {
+                md += `---\n\n${task.description}\n\n`;
+            } else {
+                md += `---\n\n*Sem descrição.*\n\n`;
+            }
+
+            // Session history
+            if (sessions && sessions.length > 0) {
+                md += `---\n\n### Sessões\n\n`;
+                for (const s of sessions) {
+                    const date = new Date(s.start_time).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+                    const name = s.name || s.id.substring(0, 8);
+                    const isActive = s.status === 'running' || s.status === 'starting';
+                    const badge = isActive ? '🟢 running' : s.status;
+                    md += `- **${this.escapeHtml(name)}** — ${badge} — ${date}\n`;
+                }
+            }
+
+            // Project name
+            const project = (this.projects || []).find(p => p.id === projectId);
+            if (project) {
+                md += `\n---\n\n*Projeto: ${this.escapeHtml(project.name)}*\n`;
+            }
+
+            // Action buttons
+            const isDone = task.status === 'done';
+            const actions = [
+                {
+                    label: 'Editar',
+                    class: 'btn btn-secondary',
+                    onClick: () => {
+                        window.docViewer.close();
+                        this.showTaskModal(projectId, taskId);
+                    }
+                }
+            ];
+
+            if (!isDone) {
+                const cycle = { 'todo': 'in_progress', 'in_progress': 'done', 'blocked': 'todo' };
+                const next = cycle[task.status] || 'in_progress';
+                const nextLabel = next.replace('_', ' ');
+                actions.push({
+                    label: `Marcar ${nextLabel}`,
+                    class: 'btn btn-primary',
+                    onClick: async () => {
+                        try {
+                            await this.api('PATCH', `/projects/${projectId}/tasks/${taskId}/status`, { status: next });
+                            window.docViewer.close();
+                            this.showToast('Sucesso', `Tarefa marcada como ${nextLabel}`, 'success');
+                            this.loadAllTasks();
+                        } catch (e) {
+                            this.showToast('Erro', e.message, 'error');
+                        }
+                    }
+                });
+
+                actions.push({
+                    label: 'Iniciar Sessão',
+                    class: 'btn btn-success',
+                    onClick: () => {
+                        window.docViewer.close();
+                        this.startSessionFromTask(projectId, taskId);
+                    }
+                });
+            }
+
+            window.docViewer.openWithContent(task.title, md, { actions });
+        } catch (e) {
+            this.showToast('Erro', 'Falha ao carregar detalhes da tarefa', 'error');
+        }
+    }
+
     async saveTask(projectId, taskId, parentId) {
         const form = document.getElementById('task-form');
         if (!form) return;
@@ -3830,6 +3911,145 @@ class DevManager {
         }
     }
 
+    // ============ All Tasks (Cross-Project) ============
+
+    async loadAllTasks() {
+        const container = document.getElementById('all-tasks-list');
+        const statsEl = document.getElementById('all-tasks-stats');
+        if (!container) return;
+
+        const params = new URLSearchParams();
+        const status = document.getElementById('filter-status')?.value;
+        const priority = document.getElementById('filter-priority')?.value;
+        const projectId = document.getElementById('filter-project')?.value;
+        const search = document.getElementById('filter-search')?.value;
+
+        if (status) params.set('status', status);
+        if (priority) params.set('priority', priority);
+        if (projectId) params.set('project_id', projectId);
+        if (search) params.set('search', search);
+
+        const queryStr = params.toString() ? `?${params.toString()}` : '';
+
+        try {
+            const data = await this.api('GET', `/tasks${queryStr}`);
+            const tasks = data.tasks || [];
+            const summary = data.summary || {};
+
+            if (statsEl) {
+                const total = Object.values(summary).reduce((a, b) => a + b, 0);
+                statsEl.innerHTML = `
+                    <div class="all-tasks-stat-cards">
+                        <div class="stat-card stat-total"><span class="stat-number">${total}</span><span class="stat-label">Total</span></div>
+                        <div class="stat-card stat-todo"><span class="stat-number">${summary.todo || 0}</span><span class="stat-label">Todo</span></div>
+                        <div class="stat-card stat-progress"><span class="stat-number">${summary.in_progress || 0}</span><span class="stat-label">In Progress</span></div>
+                        <div class="stat-card stat-done"><span class="stat-number">${summary.done || 0}</span><span class="stat-label">Done</span></div>
+                        <div class="stat-card stat-blocked"><span class="stat-number">${summary.blocked || 0}</span><span class="stat-label">Blocked</span></div>
+                    </div>
+                `;
+            }
+
+            this._populateProjectFilter();
+
+            if (tasks.length === 0) {
+                container.innerHTML = '<div class="empty-state">No tasks match your filters.</div>';
+                return;
+            }
+
+            const projectMap = {};
+            (this.projects || []).forEach(p => { projectMap[p.id] = p.name; });
+
+            let html = '';
+            for (const task of tasks) {
+                const projectName = projectMap[task.project_id] || `Project #${task.project_id}`;
+                html += this.renderAllTaskCard(task, projectName);
+            }
+            container.innerHTML = html;
+        } catch (e) {
+            container.innerHTML = '<div class="empty-state">Failed to load tasks.</div>';
+        }
+    }
+
+    renderAllTaskCard(task, projectName) {
+        const now = new Date();
+        const hasDue = task.due_date?.Valid;
+        const isOverdue = hasDue && new Date(task.due_date.Time) < now && task.status !== 'done';
+        const isDone = task.status === 'done';
+
+        const priorityClass = `priority-${task.priority}`;
+        const overdueClass = isOverdue ? ' task-overdue' : '';
+        const doneClass = isDone ? ' task-done' : '';
+
+        let dueDateHtml = '';
+        if (hasDue) {
+            const d = new Date(task.due_date.Time);
+            const dateStr = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+            const timeStr = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+            const overdueTag = isOverdue ? ' overdue' : '';
+            dueDateHtml = `<span class="task-due${overdueTag}">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                ${dateStr} ${timeStr}
+            </span>`;
+        }
+
+        const descPreview = task.description ? `<span class="task-description-preview">${this.escapeHtml(task.description.substring(0, 80))}</span>` : '';
+        const projectBadge = `<span class="task-project-badge" onclick="event.stopPropagation();app.showProjectDetail(${task.project_id})" title="Go to project">${this.escapeHtml(projectName)}</span>`;
+
+        const startSessionBtn = !isDone ? `
+            <button class="btn-icon btn-start-session" onclick="event.stopPropagation();app.startSessionFromTask(${task.project_id}, ${task.id})" title="Start Session">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            </button>` : '';
+
+        return `
+            <div class="task-card${overdueClass}${doneClass}" data-task-id="${task.id}">
+                <div class="task-priority-indicator ${priorityClass}"></div>
+                <div class="task-card-body">
+                    <div class="task-card-top">
+                        <span class="task-title" onclick="app.viewTaskDetail(${task.project_id}, ${task.id})" style="cursor:pointer;">${this.escapeHtml(task.title)}</span>
+                        <span class="task-status-badge badge-${task.status}" onclick="app.cycleTaskStatus(${task.project_id}, ${task.id}, '${task.status}')">${task.status.replace('_', ' ')}</span>
+                    </div>
+                    <div class="task-card-meta">
+                        ${projectBadge}
+                        ${dueDateHtml}
+                        ${descPreview}
+                    </div>
+                </div>
+                <div class="task-card-actions">
+                    ${startSessionBtn}
+                    <button class="btn-icon" onclick="app.showTaskModal(${task.project_id}, ${task.id})" title="Edit">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
+    _populateProjectFilter() {
+        const select = document.getElementById('filter-project');
+        if (!select || select.options.length > 1) return;
+        (this.projects || []).forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.id;
+            opt.textContent = p.name;
+            select.appendChild(opt);
+        });
+    }
+
+    setupAllTasksFilters() {
+        let searchTimeout = null;
+        const searchInput = document.getElementById('filter-search');
+        if (searchInput) {
+            searchInput.addEventListener('input', () => {
+                clearTimeout(searchTimeout);
+                searchTimeout = setTimeout(() => this.loadAllTasks(), 300);
+            });
+        }
+        ['filter-status', 'filter-priority', 'filter-project'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener('change', () => this.loadAllTasks());
+        });
+    }
+
     // ============ AI Proactive Suggestions ============
 
     async _loadPendingSuggestions() {
@@ -3869,7 +4089,7 @@ class DevManager {
             level: raw.level || 'standard',
             proactive_type: typeMap[raw.type] || raw.type || 'task_suggestion',
             title: raw.title || '',
-            body: raw.description || '',
+            body: '',
             conversation_id: raw.conversation_id?.Int64 ?? raw.conversation_id ?? null,
             suggestion_id: raw.id || null,
             actions: [
@@ -4074,7 +4294,7 @@ class DevManager {
 
         const typeLabels = {
             task_suggestion: 'Sugestao de Tarefa',
-            meta_update: 'Meta Doc',
+            memory_doc_update: 'Memory Doc',
             insight: 'Insight',
             alert: 'Alerta'
         };
@@ -4092,7 +4312,6 @@ class DevManager {
             </div>
             <div class="ai-suggestion-body">
                 <div class="ai-suggestion-title">${this.escapeHtml(data.title)}</div>
-                ${data.body ? `<div class="ai-suggestion-desc">${this.escapeHtml(data.body)}</div>` : ''}
             </div>
             <div class="ai-suggestion-actions">
                 ${(data.actions || []).map(a =>

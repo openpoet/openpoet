@@ -243,6 +243,7 @@ body {
     padding: 16px 24px;
     border-bottom: 1px solid var(--color-border);
     background-color: var(--color-bg-secondary);
+    flex-shrink: 0;
 }
 
 .view-header h2 {
@@ -3013,6 +3014,88 @@ body {
     font-weight: 500;
 }
 
+/* Doc card (native document preview in chat) */
+.ai-chat-doc-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    margin: 8px 0;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    border-left: 3px solid var(--color-primary);
+    cursor: default;
+}
+.ai-chat-doc-card-proposal {
+    border-left-color: #e8a317;
+    background: color-mix(in srgb, #e8a317 5%, var(--color-surface));
+}
+.ai-chat-doc-card-icon {
+    flex-shrink: 0;
+    color: var(--color-primary);
+    display: flex;
+    align-items: center;
+}
+.ai-chat-doc-card-proposal .ai-chat-doc-card-icon {
+    color: #e8a317;
+}
+.ai-chat-doc-card-info {
+    flex: 1;
+    min-width: 0;
+}
+.ai-chat-doc-card-title {
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--color-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.ai-chat-doc-card-summary {
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.ai-chat-doc-card-btn {
+    flex-shrink: 0;
+    padding: 6px 14px;
+    border: none;
+    border-radius: 6px;
+    background: var(--color-primary);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: opacity 0.15s;
+}
+.ai-chat-doc-card-btn:hover {
+    opacity: 0.85;
+}
+.ai-chat-doc-card-proposal .ai-chat-doc-card-btn {
+    background: #e8a317;
+}
+.ai-chat-doc-card-badge {
+    flex-shrink: 0;
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.ai-chat-doc-card-badge-approved {
+    background: rgba(34, 197, 94, 0.15);
+    color: #16a34a;
+}
+.ai-chat-doc-card-badge-rejected {
+    background: rgba(239, 68, 68, 0.15);
+    color: #dc2626;
+}
+
 /* Input area */
 .ai-chat-input-area {
     display: flex;
@@ -3383,50 +3466,50 @@ body {
     flex-shrink: 0;
 }
 
-/* ============ Project Meta Document ============ */
-.project-meta-content {
+/* ============ Memory Doc ============ */
+.memory-doc-content {
     max-height: 400px;
     overflow-y: auto;
     padding: 4px 0;
 }
 
-.project-meta-content .meta-rendered {
+.memory-doc-content .meta-rendered {
     font-size: 13px;
     line-height: 1.6;
     color: var(--color-text-primary);
 }
 
-.project-meta-content .meta-rendered h1,
-.project-meta-content .meta-rendered h2,
-.project-meta-content .meta-rendered h3 {
+.memory-doc-content .meta-rendered h1,
+.memory-doc-content .meta-rendered h2,
+.memory-doc-content .meta-rendered h3 {
     margin-top: 12px;
     margin-bottom: 6px;
     font-weight: 600;
     color: var(--color-text-primary);
 }
 
-.project-meta-content .meta-rendered h1 { font-size: 16px; }
-.project-meta-content .meta-rendered h2 { font-size: 14px; }
-.project-meta-content .meta-rendered h3 { font-size: 13px; }
+.memory-doc-content .meta-rendered h1 { font-size: 16px; }
+.memory-doc-content .meta-rendered h2 { font-size: 14px; }
+.memory-doc-content .meta-rendered h3 { font-size: 13px; }
 
-.project-meta-content .meta-rendered ul,
-.project-meta-content .meta-rendered ol {
+.memory-doc-content .meta-rendered ul,
+.memory-doc-content .meta-rendered ol {
     padding-left: 20px;
     margin: 6px 0;
 }
 
-.project-meta-content .meta-rendered p {
+.memory-doc-content .meta-rendered p {
     margin: 6px 0;
 }
 
-.project-meta-content .meta-rendered code {
+.memory-doc-content .meta-rendered code {
     background: var(--color-bg-tertiary);
     padding: 1px 4px;
     border-radius: 3px;
     font-size: 12px;
 }
 
-.project-meta-content .meta-rendered pre {
+.memory-doc-content .meta-rendered pre {
     background: var(--color-bg-tertiary);
     padding: 8px 12px;
     border-radius: 6px;
@@ -3434,7 +3517,7 @@ body {
     margin: 8px 0;
 }
 
-.project-meta-content .meta-info {
+.memory-doc-content .meta-info {
     font-size: 11px;
     color: var(--color-text-muted);
     margin-top: 8px;
@@ -3568,69 +3651,77 @@ body {
     to { transform: rotate(360deg); }
 }
 
-/* ============ Document Viewer Modal ============ */
-.doc-viewer-modal {
+/* ============ Document Review Overlay ============ */
+.doc-review-overlay {
     position: fixed;
-    inset: 0;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
     z-index: 10000;
-    background: rgba(0, 0, 0, 0.7);
+    background-color: rgba(0, 0, 0, 0.8);
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 16px;
+    padding: 20px;
 }
-
-.doc-viewer-container {
-    background: var(--color-bg-secondary);
-    border: 1px solid var(--color-border);
-    border-radius: var(--border-radius);
+.doc-review-overlay.hidden {
+    display: none;
+}
+.doc-review-container {
     width: 100%;
-    max-width: 720px;
-    max-height: 85vh;
+    max-width: 900px;
+    max-height: 90vh;
+    background-color: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
 }
-
-.doc-viewer-header {
+.doc-review-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 12px 16px;
+    background-color: var(--color-bg-secondary);
     border-bottom: 1px solid var(--color-border);
     flex-shrink: 0;
 }
-
-.doc-viewer-header h3 {
-    font-size: 14px;
+.doc-review-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--color-text);
     font-weight: 600;
-    color: var(--color-text);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.doc-viewer-close {
-    background: none;
-    border: none;
-    color: var(--color-text-secondary);
-    font-size: 22px;
-    cursor: pointer;
-    padding: 0 4px;
-    line-height: 1;
-}
-
-.doc-viewer-close:hover {
-    color: var(--color-text);
-}
-
-.doc-viewer-body {
-    padding: 16px;
-    overflow-y: auto;
+    font-size: 14px;
+    min-width: 0;
     flex: 1;
-    font-size: 13px;
-    line-height: 1.6;
+}
+.doc-review-title svg {
+    flex-shrink: 0;
+    color: var(--color-primary);
+}
+.doc-review-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    min-height: 0;
+    font-size: 14px;
+    line-height: 1.7;
     color: var(--color-text);
+}
+.doc-review-footer {
+    display: flex;
+    gap: 12px;
+    padding: 16px;
+    border-top: 1px solid var(--color-border);
+    background-color: var(--color-bg-secondary);
+    justify-content: flex-end;
+    flex-shrink: 0;
+}
+.doc-review-footer.hidden {
+    display: none;
 }
 
 /* ============ Project Tasks ============ */
@@ -3850,6 +3941,128 @@ body {
     .task-description-preview {
         max-width: 180px;
     }
+}
+
+/* ============ All Tasks View ============ */
+
+.all-tasks-stats {
+    padding: 0 16px;
+    margin-bottom: 16px;
+    flex-shrink: 0;
+}
+
+.all-tasks-stat-cards {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.stat-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    flex: 1;
+    min-width: 70px;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.stat-card .stat-number {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--color-text);
+}
+
+.stat-card .stat-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--color-text-secondary);
+}
+
+.stat-card.stat-todo .stat-number { color: #3b82f6; }
+.stat-card.stat-progress .stat-number { color: #f59e0b; }
+.stat-card.stat-done .stat-number { color: #22c55e; }
+.stat-card.stat-blocked .stat-number { color: #ef4444; }
+
+.all-tasks-filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 16px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+}
+
+.filter-group {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.filter-select {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    color: var(--color-text);
+    font-size: 12px;
+    padding: 6px 10px;
+    cursor: pointer;
+    min-width: 110px;
+}
+
+.filter-select:focus {
+    outline: none;
+    border-color: var(--color-primary);
+}
+
+.filter-search {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    color: var(--color-text);
+    font-size: 12px;
+    padding: 6px 10px;
+    min-width: 180px;
+    flex: 1;
+}
+
+.filter-search:focus {
+    outline: none;
+    border-color: var(--color-primary);
+}
+
+.filter-search::placeholder {
+    color: var(--color-text-muted, #666);
+}
+
+.all-tasks-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 0 16px 16px;
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+}
+
+.task-project-badge {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(99, 102, 241, 0.15);
+    color: var(--color-primary);
+    cursor: pointer;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.task-project-badge:hover {
+    background: rgba(99, 102, 241, 0.25);
 }
 
 /* ============ AI Suggestion Cards ============ */
