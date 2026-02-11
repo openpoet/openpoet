@@ -1,4 +1,4 @@
-.PHONY: all build run clean test deps vendor-js
+.PHONY: all build run clean test deps vendor-js deploy deploy-status deploy-log
 
 # Variables
 BINARY_NAME=devmanager
@@ -99,6 +99,18 @@ icons:
 tools:
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
+# Deploy to production (port 8081) — survives caller disconnection
+deploy:
+	@./scripts/deploy.sh
+
+# Check last deploy status
+deploy-status:
+	@./scripts/deploy.sh --status
+
+# Show recent deploy log
+deploy-log:
+	@./scripts/deploy.sh --log
+
 # Show help
 help:
 	@echo "DevManager Makefile"
@@ -119,5 +131,8 @@ help:
 	@echo "  fmt          Format code"
 	@echo "  lint         Lint code"
 	@echo "  icons        Generate PWA icons"
+	@echo "  deploy       Deploy to production (port 8081)"
+	@echo "  deploy-status Show last deploy status"
+	@echo "  deploy-log   Show recent deploy log"
 	@echo "  tools        Install development tools"
 	@echo "  help         Show this help"

@@ -4,7 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"devmanager/internal/database"
-	"devmanager/internal/macro"
+	"devmanager/internal/files"
+	"devmanager/internal/configsync"
 	"devmanager/internal/notifications"
 	"devmanager/internal/security"
 	"devmanager/internal/session"
@@ -16,35 +17,192 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
+// pendingMemoryDoc holds a proposed memory doc edit awaiting user approval.
+type pendingMemoryDoc struct {
+	ProjectID int64
+	Content   string
+	Summary   string
+}
+
 type API struct {
 	db           *database.DB
 	hub          *websocket.Hub
 	sessionMgr   *session.Manager
-	macroExec    *macro.Executor
-	configSync   *macro.ConfigSyncer
+	configSync   *configsync.ConfigSyncer
 	encryptor    *security.Encryptor
 	notifService *notifications.Service
 	hookHandler  *HookHandler
 	aiHandler    *AIHandler
+
+	pendingMemoryDocsMu sync.Mutex
+	pendingMemoryDocs   map[string]*pendingMemoryDoc // docID -> pending edit
 }
 
-// SetAIHandler sets the AI handler for post-sync meta evaluation.
+// SetAIHandler sets the AI handler for AI chat functionality.
 func (a *API) SetAIHandler(h *AIHandler) {
 	a.aiHandler = h
+}
+
+// writeClaudeMD writes content to the project's CLAUDE.md file.
+func (a *API) writeClaudeMD(project *database.Project, content string) {
+	if project.Type == "local" {
+		fm := files.NewLocalFileManager(project.Path)
+		if err := fm.Write("CLAUDE.md", []byte(content)); err != nil {
+			log.Printf("[MemoryDoc] Failed to write CLAUDE.md for project %d: %v", project.ID, err)
+		}
+	}
+}
+
+// storePendingMemoryDoc stores a proposed memory doc edit for later approval.
+func (a *API) storePendingMemoryDoc(docID string, projectID int64, content, summary string) {
+	a.pendingMemoryDocsMu.Lock()
+	defer a.pendingMemoryDocsMu.Unlock()
+	if a.pendingMemoryDocs == nil {
+		a.pendingMemoryDocs = make(map[string]*pendingMemoryDoc)
+	}
+	a.pendingMemoryDocs[docID] = &pendingMemoryDoc{
+		ProjectID: projectID,
+		Content:   content,
+		Summary:   summary,
+	}
+}
+
+// ApproveMemoryDoc applies a pending memory doc edit.
+func (a *API) ApproveMemoryDoc(w http.ResponseWriter, r *http.Request) {
+	docID := chi.URLParam(r, "docId")
+
+	a.pendingMemoryDocsMu.Lock()
+	pending, ok := a.pendingMemoryDocs[docID]
+	if ok {
+		delete(a.pendingMemoryDocs, docID)
+	}
+	a.pendingMemoryDocsMu.Unlock()
+
+	if !ok {
+		respondError(w, http.StatusNotFound, "No pending memory doc edit found for this document")
+		return
+	}
+
+	a.db.UpdateTempDocumentStatus(r.Context(), docID, "approved")
+
+	project, err := a.db.GetProject(r.Context(), pending.ProjectID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	doc, err := a.db.UpsertMemoryDoc(r.Context(), pending.ProjectID, pending.Content, "ai", pending.Summary)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Write back to project's CLAUDE.md
+	a.writeClaudeMD(project, pending.Content)
+
+	a.hub.BroadcastStateUpdate("memory_doc", map[string]interface{}{
+		"action":     "updated",
+		"project_id": pending.ProjectID,
+		"version":    doc.Version,
+	})
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"status":     "approved",
+		"project_id": pending.ProjectID,
+		"version":    doc.Version,
+	})
+}
+
+// RejectMemoryDoc discards a pending memory doc edit.
+func (a *API) RejectMemoryDoc(w http.ResponseWriter, r *http.Request) {
+	docID := chi.URLParam(r, "docId")
+
+	a.pendingMemoryDocsMu.Lock()
+	_, ok := a.pendingMemoryDocs[docID]
+	if ok {
+		delete(a.pendingMemoryDocs, docID)
+	}
+	a.pendingMemoryDocsMu.Unlock()
+
+	if !ok {
+		respondError(w, http.StatusNotFound, "No pending memory doc edit found for this document")
+		return
+	}
+
+	a.db.UpdateTempDocumentStatus(r.Context(), docID, "rejected")
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
+}
+
+// ProposeMemoryDoc creates a pending memory doc proposal for user approval.
+// Called by the MCP tool instead of saving directly.
+func (a *API) ProposeMemoryDoc(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		ProjectID      int64  `json:"project_id"`
+		Content        string `json:"content"`
+		Summary        string `json:"summary"`
+		ConversationID string `json:"conversation_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	if input.Content == "" {
+		respondError(w, http.StatusBadRequest, "content is required")
+		return
+	}
+
+	project, err := a.db.GetProject(r.Context(), input.ProjectID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	docID := uuid.New().String()[:8]
+	convID, _ := strconv.ParseInt(input.ConversationID, 10, 64)
+	tempDoc := &database.TempDocument{
+		ID:             docID,
+		Title:          fmt.Sprintf("Memory Doc: %s", project.Name),
+		Content:        input.Content,
+		ConversationID: sql.NullInt64{Int64: convID, Valid: convID > 0},
+		Summary:        input.Summary,
+	}
+	if err := a.db.CreateTempDocument(r.Context(), tempDoc); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.storePendingMemoryDoc(docID, input.ProjectID, input.Content, input.Summary)
+
+	// Notify the chat panel via WebSocket to inject an inline doc card
+	// Include conversation_id so the frontend can match the correct chat session
+	a.hub.BroadcastChatDocCard(map[string]interface{}{
+		"doc_id":          docID,
+		"type":            "proposal",
+		"title":           fmt.Sprintf("Proposta de alteração — %s", project.Name),
+		"summary":         input.Summary,
+		"conversation_id": input.ConversationID,
+	})
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"status":  "pending_approval",
+		"doc_id":  docID,
+		"message": fmt.Sprintf("Proposta criada para o projeto %s. O usuário precisa aprovar antes que a alteração seja aplicada.", project.Name),
+	})
 }
 
 func NewAPI(
 	db *database.DB,
 	hub *websocket.Hub,
 	sessionMgr *session.Manager,
-	macroExec *macro.Executor,
-	configSync *macro.ConfigSyncer,
+	configSync *configsync.ConfigSyncer,
 	encryptor *security.Encryptor,
 	notifService *notifications.Service,
 	hookHandler *HookHandler,
@@ -53,7 +211,6 @@ func NewAPI(
 		db:           db,
 		hub:          hub,
 		sessionMgr:   sessionMgr,
-		macroExec:    macroExec,
 		configSync:   configSync,
 		encryptor:    encryptor,
 		notifService: notifService,
@@ -325,16 +482,6 @@ func (a *API) SyncProjectConfig(w http.ResponseWriter, r *http.Request) {
 	a.db.UpdateProjectConfigSyncedAt(r.Context(), id)
 	a.hub.BroadcastSyncProgress(id, "sync", "done", "Configuration synced successfully")
 
-	// Trigger AI meta evaluation in background
-	if a.aiHandler != nil {
-		a.hub.BroadcastSyncProgress(id, "ai_meta", "running", "AI evaluating meta document...")
-		go func() {
-			ctx := context.Background()
-			a.aiHandler.EvaluateProjectMeta(ctx, id)
-			a.hub.BroadcastSyncProgress(id, "ai_meta", "done", "AI evaluation complete")
-		}()
-	}
-
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -488,140 +635,6 @@ func (a *API) DeleteSession(w http.ResponseWriter, r *http.Request) {
 
 	a.hub.BroadcastSessionStatus(id, "stopped")
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// ============ Macros ============
-
-func (a *API) ListMacros(w http.ResponseWriter, r *http.Request) {
-	macros, err := a.db.ListMacros(r.Context())
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if macros == nil {
-		macros = []database.Macro{}
-	}
-	respondJSON(w, http.StatusOK, macros)
-}
-
-func (a *API) CreateMacro(w http.ResponseWriter, r *http.Request) {
-	var m database.Macro
-	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid JSON")
-		return
-	}
-
-	m.IsBuiltin = false
-	if err := a.db.CreateMacro(r.Context(), &m); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("macro", map[string]interface{}{"action": "created", "macro": m})
-	respondJSON(w, http.StatusCreated, m)
-}
-
-func (a *API) GetMacro(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid macro ID")
-		return
-	}
-
-	m, err := a.db.GetMacro(r.Context(), id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Macro not found")
-		return
-	}
-
-	respondJSON(w, http.StatusOK, m)
-}
-
-func (a *API) UpdateMacro(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid macro ID")
-		return
-	}
-
-	existing, err := a.db.GetMacro(r.Context(), id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Macro not found")
-		return
-	}
-
-	if existing.IsBuiltin {
-		respondError(w, http.StatusForbidden, "Cannot modify built-in macros")
-		return
-	}
-
-	var m database.Macro
-	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid JSON")
-		return
-	}
-
-	m.ID = id
-	m.IsBuiltin = false
-	if err := a.db.UpdateMacro(r.Context(), &m); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("macro", map[string]interface{}{"action": "updated", "macro": m})
-	respondJSON(w, http.StatusOK, m)
-}
-
-func (a *API) DeleteMacro(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid macro ID")
-		return
-	}
-
-	if err := a.db.DeleteMacro(r.Context(), id); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("macro", map[string]interface{}{"action": "deleted", "id": id})
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (a *API) RunMacro(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid macro ID")
-		return
-	}
-
-	var input struct {
-		ProjectID int64 `json:"project_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid JSON")
-		return
-	}
-
-	m, err := a.db.GetMacro(r.Context(), id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Macro not found")
-		return
-	}
-
-	project, err := a.db.GetProject(r.Context(), input.ProjectID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
-		return
-	}
-
-	execID, err := a.macroExec.Run(r.Context(), m, project)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	respondJSON(w, http.StatusOK, map[string]string{"execution_id": execID})
 }
 
 // ============ Skills ============
@@ -1105,16 +1118,16 @@ func (a *API) MarkNotificationRead(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ============ Project Meta Documents ============
+// ============ Memory Docs ============
 
-func (a *API) GetProjectMeta(w http.ResponseWriter, r *http.Request) {
+func (a *API) GetMemoryDoc(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
 
-	doc, err := a.db.GetProjectMeta(r.Context(), id)
+	doc, err := a.db.GetMemoryDoc(r.Context(), id)
 	if err != nil {
 		// Return empty placeholder if none exists
 		respondJSON(w, http.StatusOK, map[string]interface{}{
@@ -1137,7 +1150,7 @@ func (a *API) GetProjectMeta(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *API) UpdateProjectMeta(w http.ResponseWriter, r *http.Request) {
+func (a *API) UpdateMemoryDoc(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
@@ -1145,7 +1158,7 @@ func (a *API) UpdateProjectMeta(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify project exists
-	_, err = a.db.GetProject(r.Context(), id)
+	project, err := a.db.GetProject(r.Context(), id)
 	if err != nil {
 		respondError(w, http.StatusNotFound, "Project not found")
 		return
@@ -1165,13 +1178,16 @@ func (a *API) UpdateProjectMeta(w http.ResponseWriter, r *http.Request) {
 		input.UpdatedBy = "user"
 	}
 
-	doc, err := a.db.UpsertProjectMeta(r.Context(), id, input.Content, input.UpdatedBy, input.Summary)
+	doc, err := a.db.UpsertMemoryDoc(r.Context(), id, input.Content, input.UpdatedBy, input.Summary)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	a.hub.BroadcastStateUpdate("project_meta", map[string]interface{}{
+	// Write back to project's CLAUDE.md
+	a.writeClaudeMD(project, input.Content)
+
+	a.hub.BroadcastStateUpdate("memory_doc", map[string]interface{}{
 		"action":     "updated",
 		"project_id": id,
 		"version":    doc.Version,
@@ -1223,6 +1239,51 @@ func (a *API) GetTempDocument(w http.ResponseWriter, r *http.Request) {
 }
 
 // ============ Project Tasks ============
+
+func (a *API) ListAllTasks(w http.ResponseWriter, r *http.Request) {
+	f := database.TaskFilter{}
+
+	if s := r.URL.Query().Get("status"); s != "" {
+		f.Status = s
+	}
+	if p := r.URL.Query().Get("priority"); p != "" {
+		f.Priority = p
+	}
+	if pid := r.URL.Query().Get("project_id"); pid != "" {
+		if n, err := strconv.ParseInt(pid, 10, 64); err == nil {
+			f.ProjectID = &n
+		}
+	}
+	if db := r.URL.Query().Get("due_before"); db != "" {
+		if t, err := parseFlexibleTime(db); err == nil {
+			f.DueBefore = &t
+		}
+	}
+	if da := r.URL.Query().Get("due_after"); da != "" {
+		if t, err := parseFlexibleTime(da); err == nil {
+			f.DueAfter = &t
+		}
+	}
+	if s := r.URL.Query().Get("search"); s != "" {
+		f.Search = s
+	}
+
+	tasks, err := a.db.ListAllTasks(r.Context(), f)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if tasks == nil {
+		tasks = []database.ProjectTask{}
+	}
+
+	summary, _ := a.db.GetAllTasksSummary(r.Context())
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"tasks":   tasks,
+		"summary": summary,
+	})
+}
 
 func (a *API) ListProjectTasks(w http.ResponseWriter, r *http.Request) {
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)

@@ -38,12 +38,14 @@ func Serve(apiURL string) {
 	log.SetPrefix("[mcp] ")
 
 	sessionID := os.Getenv("DEVMANAGER_SESSION_ID")
+	context := os.Getenv("DEVMANAGER_CONTEXT")           // "chat" when spawned by AI chat
+	conversationID := os.Getenv("DEVMANAGER_CONVERSATION_ID") // conversation ID for chat correlation
 	client := NewAPIClient(apiURL)
 
 	reader := bufio.NewReader(os.Stdin)
 	writer := os.Stdout
 
-	log.Printf("MCP server started, API URL: %s, Session ID: %s", apiURL, sessionID)
+	log.Printf("MCP server started, API URL: %s, Session ID: %s, Context: %s, ConversationID: %s", apiURL, sessionID, context, conversationID)
 
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -75,7 +77,7 @@ func Serve(apiURL string) {
 			continue
 		}
 
-		resp := handleRequest(client, &req, sessionID)
+		resp := handleRequest(client, &req, sessionID, context, conversationID)
 		respBytes, err := json.Marshal(resp)
 		if err != nil {
 			log.Printf("marshal error: %v", err)
@@ -90,7 +92,7 @@ func Serve(apiURL string) {
 	}
 }
 
-func handleRequest(client *APIClient, req *jsonRPCRequest, sessionID string) *jsonRPCResponse {
+func handleRequest(client *APIClient, req *jsonRPCRequest, sessionID, context, conversationID string) *jsonRPCResponse {
 	switch req.Method {
 	case "initialize":
 		return &jsonRPCResponse{
@@ -113,12 +115,12 @@ func handleRequest(client *APIClient, req *jsonRPCRequest, sessionID string) *js
 			JSONRPC: "2.0",
 			ID:      req.ID,
 			Result: map[string]interface{}{
-				"tools": toolsDef(),
+				"tools": toolsDef(context),
 			},
 		}
 
 	case "tools/call":
-		return handleToolCall(client, req, sessionID)
+		return handleToolCall(client, req, sessionID, conversationID)
 
 	default:
 		return &jsonRPCResponse{
@@ -132,7 +134,7 @@ func handleRequest(client *APIClient, req *jsonRPCRequest, sessionID string) *js
 	}
 }
 
-func handleToolCall(client *APIClient, req *jsonRPCRequest, sessionID string) *jsonRPCResponse {
+func handleToolCall(client *APIClient, req *jsonRPCRequest, sessionID, conversationID string) *jsonRPCResponse {
 	var params struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -150,7 +152,7 @@ func handleToolCall(client *APIClient, req *jsonRPCRequest, sessionID string) *j
 
 	log.Printf("tool call: %s args=%s", params.Name, string(params.Arguments))
 
-	result, err := executeTool(client, params.Name, params.Arguments, sessionID)
+	result, err := executeTool(client, params.Name, params.Arguments, sessionID, conversationID)
 	if err != nil {
 		log.Printf("tool error: %s: %v", params.Name, err)
 		return &jsonRPCResponse{

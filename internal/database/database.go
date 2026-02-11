@@ -131,46 +131,6 @@ func (d *DB) DeleteSession(ctx context.Context, id string) error {
 	return err
 }
 
-// Macro operations
-func (d *DB) CreateMacro(ctx context.Context, m *Macro) error {
-	query := `INSERT INTO macros (name, description, script, target_type, is_builtin) VALUES (?, ?, ?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, m.Name, m.Description, m.Script, m.TargetType, m.IsBuiltin)
-	if err != nil {
-		return err
-	}
-	m.ID, _ = result.LastInsertId()
-	return nil
-}
-
-func (d *DB) GetMacro(ctx context.Context, id int64) (*Macro, error) {
-	var m Macro
-	err := d.GetContext(ctx, &m, "SELECT * FROM macros WHERE id = ?", id)
-	return &m, err
-}
-
-func (d *DB) GetMacroByName(ctx context.Context, name string) (*Macro, error) {
-	var m Macro
-	err := d.GetContext(ctx, &m, "SELECT * FROM macros WHERE name = ?", name)
-	return &m, err
-}
-
-func (d *DB) ListMacros(ctx context.Context) ([]Macro, error) {
-	var macros []Macro
-	err := d.SelectContext(ctx, &macros, "SELECT * FROM macros ORDER BY is_builtin DESC, name")
-	return macros, err
-}
-
-func (d *DB) UpdateMacro(ctx context.Context, m *Macro) error {
-	query := `UPDATE macros SET name=?, description=?, script=?, target_type=?, updated_at=? WHERE id=?`
-	_, err := d.ExecContext(ctx, query, m.Name, m.Description, m.Script, m.TargetType, time.Now(), m.ID)
-	return err
-}
-
-func (d *DB) DeleteMacro(ctx context.Context, id int64) error {
-	_, err := d.ExecContext(ctx, "DELETE FROM macros WHERE id = ? AND is_builtin = 0", id)
-	return err
-}
-
 // Skill operations
 func (d *DB) CreateSkill(ctx context.Context, s *Skill) error {
 	query := `INSERT INTO skills (name, content, enabled, category, sort_order) VALUES (?, ?, ?, ?, ?)`
@@ -482,17 +442,25 @@ func (d *DB) TouchAIConversation(ctx context.Context, id int64) error {
 }
 
 func (d *DB) DeleteAIConversation(ctx context.Context, id int64) error {
+	d.DeleteTempDocumentsByConversation(ctx, id)
 	_, err := d.ExecContext(ctx, "DELETE FROM ai_conversations WHERE id = ?", id)
 	return err
 }
 
 func (d *DB) DeleteAllAIConversations(ctx context.Context) error {
+	d.ExecContext(ctx, "DELETE FROM temp_documents WHERE conversation_id IS NOT NULL")
 	_, err := d.ExecContext(ctx, "DELETE FROM ai_conversations")
 	return err
 }
 
 // PruneOldAIConversations keeps only the most recent N conversations.
 func (d *DB) PruneOldAIConversations(ctx context.Context, keep int) error {
+	// Clean up temp documents for conversations being pruned
+	d.ExecContext(ctx, `DELETE FROM temp_documents WHERE conversation_id IN (
+		SELECT id FROM ai_conversations WHERE id NOT IN (
+			SELECT id FROM ai_conversations ORDER BY updated_at DESC LIMIT ?
+		)
+	)`, keep)
 	_, err := d.ExecContext(ctx, `DELETE FROM ai_conversations WHERE id NOT IN (
 		SELECT id FROM ai_conversations ORDER BY updated_at DESC LIMIT ?
 	)`, keep)
@@ -518,8 +486,27 @@ func (d *DB) ListAIMessages(ctx context.Context, conversationID int64) ([]AIMess
 
 // Temp Document operations
 func (d *DB) CreateTempDocument(ctx context.Context, doc *TempDocument) error {
-	query := `INSERT INTO temp_documents (id, title, content) VALUES (?, ?, ?)`
-	_, err := d.ExecContext(ctx, query, doc.ID, doc.Title, doc.Content)
+	if doc.Status == "" {
+		doc.Status = "pending"
+	}
+	query := `INSERT INTO temp_documents (id, title, content, conversation_id, summary, status) VALUES (?, ?, ?, ?, ?, ?)`
+	_, err := d.ExecContext(ctx, query, doc.ID, doc.Title, doc.Content, doc.ConversationID, doc.Summary, doc.Status)
+	return err
+}
+
+func (d *DB) UpdateTempDocumentStatus(ctx context.Context, id string, status string) error {
+	_, err := d.ExecContext(ctx, "UPDATE temp_documents SET status = ? WHERE id = ?", status, id)
+	return err
+}
+
+func (d *DB) ListTempDocumentsByConversation(ctx context.Context, conversationID int64) ([]TempDocument, error) {
+	var docs []TempDocument
+	err := d.SelectContext(ctx, &docs, "SELECT * FROM temp_documents WHERE conversation_id = ? ORDER BY created_at ASC", conversationID)
+	return docs, err
+}
+
+func (d *DB) DeleteTempDocumentsByConversation(ctx context.Context, conversationID int64) error {
+	_, err := d.ExecContext(ctx, "DELETE FROM temp_documents WHERE conversation_id = ?", conversationID)
 	return err
 }
 
@@ -655,6 +642,70 @@ func (d *DB) GetTaskSummaryByProject(ctx context.Context, projectID int64) (map[
 	return result, nil
 }
 
+// TaskFilter holds optional filtering parameters for ListAllTasks.
+type TaskFilter struct {
+	Status    string
+	Priority  string
+	ProjectID *int64
+	DueBefore *time.Time
+	DueAfter  *time.Time
+	Search    string
+}
+
+func (d *DB) ListAllTasks(ctx context.Context, f TaskFilter) ([]ProjectTask, error) {
+	query := "SELECT * FROM project_tasks WHERE 1=1"
+	args := []interface{}{}
+
+	if f.Status != "" {
+		query += " AND status = ?"
+		args = append(args, f.Status)
+	}
+	if f.Priority != "" {
+		query += " AND priority = ?"
+		args = append(args, f.Priority)
+	}
+	if f.ProjectID != nil {
+		query += " AND project_id = ?"
+		args = append(args, *f.ProjectID)
+	}
+	if f.DueBefore != nil {
+		query += " AND due_date <= ?"
+		args = append(args, *f.DueBefore)
+	}
+	if f.DueAfter != nil {
+		query += " AND due_date >= ?"
+		args = append(args, *f.DueAfter)
+	}
+	if f.Search != "" {
+		query += " AND (title LIKE ? OR description LIKE ?)"
+		search := "%" + f.Search + "%"
+		args = append(args, search, search)
+	}
+
+	query += " ORDER BY CASE status WHEN 'in_progress' THEN 0 WHEN 'todo' THEN 1 WHEN 'blocked' THEN 2 WHEN 'done' THEN 3 END, sort_order, created_at DESC"
+
+	var tasks []ProjectTask
+	err := d.SelectContext(ctx, &tasks, query, args...)
+	return tasks, err
+}
+
+func (d *DB) GetAllTasksSummary(ctx context.Context) (map[string]int, error) {
+	type statusCount struct {
+		Status string `db:"status"`
+		Count  int    `db:"count"`
+	}
+	var counts []statusCount
+	err := d.SelectContext(ctx, &counts, "SELECT status, COUNT(*) as count FROM project_tasks GROUP BY status")
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]int)
+	for _, c := range counts {
+		result[c.Status] = c.Count
+	}
+	return result, nil
+}
+
 // SessionTask operations
 
 func (d *DB) CreateSessionTask(ctx context.Context, st *SessionTask) error {
@@ -673,7 +724,7 @@ func (d *DB) GetTaskForSession(ctx context.Context, sessionID string) (*ProjectT
 	err := d.GetContext(ctx, &task,
 		`SELECT t.* FROM project_tasks t
 		 INNER JOIN session_tasks st ON t.id = st.task_id
-		 WHERE st.session_id = ? AND st.role IN ('created_from', 'registered_as')
+		 WHERE st.session_id = ? AND st.role IN ('created_from', 'registered_as', 'works_on')
 		 ORDER BY st.created_at DESC LIMIT 1`, sessionID)
 	if err != nil {
 		return nil, err
@@ -812,10 +863,10 @@ func (d *DB) CountUnreadProactive(ctx context.Context) (int, error) {
 	return count, err
 }
 
-// Project Meta Document operations
-func (d *DB) GetProjectMeta(ctx context.Context, projectID int64) (*ProjectMetaDocument, error) {
-	var doc ProjectMetaDocument
-	err := d.GetContext(ctx, &doc, "SELECT * FROM project_meta_documents WHERE project_id = ?", projectID)
+// Memory Doc operations
+func (d *DB) GetMemoryDoc(ctx context.Context, projectID int64) (*MemoryDoc, error) {
+	var doc MemoryDoc
+	err := d.GetContext(ctx, &doc, "SELECT * FROM memory_docs WHERE project_id = ?", projectID)
 	return &doc, err
 }
 
@@ -1037,8 +1088,8 @@ func (d *DB) GetTokenUsageByAISubcategory(ctx context.Context, since time.Time) 
 	return results, err
 }
 
-func (d *DB) UpsertProjectMeta(ctx context.Context, projectID int64, content, updatedBy string, summary string) (*ProjectMetaDocument, error) {
-	query := `INSERT INTO project_meta_documents (project_id, content, version, last_updated_by, summary)
+func (d *DB) UpsertMemoryDoc(ctx context.Context, projectID int64, content, updatedBy string, summary string) (*MemoryDoc, error) {
+	query := `INSERT INTO memory_docs (project_id, content, version, last_updated_by, summary)
 			  VALUES (?, ?, 1, ?, ?)
 			  ON CONFLICT(project_id) DO UPDATE SET
 			    content=excluded.content,
@@ -1050,5 +1101,5 @@ func (d *DB) UpsertProjectMeta(ctx context.Context, projectID int64, content, up
 	if err != nil {
 		return nil, err
 	}
-	return d.GetProjectMeta(ctx, projectID)
+	return d.GetMemoryDoc(ctx, projectID)
 }

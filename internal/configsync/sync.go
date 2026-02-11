@@ -1,4 +1,4 @@
-package macro
+package configsync
 
 import (
 	"context"
@@ -105,6 +105,19 @@ func (cs *ConfigSyncer) syncToLocal(ctx context.Context, project *database.Proje
 	}
 	cs.reportProgress(project.ID, "settings", "done", "Hooks synced")
 
+	// Sync CLAUDE.md → memory doc
+	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing CLAUDE.md to memory doc...")
+	claudeMDPath := filepath.Join(projectPath, "CLAUDE.md")
+	if data, err := os.ReadFile(claudeMDPath); err == nil {
+		if _, err := cs.db.UpsertMemoryDoc(ctx, project.ID, string(data), "sync", "Synced from CLAUDE.md"); err != nil {
+			cs.reportProgress(project.ID, "memory_doc", "error", err.Error())
+		} else {
+			cs.reportProgress(project.ID, "memory_doc", "done", "CLAUDE.md synced to memory doc")
+		}
+	} else {
+		cs.reportProgress(project.ID, "memory_doc", "done", "No CLAUDE.md found")
+	}
+
 	return nil
 }
 
@@ -180,6 +193,25 @@ func (cs *ConfigSyncer) syncToRemote(ctx context.Context, project *database.Proj
 	f.Write(settingsJSON)
 	f.Close()
 	cs.reportProgress(project.ID, "settings", "done", "Hooks synced")
+
+	// Sync CLAUDE.md → memory doc (remote)
+	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing CLAUDE.md to memory doc...")
+	claudeMDPath := filepath.Join(project.Path, "CLAUDE.md")
+	if rf, err := sftpClient.Open(claudeMDPath); err == nil {
+		data, readErr := io.ReadAll(rf)
+		rf.Close()
+		if readErr == nil {
+			if _, err := cs.db.UpsertMemoryDoc(ctx, project.ID, string(data), "sync", "Synced from CLAUDE.md"); err != nil {
+				cs.reportProgress(project.ID, "memory_doc", "error", err.Error())
+			} else {
+				cs.reportProgress(project.ID, "memory_doc", "done", "CLAUDE.md synced to memory doc")
+			}
+		} else {
+			cs.reportProgress(project.ID, "memory_doc", "error", readErr.Error())
+		}
+	} else {
+		cs.reportProgress(project.ID, "memory_doc", "done", "No CLAUDE.md found")
+	}
 
 	return nil
 }

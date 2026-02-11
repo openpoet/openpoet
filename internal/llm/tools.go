@@ -100,8 +100,8 @@ func ChatTools() []ToolDefinition {
 			},
 		},
 		{
-			Name:        "get_project_meta",
-			Description: "Get the meta document for a project. The meta document tracks project goals, progress, and key decisions.",
+			Name:        "get_memory_doc",
+			Description: "Get the memory doc (CLAUDE.md) for a project. Returns a viewer link + internal reference. IMPORTANT: Never paste the content in chat — only share the viewer link with the user.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
@@ -111,13 +111,13 @@ func ChatTools() []ToolDefinition {
 			},
 		},
 		{
-			Name:        "update_project_meta",
-			Description: "Update the meta document for a project. You are the sole editor. The content should be a complete markdown document with project goals, progress, decisions, and any relevant context.",
+			Name:        "update_memory_doc",
+			Description: "Propose changes to the memory doc (CLAUDE.md) for a project. Creates a preview for user approval — changes are NOT applied immediately. Only use when the user explicitly asks.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
 					"project_id": {Type: "string", Description: "The project ID (number)"},
-					"content":    {Type: "string", Description: "Full markdown content for the meta document"},
+					"content":    {Type: "string", Description: "Full markdown content for the memory doc"},
 					"summary":    {Type: "string", Description: "Brief summary of what changed in this update"},
 				},
 				Required: []string{"project_id", "content"},

@@ -12,8 +12,30 @@ type MCPTool struct {
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
+// chatOnlyTools lists tools that should only be available in chat context (no session ID).
+var chatOnlyTools = map[string]bool{
+	"devmanager_update_memory_doc": true,
+}
+
 // toolsDef returns the list of MCP tools exposed by DevManager.
-func toolsDef() []MCPTool {
+// When context is "chat" (spawned by AI Assistant), all tools are included.
+// Otherwise (terminal sessions), chat-only tools are excluded.
+func toolsDef(context string) []MCPTool {
+	all := allToolsDef()
+	if context == "chat" {
+		return all
+	}
+	// Filter out chat-only tools for terminal sessions
+	var filtered []MCPTool
+	for _, t := range all {
+		if !chatOnlyTools[t.Name] {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
+}
+
+func allToolsDef() []MCPTool {
 	return []MCPTool{
 		{
 			Name:        "devmanager_list_skills",
@@ -81,14 +103,14 @@ func toolsDef() []MCPTool {
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"project_id":{"type":"number","description":"The project ID"},"path":{"type":"string","description":"Relative path to the file within the project"}},"required":["project_id","path"]}`),
 		},
 		{
-			Name:        "devmanager_get_project_meta",
-			Description: "Get the meta document for a project. The meta document tracks project goals, progress, and key decisions. Returns the markdown content or empty if none exists.",
+			Name:        "devmanager_get_memory_doc",
+			Description: "Get the memory doc for a project. The memory doc tracks project goals, progress, and key decisions. Returns the markdown content or empty if none exists.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"project_id":{"type":"number","description":"The project ID"}},"required":["project_id"]}`),
 		},
 		{
-			Name:        "devmanager_update_project_meta",
-			Description: "Update the meta document for a project. The meta document is a markdown document that tracks project goals, progress, architecture decisions, and key information. You are the sole editor of this document.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"project_id":{"type":"number","description":"The project ID"},"content":{"type":"string","description":"Full markdown content for the meta document"},"summary":{"type":"string","description":"Brief summary of what changed in this update"}},"required":["project_id","content"]}`),
+			Name:        "devmanager_update_memory_doc",
+			Description: "Propose changes to a project's memory doc. Changes are NOT applied immediately — they create a proposal that the user must approve via the DevManager UI.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"project_id":{"type":"number","description":"The project ID"},"content":{"type":"string","description":"Full markdown content for the memory doc"},"summary":{"type":"string","description":"Brief summary of what changed in this update"}},"required":["project_id","content"]}`),
 		},
 		{
 			Name:        "devmanager_list_tasks",
@@ -130,7 +152,7 @@ func toolsDef() []MCPTool {
 }
 
 // executeTool runs a tool by name with the given arguments, calling the DevManager API.
-func executeTool(client *APIClient, name string, args json.RawMessage, sessionID string) (string, error) {
+func executeTool(client *APIClient, name string, args json.RawMessage, sessionID, conversationID string) (string, error) {
 	var params map[string]interface{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &params); err != nil {
@@ -287,7 +309,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return formatFileContent(body)
 
-	case "devmanager_get_project_meta":
+	case "devmanager_get_memory_doc":
 		projectID, ok := getID(params)
 		if !ok {
 			if v, exists := params["project_id"]; exists {
@@ -298,12 +320,12 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 				return "", fmt.Errorf("project_id is required")
 			}
 		}
-		endpoint := fmt.Sprintf("/api/projects/%d/meta", projectID)
+		endpoint := fmt.Sprintf("/api/projects/%d/memory-doc", projectID)
 		body, err := client.Get(endpoint)
 		if err != nil {
 			return "", err
 		}
-		return formatMetaDoc(body)
+		return formatMemoryDoc(body)
 
 	case "devmanager_list_tasks":
 		projectID := getProjectID(params)
@@ -362,7 +384,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return fmt.Sprintf("Task %d deleted", taskID), nil
 
-	case "devmanager_update_project_meta":
+	case "devmanager_update_memory_doc":
 		projectID, ok := getID(params)
 		if !ok {
 			if v, exists := params["project_id"]; exists {
@@ -378,17 +400,24 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 			return "", fmt.Errorf("content is required")
 		}
 		summary, _ := params["summary"].(string)
-		payload, _ := json.Marshal(map[string]string{
-			"content":    content,
-			"updated_by": "ai",
-			"summary":    summary,
+		payload, _ := json.Marshal(map[string]interface{}{
+			"project_id":      projectID,
+			"content":         content,
+			"summary":         summary,
+			"conversation_id": conversationID,
 		})
-		endpoint := fmt.Sprintf("/api/projects/%d/meta", projectID)
-		body, err := client.Put(endpoint, string(payload))
+		body, err := client.Post("/api/memory-doc/propose", string(payload))
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Meta document updated: %s", string(body)), nil
+		var result struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(body, &result) == nil && result.Message != "" {
+			return result.Message, nil
+		}
+		return "Proposta de alteração criada. O usuário precisa aprovar antes que a alteração seja aplicada.", nil
 
 	case "devmanager_get_my_task":
 		if sessionID == "" {
@@ -564,8 +593,8 @@ func formatFileContent(body []byte) (string, error) {
 	return fmt.Sprintf("--- %s (%s) ---\n%s", file.Path, formatSize(file.Size), file.Content), nil
 }
 
-// formatMetaDoc formats the meta document JSON response.
-func formatMetaDoc(body []byte) (string, error) {
+// formatMemoryDoc formats the memory doc JSON response.
+func formatMemoryDoc(body []byte) (string, error) {
 	var meta struct {
 		ProjectID int64  `json:"project_id"`
 		Content   string `json:"content"`
@@ -576,9 +605,9 @@ func formatMetaDoc(body []byte) (string, error) {
 		return string(body), nil
 	}
 	if !meta.Exists || meta.Content == "" {
-		return fmt.Sprintf("No meta document exists for project %d yet.", meta.ProjectID), nil
+		return fmt.Sprintf("No memory doc exists for project %d yet. Sync the project to load its CLAUDE.md.", meta.ProjectID), nil
 	}
-	return fmt.Sprintf("--- Meta Document (v%d) ---\n%s", meta.Version, meta.Content), nil
+	return fmt.Sprintf("--- Memory Doc (v%d) ---\n%s", meta.Version, meta.Content), nil
 }
 
 func formatSize(bytes int64) string {
