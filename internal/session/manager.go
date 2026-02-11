@@ -222,6 +222,116 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	return session, nil
 }
 
+func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, project *database.Project, envVars map[string]string) error {
+	sessionID := session.ID
+
+	// Verify session is not already running
+	m.mu.RLock()
+	_, alreadyRunning := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if alreadyRunning {
+		return fmt.Errorf("session %s is already running", sessionID)
+	}
+
+	// Reset DB record
+	if err := m.db.ReopenSession(ctx, sessionID); err != nil {
+		return fmt.Errorf("failed to reopen session in DB: %w", err)
+	}
+
+	// Create output buffer (1MB max)
+	outputBuffer := NewOutputBuffer(1024 * 1024)
+
+	// Inject hook environment variables
+	if envVars == nil {
+		envVars = make(map[string]string)
+	}
+	envVars["DEVMANAGER_HOOK_URL"] = "http://" + m.serverAddr
+	envVars["DEVMANAGER_SESSION_ID"] = sessionID
+
+	// Inject OpenTelemetry env vars for Claude Code token tracking
+	envVars["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
+	envVars["OTEL_METRICS_EXPORTER"] = "otlp"
+	envVars["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/json"
+	envVars["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://" + m.serverAddr
+	envVars["OTEL_RESOURCE_ATTRIBUTES"] = "devmanager.session_id=" + sessionID
+	envVars["OTEL_METRIC_EXPORT_INTERVAL"] = "10000"
+
+	// Build CLI args - start with --continue to resume conversation
+	var cliArgs []string
+	cliArgs = append(cliArgs, "--continue")
+
+	// Build MCP config for --mcp-config CLI flag
+	if mcpJSON := m.buildMCPConfigJSON(ctx); mcpJSON != "" {
+		cliArgs = append(cliArgs, "--mcp-config", mcpJSON)
+	}
+
+	// Inject task system prompt if present
+	if prompt, ok := envVars["DEVMANAGER_APPEND_SYSTEM_PROMPT"]; ok && prompt != "" {
+		cliArgs = append(cliArgs, "--append-system-prompt", prompt)
+		delete(envVars, "DEVMANAGER_APPEND_SYSTEM_PROMPT")
+	}
+
+	// Create runner based on project type
+	var runner Runner
+	var err error
+
+	if project.Type == "local" {
+		runner, err = NewLocalRunner(project.Path, envVars, func(data []byte) {
+			outputBuffer.Write(data)
+			m.hub.BroadcastSessionOutput(sessionID, data)
+			m.checkForNotificationTriggers(sessionID, data)
+		}, cliArgs)
+	} else {
+		return fmt.Errorf("remote session reopen not yet implemented")
+	}
+
+	if err != nil {
+		m.db.EndSession(ctx, sessionID, "error")
+		return fmt.Errorf("failed to create runner: %w", err)
+	}
+
+	// Start the session
+	sessionCtx, cancel := context.WithCancel(context.Background())
+	rs := &runningSession{
+		session:      session,
+		runner:       runner,
+		cancel:       cancel,
+		output:       make(chan []byte, 100),
+		outputBuffer: outputBuffer,
+	}
+
+	m.mu.Lock()
+	m.sessions[sessionID] = rs
+	m.mu.Unlock()
+
+	if err := runner.Start(sessionCtx); err != nil {
+		cancel()
+		m.mu.Lock()
+		delete(m.sessions, sessionID)
+		m.mu.Unlock()
+		m.db.EndSession(ctx, sessionID, "error")
+		return fmt.Errorf("failed to start runner: %w", err)
+	}
+
+	// Update session status and PID
+	session.Status = "running"
+	m.db.UpdateSessionStatus(ctx, sessionID, "running")
+	if pid := runner.PID(); pid > 0 {
+		m.db.UpdateSessionPID(ctx, sessionID, pid)
+	}
+
+	m.hub.BroadcastSessionStatus(sessionID, "running")
+
+	// Monitor session completion
+	go m.monitorSession(sessionID, rs)
+
+	if m.OnSessionStart != nil {
+		go m.OnSessionStart(sessionID)
+	}
+
+	return nil
+}
+
 func (m *Manager) StopSession(ctx context.Context, sessionID string) error {
 	m.mu.RLock()
 	rs, ok := m.sessions[sessionID]

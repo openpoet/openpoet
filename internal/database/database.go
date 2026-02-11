@@ -441,6 +441,14 @@ func (d *DB) TouchAIConversation(ctx context.Context, id int64) error {
 	return err
 }
 
+// UpdateAIConversationMode updates the proactive type and context of a conversation (used for planning mode switch).
+func (d *DB) UpdateAIConversationMode(ctx context.Context, id int64, proactiveType, proactiveContext string) error {
+	_, err := d.ExecContext(ctx,
+		"UPDATE ai_conversations SET proactive_type=?, proactive_context=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+		proactiveType, proactiveContext, id)
+	return err
+}
+
 func (d *DB) DeleteAIConversation(ctx context.Context, id int64) error {
 	d.DeleteTempDocumentsByConversation(ctx, id)
 	_, err := d.ExecContext(ctx, "DELETE FROM ai_conversations WHERE id = ?", id)
@@ -469,8 +477,11 @@ func (d *DB) PruneOldAIConversations(ctx context.Context, keep int) error {
 
 // AI Message operations
 func (d *DB) CreateAIMessage(ctx context.Context, m *AIMessage) error {
-	query := `INSERT INTO ai_messages (conversation_id, role, content, tool_calls) VALUES (?, ?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, m.ConversationID, m.Role, m.Content, m.ToolCalls)
+	if m.Status == "" {
+		m.Status = "completed"
+	}
+	query := `INSERT INTO ai_messages (conversation_id, role, content, tool_calls, status) VALUES (?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, m.ConversationID, m.Role, m.Content, m.ToolCalls, m.Status)
 	if err != nil {
 		return err
 	}
@@ -482,6 +493,26 @@ func (d *DB) ListAIMessages(ctx context.Context, conversationID int64) ([]AIMess
 	var msgs []AIMessage
 	err := d.SelectContext(ctx, &msgs, "SELECT * FROM ai_messages WHERE conversation_id = ? ORDER BY created_at ASC", conversationID)
 	return msgs, err
+}
+
+// UpdateAIMessageContent updates the content and tool_calls of a streaming message (debounced flush).
+func (d *DB) UpdateAIMessageContent(ctx context.Context, id int64, content string, toolCalls string) error {
+	_, err := d.ExecContext(ctx, "UPDATE ai_messages SET content=?, tool_calls=? WHERE id=?", content, toolCalls, id)
+	return err
+}
+
+// UpdateAIMessageStatus sets the final status of a message (completed or error).
+func (d *DB) UpdateAIMessageStatus(ctx context.Context, id int64, status string, content string, toolCalls string, errorInfo string) error {
+	_, err := d.ExecContext(ctx, "UPDATE ai_messages SET status=?, content=?, tool_calls=?, error_info=? WHERE id=?",
+		status, content, toolCalls, errorInfo, id)
+	return err
+}
+
+// FixStaleStreamingMessages marks any leftover 'streaming' messages as 'error' on startup.
+func (d *DB) FixStaleStreamingMessages(ctx context.Context) error {
+	_, err := d.ExecContext(ctx,
+		"UPDATE ai_messages SET status='error', error_info='Server restarted during streaming' WHERE status='streaming'")
+	return err
 }
 
 // Temp Document operations
@@ -743,23 +774,29 @@ func (d *DB) GetSessionsForTask(ctx context.Context, taskID int64) ([]Session, e
 }
 
 func (d *DB) GetTaskSessionSummary(ctx context.Context, projectID int64) ([]struct {
-	TaskID        int64  `db:"task_id" json:"task_id"`
-	SessionCount  int    `db:"session_count" json:"session_count"`
-	ActiveCount   int    `db:"active_count" json:"active_count"`
-	LatestSession string `db:"latest_session" json:"latest_session"`
+	TaskID               int64  `db:"task_id" json:"task_id"`
+	SessionCount         int    `db:"session_count" json:"session_count"`
+	ActiveCount          int    `db:"active_count" json:"active_count"`
+	StoppedCount         int    `db:"stopped_count" json:"stopped_count"`
+	LatestSession        string `db:"latest_session" json:"latest_session"`
+	LatestStoppedSession string `db:"latest_stopped_session" json:"latest_stopped_session"`
 }, error) {
 	type taskSessionInfo struct {
-		TaskID        int64  `db:"task_id" json:"task_id"`
-		SessionCount  int    `db:"session_count" json:"session_count"`
-		ActiveCount   int    `db:"active_count" json:"active_count"`
-		LatestSession string `db:"latest_session" json:"latest_session"`
+		TaskID               int64  `db:"task_id" json:"task_id"`
+		SessionCount         int    `db:"session_count" json:"session_count"`
+		ActiveCount          int    `db:"active_count" json:"active_count"`
+		StoppedCount         int    `db:"stopped_count" json:"stopped_count"`
+		LatestSession        string `db:"latest_session" json:"latest_session"`
+		LatestStoppedSession string `db:"latest_stopped_session" json:"latest_stopped_session"`
 	}
 	var results []taskSessionInfo
 	err := d.SelectContext(ctx, &results, `
 		SELECT st.task_id,
 		       COUNT(DISTINCT st.session_id) as session_count,
 		       COUNT(DISTINCT CASE WHEN s.status IN ('running', 'starting') THEN st.session_id END) as active_count,
-		       COALESCE(MAX(s.id), '') as latest_session
+		       COUNT(DISTINCT CASE WHEN s.status IN ('stopped', 'completed') THEN st.session_id END) as stopped_count,
+		       COALESCE(MAX(s.id), '') as latest_session,
+		       COALESCE(MAX(CASE WHEN s.status IN ('stopped', 'completed') THEN s.id END), '') as latest_stopped_session
 		FROM session_tasks st
 		INNER JOIN sessions s ON s.id = st.session_id
 		INNER JOIN project_tasks t ON t.id = st.task_id
@@ -770,18 +807,29 @@ func (d *DB) GetTaskSessionSummary(ctx context.Context, projectID int64) ([]stru
 	}
 	// Convert to the return type
 	out := make([]struct {
-		TaskID        int64  `db:"task_id" json:"task_id"`
-		SessionCount  int    `db:"session_count" json:"session_count"`
-		ActiveCount   int    `db:"active_count" json:"active_count"`
-		LatestSession string `db:"latest_session" json:"latest_session"`
+		TaskID               int64  `db:"task_id" json:"task_id"`
+		SessionCount         int    `db:"session_count" json:"session_count"`
+		ActiveCount          int    `db:"active_count" json:"active_count"`
+		StoppedCount         int    `db:"stopped_count" json:"stopped_count"`
+		LatestSession        string `db:"latest_session" json:"latest_session"`
+		LatestStoppedSession string `db:"latest_stopped_session" json:"latest_stopped_session"`
 	}, len(results))
 	for i, r := range results {
 		out[i].TaskID = r.TaskID
 		out[i].SessionCount = r.SessionCount
 		out[i].ActiveCount = r.ActiveCount
+		out[i].StoppedCount = r.StoppedCount
 		out[i].LatestSession = r.LatestSession
+		out[i].LatestStoppedSession = r.LatestStoppedSession
 	}
 	return out, nil
+}
+
+func (d *DB) ReopenSession(ctx context.Context, id string) error {
+	_, err := d.ExecContext(ctx,
+		"UPDATE sessions SET status='starting', end_time=NULL, start_time=?, pid=NULL WHERE id=? AND status IN ('stopped', 'completed')",
+		time.Now(), id)
+	return err
 }
 
 // AISuggestion operations

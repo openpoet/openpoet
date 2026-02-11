@@ -2879,6 +2879,38 @@ body {
     color: var(--color-text-muted);
     font-size: 12px;
 }
+.ai-chat-status-indicator {
+    margin-top: 8px;
+    padding: 4px 8px;
+    font-size: 0.85em;
+    border-radius: 4px;
+}
+.ai-chat-status-streaming {
+    color: var(--color-primary, #3b82f6);
+    background: rgba(59, 130, 246, 0.1);
+}
+.ai-chat-status-interrupted {
+    color: var(--color-warning, #f59e0b);
+    background: rgba(245, 158, 11, 0.1);
+}
+.ai-chat-status-error {
+    color: var(--color-danger, #ef4444);
+    background: rgba(239, 68, 68, 0.1);
+}
+.ai-chat-retry-btn {
+    margin-top: 8px;
+    padding: 4px 12px;
+    font-size: 0.85em;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--color-primary);
+    cursor: pointer;
+}
+.ai-chat-retry-btn:hover {
+    background: var(--color-primary);
+    color: white;
+}
 .ai-chat-token-info {
     font-size: 11px;
     color: var(--color-text-muted);
@@ -3820,6 +3852,59 @@ body {
     gap: 6px;
 }
 
+/* Planning button in tasks header */
+#btn-plan-tasks {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+#btn-plan-tasks svg {
+    flex-shrink: 0;
+}
+
+/* Planning project selection modal */
+.planning-project-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 300px;
+    overflow-y: auto;
+}
+.planning-project-option {
+    cursor: pointer;
+    display: block;
+}
+.planning-project-option input[type="radio"] {
+    display: none;
+}
+.planning-project-card {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border: 2px solid var(--color-border);
+    border-radius: 8px;
+    transition: border-color 0.15s, background 0.15s;
+}
+.planning-project-option input[type="radio"]:checked + .planning-project-card {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+}
+.planning-project-card:hover {
+    border-color: var(--color-primary);
+}
+.planning-project-card strong {
+    flex: 1;
+}
+.planning-project-path {
+    font-size: 0.8em;
+    color: var(--color-text-secondary);
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .task-card {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
@@ -4005,6 +4090,104 @@ body {
     .task-description-preview {
         max-width: 180px;
     }
+}
+
+/* ============ Task Select Modal ============ */
+
+.task-select-list {
+    max-height: 320px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.task-select-item {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--color-surface, #fff);
+    border: 1px solid var(--color-border, #e0e0e0);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: border-color 0.15s, background-color 0.15s;
+}
+
+.task-select-item:hover {
+    border-color: var(--color-primary, #4f46e5);
+    background: var(--color-bg-tertiary, #f8f8f8);
+}
+
+.task-select-item .task-priority-indicator {
+    width: 4px;
+    min-height: 24px;
+    border-radius: 2px;
+    flex-shrink: 0;
+    align-self: stretch;
+}
+
+.task-select-item-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.task-select-item-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--color-text, #333);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.task-select-item-meta {
+    font-size: 11px;
+    color: var(--color-text-secondary, #666);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 2px;
+    flex-wrap: wrap;
+}
+
+.task-select-view {
+    flex-shrink: 0;
+    color: var(--color-text-secondary, #888);
+    opacity: 0.6;
+    transition: opacity 0.15s;
+}
+.task-select-view:hover {
+    opacity: 1;
+    color: var(--color-primary, #4f46e5);
+}
+
+.task-select-item-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+    width: 100%;
+    justify-content: flex-end;
+    padding-top: 4px;
+    border-top: 1px solid var(--color-border-light, #eee);
+    margin-top: 2px;
+}
+
+.task-select-item-actions .btn {
+    font-size: 11px;
+    padding: 4px 10px;
+    white-space: nowrap;
+}
+
+.task-select-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+    color: var(--color-text-secondary, #666);
+    gap: 10px;
+    font-size: 13px;
 }
 
 /* ============ All Tasks View ============ */

@@ -124,6 +124,8 @@ type AIMessage struct {
 	Role           string    `db:"role" json:"role"` // 'user', 'assistant'
 	Content        string    `db:"content" json:"content"`
 	ToolCalls      string    `db:"tool_calls" json:"tool_calls"` // JSON array
+	Status         string    `db:"status" json:"status"`           // 'streaming', 'completed', 'error'
+	ErrorInfo      string    `db:"error_info" json:"error_info"`   // error description when status='error'
 	CreatedAt      time.Time `db:"created_at" json:"created_at"`
 }
 

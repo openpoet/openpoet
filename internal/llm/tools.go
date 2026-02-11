@@ -203,5 +203,94 @@ func ChatTools() []ToolDefinition {
 				Required: []string{"title", "content"},
 			},
 		},
+		// File exploration tools (used by planning mode and general chat)
+		{
+			Name:        "list_directory",
+			Description: "List files and directories in a project path. Returns names, sizes, and types. Use to browse the project structure.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"path":       {Type: "string", Description: "Relative path within the project (empty or omit for root directory)"},
+				},
+				Required: []string{"project_id"},
+			},
+		},
+		{
+			Name:        "read_file",
+			Description: "Read the content of a text file from a project. Supports optional line offset and limit for reading specific sections of large files. Max 2MB file size.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"path":       {Type: "string", Description: "Relative path to the file within the project"},
+					"offset":     {Type: "string", Description: "Line number to start reading from (1-based, optional)"},
+					"limit":      {Type: "string", Description: "Number of lines to read (optional, default: all lines)"},
+				},
+				Required: []string{"project_id", "path"},
+			},
+		},
+		{
+			Name:        "find_files",
+			Description: "Find files matching a glob pattern recursively in a project. Returns matching file paths sorted alphabetically. Skips common non-essential directories (.git, node_modules, vendor, etc.). Max 100 results.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"pattern":    {Type: "string", Description: "Glob pattern to match file names (e.g. '*.go', '*.tsx', 'Makefile')"},
+				},
+				Required: []string{"project_id", "pattern"},
+			},
+		},
+		{
+			Name:        "grep_content",
+			Description: "Search file contents using a regex pattern in a project. Returns matching lines with file paths and line numbers. Skips binary files and files larger than 1MB. Max 50 results.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"pattern":    {Type: "string", Description: "Regular expression pattern to search for (e.g. 'func.*Handler', 'import.*react')"},
+					"path":       {Type: "string", Description: "Subdirectory to restrict search to (optional, empty = entire project)"},
+					"glob":       {Type: "string", Description: "File name filter pattern (e.g. '*.go', '*.ts') — optional"},
+				},
+				Required: []string{"project_id", "pattern"},
+			},
+		},
+		// Planning mode activation tool
+		{
+			Name:        "activate_planning_mode",
+			Description: "Switch this conversation to planning mode for a specific project. This enables the planning workflow with file exploration tools and task creation. Use when the user wants to plan features, refactoring, or any development work that should be broken into tasks.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number) to plan for"},
+				},
+				Required: []string{"project_id"},
+			},
+		},
 	}
+}
+
+// PlanningTools returns the subset of tools available in planning mode.
+func PlanningTools() []ToolDefinition {
+	all := ChatTools()
+	allowed := map[string]bool{
+		"list_projects":  true,
+		"list_directory": true,
+		"read_file":      true,
+		"find_files":     true,
+		"grep_content":   true,
+		"list_tasks":     true,
+		"create_task":    true,
+		"update_task":    true,
+		"get_task_report": true,
+		"create_document": true,
+	}
+	var filtered []ToolDefinition
+	for _, t := range all {
+		if allowed[t.Name] {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
 }

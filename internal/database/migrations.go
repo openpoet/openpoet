@@ -31,6 +31,7 @@ var migrations = []Migration{
 	{Version: 13, Description: "docs: add conversation_id to temp_documents", Up: migrateV13},
 	{Version: 14, Description: "remove macros table", Up: migrateV14},
 	{Version: 15, Description: "docs: add summary and status to temp_documents", Up: migrateV15},
+	{Version: 16, Description: "ai_messages: add status and error_info columns for streaming persistence", Up: migrateV16},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -477,6 +478,20 @@ func migrateV15(tx *sqlx.Tx) error {
 	stmts := []string{
 		`ALTER TABLE temp_documents ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE temp_documents ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("statement failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV16 adds status and error_info columns to ai_messages for streaming persistence.
+func migrateV16(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE ai_messages ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'`,
+		`ALTER TABLE ai_messages ADD COLUMN error_info TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
