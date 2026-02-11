@@ -1,11 +1,13 @@
 package files
 
 import (
+	"bufio"
 	"devmanager/internal/database"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -313,6 +315,136 @@ func (m *RemoteFileManager) GetMimeType(relativePath string) string {
 		return mimeType
 	}
 	return "application/octet-stream"
+}
+
+// Glob finds files matching a pattern recursively via SFTP.
+func (m *RemoteFileManager) Glob(pattern string) ([]string, error) {
+	const maxResults = 100
+
+	sshClient, sftpClient, err := m.connect()
+	if err != nil {
+		return nil, err
+	}
+	defer sftpClient.Close()
+	defer sshClient.Close()
+
+	var results []string
+	walker := sftpClient.Walk(m.project.Path)
+	for walker.Step() {
+		if len(results) >= maxResults {
+			break
+		}
+		if err := walker.Err(); err != nil {
+			continue
+		}
+		fi := walker.Stat()
+		if fi.IsDir() {
+			if ignoredDirs[fi.Name()] {
+				walker.SkipDir()
+				continue
+			}
+			continue
+		}
+		matched, _ := filepath.Match(pattern, fi.Name())
+		if matched {
+			rel, _ := filepath.Rel(m.project.Path, walker.Path())
+			results = append(results, rel)
+		}
+	}
+	return results, nil
+}
+
+// Grep searches file contents for a regex pattern via SFTP.
+func (m *RemoteFileManager) Grep(pattern string, searchPath string, fileGlob string) ([]GrepResult, error) {
+	const maxResults = 50
+	const maxFileSize int64 = 1 * 1024 * 1024
+
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid regex: %w", err)
+	}
+
+	sshClient, sftpClient, err := m.connect()
+	if err != nil {
+		return nil, err
+	}
+	defer sftpClient.Close()
+	defer sshClient.Close()
+
+	searchRoot := m.project.Path
+	if searchPath != "" {
+		searchRoot = filepath.Join(m.project.Path, searchPath)
+	}
+
+	var results []GrepResult
+	walker := sftpClient.Walk(searchRoot)
+	for walker.Step() {
+		if len(results) >= maxResults {
+			break
+		}
+		if err := walker.Err(); err != nil {
+			continue
+		}
+		fi := walker.Stat()
+		if fi.IsDir() {
+			if ignoredDirs[fi.Name()] {
+				walker.SkipDir()
+				continue
+			}
+			continue
+		}
+		if fi.Size() > maxFileSize {
+			continue
+		}
+		if fileGlob != "" {
+			matched, _ := filepath.Match(fileGlob, fi.Name())
+			if !matched {
+				continue
+			}
+		}
+
+		relPath, _ := filepath.Rel(m.project.Path, walker.Path())
+
+		file, err := sftpClient.Open(walker.Path())
+		if err != nil {
+			continue
+		}
+
+		// Binary check
+		header := make([]byte, 512)
+		n, _ := file.Read(header)
+		isBinary := false
+		for i := 0; i < n; i++ {
+			if header[i] == 0 {
+				isBinary = true
+				break
+			}
+		}
+		if isBinary {
+			file.Close()
+			continue
+		}
+		file.Seek(0, 0)
+
+		scanner := bufio.NewScanner(file)
+		lineNum := 0
+		for scanner.Scan() {
+			lineNum++
+			line := scanner.Text()
+			if re.MatchString(line) {
+				results = append(results, GrepResult{
+					File:    relPath,
+					Line:    lineNum,
+					Content: line,
+				})
+				if len(results) >= maxResults {
+					break
+				}
+			}
+		}
+		file.Close()
+	}
+	return results, nil
 }
 
 // GetBasePath returns the project path

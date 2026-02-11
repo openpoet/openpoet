@@ -657,6 +657,71 @@ func (a *API) DeleteSession(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (a *API) ReopenSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+
+	sess, err := a.db.GetSession(r.Context(), sessionID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Session not found")
+		return
+	}
+
+	if sess.Status != "stopped" && sess.Status != "completed" {
+		respondError(w, http.StatusConflict, fmt.Sprintf("Session cannot be reopened: current status is '%s'", sess.Status))
+		return
+	}
+
+	if a.sessionMgr.IsSessionRunning(sessionID) {
+		respondError(w, http.StatusConflict, "Session is already running")
+		return
+	}
+
+	project, err := a.db.GetProject(r.Context(), sess.ProjectID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	// Auto-sync config before starting
+	if a.configSync != nil {
+		if syncErr := a.configSync.SyncToProject(r.Context(), project); syncErr != nil {
+			log.Printf("Warning: config sync failed before session reopen: %v", syncErr)
+		}
+	}
+
+	// Build env vars with task context if linked
+	envVars := make(map[string]string)
+	linkedTask, _ := a.db.GetTaskForSession(r.Context(), sessionID)
+	if linkedTask != nil {
+		envVars["DEVMANAGER_TASK_ID"] = fmt.Sprintf("%d", linkedTask.ID)
+		envVars["DEVMANAGER_TASK_TITLE"] = linkedTask.Title
+
+		description := linkedTask.Description
+		if description == "" {
+			description = "(no description provided)"
+		}
+		envVars["DEVMANAGER_APPEND_SYSTEM_PROMPT"] = fmt.Sprintf(
+			"You have been assigned the following task by DevManager:\n\n"+
+				"Title: %s\n\n"+
+				"Description:\n%s\n\n"+
+				"IMPORTANT: This is a RESUMED session. You are continuing work from a previous conversation.\n\n"+
+				"IMPORTANT: Communicate with the user in the same language used in the task title and description above. "+
+				"If the task is written in Portuguese, respond in Portuguese. If in English, respond in English. Match the language naturally.\n\n"+
+				"You can use the devmanager_get_my_task MCP tool to fetch updated task details or the devmanager_request_task_evaluation tool when you believe you have completed significant work.",
+			linkedTask.Title, description,
+		)
+	}
+
+	if err := a.sessionMgr.ReopenSession(r.Context(), sess, project, envVars); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Refresh session from DB for updated fields
+	sess, _ = a.db.GetSession(r.Context(), sessionID)
+	respondJSON(w, http.StatusOK, sess)
+}
+
 // ============ Skills ============
 
 // validateSkillName checks for empty, path traversal, and invalid characters.

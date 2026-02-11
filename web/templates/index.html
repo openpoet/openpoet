@@ -132,6 +132,14 @@
             <section id="view-tasks" class="view">
                 <header class="view-header">
                     <h2>All Tasks</h2>
+                    <button class="btn btn-primary btn-sm" id="btn-plan-tasks" onclick="app.startPlanning()" title="Planejar com IA">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                            <polyline points="2 17 12 22 22 17"></polyline>
+                            <polyline points="2 12 12 17 22 12"></polyline>
+                        </svg>
+                        Planejar
+                    </button>
                 </header>
                 <div id="all-tasks-stats" class="all-tasks-stats"></div>
                 <div id="all-tasks-filters" class="all-tasks-filter-bar">
@@ -633,6 +641,27 @@
             <div class="modal-footer">
                 <button id="session-name-cancel" class="btn btn-secondary">Cancel</button>
                 <button id="session-name-start" class="btn btn-primary">Start Session</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Task Select Modal (before session start) -->
+    <div id="task-select-modal" class="modal-overlay hidden">
+        <div class="modal-container" style="max-width: 540px;">
+            <div class="modal-header">
+                <h3>Link a Task?</h3>
+            </div>
+            <div class="modal-body" style="padding: 12px 20px;">
+                <p style="margin-bottom: 12px; color: var(--color-text-secondary, #666); font-size: 13px;">
+                    This project has pending tasks. Select one to link to this session, or skip to start without a task.
+                </p>
+                <div id="task-select-list" class="task-select-list">
+                    <!-- Dynamically populated -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="task-select-cancel" class="btn btn-secondary">Cancel</button>
+                <button id="task-select-skip" class="btn btn-primary">Skip / No task</button>
             </div>
         </div>
     </div>

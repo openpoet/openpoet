@@ -273,8 +273,16 @@ class DevManager {
                 break;
             case 'session':
                 this.loadSessions();
-                if (this.currentSession === data.id) {
-                    // Update terminal status
+                // Handle session rename (e.g. when dynamically linked to a task)
+                if (data.data?.action === 'renamed' && data.data?.session_id && data.data?.name) {
+                    const sessionId = data.data.session_id;
+                    const newName = data.data.name;
+                    window.terminalManager?.renameSession(sessionId, newName);
+                    const tab = document.querySelector(`.terminal-tab[data-session-id="${sessionId}"]`);
+                    if (tab) {
+                        const nameSpan = tab.querySelector('.terminal-tab-name');
+                        if (nameSpan) nameSpan.textContent = newName;
+                    }
                 }
                 break;
             case 'task':
@@ -390,18 +398,51 @@ class DevManager {
     }
 
     async startSession(projectId) {
-        // Get project name for default session name
         const project = this.projects.find(p => p.id === projectId);
         const projectName = project?.name || 'Session';
-        const defaultName = `${projectName} (${new Date().toLocaleTimeString()})`;
 
-        // Show session name modal
+        // Step 1: Check for pending tasks and optionally select one
+        const taskSelection = await this.showTaskSelectModal(projectId);
+        if (taskSelection === false) return; // User cancelled
+
+        // Step 2: If reconnecting to existing active session, just open terminal
+        if (taskSelection && taskSelection.reconnect) {
+            this.openTerminal(taskSelection.reconnect);
+            return;
+        }
+
+        // Step 2b: If reopening a stopped session, call reopen API then open terminal
+        if (taskSelection && taskSelection.reopen) {
+            try {
+                const sess = await this.api('POST', `/sessions/${taskSelection.reopen}/reopen`);
+                this.showToast('Success', 'Session reopened (continuing conversation)', 'success');
+                this.openTerminal(sess.id, sess, sess.name);
+            } catch (error) {
+                this.showToast('Error', `Failed to reopen session: ${error.message}`, 'error');
+            }
+            return;
+        }
+
+        // Step 3: Determine default session name
+        let defaultName;
+        let taskId = null;
+        if (taskSelection && taskSelection.taskId) {
+            taskId = taskSelection.taskId;
+            defaultName = `Task: ${taskSelection.taskTitle}`;
+        } else {
+            defaultName = `${projectName} (${new Date().toLocaleTimeString()})`;
+        }
+
+        // Step 4: Show session name modal
         const customName = await this.showSessionNameModal(defaultName);
-        if (!customName) return; // User cancelled
+        if (!customName) return;
 
+        // Step 5: Create session with optional task_id
         try {
-            const session = await this.api('POST', '/sessions', { project_id: projectId, name: customName });
-            this.showToast('Success', 'Session started', 'success');
+            const payload = { project_id: projectId, name: customName };
+            if (taskId) payload.task_id = taskId;
+            const session = await this.api('POST', '/sessions', payload);
+            this.showToast('Success', taskId ? 'Session started from task' : 'Session started', 'success');
             this.openTerminal(session.id, session, customName);
         } catch (error) {
             this.showToast('Error', error.message, 'error');
@@ -455,6 +496,167 @@ class DevManager {
             startBtn.addEventListener('click', handleStart);
             cancelBtn.addEventListener('click', handleCancel);
             input.addEventListener('keydown', handleKeydown);
+        });
+    }
+
+    /**
+     * Shows task selection modal before starting a session.
+     * @returns {Promise<{taskId,taskTitle}|{reconnect:string}|null|false>}
+     *   - {taskId, taskTitle} = task selected
+     *   - {reconnect: sessionId} = reconnect to active session
+     *   - null = skip (no task)
+     *   - false = cancelled
+     */
+    showTaskSelectModal(projectId) {
+        return new Promise(async (resolve) => {
+            const modal = document.getElementById('task-select-modal');
+            const listEl = document.getElementById('task-select-list');
+            const skipBtn = document.getElementById('task-select-skip');
+            const cancelBtn = document.getElementById('task-select-cancel');
+
+            let resolved = false;
+            const finish = (value) => {
+                if (resolved) return;
+                resolved = true;
+                cleanup();
+                resolve(value);
+            };
+
+            const cleanup = () => {
+                modal.classList.add('hidden');
+                skipBtn.removeEventListener('click', handleSkip);
+                cancelBtn.removeEventListener('click', handleCancel);
+                document.removeEventListener('keydown', handleKeydown);
+            };
+
+            const handleSkip = () => finish(null);
+            const handleCancel = () => finish(false);
+            const handleKeydown = (e) => {
+                if (e.key === 'Escape') finish(false);
+            };
+
+            // Show modal with loading state
+            listEl.innerHTML = '<div class="task-select-loading"><div class="spinner"></div> Loading tasks...</div>';
+            modal.classList.remove('hidden');
+
+            skipBtn.addEventListener('click', handleSkip);
+            cancelBtn.addEventListener('click', handleCancel);
+            document.addEventListener('keydown', handleKeydown);
+
+            try {
+                const [allTasks, sessionSummaryRaw] = await Promise.all([
+                    this.api('GET', `/projects/${projectId}/tasks`),
+                    this.api('GET', `/projects/${projectId}/tasks/session-summary`).catch(() => [])
+                ]);
+
+                // Build session summary lookup
+                const sessSummary = {};
+                (sessionSummaryRaw || []).forEach(s => { sessSummary[s.task_id] = s; });
+
+                // Filter to pending tasks (todo/in_progress), exclude subtasks
+                const pendingTasks = (allTasks || []).filter(t =>
+                    (t.status === 'todo' || t.status === 'in_progress') && !t.parent_id?.Valid
+                );
+
+                if (pendingTasks.length === 0) {
+                    finish(null);
+                    return;
+                }
+
+                // Render task items
+                listEl.innerHTML = pendingTasks.map(task => {
+                    const priorityClass = `priority-${task.priority || 'medium'}`;
+                    const statusLabel = (task.status || 'todo').replace('_', ' ');
+                    const descSnippet = task.description
+                        ? this.escapeHtml(task.description.substring(0, 60)) + (task.description.length > 60 ? '...' : '')
+                        : '';
+                    const summary = sessSummary[task.id];
+                    const hasActive = summary?.active_count > 0;
+                    const hasStopped = !hasActive && summary?.stopped_count > 0;
+
+                    let actionsHtml = '';
+                    if (hasActive) {
+                        actionsHtml = `
+                            <div class="task-select-item-actions">
+                                <button class="btn btn-sm btn-success task-select-reconnect" data-session-id="${this.escapeHtml(summary.latest_session)}" title="Reconnect to active session">Reconnect</button>
+                                <button class="btn btn-sm btn-secondary task-select-new" data-task-id="${task.id}" data-task-title="${this.escapeHtml(task.title)}" title="Start new session">New</button>
+                            </div>`;
+                    } else if (hasStopped) {
+                        actionsHtml = `
+                            <div class="task-select-item-actions">
+                                <button class="btn btn-sm btn-warning task-select-reopen" data-session-id="${this.escapeHtml(summary.latest_stopped_session)}" title="Reopen stopped session (continue conversation)">Reopen</button>
+                                <button class="btn btn-sm btn-secondary task-select-new" data-task-id="${task.id}" data-task-title="${this.escapeHtml(task.title)}" title="Start fresh session">New</button>
+                            </div>`;
+                    }
+
+                    return `
+                        <div class="task-select-item" data-task-id="${task.id}" data-task-title="${this.escapeHtml(task.title)}" data-project-id="${task.project_id || projectId}" ${hasActive ? 'data-has-active="1"' : ''} ${hasStopped ? 'data-has-stopped="1"' : ''}>
+                            <div class="task-priority-indicator ${priorityClass}"></div>
+                            <div class="task-select-item-body">
+                                <div class="task-select-item-title">${this.escapeHtml(task.title)}</div>
+                                <div class="task-select-item-meta">
+                                    <span class="task-status-badge badge-${task.status}">${statusLabel}</span>
+                                    ${hasActive ? '<span class="badge badge-running">active session</span>' : ''}
+                                    ${hasStopped ? '<span class="badge badge-stopped">previous session</span>' : ''}
+                                    ${descSnippet ? `<span>${descSnippet}</span>` : ''}
+                                </div>
+                            </div>
+                            <button class="btn-icon task-select-view" data-task-id="${task.id}" data-project-id="${task.project_id || projectId}" title="View task details">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                            </button>
+                            ${actionsHtml}
+                        </div>`;
+                }).join('');
+
+                // Attach click handlers
+                listEl.querySelectorAll('.task-select-item').forEach(item => {
+                    const hasActive = item.dataset.hasActive === '1';
+                    const hasStopped = item.dataset.hasStopped === '1';
+
+                    if (!hasActive && !hasStopped) {
+                        // No sessions at all: clicking the row selects the task for a new session
+                        item.addEventListener('click', () => {
+                            finish({ taskId: parseInt(item.dataset.taskId, 10), taskTitle: item.dataset.taskTitle });
+                        });
+                    }
+                });
+
+                // Reconnect buttons (active sessions)
+                listEl.querySelectorAll('.task-select-reconnect').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        finish({ reconnect: btn.dataset.sessionId });
+                    });
+                });
+
+                // Reopen buttons (stopped sessions)
+                listEl.querySelectorAll('.task-select-reopen').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        finish({ reopen: btn.dataset.sessionId });
+                    });
+                });
+
+                // New session buttons (for tasks with active or stopped sessions)
+                listEl.querySelectorAll('.task-select-new').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        finish({ taskId: parseInt(btn.dataset.taskId, 10), taskTitle: btn.dataset.taskTitle });
+                    });
+                });
+
+                // View task detail buttons
+                listEl.querySelectorAll('.task-select-view').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        this.viewTaskDetail(parseInt(btn.dataset.projectId, 10), parseInt(btn.dataset.taskId, 10));
+                    });
+                });
+
+            } catch (err) {
+                console.warn('Failed to fetch tasks for task-select modal:', err);
+                finish(null);
+            }
         });
     }
 
@@ -1055,6 +1257,76 @@ class DevManager {
             }
         } catch (e) {
             this.showToast('Erro ao iniciar edicao do memory doc', 'error');
+        }
+    }
+
+    startPlanning(projectId = null) {
+        if (!window.aiChat) {
+            this.showToast('AI Chat not available', 'error');
+            return;
+        }
+
+        // If projectId is provided, start planning directly
+        if (projectId) {
+            this._initiatePlanning(projectId);
+            return;
+        }
+
+        // Show project selection modal
+        if (!this.projects || this.projects.length === 0) {
+            this.showToast('Nenhum projeto encontrado', 'error');
+            return;
+        }
+
+        const projectOptions = this.projects.map(p => `
+            <label class="planning-project-option">
+                <input type="radio" name="planning-project" value="${p.id}">
+                <div class="planning-project-card">
+                    <strong>${this.escapeHtml(p.name)}</strong>
+                    <span class="planning-project-path">${this.escapeHtml(p.path)}</span>
+                    <span class="badge badge-${p.type === 'local' ? 'info' : 'warning'}">${p.type}</span>
+                </div>
+            </label>
+        `).join('');
+
+        const content = `
+            <p style="margin-bottom: 12px; color: var(--color-text-secondary);">Selecione o projeto para planejar:</p>
+            <div class="planning-project-list">
+                ${projectOptions}
+            </div>
+        `;
+
+        const actions = `
+            <button class="btn btn-secondary" onclick="app.hideModal()">Cancelar</button>
+            <button class="btn btn-primary" id="btn-confirm-planning" onclick="app._confirmPlanning()">Iniciar Planejamento</button>
+        `;
+
+        this.showModal('Planejar com IA', content, actions);
+
+        // Pre-select first project
+        const firstRadio = document.querySelector('input[name="planning-project"]');
+        if (firstRadio) firstRadio.checked = true;
+    }
+
+    _confirmPlanning() {
+        const selected = document.querySelector('input[name="planning-project"]:checked');
+        if (!selected) {
+            this.showToast('Selecione um projeto', 'error');
+            return;
+        }
+        this.hideModal();
+        this._initiatePlanning(parseInt(selected.value));
+    }
+
+    async _initiatePlanning(projectId) {
+        try {
+            const result = await this.api('POST', '/ai/initiate-planning', { project_id: projectId });
+            if (result?.conversation_id) {
+                window.aiChat.open();
+                window.aiChat.loadConversation(result.conversation_id);
+            }
+        } catch (e) {
+            this.showToast('Erro ao iniciar planejamento', 'error');
         }
     }
 
@@ -3892,8 +4164,53 @@ class DevManager {
     }
     // ============ Session-Task Integration ============
 
+    showSessionReopenChoiceModal() {
+        return new Promise((resolve) => {
+            document.querySelector('.confirm-modal-overlay')?.remove();
+            const overlay = document.createElement('div');
+            overlay.className = 'confirm-modal-overlay';
+            overlay.innerHTML = `
+                <div class="confirm-modal">
+                    <div class="confirm-modal-title">Previous Session Found</div>
+                    <div class="confirm-modal-message">This task has a previous session that was closed. What would you like to do?</div>
+                    <div class="confirm-modal-actions" style="gap:8px;">
+                        <button class="confirm-modal-cancel">Cancel</button>
+                        <button class="btn btn-secondary" data-choice="new">New Session</button>
+                        <button class="btn btn-success" data-choice="reopen">Reopen</button>
+                    </div>
+                </div>
+            `;
+            const finish = (val) => { overlay.remove(); resolve(val); };
+            overlay.querySelector('.confirm-modal-cancel').addEventListener('click', () => finish(null));
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(null); });
+            overlay.querySelector('[data-choice="reopen"]').addEventListener('click', () => finish('reopen'));
+            overlay.querySelector('[data-choice="new"]').addEventListener('click', () => finish('new'));
+            document.body.appendChild(overlay);
+        });
+    }
+
     async startSessionFromTask(projectId, taskId) {
         try {
+            const sessionSummary = await this.api('GET', `/projects/${projectId}/tasks/session-summary`).catch(() => []);
+            const taskSummary = (sessionSummary || []).find(s => s.task_id === taskId);
+
+            if (taskSummary?.active_count > 0) {
+                this.openTerminal(taskSummary.latest_session);
+                return;
+            }
+
+            if (taskSummary?.stopped_count > 0 && taskSummary.latest_stopped_session) {
+                const choice = await this.showSessionReopenChoiceModal();
+                if (!choice) return;
+                if (choice === 'reopen') {
+                    const sess = await this.api('POST', `/sessions/${taskSummary.latest_stopped_session}/reopen`);
+                    this.showToast('Success', 'Session reopened', 'success');
+                    this.openTerminal(sess.id, sess, sess.name);
+                    return;
+                }
+                // choice === 'new' — fall through to create new session
+            }
+
             const task = await this.api('GET', `/projects/${projectId}/tasks/${taskId}`);
             const defaultName = `Task: ${task.title}`;
             const customName = await this.showSessionNameModal(defaultName);

@@ -1,16 +1,33 @@
 package files
 
 import (
+	"bufio"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"mime"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 )
+
+// GrepResult represents a single grep match.
+type GrepResult struct {
+	File    string
+	Line    int
+	Content string
+}
+
+// Directories to skip during recursive search.
+var ignoredDirs = map[string]bool{
+	".git": true, "node_modules": true, "__pycache__": true,
+	".next": true, "dist": true, "build": true, "vendor": true,
+	".venv": true, ".tox": true, ".mypy_cache": true, ".cache": true,
+	"target": true, ".idea": true, ".vscode": true,
+}
 
 type FileInfo struct {
 	Name    string    `json:"name"`
@@ -245,6 +262,129 @@ func (m *LocalFileManager) SaveBase64Image(base64Data string, filename string) (
 	}
 
 	return filename, nil
+}
+
+// Glob finds files matching a pattern recursively. Returns relative paths.
+// Pattern is matched against the file name (e.g. "*.go", "*.tsx").
+func (m *LocalFileManager) Glob(pattern string) ([]string, error) {
+	const maxResults = 100
+	var results []string
+
+	absBase, _ := filepath.Abs(m.basePath)
+
+	err := filepath.WalkDir(m.basePath, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip errors
+		}
+		if d.IsDir() {
+			if ignoredDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if len(results) >= maxResults {
+			return filepath.SkipAll
+		}
+
+		matched, _ := filepath.Match(pattern, d.Name())
+		if matched {
+			absPath, _ := filepath.Abs(path)
+			rel, _ := filepath.Rel(absBase, absPath)
+			results = append(results, rel)
+		}
+		return nil
+	})
+
+	return results, err
+}
+
+// Grep searches file contents for a regex pattern. Returns matches with line numbers.
+// searchPath restricts search to a subdirectory (empty = root).
+// fileGlob filters by file name pattern (e.g. "*.go", empty = all files).
+func (m *LocalFileManager) Grep(pattern string, searchPath string, fileGlob string) ([]GrepResult, error) {
+	const maxResults = 50
+	const maxFileSize int64 = 1 * 1024 * 1024 // 1MB
+
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid regex: %w", err)
+	}
+
+	absBase, _ := filepath.Abs(m.basePath)
+	searchRoot := m.basePath
+	if searchPath != "" {
+		searchRoot = filepath.Join(m.basePath, searchPath)
+	}
+
+	var results []GrepResult
+
+	walkErr := filepath.WalkDir(searchRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if ignoredDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if len(results) >= maxResults {
+			return filepath.SkipAll
+		}
+
+		// Filter by file glob
+		if fileGlob != "" {
+			matched, _ := filepath.Match(fileGlob, d.Name())
+			if !matched {
+				return nil
+			}
+		}
+
+		// Skip large files
+		info, err := d.Info()
+		if err != nil || info.Size() > maxFileSize {
+			return nil
+		}
+
+		absPath, _ := filepath.Abs(path)
+		relPath, _ := filepath.Rel(absBase, absPath)
+
+		file, err := os.Open(path)
+		if err != nil {
+			return nil
+		}
+		defer file.Close()
+
+		// Quick binary check: read first 512 bytes
+		header := make([]byte, 512)
+		n, _ := file.Read(header)
+		for i := 0; i < n; i++ {
+			if header[i] == 0 {
+				return nil // binary file
+			}
+		}
+		file.Seek(0, 0)
+
+		scanner := bufio.NewScanner(file)
+		lineNum := 0
+		for scanner.Scan() {
+			lineNum++
+			line := scanner.Text()
+			if re.MatchString(line) {
+				results = append(results, GrepResult{
+					File:    relPath,
+					Line:    lineNum,
+					Content: line,
+				})
+				if len(results) >= maxResults {
+					return filepath.SkipAll
+				}
+			}
+		}
+		return nil
+	})
+
+	return results, walkErr
 }
 
 // GetBasePath returns the base path

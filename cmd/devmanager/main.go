@@ -131,6 +131,11 @@ func main() {
 		}
 	}
 
+	// Clean up stale streaming AI messages (server restart means in-flight streams are lost)
+	if err := db.FixStaleStreamingMessages(ctx); err != nil {
+		log.Printf("Warning: failed to fix stale streaming messages: %v", err)
+	}
+
 	// Initialize encryptor
 	encryptor, err := security.NewEncryptor(cfg.EncryptKey)
 	if err != nil {
@@ -330,6 +335,7 @@ func main() {
 		r.Get("/sessions/{id}", api.GetSession)
 		r.Get("/sessions/{id}/output", api.GetSessionOutput)
 		r.Delete("/sessions/{id}", api.DeleteSession)
+		r.Post("/sessions/{id}/reopen", api.ReopenSession)
 
 		// Session-Task integration
 		r.Get("/sessions/{id}/task", api.GetSessionLinkedTask)
@@ -398,7 +404,11 @@ func main() {
 		r.Delete("/ai/conversations", aiHandler.HandleDeleteAllConversations)
 		r.Get("/ai/conversations/{id}", aiHandler.HandleGetConversation)
 		r.Delete("/ai/conversations/{id}", aiHandler.HandleDeleteConversation)
+		r.Post("/ai/conversations/{id}/stop", aiHandler.HandleStopChat)
+		r.Get("/ai/active-stream", aiHandler.HandleActiveStream)
+		r.Get("/ai/conversations/{id}/stream", aiHandler.HandleStreamReconnect)
 		r.Post("/ai/initiate-memory-doc-edit", aiHandler.HandleInitiateMemoryDocEdit)
+		r.Post("/ai/initiate-planning", aiHandler.HandleInitiatePlanning)
 		r.Post("/ai/generate-skill", aiHandler.HandleGenerateSkill)
 		r.Post("/ai/validate-skill", aiHandler.HandleValidateSkill)
 
