@@ -338,17 +338,15 @@ class FileViewer {
     static _initMarked() {
         if (FileViewer._markedInitialized) return;
         FileViewer._markedInitialized = true;
-        marked.use({
-            renderer: {
-                code({ text, lang }) {
-                    if (lang === 'mermaid') {
-                        return `<div class="mermaid">${text}</div>`;
-                    }
-                    return false;
-                }
+        const renderer = new marked.Renderer();
+        const originalCode = renderer.code.bind(renderer);
+        renderer.code = function (code, language, escaped) {
+            if (language === 'mermaid' || language === 'mermaid-shard') {
+                return `<div class="mermaid">${code}</div>`;
             }
-        });
-        marked.setOptions({ breaks: true, gfm: true });
+            return originalCode(code, language, escaped);
+        };
+        marked.setOptions({ renderer, breaks: true, gfm: true });
     }
 
     static renderMermaid(container) {
