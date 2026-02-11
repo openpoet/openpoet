@@ -222,7 +222,7 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	return session, nil
 }
 
-func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, project *database.Project, envVars map[string]string) error {
+func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, project *database.Project, envVars map[string]string, decryptFunc func(string, string) (string, error)) error {
 	sessionID := session.ID
 
 	// Verify session is not already running
@@ -275,14 +275,19 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	var runner Runner
 	var err error
 
+	outputHandler := func(data []byte) {
+		outputBuffer.Write(data)
+		m.hub.BroadcastSessionOutput(sessionID, data)
+		m.checkForNotificationTriggers(sessionID, data)
+	}
+
 	if project.Type == "local" {
-		runner, err = NewLocalRunner(project.Path, envVars, func(data []byte) {
-			outputBuffer.Write(data)
-			m.hub.BroadcastSessionOutput(sessionID, data)
-			m.checkForNotificationTriggers(sessionID, data)
-		}, cliArgs)
+		runner, err = NewLocalRunner(project.Path, envVars, outputHandler, cliArgs)
 	} else {
-		return fmt.Errorf("remote session reopen not yet implemented")
+		if remoteRunnerFactory == nil {
+			return fmt.Errorf("remote runner factory not set")
+		}
+		runner, err = remoteRunnerFactory(project, envVars, outputHandler, decryptFunc, cliArgs)
 	}
 
 	if err != nil {
