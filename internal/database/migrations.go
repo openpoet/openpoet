@@ -32,6 +32,7 @@ var migrations = []Migration{
 	{Version: 14, Description: "remove macros table", Up: migrateV14},
 	{Version: 15, Description: "docs: add summary and status to temp_documents", Up: migrateV15},
 	{Version: 16, Description: "ai_messages: add status and error_info columns for streaming persistence", Up: migrateV16},
+	{Version: 17, Description: "projects: add tool_policy column for per-project tool access control", Up: migrateV17},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -499,6 +500,12 @@ func migrateV16(tx *sqlx.Tx) error {
 		}
 	}
 	return nil
+}
+
+// migrateV17 adds tool_policy column to projects for per-project tool access control.
+func migrateV17(tx *sqlx.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE projects ADD COLUMN tool_policy TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 // migrateV4 adds AI conversation and message tables.

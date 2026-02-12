@@ -36,9 +36,9 @@ func (d *DB) migrate() error {
 
 // Project operations
 func (d *DB) CreateProject(ctx context.Context, p *Project) error {
-	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv)
-			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV)
+	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv, tool_policy)
+			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy)
 	if err != nil {
 		return err
 	}
@@ -65,8 +65,8 @@ func (d *DB) ListProjects(ctx context.Context) ([]Project, error) {
 }
 
 func (d *DB) UpdateProject(ctx context.Context, p *Project) error {
-	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, updated_at=? WHERE id=?`
-	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, time.Now(), p.ID)
+	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, tool_policy=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, time.Now(), p.ID)
 	return err
 }
 
@@ -795,8 +795,8 @@ func (d *DB) GetTaskSessionSummary(ctx context.Context, projectID int64) ([]stru
 		       COUNT(DISTINCT st.session_id) as session_count,
 		       COUNT(DISTINCT CASE WHEN s.status IN ('running', 'starting') THEN st.session_id END) as active_count,
 		       COUNT(DISTINCT CASE WHEN s.status IN ('stopped', 'completed') THEN st.session_id END) as stopped_count,
-		       COALESCE(MAX(s.id), '') as latest_session,
-		       COALESCE(MAX(CASE WHEN s.status IN ('stopped', 'completed') THEN s.id END), '') as latest_stopped_session
+		       COALESCE((SELECT s2.id FROM sessions s2 INNER JOIN session_tasks st2 ON s2.id = st2.session_id WHERE st2.task_id = st.task_id ORDER BY s2.start_time DESC LIMIT 1), '') as latest_session,
+		       COALESCE((SELECT s2.id FROM sessions s2 INNER JOIN session_tasks st2 ON s2.id = st2.session_id WHERE st2.task_id = st.task_id AND s2.status IN ('stopped', 'completed') ORDER BY s2.start_time DESC LIMIT 1), '') as latest_stopped_session
 		FROM session_tasks st
 		INNER JOIN sessions s ON s.id = st.session_id
 		INNER JOIN project_tasks t ON t.id = st.task_id
