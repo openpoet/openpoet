@@ -567,13 +567,21 @@ class AIChatManager {
         if (data.doc_id) card.dataset.docId = data.doc_id;
 
         const isProposal = data.type === 'proposal';
+        const isPlanning = data.type === 'planning';
         const status = data.status || 'pending';
-        const icon = isProposal
-            ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>'
-            : '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="11" x2="15" y2="11"/></svg>';
+
+        let icon;
+        if (isPlanning) {
+            icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 14l2 2 4-4"/></svg>';
+        } else if (isProposal) {
+            icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+        } else {
+            icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="11" x2="15" y2="11"/></svg>';
+        }
 
         const title = this.escapeHtml(data.title || 'Documento');
         const summary = data.summary ? `<div class="ai-chat-doc-card-summary">${this.escapeHtml(data.summary)}</div>` : '';
+        const taskCount = data.task_count ? `<div class="ai-chat-doc-card-task-count">${data.task_count} ação(ões)</div>` : '';
 
         let actionHtml;
         if (status === 'approved') {
@@ -581,7 +589,7 @@ class AIChatManager {
         } else if (status === 'rejected') {
             actionHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-rejected">Rejeitado</span>';
         } else {
-            const btnLabel = isProposal ? 'Revisar Proposta' : 'Ver Documento';
+            const btnLabel = isPlanning ? 'Revisar Plano' : (isProposal ? 'Revisar Proposta' : 'Ver Documento');
             actionHtml = `<button class="ai-chat-doc-card-btn">${btnLabel}</button>`;
         }
 
@@ -590,6 +598,7 @@ class AIChatManager {
             <div class="ai-chat-doc-card-info">
                 <div class="ai-chat-doc-card-title">${title}</div>
                 ${summary}
+                ${taskCount}
             </div>
             ${actionHtml}
         `;

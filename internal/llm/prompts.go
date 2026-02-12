@@ -203,8 +203,10 @@ Follow this workflow rigorously:
   - Detailed description with technical context, files involved, and acceptance criteria
   - Appropriate priority (urgent/high/medium/low)
   - Subtasks when the main task is complex (use parent_id)
-- Create tasks using create_task
-- Present a summary of the created plan at the end
+- Create tasks using create_task, update_task, or delete_task as needed
+- IMPORTANT: Task actions in planning mode are NOT applied immediately. They are collected into a planning proposal that the user must review and approve before any changes take effect.
+- After all task actions are defined, a "Revisar Plano" card will be shown to the user with the full proposal.
+- Present a summary of the proposed plan at the end of your response.
 
 ## Important Rules
 - ALWAYS ask for the project before creating tasks if not specified
@@ -214,6 +216,7 @@ Follow this workflow rigorously:
 - Keep chat responses concise. For long lists or detailed plans, use create_document.
 - Do not create more than 15 tasks at once (split into phases if needed)
 - Status for new tasks should be "todo" unless otherwise specified
+- Task changes require user approval — inform the user that a proposal was created for review
 `)
 
 	sb.WriteString(`
