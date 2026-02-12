@@ -17,6 +17,7 @@ import (
 	"devmanager/internal/database"
 	"devmanager/internal/files"
 	"devmanager/internal/llm"
+	"devmanager/internal/mcp"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -1604,8 +1605,33 @@ func (h *AIHandler) HandleExecuteTool(w http.ResponseWriter, r *http.Request) {
 
 // HandleToolDefinitions returns the chat tool definitions as JSON.
 // Used by the Node.js SDK sidecar to register tools at startup.
+// Applies the chat tool policy to filter available tools.
 func (h *AIHandler) HandleToolDefinitions(w http.ResponseWriter, r *http.Request) {
-	respondJSON(w, http.StatusOK, llm.ChatTools())
+	tools := llm.ChatTools()
+
+	// Apply chat tool policy
+	policyStr, _ := h.api.db.GetSetting(r.Context(), "mcp_tool_policy_chat")
+	if policyStr != "" {
+		policy := mcp.ParsePolicy(policyStr)
+		var names []string
+		for _, t := range tools {
+			names = append(names, t.Name)
+		}
+		allowed := mcp.FilterByPolicy(policy, names)
+		allowedSet := make(map[string]bool, len(allowed))
+		for _, n := range allowed {
+			allowedSet[n] = true
+		}
+		var filtered []llm.ToolDefinition
+		for _, t := range tools {
+			if allowedSet[t.Name] {
+				filtered = append(filtered, t)
+			}
+		}
+		tools = filtered
+	}
+
+	respondJSON(w, http.StatusOK, tools)
 }
 
 // buildDocCard checks if a tool execution produced a document link and returns
@@ -2098,13 +2124,11 @@ func (h *AIHandler) EvaluateSession(ctx context.Context, sessionID string, trigg
 	}
 	log.Printf("[AI-Session] Provider OK: %T", p)
 
-	// Skip automatic evaluations if disabled in settings (manual "session_request" always allowed)
-	if trigger != "session_request" {
-		val, _ := h.api.db.GetSetting(ctx, "task_auto_eval_enabled")
-		if val != "true" {
-			log.Printf("[AI-Session] Auto task evaluation disabled (trigger=%s), skipping", trigger)
-			return
-		}
+	// Skip all evaluations if disabled in settings
+	val, _ := h.api.db.GetSetting(ctx, "task_auto_eval_enabled")
+	if val != "true" {
+		log.Printf("[AI-Session] Task evaluation disabled (trigger=%s), skipping", trigger)
+		return
 	}
 
 	sess, err := h.api.db.GetSession(ctx, sessionID)

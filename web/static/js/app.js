@@ -844,6 +844,18 @@ class DevManager {
             <div class="project-detail-card">
                 <div class="project-detail-section">
                     <div class="project-detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                        <span>Session Tools</span>
+                        <span id="project-tools-summary" style="font-size: 11px; color: var(--color-text-muted);"></span>
+                    </div>
+                    <div id="project-tools-list" class="project-tools-list">
+                        <div class="meta-empty">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="project-detail-card">
+                <div class="project-detail-section">
+                    <div class="project-detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
                         <span>Memory Doc</span>
                         <button class="meta-ai-btn" onclick="app.editMemoryDocWithAI(${project.id})" title="Edit with AI">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -890,8 +902,9 @@ class DevManager {
 
         container.innerHTML = html;
 
-        // Load memory doc, tasks, and token usage
+        // Load memory doc, tasks, tools, and token usage
         this.loadMemoryDoc(project.id);
+        this.loadProjectTools(project.id);
         this.loadProjectTasks(project.id);
         this.loadProjectTokenUsage(project.id, 30);
 
@@ -958,6 +971,98 @@ class DevManager {
             }
         } catch (e) {
             container.innerHTML = '<div class="meta-empty">Failed to load memory doc.</div>';
+        }
+    }
+
+    async loadProjectTools(projectId) {
+        const container = document.getElementById('project-tools-list');
+        const summaryEl = document.getElementById('project-tools-summary');
+        if (!container) return;
+
+        try {
+            const tools = await this.api('GET', `/projects/${projectId}/tools`);
+            const enabled = tools.filter(t => t.enabled);
+
+            if (summaryEl) {
+                if (enabled.length === 0) {
+                    summaryEl.textContent = 'No tools enabled';
+                } else if (enabled.length === tools.length) {
+                    summaryEl.textContent = `All ${tools.length} tools enabled`;
+                } else {
+                    summaryEl.textContent = `${enabled.length}/${tools.length} tools enabled`;
+                }
+            }
+
+            container.innerHTML = `
+                <div style="margin-bottom: 6px;">
+                    <label class="tp-tool-item" style="font-weight:500; cursor:pointer;">
+                        <input type="checkbox" id="project-tools-toggle-all" ${enabled.length === tools.length ? 'checked' : ''} onchange="app.projectDetailSelectAll(${projectId}, this.checked)">
+                        <span class="tp-tool-name" style="min-width:auto;">Toggle all</span>
+                    </label>
+                </div>
+                <div class="project-tools-grid">
+                    ${tools.map(t => {
+                        const shortDesc = t.description.length > 80 ? t.description.slice(0, 80) + '...' : t.description;
+                        return `<label class="tp-tool-item" title="${t.description.replace(/"/g, '&quot;')}">
+                            <input type="checkbox" data-tool="${t.name}" ${t.enabled ? 'checked' : ''} onchange="app._projectToolChanged(${projectId})">
+                            <span class="tp-tool-name">${t.name}</span>
+                            <span class="tp-tool-desc">${shortDesc}</span>
+                        </label>`;
+                    }).join('')}
+                </div>
+                <div class="project-tools-actions" id="project-tools-actions" style="display:none;">
+                    <button class="btn btn-sm btn-primary" onclick="app.saveProjectToolsFromDetail(${projectId})">Save</button>
+                    <button class="btn btn-sm btn-secondary" onclick="app.loadProjectTools(${projectId})">Cancel</button>
+                    <span style="font-size: 11px; color: var(--color-text-muted);" id="project-tools-dirty">Unsaved changes</span>
+                </div>
+            `;
+            // Hide actions bar initially
+            const actions = document.getElementById('project-tools-actions');
+            if (actions) actions.style.display = 'none';
+        } catch (e) {
+            container.innerHTML = '<div class="meta-empty">Failed to load tools.</div>';
+        }
+    }
+
+    projectDetailSelectAll(projectId, checked) {
+        document.querySelectorAll('#project-tools-list input[data-tool]').forEach(cb => cb.checked = checked);
+        this._projectToolChanged(projectId);
+    }
+
+    _projectToolChanged(projectId) {
+        const actions = document.getElementById('project-tools-actions');
+        if (actions) actions.style.display = 'flex';
+    }
+
+    async saveProjectToolsFromDetail(projectId) {
+        const checkboxes = document.querySelectorAll('#project-tools-list input[data-tool]');
+        const all = Array.from(checkboxes);
+        const checked = all.filter(cb => cb.checked);
+
+        let policy;
+        if (checked.length === all.length) {
+            // All enabled — clear project override, inherit global
+            policy = '';
+        } else if (checked.length === 0) {
+            policy = JSON.stringify({ mode: 'deny_all' });
+        } else if (checked.length <= all.length / 2) {
+            const allowed = checked.map(cb => cb.dataset.tool);
+            policy = JSON.stringify({ mode: 'deny_all', allowed });
+        } else {
+            const unchecked = all.filter(cb => !cb.checked);
+            const denied = unchecked.map(cb => cb.dataset.tool);
+            policy = JSON.stringify({ mode: 'allow_all', denied });
+        }
+
+        try {
+            await this.api('PUT', `/projects/${projectId}/tool-policy`, { tool_policy: policy });
+            // Refresh projects list to pick up change
+            await this.loadProjects();
+            this.showToast('Success', 'Tool policy updated', 'success');
+            // Reload to reflect saved state
+            this.loadProjectTools(projectId);
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
         }
     }
 
@@ -1520,6 +1625,13 @@ class DevManager {
         this.updateTabActiveState(sessionId);
         this.currentSession = sessionId;
 
+        // Update tools badge for this session
+        this._updateSessionToolsBadge(sessionId);
+
+        // Close tools panel when switching sessions
+        const toolsPanel = document.getElementById('session-tools-panel');
+        if (toolsPanel) toolsPanel.style.display = 'none';
+
         // Save tabs to storage
         this.saveTabsToStorage();
     }
@@ -1544,6 +1656,78 @@ class DevManager {
         } catch (error) {
             console.error('stopSession error:', error);
             this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    // ==================== SESSION TOOLS ====================
+
+    async toggleSessionToolsPanel() {
+        const panel = document.getElementById('session-tools-panel');
+        if (!panel) return;
+        const visible = panel.style.display !== 'none';
+        if (visible) {
+            panel.style.display = 'none';
+            return;
+        }
+        panel.style.display = '';
+        this.loadSessionTools();
+    }
+
+    async loadSessionTools() {
+        const list = document.getElementById('session-tools-panel-list');
+        const summary = document.getElementById('session-tools-panel-summary');
+        const countEl = document.getElementById('session-tools-count');
+        if (!list) return;
+
+        const sessionId = this.currentSession;
+        if (!sessionId) {
+            list.innerHTML = '<div class="meta-empty">No session selected</div>';
+            return;
+        }
+
+        list.innerHTML = '<div class="meta-empty">Loading...</div>';
+
+        try {
+            const tools = await this.api('GET', `/sessions/${sessionId}/tools`);
+            const enabled = tools.filter(t => t.enabled);
+
+            if (summary) {
+                summary.textContent = `${enabled.length}/${tools.length} enabled`;
+            }
+            if (countEl) {
+                countEl.textContent = enabled.length;
+                countEl.style.display = enabled.length > 0 ? '' : 'none';
+            }
+
+            if (tools.length === 0) {
+                list.innerHTML = '<div class="meta-empty">No tools configured</div>';
+                return;
+            }
+
+            list.innerHTML = tools.map(t => {
+                const shortDesc = t.description.length > 70 ? t.description.slice(0, 70) + '...' : t.description;
+                return `<div class="session-tool-item ${t.enabled ? '' : 'disabled'}" title="${t.description.replace(/"/g, '&quot;')}">
+                    <span class="session-tool-status">${t.enabled ? '&#9679;' : '&#9675;'}</span>
+                    <span class="tp-tool-name">${t.name}</span>
+                    <span class="tp-tool-desc">${shortDesc}</span>
+                </div>`;
+            }).join('');
+        } catch (e) {
+            list.innerHTML = '<div class="meta-empty">Failed to load tools</div>';
+        }
+    }
+
+    // Update session tools count badge when switching sessions
+    async _updateSessionToolsBadge(sessionId) {
+        const countEl = document.getElementById('session-tools-count');
+        if (!countEl) return;
+        try {
+            const tools = await this.api('GET', `/sessions/${sessionId}/tools`);
+            const enabled = tools.filter(t => t.enabled);
+            countEl.textContent = enabled.length;
+            countEl.style.display = enabled.length > 0 ? '' : 'none';
+        } catch (e) {
+            countEl.style.display = 'none';
         }
     }
 
@@ -1649,6 +1833,7 @@ class DevManager {
                     window.terminalManager.switchToSession(sessionId);
                 }
             }
+            this.currentSession = sessionId;
             this.updateTabActiveState(sessionId);
         });
 
@@ -2511,6 +2696,7 @@ class DevManager {
             // Restore active tab
             if (state.activeSessionId && this.openTabs.has(state.activeSessionId)) {
                 window.terminalManager.switchToSession(state.activeSessionId);
+                this.currentSession = state.activeSessionId;
                 this.updateTabActiveState(state.activeSessionId);
             }
 
@@ -2586,6 +2772,7 @@ class DevManager {
         const nextIndex = (currentIndex + 1) % sessionIds.length;
 
         window.terminalManager.switchToSession(sessionIds[nextIndex]);
+        this.currentSession = sessionIds[nextIndex];
         this.updateTabActiveState(sessionIds[nextIndex]);
     }
 
@@ -2597,6 +2784,7 @@ class DevManager {
         const prevIndex = (currentIndex - 1 + sessionIds.length) % sessionIds.length;
 
         window.terminalManager.switchToSession(sessionIds[prevIndex]);
+        this.currentSession = sessionIds[prevIndex];
         this.updateTabActiveState(sessionIds[prevIndex]);
     }
 
@@ -2604,6 +2792,7 @@ class DevManager {
         const sessionIds = Array.from(this.openTabs.keys());
         if (index >= 0 && index < sessionIds.length) {
             window.terminalManager.switchToSession(sessionIds[index]);
+            this.currentSession = sessionIds[index];
             this.updateTabActiveState(sessionIds[index]);
         }
     }
@@ -2921,6 +3110,41 @@ class DevManager {
                     <div id="ai-test-result" style="margin-top: 8px; font-size: 12px;"></div>
                 </div>
             </div>
+            <div class="card" style="margin-top: 16px;">
+                <div class="card-header">
+                    <div class="card-title">MCP HTTP Endpoint</div>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: 12px; color: var(--text-secondary, #999); font-size: 13px;">
+                        Expose DevManager tools over HTTP for external AI systems (e.g. OpenClaw). Restart required after enabling.
+                    </p>
+                    <div class="form-checkbox" style="margin-bottom: 12px;">
+                        <input type="checkbox" id="mcp-http-enabled">
+                        <label>Enable MCP HTTP endpoint (/mcp)</label>
+                    </div>
+                    <div style="margin-bottom: 12px;">
+                        <label class="form-label">API Key (for remote access)</label>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <span id="mcp-api-key-status" style="font-size: 12px; color: var(--color-text-muted);">Checking...</span>
+                            <button class="btn btn-primary btn-sm" onclick="app.generateMCPAPIKey()">Generate</button>
+                            <button class="btn btn-danger btn-sm" onclick="app.revokeMCPAPIKey()">Revoke</button>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary btn-sm" onclick="app.saveMCPHTTPSettings()">Save</button>
+                </div>
+            </div>
+            <div class="card" style="margin-top: 16px;">
+                <div class="card-header">
+                    <div class="card-title">Tool Policies</div>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: 12px; color: var(--text-secondary, #999); font-size: 13px;">
+                        Control which DevManager tools are available in each context. Uncheck tools to deny them.
+                    </p>
+                    <div id="tp-contexts" style="display: flex; flex-direction: column; gap: 8px;"></div>
+                    <button class="btn btn-primary btn-sm" style="margin-top: 12px;" onclick="app.saveToolPolicies()">Save</button>
+                </div>
+            </div>
         `;
 
         // Populate settings after render
@@ -2942,7 +3166,13 @@ class DevManager {
                 if (aiModelSelect && this.settings.ai_model) {
                     aiModelSelect.value = this.settings.ai_model;
                 }
+                const mcpHttpCheckbox = document.getElementById('mcp-http-enabled');
+                if (mcpHttpCheckbox) {
+                    mcpHttpCheckbox.checked = this.settings.mcp_http_enabled === 'true';
+                }
             }
+            this.loadMCPAPIKeyStatus();
+            this.loadToolPolicies();
         }, 0);
 
         return html;
@@ -3010,6 +3240,35 @@ class DevManager {
                         <option value="remote" ${project?.type === 'remote' ? 'selected' : ''}>Remote (SSH)</option>
                     </select>
                 </div>
+                <div class="form-group">
+                    <label class="form-label" style="display: flex; align-items: center; gap: 8px;">
+                        Tool Policy
+                        <span style="font-size: 11px; font-weight: normal; color: var(--color-text-muted);">(click to expand)</span>
+                    </label>
+                    <div class="tp-context-section" style="margin-bottom: 4px;">
+                        <div class="tp-context-header" onclick="app.toggleProjectToolPolicy()">
+                            <span class="tp-context-arrow" id="tp-project-arrow">&#9654;</span>
+                            <span>Override global policy for this project</span>
+                            <span class="tp-context-summary" id="tp-project-summary" style="font-size: 11px;">Inheriting global</span>
+                        </div>
+                        <div id="tp-project-body" style="display:none;">
+                            <div style="padding: 8px 12px; border-top: 1px solid var(--color-border);">
+                                <div class="form-checkbox" style="margin-bottom: 8px;">
+                                    <input type="checkbox" id="tp-project-override" onchange="app.onProjectPolicyOverrideChange()">
+                                    <label>Enable per-project override</label>
+                                </div>
+                                <div id="tp-project-tools" style="display:none;">
+                                    <div style="display: flex; gap: 8px; margin-bottom: 6px;">
+                                        <button class="btn btn-sm btn-secondary" onclick="app.tpProjectSelectAll(true)">Select All</button>
+                                        <button class="btn btn-sm btn-secondary" onclick="app.tpProjectSelectAll(false)">Deselect All</button>
+                                    </div>
+                                    <div class="tp-tool-grid" id="tp-project-tool-grid"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <input type="hidden" name="tool_policy" id="project-tool-policy-value" value="${project?.tool_policy || ''}">
+                </div>
                 <div id="ssh-fields" class="${project?.type !== 'remote' ? 'hidden' : ''}">
                     <div class="form-group">
                         <label class="form-label">SSH Host</label>
@@ -3045,6 +3304,98 @@ class DevManager {
         `;
 
         this.showModal(isEdit ? 'Edit Project' : 'New Project', content, actions);
+        this._populateProjectToolPolicy(project?.tool_policy || '');
+    }
+
+    async _populateProjectToolPolicy(policyJson) {
+        // Load tools if not cached
+        if (!this._tpTools) {
+            try { this._tpTools = await this.api('GET', '/config/mcp-tools'); } catch(e) { return; }
+        }
+        const grid = document.getElementById('tp-project-tool-grid');
+        if (!grid) return;
+
+        let policy = null;
+        try { if (policyJson) policy = JSON.parse(policyJson); } catch(e) {}
+        const hasOverride = policy && policy.mode;
+        const denied = new Set(policy?.denied || []);
+        const allowed = new Set(policy?.allowed || []);
+        const mode = policy?.mode || 'allow_all';
+
+        grid.innerHTML = this._tpTools.map(t => {
+            let checked;
+            if (mode === 'deny_all') {
+                checked = allowed.has(t.name);
+            } else {
+                checked = !denied.has(t.name);
+            }
+            const shortDesc = t.description.length > 60 ? t.description.slice(0, 60) + '...' : t.description;
+            return `<label class="tp-tool-item" title="${t.description.replace(/"/g, '&quot;')}">
+                <input type="checkbox" data-ctx="project" data-tool="${t.name}" ${checked ? 'checked' : ''}>
+                <span class="tp-tool-name">${t.name}</span>
+                <span class="tp-tool-desc">${shortDesc}</span>
+            </label>`;
+        }).join('');
+
+        const overrideCb = document.getElementById('tp-project-override');
+        const toolsDiv = document.getElementById('tp-project-tools');
+        const summaryEl = document.getElementById('tp-project-summary');
+        if (overrideCb) overrideCb.checked = hasOverride;
+        if (toolsDiv) toolsDiv.style.display = hasOverride ? '' : 'none';
+        if (summaryEl) summaryEl.textContent = hasOverride ? `Custom (${mode})` : 'Inheriting global';
+
+        // Listen for changes to update hidden field
+        grid.addEventListener('change', () => this._syncProjectPolicyHidden());
+    }
+
+    toggleProjectToolPolicy() {
+        const body = document.getElementById('tp-project-body');
+        const arrow = document.getElementById('tp-project-arrow');
+        if (!body) return;
+        const open = body.style.display !== 'none';
+        body.style.display = open ? 'none' : '';
+        if (arrow) arrow.innerHTML = open ? '&#9654;' : '&#9660;';
+    }
+
+    onProjectPolicyOverrideChange() {
+        const enabled = document.getElementById('tp-project-override')?.checked;
+        const toolsDiv = document.getElementById('tp-project-tools');
+        const summaryEl = document.getElementById('tp-project-summary');
+        if (toolsDiv) toolsDiv.style.display = enabled ? '' : 'none';
+        if (summaryEl) summaryEl.textContent = enabled ? 'Custom' : 'Inheriting global';
+        this._syncProjectPolicyHidden();
+    }
+
+    tpProjectSelectAll(checked) {
+        document.querySelectorAll('input[data-ctx="project"]').forEach(cb => cb.checked = checked);
+        this._syncProjectPolicyHidden();
+    }
+
+    _syncProjectPolicyHidden() {
+        const hidden = document.getElementById('project-tool-policy-value');
+        if (!hidden) return;
+
+        const override = document.getElementById('tp-project-override')?.checked;
+        if (!override) {
+            hidden.value = '';
+            return;
+        }
+
+        const all = document.querySelectorAll('input[data-ctx="project"]');
+        const checked = document.querySelectorAll('input[data-ctx="project"]:checked');
+
+        if (checked.length === all.length) {
+            hidden.value = JSON.stringify({ mode: 'allow_all' });
+        } else if (checked.length === 0) {
+            hidden.value = JSON.stringify({ mode: 'deny_all' });
+        } else if (checked.length <= all.length / 2) {
+            const allowed = Array.from(checked).map(cb => cb.dataset.tool);
+            hidden.value = JSON.stringify({ mode: 'deny_all', allowed });
+        } else {
+            const unchecked = document.querySelectorAll('input[data-ctx="project"]:not(:checked)');
+            const denied = Array.from(unchecked).map(cb => cb.dataset.tool);
+            hidden.value = JSON.stringify({ mode: 'allow_all', denied });
+        }
     }
 
     toggleSSHFields(type) {
@@ -3062,7 +3413,8 @@ class DevManager {
             ssh_port: parseInt(formData.get('ssh_port')) || 22,
             ssh_user: formData.get('ssh_user'),
             ssh_auth_type: formData.get('ssh_auth_type'),
-            ssh_credential: formData.get('ssh_credential')
+            ssh_credential: formData.get('ssh_credential'),
+            tool_policy: formData.get('tool_policy') || ''
         };
 
         try {
@@ -3665,6 +4017,189 @@ class DevManager {
         try {
             await this.api('PUT', '/config/settings', settings);
             this.showToast('Success', 'AI settings saved. Restart the service for changes to take effect.', 'success');
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    async saveMCPHTTPSettings() {
+        const enabled = document.getElementById('mcp-http-enabled')?.checked;
+        try {
+            await this.api('PUT', '/config/settings', {
+                mcp_http_enabled: enabled ? 'true' : 'false'
+            });
+            this.showToast('Success', 'MCP HTTP settings saved. Restart required.', 'success');
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    async loadMCPAPIKeyStatus() {
+        try {
+            const data = await this.api('GET', '/config/mcp-api-key/status');
+            const el = document.getElementById('mcp-api-key-status');
+            if (el) {
+                el.textContent = data.exists ? `Active: ${data.prefix}` : 'No key configured';
+                el.style.color = data.exists ? 'var(--color-success)' : 'var(--color-text-muted)';
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    async generateMCPAPIKey() {
+        try {
+            const data = await this.api('POST', '/config/mcp-api-key/generate');
+            this.showToast('API Key Generated', `Key: ${data.key}`, 'success');
+            this.loadMCPAPIKeyStatus();
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    async revokeMCPAPIKey() {
+        try {
+            await this.api('DELETE', '/config/mcp-api-key');
+            this.showToast('Success', 'API key revoked', 'success');
+            this.loadMCPAPIKeyStatus();
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    async loadToolPolicies() {
+        const container = document.getElementById('tp-contexts');
+        if (!container) return;
+
+        try {
+            const contexts = [
+                { key: 'session', label: 'Session (Claude Code sessions)' },
+                { key: 'chat', label: 'Chat (AI Assistant)' },
+                { key: 'http', label: 'HTTP (External MCP)' },
+            ];
+
+            // Fetch tools per context and policies in parallel
+            const [mcpTools, chatTools, policies] = await Promise.all([
+                this.api('GET', '/config/mcp-tools'),
+                this.api('GET', '/config/mcp-tools?context=chat'),
+                this.api('GET', '/config/tool-policies'),
+            ]);
+
+            this._tpTools = mcpTools; // for project modal (uses MCP tools)
+            const toolsByContext = { session: mcpTools, chat: chatTools, http: mcpTools };
+
+            container.innerHTML = contexts.map(ctx => {
+                // Sessions default to deny_all (no tools), chat/http default to allow_all
+                const defaultMode = ctx.key === 'session' ? 'deny_all' : 'allow_all';
+                let policy = { mode: defaultMode, denied: [], allowed: [] };
+                try { if (policies[ctx.key]) policy = JSON.parse(policies[ctx.key]); } catch(e) {}
+                const denied = new Set(policy.denied || []);
+                const allowed = new Set(policy.allowed || []);
+                const mode = policy.mode || 'allow_all';
+                const tools = toolsByContext[ctx.key];
+
+                const toolCheckboxes = tools.map(t => {
+                    let checked;
+                    if (mode === 'deny_all') {
+                        checked = allowed.has(t.name);
+                    } else {
+                        checked = !denied.has(t.name);
+                    }
+                    const shortDesc = t.description.length > 60 ? t.description.slice(0, 60) + '...' : t.description;
+                    return `<label class="tp-tool-item" title="${t.description.replace(/"/g, '&quot;')}">
+                        <input type="checkbox" data-ctx="${ctx.key}" data-tool="${t.name}" ${checked ? 'checked' : ''}>
+                        <span class="tp-tool-name">${t.name}</span>
+                        <span class="tp-tool-desc">${shortDesc}</span>
+                    </label>`;
+                }).join('');
+
+                return `<div class="tp-context-section">
+                    <div class="tp-context-header" onclick="app.toggleTPContext('${ctx.key}')">
+                        <span class="tp-context-arrow" id="tp-arrow-${ctx.key}">&#9654;</span>
+                        <strong>${ctx.label}</strong>
+                        <span class="tp-context-summary" id="tp-summary-${ctx.key}"></span>
+                    </div>
+                    <div class="tp-context-body" id="tp-body-${ctx.key}" style="display:none;">
+                        <div style="display: flex; gap: 8px; margin-bottom: 8px; align-items: center;">
+                            <button class="btn btn-sm btn-secondary" onclick="app.tpSelectAll('${ctx.key}', true)">Select All</button>
+                            <button class="btn btn-sm btn-secondary" onclick="app.tpSelectAll('${ctx.key}', false)">Deselect All</button>
+                        </div>
+                        <div class="tp-tool-grid">${toolCheckboxes}</div>
+                    </div>
+                </div>`;
+            }).join('');
+
+            // Update summaries
+            for (const ctx of contexts) {
+                this._updateTPSummary(ctx.key);
+            }
+
+            // Listen for checkbox changes to update summary
+            container.addEventListener('change', (e) => {
+                if (e.target.dataset.ctx) this._updateTPSummary(e.target.dataset.ctx);
+            });
+        } catch (e) {
+            container.innerHTML = '<span style="color: var(--color-text-muted); font-size: 12px;">Failed to load tool policies</span>';
+        }
+    }
+
+    _updateTPSummary(ctx) {
+        const all = document.querySelectorAll(`input[data-ctx="${ctx}"]`);
+        const checked = document.querySelectorAll(`input[data-ctx="${ctx}"]:checked`);
+        const el = document.getElementById(`tp-summary-${ctx}`);
+        if (el) {
+            if (checked.length === all.length) {
+                el.textContent = 'All tools enabled';
+                el.style.color = 'var(--color-success)';
+            } else if (checked.length === 0) {
+                el.textContent = 'All tools disabled';
+                el.style.color = 'var(--color-danger, #e74c3c)';
+            } else {
+                el.textContent = `${checked.length}/${all.length} tools enabled`;
+                el.style.color = 'var(--color-warning, #f39c12)';
+            }
+        }
+    }
+
+    toggleTPContext(ctx) {
+        const body = document.getElementById(`tp-body-${ctx}`);
+        const arrow = document.getElementById(`tp-arrow-${ctx}`);
+        if (!body) return;
+        const open = body.style.display !== 'none';
+        body.style.display = open ? 'none' : '';
+        if (arrow) arrow.innerHTML = open ? '&#9654;' : '&#9660;';
+    }
+
+    tpSelectAll(ctx, checked) {
+        document.querySelectorAll(`input[data-ctx="${ctx}"]`).forEach(cb => cb.checked = checked);
+        this._updateTPSummary(ctx);
+    }
+
+    async saveToolPolicies() {
+        const policies = {};
+        for (const ctx of ['session', 'chat', 'http']) {
+            const all = document.querySelectorAll(`input[data-ctx="${ctx}"]`);
+            const checked = document.querySelectorAll(`input[data-ctx="${ctx}"]:checked`);
+
+            if (checked.length === all.length) {
+                policies[ctx] = JSON.stringify({ mode: 'allow_all' });
+            } else if (checked.length === 0) {
+                policies[ctx] = JSON.stringify({ mode: 'deny_all' });
+            } else {
+                // Use the smaller list for efficiency
+                if (checked.length <= all.length / 2) {
+                    // More denied than allowed -> deny_all + allowed list
+                    const allowed = Array.from(checked).map(cb => cb.dataset.tool);
+                    policies[ctx] = JSON.stringify({ mode: 'deny_all', allowed });
+                } else {
+                    // More allowed than denied -> allow_all + denied list
+                    const unchecked = document.querySelectorAll(`input[data-ctx="${ctx}"]:not(:checked)`);
+                    const denied = Array.from(unchecked).map(cb => cb.dataset.tool);
+                    policies[ctx] = JSON.stringify({ mode: 'allow_all', denied });
+                }
+            }
+        }
+        try {
+            await this.api('PUT', '/config/tool-policies', policies);
+            this.showToast('Success', 'Tool policies saved', 'success');
         } catch (error) {
             this.showToast('Error', error.message, 'error');
         }

@@ -16,6 +16,7 @@ type Project struct {
 	SSHAuthType            sql.NullString `db:"ssh_auth_type" json:"ssh_auth_type,omitempty"` // 'password', 'key', 'key_passphrase'
 	SSHCredentialEncrypted sql.NullString `db:"ssh_credential_encrypted" json:"-"`
 	SSHCredentialIV        sql.NullString `db:"ssh_credential_iv" json:"-"`
+	ToolPolicy             string         `db:"tool_policy" json:"tool_policy,omitempty"` // JSON ToolPolicy
 	ConfigSyncedAt         sql.NullTime   `db:"config_synced_at" json:"config_synced_at,omitempty"`
 	CreatedAt              time.Time      `db:"created_at" json:"created_at"`
 	UpdatedAt              time.Time      `db:"updated_at" json:"updated_at"`
@@ -30,6 +31,7 @@ type ProjectInput struct {
 	SSHUser       string `json:"ssh_user,omitempty"`
 	SSHAuthType   string `json:"ssh_auth_type,omitempty"`
 	SSHCredential string `json:"ssh_credential,omitempty"`
+	ToolPolicy    string `json:"tool_policy,omitempty"`
 }
 
 type Session struct {

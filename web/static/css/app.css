@@ -3121,6 +3121,203 @@ body {
     font-weight: 500;
 }
 
+/* Tool Policy settings */
+.tp-context-section {
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    overflow: hidden;
+}
+.tp-context-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+    background: var(--color-bg);
+    user-select: none;
+}
+.tp-context-header:hover {
+    background: var(--color-surface);
+}
+.tp-context-arrow {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    width: 12px;
+}
+.tp-context-summary {
+    margin-left: auto;
+    font-size: 11px;
+    font-weight: normal;
+}
+.tp-context-body {
+    padding: 10px 12px;
+    border-top: 1px solid var(--color-border);
+}
+.tp-tool-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 2px;
+    max-height: 300px;
+    overflow-y: auto;
+}
+.tp-tool-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 12px;
+}
+.tp-tool-item:hover {
+    background: var(--color-surface);
+}
+.tp-tool-item input[type="checkbox"] {
+    flex-shrink: 0;
+}
+.tp-tool-name {
+    font-family: var(--font-mono, monospace);
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+    min-width: 220px;
+}
+.tp-tool-desc {
+    color: var(--color-text-muted);
+    font-size: 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Tools button and panel */
+.ai-chat-tools-btn {
+    position: relative;
+}
+.ai-chat-tools-count {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    font-size: 9px;
+    font-weight: 700;
+    background: var(--color-primary);
+    color: #fff;
+    border-radius: 8px;
+    padding: 1px 4px;
+    min-width: 14px;
+    text-align: center;
+    line-height: 1.2;
+}
+.ai-chat-tools-btn.active {
+    background: var(--color-primary);
+    color: #fff;
+    border-radius: 4px;
+}
+.ai-chat-tools-panel {
+    max-height: 200px;
+    overflow-y: auto;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface);
+    padding: 8px;
+}
+.ai-chat-tools-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.ai-chat-tool-item {
+    display: flex;
+    flex-direction: column;
+    padding: 6px 8px;
+    border-radius: 4px;
+    background: var(--color-bg);
+    font-size: 11px;
+    line-height: 1.3;
+}
+.ai-chat-tool-item strong {
+    font-size: 11px;
+    color: var(--color-text);
+    font-family: var(--font-mono, monospace);
+}
+.ai-chat-tool-item span {
+    color: var(--color-text-muted);
+    font-size: 10px;
+}
+
+/* Session tools panel (terminal view) */
+.session-tools-count {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    font-size: 9px;
+    font-weight: 700;
+    background: var(--color-primary);
+    color: #fff;
+    border-radius: 8px;
+    padding: 1px 4px;
+    min-width: 14px;
+    text-align: center;
+    line-height: 1.2;
+}
+#btn-session-tools {
+    position: relative;
+}
+.session-tools-panel {
+    background: var(--color-surface);
+    border-bottom: 1px solid var(--color-border);
+    max-height: 250px;
+    overflow-y: auto;
+}
+.session-tools-panel-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-bg);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+.session-tools-panel-list {
+    padding: 6px 8px;
+}
+.session-tool-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+}
+.session-tool-item.disabled {
+    opacity: 0.4;
+}
+.session-tool-status {
+    font-size: 8px;
+    flex-shrink: 0;
+    width: 12px;
+    text-align: center;
+}
+.session-tool-item:not(.disabled) .session-tool-status {
+    color: var(--color-success, #22c55e);
+}
+
+/* Project tools grid (project detail view) */
+.project-tools-list {
+    max-height: 350px;
+    overflow-y: auto;
+}
+.project-tools-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 2px;
+}
+.project-tools-actions {
+    padding-top: 8px;
+    border-top: 1px solid var(--color-border);
+}
+
 /* Doc card (native document preview in chat) */
 .ai-chat-doc-card {
     display: flex;
