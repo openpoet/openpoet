@@ -4821,13 +4821,14 @@ class DevManager {
 
             if (statsEl) {
                 const total = Object.values(summary).reduce((a, b) => a + b, 0);
+                const activeStatus = document.getElementById('filter-status')?.value || '';
                 statsEl.innerHTML = `
                     <div class="all-tasks-stat-cards">
-                        <div class="stat-card stat-total"><span class="stat-number">${total}</span><span class="stat-label">Total</span></div>
-                        <div class="stat-card stat-todo"><span class="stat-number">${summary.todo || 0}</span><span class="stat-label">Todo</span></div>
-                        <div class="stat-card stat-progress"><span class="stat-number">${summary.in_progress || 0}</span><span class="stat-label">In Progress</span></div>
-                        <div class="stat-card stat-done"><span class="stat-number">${summary.done || 0}</span><span class="stat-label">Done</span></div>
-                        <div class="stat-card stat-blocked"><span class="stat-number">${summary.blocked || 0}</span><span class="stat-label">Blocked</span></div>
+                        <div class="stat-card stat-total${activeStatus === '' ? ' active' : ''}" data-filter="" onclick="app.filterByStatus('')"><span class="stat-number">${total}</span><span class="stat-label">Total</span></div>
+                        <div class="stat-card stat-todo${activeStatus === 'todo' ? ' active' : ''}" data-filter="todo" onclick="app.filterByStatus('todo')"><span class="stat-number">${summary.todo || 0}</span><span class="stat-label">Todo</span></div>
+                        <div class="stat-card stat-progress${activeStatus === 'in_progress' ? ' active' : ''}" data-filter="in_progress" onclick="app.filterByStatus('in_progress')"><span class="stat-number">${summary.in_progress || 0}</span><span class="stat-label">In Progress</span></div>
+                        <div class="stat-card stat-done${activeStatus === 'done' ? ' active' : ''}" data-filter="done" onclick="app.filterByStatus('done')"><span class="stat-number">${summary.done || 0}</span><span class="stat-label">Done</span></div>
+                        <div class="stat-card stat-blocked${activeStatus === 'blocked' ? ' active' : ''}" data-filter="blocked" onclick="app.filterByStatus('blocked')"><span class="stat-number">${summary.blocked || 0}</span><span class="stat-label">Blocked</span></div>
                     </div>
                 `;
             }
@@ -4931,6 +4932,15 @@ class DevManager {
             const el = document.getElementById(id);
             if (el) el.addEventListener('change', () => this.loadAllTasks());
         });
+    }
+
+    filterByStatus(status) {
+        const select = document.getElementById('filter-status');
+        if (select) {
+            const current = select.value;
+            select.value = (current === status) ? '' : status;
+        }
+        this.loadAllTasks();
     }
 
     // ============ AI Proactive Suggestions ============
