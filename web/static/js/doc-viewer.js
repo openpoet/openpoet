@@ -37,6 +37,7 @@ class DocViewer {
 
             const isPendingMemoryDoc = doc.title && doc.title.startsWith('Memory Doc:');
             const isPlanningProposal = doc.title && doc.title.startsWith('Planejamento:');
+            const isTaskProposal = doc.title && doc.title.startsWith('Tarefa:');
 
             if (isPendingMemoryDoc) {
                 this.openWithContent(doc.title, doc.content, {
@@ -116,6 +117,46 @@ class DocViewer {
                         }
                     ]
                 });
+            } else if (isTaskProposal) {
+                this.openWithContent(doc.title, doc.content, {
+                    actions: [
+                        {
+                            label: 'Rejeitar',
+                            class: 'btn btn-secondary',
+                            onClick: async () => {
+                                try {
+                                    await fetch(`/api/task-proposal/reject/${docId}`, { method: 'POST' });
+                                    this.close();
+                                    window.aiChat?.updateDocCardStatus(docId, 'rejected');
+                                    window.app?.showToast('Proposta de tarefa rejeitada.', 'info');
+                                } catch (e) {
+                                    this.close();
+                                }
+                            }
+                        },
+                        {
+                            label: 'Aprovar Tarefa',
+                            class: 'btn btn-primary',
+                            onClick: async () => {
+                                try {
+                                    const r = await fetch(`/api/task-proposal/approve/${docId}`, { method: 'POST' });
+                                    if (r.ok) {
+                                        const data = await r.json();
+                                        this.close();
+                                        window.aiChat?.updateDocCardStatus(docId, 'approved');
+                                        const msg = `Tarefa aprovada! ${data.created || 0} criada(s), ${data.updated || 0} atualizada(s).`;
+                                        window.app?.showToast(msg, 'success');
+                                    } else {
+                                        const err = await r.json();
+                                        window.app?.showToast(err.error || 'Erro ao aprovar tarefa', 'error');
+                                    }
+                                } catch (e) {
+                                    window.app?.showToast('Erro ao aprovar tarefa', 'error');
+                                }
+                            }
+                        }
+                    ]
+                });
             } else {
                 this.openWithContent(doc.title || 'Documento', doc.content);
             }
@@ -129,7 +170,10 @@ class DocViewer {
 
         this.nameEl.textContent = title || 'Documento';
         this.contentEl.innerHTML = this._renderMarkdown(content || '');
-        if (typeof FileViewer !== 'undefined') FileViewer.renderMermaid(this.contentEl);
+        // Defer mermaid rendering to ensure DOM is stable
+        requestAnimationFrame(() => {
+            if (typeof FileViewer !== 'undefined') FileViewer.renderMermaid(this.contentEl);
+        });
 
         // Build footer actions
         this.footerEl.innerHTML = '';
@@ -159,6 +203,8 @@ class DocViewer {
         if (!text) return '';
         if (typeof marked !== 'undefined') {
             try {
+                // Ensure the mermaid-aware renderer is initialized
+                if (typeof FileViewer !== 'undefined') FileViewer._initMarked();
                 return marked.parse(text);
             } catch (e) {
                 return this._escapeHtml(text);

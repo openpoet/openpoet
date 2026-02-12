@@ -185,6 +185,12 @@ func allToolsDef() []MCPTool {
 			Description: "Send text input to a running Claude Code session terminal.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"session_id":{"type":"string","description":"Session ID"},"text":{"type":"string","description":"Text to send (Enter appended automatically)"}},"required":["session_id","text"]}`),
 		},
+		// Document creation tool
+		{
+			Name:        "devmanager_create_document",
+			Description: "Create a temporary markdown document for the user to view. Use for ANY response longer than ~5 lines (lists, explanations, code, reports). Keeps the chat clean.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"title":{"type":"string","description":"Short document title"},"content":{"type":"string","description":"Full markdown content"},"conversation_id":{"type":"string","description":"Current conversation ID (if available)"}},"required":["content"]}`),
+		},
 	}
 }
 
@@ -577,6 +583,34 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 			return "", err
 		}
 		return fmt.Sprintf("Sent to session %s: %s", sid[:8], truncate(text, 100)), nil
+
+	case "devmanager_create_document":
+		title, _ := params["title"].(string)
+		content, _ := params["content"].(string)
+		convID := conversationID
+		if v, ok := params["conversation_id"].(string); ok && v != "" {
+			convID = v
+		}
+		if content == "" {
+			return "", fmt.Errorf("content is required")
+		}
+		payload, _ := json.Marshal(map[string]interface{}{
+			"title":           title,
+			"content":         content,
+			"conversation_id": convID,
+		})
+		body, err := client.Post("/api/documents", string(payload))
+		if err != nil {
+			return "", err
+		}
+		var result struct {
+			ID   string `json:"id"`
+			Link string `json:"link"`
+		}
+		if json.Unmarshal(body, &result) == nil {
+			return fmt.Sprintf("Documento criado com sucesso. Um botão 'Ver Documento' foi exibido automaticamente no chat. NÃO gere links — o usuário usará o botão nativo. Link interno: %s", result.Link), nil
+		}
+		return string(body), nil
 
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
