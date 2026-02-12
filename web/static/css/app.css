@@ -2883,6 +2883,50 @@ body {
     text-decoration: none;
 }
 
+.ai-chat-msg-assistant .ai-chat-msg-content .mermaid {
+    margin: 8px 0;
+    text-align: center;
+    background: var(--color-bg);
+    border-radius: 6px;
+    padding: 12px;
+}
+.ai-chat-msg-assistant .ai-chat-msg-content h1,
+.ai-chat-msg-assistant .ai-chat-msg-content h2,
+.ai-chat-msg-assistant .ai-chat-msg-content h3 {
+    margin-top: 10px;
+    margin-bottom: 4px;
+    font-weight: 600;
+}
+.ai-chat-msg-assistant .ai-chat-msg-content h1 { font-size: 16px; }
+.ai-chat-msg-assistant .ai-chat-msg-content h2 { font-size: 14px; }
+.ai-chat-msg-assistant .ai-chat-msg-content h3 { font-size: 13px; }
+.ai-chat-msg-assistant .ai-chat-msg-content table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 8px 0;
+    font-size: 12px;
+}
+.ai-chat-msg-assistant .ai-chat-msg-content th,
+.ai-chat-msg-assistant .ai-chat-msg-content td {
+    padding: 6px 8px;
+    border: 1px solid var(--color-border);
+    text-align: left;
+}
+.ai-chat-msg-assistant .ai-chat-msg-content th {
+    background: var(--color-bg);
+    font-weight: 600;
+}
+.ai-chat-msg-assistant .ai-chat-msg-content blockquote {
+    border-left: 3px solid var(--color-primary);
+    margin: 8px 0;
+    padding: 4px 12px;
+    color: var(--color-text-secondary);
+}
+.ai-chat-msg-assistant .ai-chat-msg-content img {
+    max-width: 100%;
+    border-radius: 4px;
+}
+
 .ai-chat-error {
     color: var(--color-danger);
 }
@@ -3408,6 +3452,16 @@ body {
 }
 .ai-chat-doc-card-planning .ai-chat-doc-card-btn {
     background: #06b6d4;
+}
+.ai-chat-doc-card-task_proposal {
+    border-left-color: #22c55e;
+    background: color-mix(in srgb, #22c55e 5%, var(--color-surface));
+}
+.ai-chat-doc-card-task_proposal .ai-chat-doc-card-icon {
+    color: #22c55e;
+}
+.ai-chat-doc-card-task_proposal .ai-chat-doc-card-btn {
+    background: #22c55e;
 }
 .ai-chat-doc-card-task-count {
     font-size: 11px;
@@ -4032,6 +4086,109 @@ body {
     font-size: 14px;
     line-height: 1.7;
     color: var(--color-text);
+}
+.doc-review-content h1,
+.doc-review-content h2,
+.doc-review-content h3,
+.doc-review-content h4 {
+    margin-top: 16px;
+    margin-bottom: 8px;
+    font-weight: 600;
+    color: var(--color-text);
+}
+.doc-review-content h1 { font-size: 20px; }
+.doc-review-content h2 { font-size: 17px; }
+.doc-review-content h3 { font-size: 15px; }
+.doc-review-content h4 { font-size: 14px; }
+.doc-review-content h1:first-child,
+.doc-review-content h2:first-child,
+.doc-review-content h3:first-child {
+    margin-top: 0;
+}
+.doc-review-content p {
+    margin: 8px 0;
+}
+.doc-review-content ul,
+.doc-review-content ol {
+    padding-left: 24px;
+    margin: 8px 0;
+}
+.doc-review-content li {
+    margin: 4px 0;
+}
+.doc-review-content code {
+    background: var(--color-bg-tertiary);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+}
+.doc-review-content pre {
+    background: var(--color-bg-tertiary);
+    padding: 12px 16px;
+    border-radius: 8px;
+    overflow-x: auto;
+    margin: 12px 0;
+    border: 1px solid var(--color-border);
+}
+.doc-review-content pre code {
+    background: none;
+    padding: 0;
+    font-size: 12px;
+    line-height: 1.5;
+}
+.doc-review-content blockquote {
+    border-left: 3px solid var(--color-primary);
+    margin: 12px 0;
+    padding: 8px 16px;
+    color: var(--color-text-secondary);
+    background: var(--color-bg-secondary);
+    border-radius: 0 6px 6px 0;
+}
+.doc-review-content table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 13px;
+}
+.doc-review-content th,
+.doc-review-content td {
+    padding: 8px 12px;
+    border: 1px solid var(--color-border);
+    text-align: left;
+}
+.doc-review-content th {
+    background: var(--color-bg-secondary);
+    font-weight: 600;
+}
+.doc-review-content tr:nth-child(even) {
+    background: var(--color-bg-secondary);
+}
+.doc-review-content hr {
+    border: none;
+    border-top: 1px solid var(--color-border);
+    margin: 16px 0;
+}
+.doc-review-content a {
+    color: var(--color-primary);
+    text-decoration: none;
+}
+.doc-review-content a:hover {
+    text-decoration: underline;
+}
+.doc-review-content strong {
+    font-weight: 600;
+}
+.doc-review-content .mermaid {
+    margin: 16px 0;
+    text-align: center;
+    background: var(--color-bg-secondary);
+    border-radius: 8px;
+    padding: 16px;
+}
+.doc-review-content img {
+    max-width: 100%;
+    border-radius: 6px;
 }
 .doc-review-footer {
     display: flex;

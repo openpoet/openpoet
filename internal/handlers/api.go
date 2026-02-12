@@ -60,6 +60,12 @@ type pendingPlanningProposal struct {
 	Summary   string
 }
 
+// pendingTaskProposal holds a single-task proposal awaiting user approval.
+type pendingTaskProposal struct {
+	Actions []PlanningTaskAction
+	Summary string
+}
+
 type API struct {
 	db           *database.DB
 	hub          *websocket.Hub
@@ -75,6 +81,9 @@ type API struct {
 
 	pendingPlanningMu sync.Mutex
 	pendingPlanning   map[string]*pendingPlanningProposal // docID -> pending planning
+
+	pendingTaskProposalsMu sync.Mutex
+	pendingTaskProposals   map[string]*pendingTaskProposal // docID -> pending task
 }
 
 // SetAIHandler sets the AI handler for AI chat functionality.
@@ -308,6 +317,130 @@ func (a *API) RejectPlanning(w http.ResponseWriter, r *http.Request) {
 
 	if !ok {
 		respondError(w, http.StatusNotFound, "No pending planning proposal found for this document")
+		return
+	}
+
+	a.db.UpdateTempDocumentStatus(r.Context(), docID, "rejected")
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
+}
+
+// storePendingTaskProposal stores a proposed task action set for later approval.
+func (a *API) storePendingTaskProposal(docID string, actions []PlanningTaskAction, summary string) {
+	a.pendingTaskProposalsMu.Lock()
+	defer a.pendingTaskProposalsMu.Unlock()
+	if a.pendingTaskProposals == nil {
+		a.pendingTaskProposals = make(map[string]*pendingTaskProposal)
+	}
+	a.pendingTaskProposals[docID] = &pendingTaskProposal{Actions: actions, Summary: summary}
+}
+
+// ApproveTaskProposal applies all task actions from a pending task proposal.
+func (a *API) ApproveTaskProposal(w http.ResponseWriter, r *http.Request) {
+	docID := chi.URLParam(r, "docId")
+
+	a.pendingTaskProposalsMu.Lock()
+	pending, ok := a.pendingTaskProposals[docID]
+	if ok {
+		delete(a.pendingTaskProposals, docID)
+	}
+	a.pendingTaskProposalsMu.Unlock()
+
+	if !ok {
+		respondError(w, http.StatusNotFound, "No pending task proposal found for this document")
+		return
+	}
+
+	a.db.UpdateTempDocumentStatus(r.Context(), docID, "approved")
+
+	created := 0
+	updated := 0
+
+	for _, action := range pending.Actions {
+		switch action.Action {
+		case "create":
+			task := &database.ProjectTask{
+				ProjectID:   action.ProjectID,
+				Title:       action.Title,
+				Description: action.Description,
+				Status:      action.Status,
+				Priority:    action.Priority,
+			}
+			if task.Status == "" {
+				task.Status = "todo"
+			}
+			if task.Priority == "" {
+				task.Priority = "medium"
+			}
+			if action.DueDate != "" {
+				t, err := parseFlexibleTime(action.DueDate)
+				if err == nil {
+					task.DueDate = sql.NullTime{Time: t, Valid: true}
+				}
+			}
+			if action.ParentID > 0 {
+				task.ParentID = sql.NullInt64{Int64: action.ParentID, Valid: true}
+			}
+			if err := a.db.CreateTask(r.Context(), task); err != nil {
+				log.Printf("[TaskProposal] Failed to create task '%s': %v", action.Title, err)
+				continue
+			}
+			a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "created", "project_id": action.ProjectID, "task": task})
+			created++
+
+		case "update":
+			task, err := a.db.GetTask(r.Context(), action.TaskID)
+			if err != nil {
+				log.Printf("[TaskProposal] Task %d not found for update: %v", action.TaskID, err)
+				continue
+			}
+			if action.Title != "" {
+				task.Title = action.Title
+			}
+			if action.Description != "" {
+				task.Description = action.Description
+			}
+			if action.Status != "" {
+				task.Status = action.Status
+			}
+			if action.Priority != "" {
+				task.Priority = action.Priority
+			}
+			if action.DueDate != "" {
+				t, err := parseFlexibleTime(action.DueDate)
+				if err == nil {
+					task.DueDate = sql.NullTime{Time: t, Valid: true}
+				}
+			}
+			if err := a.db.UpdateTask(r.Context(), task); err != nil {
+				log.Printf("[TaskProposal] Failed to update task %d: %v", action.TaskID, err)
+				continue
+			}
+			a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": action.ProjectID, "task": task})
+			updated++
+		}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"status":  "approved",
+		"created": created,
+		"updated": updated,
+	})
+}
+
+// RejectTaskProposal discards a pending task proposal.
+func (a *API) RejectTaskProposal(w http.ResponseWriter, r *http.Request) {
+	docID := chi.URLParam(r, "docId")
+
+	a.pendingTaskProposalsMu.Lock()
+	_, ok := a.pendingTaskProposals[docID]
+	if ok {
+		delete(a.pendingTaskProposals, docID)
+	}
+	a.pendingTaskProposalsMu.Unlock()
+
+	if !ok {
+		respondError(w, http.StatusNotFound, "No pending task proposal found for this document")
 		return
 	}
 
@@ -1462,8 +1595,9 @@ func (a *API) UpdateMemoryDoc(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) CreateTempDocument(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Title   string `json:"title"`
-		Content string `json:"content"`
+		Title          string `json:"title"`
+		Content        string `json:"content"`
+		ConversationID string `json:"conversation_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
@@ -1474,15 +1608,30 @@ func (a *API) CreateTempDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	title := input.Title
+	if title == "" {
+		title = "Documento"
+	}
+
+	convID, _ := strconv.ParseInt(input.ConversationID, 10, 64)
 	doc := &database.TempDocument{
-		ID:      uuid.New().String()[:8],
-		Title:   input.Title,
-		Content: input.Content,
+		ID:             uuid.New().String()[:8],
+		Title:          title,
+		Content:        input.Content,
+		ConversationID: sql.NullInt64{Int64: convID, Valid: convID > 0},
 	}
 	if err := a.db.CreateTempDocument(r.Context(), doc); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	// Notify the chat panel via WebSocket to inject an inline doc card
+	a.hub.BroadcastChatDocCard(map[string]interface{}{
+		"doc_id":          doc.ID,
+		"type":            "document",
+		"title":           title,
+		"conversation_id": input.ConversationID,
+	})
 
 	respondJSON(w, http.StatusCreated, map[string]string{
 		"id":   doc.ID,

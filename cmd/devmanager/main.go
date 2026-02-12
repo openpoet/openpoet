@@ -348,6 +348,9 @@ func main() {
 		// Planning approval (AI-proposed task changes)
 		r.Post("/planning/approve/{docId}", api.ApprovePlanning)
 		r.Post("/planning/reject/{docId}", api.RejectPlanning)
+		// Task proposal approval (single task create/update)
+		r.Post("/task-proposal/approve/{docId}", api.ApproveTaskProposal)
+		r.Post("/task-proposal/reject/{docId}", api.RejectTaskProposal)
 		// Project Tasks
 		r.Get("/projects/{id}/tasks", api.ListProjectTasks)
 		r.Post("/projects/{id}/tasks", api.CreateProjectTask)

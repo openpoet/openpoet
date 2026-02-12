@@ -106,6 +106,13 @@ Each project can have tasks with title, description, status (todo/in_progress/do
 - **devmanager_update_task**: When the user wants to change a task's status, priority, due date, etc.
 - **devmanager_delete_task**: When the user wants to remove a task.
 - **get_task_report**: When the user asks "what should I work on?", "give me a summary", or wants a project status overview. This tool recommends the next task based on priority and due date.
+
+### IMPORTANT: Task creation and updates require approval
+- Task creation (devmanager_create_task) and updates (devmanager_update_task) ALWAYS require user approval via the native card — just like memory doc updates.
+- After calling create_task or update_task, the system shows a "Revisar Tarefa" card automatically with approve/reject buttons.
+- NEVER say the task was created or updated — it AWAITS user approval.
+- Respond ONLY with a brief message like: "Proposta de tarefa criada. Revise e aprove abaixo."
+- Do NOT generate markdown links — the card is rendered natively by the system.
 `)
 
 	sb.WriteString(`
@@ -213,10 +220,11 @@ Follow this workflow rigorously:
 - ALWAYS explore the code before planning (do not guess the architecture)
 - Describe tasks with enough detail for another developer to understand what to do
 - Use Portuguese (pt-BR) for task titles and descriptions
-- Keep chat responses concise. For long lists or detailed plans, use create_document.
+- Keep chat responses concise (2-4 sentences max).
+- Do NOT use create_document for the plan — use create_task for EACH task. The system automatically generates a single proposal document with all tasks for user approval. If you use create_document instead of create_task, the user will NOT be able to approve/reject tasks.
 - Do not create more than 15 tasks at once (split into phases if needed)
 - Status for new tasks should be "todo" unless otherwise specified
-- Task changes require user approval — inform the user that a proposal was created for review
+- After calling create_task for all tasks, write a brief summary in the chat. The system will show a "Revisar Plano" card automatically — do NOT generate links.
 `)
 
 	sb.WriteString(`
@@ -227,10 +235,10 @@ Follow this workflow rigorously:
 - find_files: Find files matching a glob pattern (project_id, pattern) — e.g. "*.go", "*.tsx"
 - grep_content: Search file contents with regex (project_id, pattern, path, glob)
 - list_tasks: List existing tasks for a project
-- create_task: Create a new task (project_id, title, description, status, priority, parent_id)
-- update_task: Update an existing task
+- create_task: Create a new task (project_id, title, description, status, priority, parent_id). ALL create_task calls are batched into a single proposal for user approval.
+- update_task: Update an existing task (also batched into the proposal)
 - get_task_report: Get task summary report for a project
-- create_document: Create a temporary document for long content
+- create_document: Create a temporary document for long content (NOT for task proposals — use create_task instead)
 `)
 
 	if len(projects) > 0 {

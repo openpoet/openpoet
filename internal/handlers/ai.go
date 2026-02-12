@@ -27,8 +27,9 @@ var docLinkRe = regexp.MustCompile(`/app/doc/([a-zA-Z0-9-]+)`)
 
 // planningCollector accumulates task actions during planning mode for batch proposal.
 type planningCollector struct {
-	mu      sync.Mutex
-	actions []PlanningTaskAction
+	mu           sync.Mutex
+	actions      []PlanningTaskAction
+	planningMode bool // true = formal planning mode; false = regular chat batch
 }
 
 func (pc *planningCollector) add(action PlanningTaskAction) {
@@ -115,6 +116,16 @@ type AIHandler struct {
 
 	activeStreams   map[int64]*activeStreamInfo
 	activeStreamsMu sync.Mutex
+
+	// streamMessageIDs maps conversationID → current assistant messageID during streaming.
+	// Used by ExecuteTool (GoSDK path) to associate TempDocuments with the correct message.
+	streamMessageIDsMu sync.Mutex
+	streamMessageIDs   map[int64]int64
+
+	// streamCollectors maps conversationID → planningCollector during streaming.
+	// Used by ExecuteTool (GoSDK path) so planning-mode tool calls can collect task actions.
+	streamCollectorsMu sync.Mutex
+	streamCollectors   map[int64]*planningCollector
 }
 
 // NewAIHandler creates a new AI handler.
@@ -506,6 +517,24 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[AI] Failed to create streaming message: %v", err)
 	}
 
+	// Register the current message ID for GoSDK tool execution
+	h.streamMessageIDsMu.Lock()
+	if h.streamMessageIDs == nil {
+		h.streamMessageIDs = make(map[int64]int64)
+	}
+	h.streamMessageIDs[conv.ID] = assistantMsg.ID
+	h.streamMessageIDsMu.Unlock()
+
+	// Create task collector and make it accessible to GoSDK tool execution.
+	// Must be stored BEFORE streaming starts, since GoSDK calls tools during streaming.
+	collector := &planningCollector{planningMode: isPlanning}
+	h.streamCollectorsMu.Lock()
+	if h.streamCollectors == nil {
+		h.streamCollectors = make(map[int64]*planningCollector)
+	}
+	h.streamCollectors[conv.ID] = collector
+	h.streamCollectorsMu.Unlock()
+
 	safeSendSSE("message_id", map[string]interface{}{
 		"id": assistantMsg.ID,
 	})
@@ -535,6 +564,16 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		h.unregisterStream(conv.ID)
 		sf.stop()
+
+		// Clear the stream message ID mapping
+		h.streamMessageIDsMu.Lock()
+		delete(h.streamMessageIDs, conv.ID)
+		h.streamMessageIDsMu.Unlock()
+
+		// Clear the stream collector mapping
+		h.streamCollectorsMu.Lock()
+		delete(h.streamCollectors, conv.ID)
+		h.streamCollectorsMu.Unlock()
 
 		textMu.Lock()
 		finalContent := assistantText.String()
@@ -598,13 +637,12 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Handle tool use loop — session providers handle tools internally, skip for them
 	maxIter := 5
-	var collector *planningCollector
 	if isPlanning {
 		maxIter = 15
-		collector = &planningCollector{}
 	}
+
 	if resp != nil && resp.StopReason == "tool_use" && !isSessionProvider {
-		loopUsage, loopErr := h.handleToolLoop(streamCtx, safeSendSSE, p, req, resp, conv, &assistantText, &toolCalls, &textMu, maxIter, collector)
+		loopUsage, loopErr := h.handleToolLoop(streamCtx, safeSendSSE, p, req, resp, conv, &assistantText, &toolCalls, &textMu, maxIter, collector, assistantMsg.ID)
 		if loopErr != nil {
 			log.Printf("[AI] Tool loop error: %v", loopErr)
 			if streamCtx.Err() == context.Canceled {
@@ -623,8 +661,10 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		totalUsage.CacheCreationTokens += loopUsage.CacheCreationTokens
 	}
 
-	// In planning mode, create a proposal document if task actions were collected
-	if collector != nil && collector.hasActions() {
+	// Create a single batch proposal document if task actions were collected.
+	// Planning mode → "Planejamento:" doc with planning approval flow.
+	// Regular mode → "Tarefa:" doc with task proposal approval flow.
+	if collector.hasActions() {
 		actions := collector.getActions()
 		projectID := actions[0].ProjectID
 
@@ -656,14 +696,9 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		if deleteCount > 0 {
 			summaryParts = append(summaryParts, fmt.Sprintf("remover %d tarefa(s)", deleteCount))
 		}
-		summary := fmt.Sprintf("Plano para %s: %s", projectName, strings.Join(summaryParts, ", "))
 
 		// Build markdown content for preview
 		var contentBuilder strings.Builder
-		contentBuilder.WriteString(fmt.Sprintf("# Proposta de Planejamento — %s\n\n", projectName))
-		contentBuilder.WriteString(fmt.Sprintf("**Resumo:** %s\n\n", summary))
-		contentBuilder.WriteString("## Ações propostas\n\n")
-
 		for i, a := range actions {
 			switch a.Action {
 			case "create":
@@ -689,28 +724,110 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			contentBuilder.WriteString("\n")
 		}
 
-		// Create temp document
 		docID := uuid.New().String()[:8]
-		tempDoc := &database.TempDocument{
-			ID:             docID,
-			Title:          fmt.Sprintf("Planejamento: %s", projectName),
-			Content:        contentBuilder.String(),
-			ConversationID: sql.NullInt64{Int64: conv.ID, Valid: conv.ID > 0},
-			Summary:        summary,
-		}
-		if err := h.api.db.CreateTempDocument(ctx, tempDoc); err != nil {
-			log.Printf("[Planning] Failed to create temp document: %v", err)
-		} else {
-			// Store pending planning proposal
-			h.api.storePendingPlanning(docID, projectID, actions, summary)
 
-			// Emit doc_card for the planning proposal
+		if isPlanning {
+			// Planning mode: "Planejamento:" doc with full planning approval
+			summary := fmt.Sprintf("Plano para %s: %s", projectName, strings.Join(summaryParts, ", "))
+
+			var fullContent strings.Builder
+			fullContent.WriteString(fmt.Sprintf("# Proposta de Planejamento — %s\n\n", projectName))
+			fullContent.WriteString(fmt.Sprintf("**Resumo:** %s\n\n", summary))
+			fullContent.WriteString("## Ações propostas\n\n")
+			fullContent.WriteString(contentBuilder.String())
+
+			tempDoc := &database.TempDocument{
+				ID:             docID,
+				Title:          fmt.Sprintf("Planejamento: %s", projectName),
+				Content:        fullContent.String(),
+				ConversationID: sql.NullInt64{Int64: conv.ID, Valid: conv.ID > 0},
+				Summary:        summary,
+				MessageID:      assistantMsg.ID,
+			}
+			if err := h.api.db.CreateTempDocument(ctx, tempDoc); err != nil {
+				log.Printf("[Planning] Failed to create temp document: %v", err)
+			} else {
+				h.api.storePendingPlanning(docID, projectID, actions, summary)
+
+				// Emit doc_card only for non-session providers (GoSDK emits via session provider code below)
+				if !isSessionProvider {
+					safeSendSSE("doc_card", map[string]interface{}{
+						"doc_id":     docID,
+						"type":       "planning",
+						"title":      fmt.Sprintf("Proposta de Planejamento — %s", projectName),
+						"summary":    summary,
+						"task_count": len(actions),
+					})
+				}
+			}
+		} else {
+			// Regular mode: "Tarefa:" doc with task proposal approval
+			summary := fmt.Sprintf("%s — %s", strings.Join(summaryParts, ", "), projectName)
+
+			// Title: task name for single task, project name for batch
+			docTitle := fmt.Sprintf("Tarefa: %s", projectName)
+			if len(actions) == 1 {
+				docTitle = fmt.Sprintf("Tarefa: %s", actions[0].Title)
+			}
+
+			var fullContent strings.Builder
+			fullContent.WriteString(fmt.Sprintf("# Proposta de Tarefas — %s\n\n", projectName))
+			fullContent.WriteString(fmt.Sprintf("**Resumo:** %s\n\n", summary))
+			fullContent.WriteString(contentBuilder.String())
+
+			tempDoc := &database.TempDocument{
+				ID:             docID,
+				Title:          docTitle,
+				Content:        fullContent.String(),
+				ConversationID: sql.NullInt64{Int64: conv.ID, Valid: conv.ID > 0},
+				Summary:        summary,
+				MessageID:      assistantMsg.ID,
+			}
+			if err := h.api.db.CreateTempDocument(ctx, tempDoc); err != nil {
+				log.Printf("[TaskProposal] Failed to create temp document: %v", err)
+			} else {
+				h.api.storePendingTaskProposal(docID, actions, summary)
+
+				// Emit doc_card only for non-session providers
+				if !isSessionProvider {
+					safeSendSSE("doc_card", map[string]interface{}{
+						"doc_id":     docID,
+						"type":       "task_proposal",
+						"title":      docTitle,
+						"summary":    summary,
+						"task_count": len(actions),
+					})
+				}
+			}
+		}
+	}
+
+	// Session providers handle tools internally — emit doc_card SSE events for
+	// any documents created during this stream (the tool loop that normally does
+	// this is skipped for session providers).
+	if isSessionProvider {
+		docCtx, docCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		docs, _ := h.api.db.ListTempDocumentsByConversation(docCtx, conv.ID)
+		docCancel()
+		for _, doc := range docs {
+			// Only emit cards for documents created after the assistant message started
+			if assistantMsg != nil && doc.CreatedAt.Before(assistantMsg.CreatedAt) {
+				continue
+			}
+			cardType := "document"
+			if strings.HasPrefix(doc.Title, "Memory Doc:") {
+				cardType = "proposal"
+			} else if strings.HasPrefix(doc.Title, "Planejamento:") {
+				cardType = "planning"
+			} else if strings.HasPrefix(doc.Title, "Tarefa:") {
+				cardType = "task_proposal"
+			}
 			safeSendSSE("doc_card", map[string]interface{}{
-				"doc_id":     docID,
-				"type":       "planning",
-				"title":      fmt.Sprintf("Proposta de Planejamento — %s", projectName),
-				"summary":    summary,
-				"task_count": len(actions),
+				"doc_id":  doc.ID,
+				"type":    cardType,
+				"title":   doc.Title,
+				"summary": doc.Summary,
+				"status":  doc.Status,
 			})
 		}
 	}
@@ -821,6 +938,7 @@ func (h *AIHandler) handleToolLoop(
 	textMu *sync.Mutex,
 	maxIterations int,
 	collector *planningCollector,
+	messageID int64,
 ) (llm.Usage, error) {
 	var accumulated llm.Usage
 
@@ -852,7 +970,7 @@ func (h *AIHandler) handleToolLoop(
 			})
 
 			toolCtx, toolCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			result, err := h.executeTool(toolCtx, block.Name, inputMap, conv.ID, collector)
+			result, err := h.executeTool(toolCtx, block.Name, inputMap, conv.ID, messageID, collector)
 			toolCancel()
 			if err != nil {
 				result = fmt.Sprintf("Error: %s", err.Error())
@@ -923,11 +1041,21 @@ func (h *AIHandler) handleToolLoop(
 // ExecuteTool implements llm.ToolExecutor. It wraps the private executeTool method
 // so that SDK providers can call DevManager tools from their in-process MCP servers.
 func (h *AIHandler) ExecuteTool(ctx context.Context, name string, input map[string]any, conversationID int64) (string, error) {
-	return h.executeTool(ctx, name, input, conversationID, nil)
+	// Look up the current streaming message ID for this conversation
+	h.streamMessageIDsMu.Lock()
+	msgID := h.streamMessageIDs[conversationID]
+	h.streamMessageIDsMu.Unlock()
+
+	// Look up planning collector for this conversation (if in planning mode)
+	h.streamCollectorsMu.Lock()
+	collector := h.streamCollectors[conversationID]
+	h.streamCollectorsMu.Unlock()
+
+	return h.executeTool(ctx, name, input, conversationID, msgID, collector)
 }
 
 // executeTool runs a tool and returns the result as a string.
-func (h *AIHandler) executeTool(ctx context.Context, name string, input map[string]interface{}, conversationID int64, collector *planningCollector) (string, error) {
+func (h *AIHandler) executeTool(ctx context.Context, name string, input map[string]interface{}, conversationID int64, messageID int64, collector *planningCollector) (string, error) {
 	switch name {
 	case "create_skill":
 		skillName, _ := input["name"].(string)
@@ -1136,9 +1264,10 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			projectName = project.Name
 		}
 		tempDoc := &database.TempDocument{
-			ID:      docID,
-			Title:   fmt.Sprintf("Memory Doc: %s (v%d)", projectName, doc.Version),
-			Content: doc.Content,
+			ID:        docID,
+			Title:     fmt.Sprintf("Memory Doc: %s (v%d)", projectName, doc.Version),
+			Content:   doc.Content,
+			MessageID: messageID,
 		}
 		if err := h.api.db.CreateTempDocument(ctx, tempDoc); err != nil {
 			// Fallback: return link to project page if temp doc creation fails
@@ -1178,6 +1307,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			Content:        content,
 			ConversationID: sql.NullInt64{Int64: conversationID, Valid: conversationID > 0},
 			Summary:        summary,
+			MessageID:      messageID,
 		}
 		if err := h.api.db.CreateTempDocument(ctx, tempDoc); err != nil {
 			return "", err
@@ -1258,7 +1388,8 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			parentID = int64(pidF)
 		}
 
-		// In planning mode, collect into proposal instead of creating directly
+		// Collect task actions into the batch collector (if available).
+		// A single proposal card with all tasks is created after streaming completes.
 		if collector != nil {
 			collector.add(PlanningTaskAction{
 				Action:      "create",
@@ -1270,33 +1401,12 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 				DueDate:     dueDateStr,
 				ParentID:    parentID,
 			})
-			return fmt.Sprintf("Task '%s' adicionada ao plano (será criada após aprovação)", title), nil
+			return fmt.Sprintf(
+				"IMPORTANTE: Task '%s' NÃO foi criada ainda — será criada após aprovação do usuário. "+
+					"NÃO diga que a tarefa foi criada.", title), nil
 		}
-
-		task := &database.ProjectTask{
-			ProjectID:   projectID,
-			Title:       title,
-			Description: description,
-			Status:      status,
-			Priority:    priority,
-		}
-
-		if dueDateStr != "" {
-			t, err := parseFlexibleTime(dueDateStr)
-			if err == nil {
-				task.DueDate = sql.NullTime{Time: t, Valid: true}
-			}
-		}
-
-		if parentID > 0 {
-			task.ParentID = sql.NullInt64{Int64: parentID, Valid: true}
-		}
-
-		if err := h.api.db.CreateTask(ctx, task); err != nil {
-			return "", err
-		}
-		h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "created", "project_id": projectID, "task": task})
-		return fmt.Sprintf("Task '%s' created (ID: %d)", title, task.ID), nil
+		// Fallback: no collector available (e.g. called from HandleExecuteTool HTTP endpoint)
+		return "", fmt.Errorf("task creation requires a streaming context")
 
 	case "update_task":
 		projectID, err := parseIDParam(input, "project_id")
@@ -1348,7 +1458,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			}
 		}
 
-		// In planning mode, collect into proposal instead of updating directly
+		// Collect task actions into the batch collector (if available).
 		if collector != nil {
 			collector.add(PlanningTaskAction{
 				Action:      "update",
@@ -1360,14 +1470,12 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 				Priority:    newPriority,
 				DueDate:     newDueDate,
 			})
-			return fmt.Sprintf("Atualização da task '%s' adicionada ao plano (será aplicada após aprovação)", newTitle), nil
+			return fmt.Sprintf(
+				"IMPORTANTE: Task '%s' NÃO foi atualizada ainda — será aplicada após aprovação do usuário. "+
+					"NÃO diga que a tarefa foi atualizada.", newTitle), nil
 		}
-
-		if err := h.api.db.UpdateTask(ctx, task); err != nil {
-			return "", err
-		}
-		h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
-		return fmt.Sprintf("Task '%s' updated", task.Title), nil
+		// Fallback: no collector available
+		return "", fmt.Errorf("task update requires a streaming context")
 
 	case "delete_task":
 		projectID, err := parseIDParam(input, "project_id")
@@ -1384,8 +1492,8 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			return "", fmt.Errorf("task not found")
 		}
 
-		// In planning mode, collect into proposal instead of deleting directly
-		if collector != nil {
+		// In planning mode, collect into proposal; otherwise delete immediately
+		if collector != nil && collector.planningMode {
 			collector.add(PlanningTaskAction{
 				Action:    "delete",
 				ProjectID: projectID,
@@ -1498,6 +1606,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			Title:          title,
 			Content:        content,
 			ConversationID: sql.NullInt64{Int64: conversationID, Valid: conversationID > 0},
+			MessageID:      messageID,
 		}
 		if err := h.api.db.CreateTempDocument(ctx, doc); err != nil {
 			return "", err
@@ -1766,7 +1875,7 @@ func (h *AIHandler) HandleExecuteTool(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	result, err := h.executeTool(ctx, input.Name, input.Args, input.ConversationID, nil)
+	result, err := h.executeTool(ctx, input.Name, input.Args, input.ConversationID, 0, nil)
 	if err != nil {
 		respondJSON(w, http.StatusOK, map[string]interface{}{
 			"result": "",

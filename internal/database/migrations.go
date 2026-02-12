@@ -33,6 +33,7 @@ var migrations = []Migration{
 	{Version: 15, Description: "docs: add summary and status to temp_documents", Up: migrateV15},
 	{Version: 16, Description: "ai_messages: add status and error_info columns for streaming persistence", Up: migrateV16},
 	{Version: 17, Description: "projects: add tool_policy column for per-project tool access control", Up: migrateV17},
+	{Version: 18, Description: "docs: add message_id to temp_documents", Up: migrateV18},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -505,6 +506,12 @@ func migrateV16(tx *sqlx.Tx) error {
 // migrateV17 adds tool_policy column to projects for per-project tool access control.
 func migrateV17(tx *sqlx.Tx) error {
 	_, err := tx.Exec(`ALTER TABLE projects ADD COLUMN tool_policy TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+// migrateV18 adds message_id to temp_documents for associating doc cards with specific messages.
+func migrateV18(tx *sqlx.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE temp_documents ADD COLUMN message_id INTEGER NOT NULL DEFAULT 0`)
 	return err
 }
 
