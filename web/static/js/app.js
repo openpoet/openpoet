@@ -982,33 +982,46 @@ class DevManager {
         try {
             const tools = await this.api('GET', `/projects/${projectId}/tools`);
             const enabled = tools.filter(t => t.enabled);
+            const project = this.projects.find(p => p.id === projectId);
+            const isInheriting = !project?.tool_policy;
 
             if (summaryEl) {
-                if (enabled.length === 0) {
-                    summaryEl.textContent = 'No tools enabled';
+                if (isInheriting) {
+                    summaryEl.textContent = `Inheriting global (${enabled.length}/${tools.length})`;
+                } else if (enabled.length === 0) {
+                    summaryEl.textContent = 'No tools enabled (custom)';
                 } else if (enabled.length === tools.length) {
-                    summaryEl.textContent = `All ${tools.length} tools enabled`;
+                    summaryEl.textContent = `All ${tools.length} tools enabled (custom)`;
                 } else {
-                    summaryEl.textContent = `${enabled.length}/${tools.length} tools enabled`;
+                    summaryEl.textContent = `${enabled.length}/${tools.length} tools enabled (custom)`;
                 }
             }
 
+            const inheritChecked = isInheriting ? 'checked' : '';
             container.innerHTML = `
-                <div style="margin-bottom: 6px;">
-                    <label class="tp-tool-item" style="font-weight:500; cursor:pointer;">
-                        <input type="checkbox" id="project-tools-toggle-all" ${enabled.length === tools.length ? 'checked' : ''} onchange="app.projectDetailSelectAll(${projectId}, this.checked)">
-                        <span class="tp-tool-name" style="min-width:auto;">Toggle all</span>
+                <div style="margin-bottom: 8px; padding: 6px 8px; background: var(--color-bg-tertiary); border-radius: 6px; display: flex; align-items: center; gap: 8px;">
+                    <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px;">
+                        <input type="checkbox" id="project-tools-inherit" ${inheritChecked} onchange="app._projectInheritChanged(${projectId})">
+                        <span>Inherit from global policy</span>
                     </label>
                 </div>
-                <div class="project-tools-grid">
-                    ${tools.map(t => {
-                        const shortDesc = t.description.length > 80 ? t.description.slice(0, 80) + '...' : t.description;
-                        return `<label class="tp-tool-item" title="${t.description.replace(/"/g, '&quot;')}">
-                            <input type="checkbox" data-tool="${t.name}" ${t.enabled ? 'checked' : ''} onchange="app._projectToolChanged(${projectId})">
-                            <span class="tp-tool-name">${t.name}</span>
-                            <span class="tp-tool-desc">${shortDesc}</span>
-                        </label>`;
-                    }).join('')}
+                <div id="project-tools-custom" style="${isInheriting ? 'opacity:0.5;pointer-events:none;' : ''}">
+                    <div style="margin-bottom: 6px;">
+                        <label class="tp-tool-item" style="font-weight:500; cursor:pointer;">
+                            <input type="checkbox" id="project-tools-toggle-all" ${enabled.length === tools.length ? 'checked' : ''} onchange="app.projectDetailSelectAll(${projectId}, this.checked)">
+                            <span class="tp-tool-name" style="min-width:auto;">Toggle all</span>
+                        </label>
+                    </div>
+                    <div class="project-tools-grid">
+                        ${tools.map(t => {
+                            const shortDesc = t.description.length > 80 ? t.description.slice(0, 80) + '...' : t.description;
+                            return `<label class="tp-tool-item" title="${t.description.replace(/"/g, '&quot;')}">
+                                <input type="checkbox" data-tool="${t.name}" ${t.enabled ? 'checked' : ''} onchange="app._projectToolChanged(${projectId})">
+                                <span class="tp-tool-name">${t.name}</span>
+                                <span class="tp-tool-desc">${shortDesc}</span>
+                            </label>`;
+                        }).join('')}
+                    </div>
                 </div>
                 <div class="project-tools-actions" id="project-tools-actions" style="display:none;">
                     <button class="btn btn-sm btn-primary" onclick="app.saveProjectToolsFromDetail(${projectId})">Save</button>
@@ -1024,6 +1037,16 @@ class DevManager {
         }
     }
 
+    _projectInheritChanged(projectId) {
+        const inherit = document.getElementById('project-tools-inherit')?.checked;
+        const customDiv = document.getElementById('project-tools-custom');
+        if (customDiv) {
+            customDiv.style.opacity = inherit ? '0.5' : '1';
+            customDiv.style.pointerEvents = inherit ? 'none' : '';
+        }
+        this._projectToolChanged(projectId);
+    }
+
     projectDetailSelectAll(projectId, checked) {
         document.querySelectorAll('#project-tools-list input[data-tool]').forEach(cb => cb.checked = checked);
         this._projectToolChanged(projectId);
@@ -1035,23 +1058,30 @@ class DevManager {
     }
 
     async saveProjectToolsFromDetail(projectId) {
-        const checkboxes = document.querySelectorAll('#project-tools-list input[data-tool]');
-        const all = Array.from(checkboxes);
-        const checked = all.filter(cb => cb.checked);
+        const inherit = document.getElementById('project-tools-inherit')?.checked;
 
         let policy;
-        if (checked.length === all.length) {
-            // All enabled — clear project override, inherit global
+        if (inherit) {
+            // Inherit from global — clear project override
             policy = '';
-        } else if (checked.length === 0) {
-            policy = JSON.stringify({ mode: 'deny_all' });
-        } else if (checked.length <= all.length / 2) {
-            const allowed = checked.map(cb => cb.dataset.tool);
-            policy = JSON.stringify({ mode: 'deny_all', allowed });
         } else {
-            const unchecked = all.filter(cb => !cb.checked);
-            const denied = unchecked.map(cb => cb.dataset.tool);
-            policy = JSON.stringify({ mode: 'allow_all', denied });
+            // Custom project policy
+            const checkboxes = document.querySelectorAll('#project-tools-list input[data-tool]');
+            const all = Array.from(checkboxes);
+            const checked = all.filter(cb => cb.checked);
+
+            if (checked.length === all.length) {
+                policy = JSON.stringify({ mode: 'allow_all' });
+            } else if (checked.length === 0) {
+                policy = JSON.stringify({ mode: 'deny_all' });
+            } else if (checked.length <= all.length / 2) {
+                const allowed = checked.map(cb => cb.dataset.tool);
+                policy = JSON.stringify({ mode: 'deny_all', allowed });
+            } else {
+                const unchecked = all.filter(cb => !cb.checked);
+                const denied = unchecked.map(cb => cb.dataset.tool);
+                policy = JSON.stringify({ mode: 'allow_all', denied });
+            }
         }
 
         try {
@@ -4485,19 +4515,33 @@ class DevManager {
         }
     }
 
-    deleteTask(projectId, taskId) {
+    async deleteTask(projectId, taskId) {
+        // Fetch project tasks to count subtasks
+        let subtaskCount = 0;
+        try {
+            const tasks = await this.api('GET', `/projects/${projectId}/tasks`);
+            subtaskCount = tasks.filter(t => t.parent_id?.Valid && t.parent_id.Int64 === taskId).length;
+        } catch (e) { /* proceed without count */ }
+
+        let message = 'A tarefa será removida permanentemente.';
+        let confirmLabel = 'Excluir';
+        if (subtaskCount > 0) {
+            message = `A tarefa e suas <strong>${subtaskCount} subtarefa(s)</strong> serão removidas permanentemente.`;
+            confirmLabel = 'Excluir tudo';
+        }
+
         showConfirmModal(
             'Excluir tarefa?',
-            'A tarefa e suas subtarefas serão removidas permanentemente.',
+            message,
             async () => {
                 try {
                     await this.api('DELETE', `/projects/${projectId}/tasks/${taskId}`);
-                    this.showToast('Success', 'Task deleted', 'success');
+                    this.showToast('Sucesso', 'Tarefa excluída', 'success');
                 } catch (e) {
-                    this.showToast('Error', e.message, 'error');
+                    this.showToast('Erro', e.message, 'error');
                 }
             },
-            'Excluir'
+            confirmLabel
         );
     }
 
@@ -4902,6 +4946,12 @@ class DevManager {
                     ${startSessionBtn}
                     <button class="btn-icon" onclick="app.showTaskModal(${task.project_id}, ${task.id})" title="Edit">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                    </button>
+                    <button class="btn-icon" onclick="app.duplicateTask(${task.project_id}, ${task.id})" title="Duplicate">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                    </button>
+                    <button class="btn-icon" onclick="app.deleteTask(${task.project_id}, ${task.id})" title="Delete">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                     </button>
                 </div>
             </div>
