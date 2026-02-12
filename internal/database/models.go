@@ -138,6 +138,7 @@ type TempDocument struct {
 	ConversationID sql.NullInt64 `db:"conversation_id" json:"conversation_id,omitempty"`
 	Summary        string        `db:"summary" json:"summary"`
 	Status         string        `db:"status" json:"status"`
+	MessageID      int64         `db:"message_id" json:"message_id"`
 	CreatedAt      time.Time     `db:"created_at" json:"created_at"`
 }
 

@@ -445,6 +445,7 @@ class AIChatManager {
 
                             case 'message_id':
                                 this.currentStreamingMessageId = event.data.id;
+                                if (assistantEl) assistantEl.dataset.messageId = event.data.id;
                                 break;
 
                             case 'text':
@@ -519,9 +520,10 @@ class AIChatManager {
         }
     }
 
-    addMessage(role, text) {
+    addMessage(role, text, messageId) {
         const el = document.createElement('div');
         el.className = `ai-chat-msg ai-chat-msg-${role}`;
+        if (messageId) el.dataset.messageId = messageId;
         el.innerHTML = `
             <div class="ai-chat-msg-avatar">${role === 'user' ? 'You' : 'AI'}</div>
             <div class="ai-chat-msg-content">${role === 'user' ? this.escapeHtml(text) : this.renderMarkdown(text)}</div>
@@ -568,6 +570,7 @@ class AIChatManager {
 
         const isProposal = data.type === 'proposal';
         const isPlanning = data.type === 'planning';
+        const isTaskProposal = data.type === 'task_proposal';
         const status = data.status || 'pending';
 
         let icon;
@@ -575,6 +578,8 @@ class AIChatManager {
             icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 14l2 2 4-4"/></svg>';
         } else if (isProposal) {
             icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+        } else if (isTaskProposal) {
+            icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
         } else {
             icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="11" x2="15" y2="11"/></svg>';
         }
@@ -589,7 +594,7 @@ class AIChatManager {
         } else if (status === 'rejected') {
             actionHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-rejected">Rejeitado</span>';
         } else {
-            const btnLabel = isPlanning ? 'Revisar Plano' : (isProposal ? 'Revisar Proposta' : 'Ver Documento');
+            const btnLabel = isTaskProposal ? 'Revisar Tarefa' : (isPlanning ? 'Revisar Plano' : (isProposal ? 'Revisar Proposta' : 'Ver Documento'));
             actionHtml = `<button class="ai-chat-doc-card-btn">${btnLabel}</button>`;
         }
 
@@ -800,7 +805,7 @@ class AIChatManager {
             this.hideHistory();
 
             for (const msg of data.messages) {
-                const el = this.addMessage(msg.role, msg.content);
+                const el = this.addMessage(msg.role, msg.content, msg.id);
 
                 // Show status indicators for incomplete assistant messages
                 if (msg.role === 'assistant' && el) {
@@ -830,15 +835,30 @@ class AIChatManager {
                 this._reconnectToStream(id);
             }
 
-            // Render persisted doc cards inside the last assistant message
+            // Render persisted doc cards matched to their originating assistant message
             if (data.doc_cards?.length) {
-                const assistantMsgs = this.messagesContainer.querySelectorAll('.ai-chat-msg-assistant .ai-chat-msg-content');
-                const lastAssistant = assistantMsgs.length > 0 ? assistantMsgs[assistantMsgs.length - 1] : null;
-                if (lastAssistant) {
-                    for (const doc of data.doc_cards) {
-                        this.addDocCard(lastAssistant, {
+                for (const doc of data.doc_cards) {
+                    let type = 'document';
+                    if (doc.title && doc.title.startsWith('Memory Doc:')) type = 'proposal';
+                    else if (doc.title && doc.title.startsWith('Planejamento:')) type = 'planning';
+                    else if (doc.title && doc.title.startsWith('Tarefa:')) type = 'task_proposal';
+
+                    // Find the specific assistant message this doc card belongs to
+                    let targetContent = null;
+                    if (doc.message_id) {
+                        const msgEl = this.messagesContainer.querySelector(`.ai-chat-msg[data-message-id="${doc.message_id}"]`);
+                        if (msgEl) targetContent = msgEl.querySelector('.ai-chat-msg-content');
+                    }
+                    // Fallback: attach to last assistant message
+                    if (!targetContent) {
+                        const assistantMsgs = this.messagesContainer.querySelectorAll('.ai-chat-msg-assistant .ai-chat-msg-content');
+                        targetContent = assistantMsgs.length > 0 ? assistantMsgs[assistantMsgs.length - 1] : null;
+                    }
+
+                    if (targetContent) {
+                        this.addDocCard(targetContent, {
                             doc_id: doc.id,
-                            type: 'proposal',
+                            type,
                             title: doc.title,
                             summary: doc.summary,
                             status: doc.status,
@@ -1062,6 +1082,8 @@ class AIChatManager {
         if (!text) return '';
         if (typeof marked !== 'undefined') {
             try {
+                // Ensure the mermaid-aware renderer is initialized
+                if (typeof FileViewer !== 'undefined') FileViewer._initMarked();
                 return marked.parse(text);
             } catch (e) {
                 return this.escapeHtml(text);

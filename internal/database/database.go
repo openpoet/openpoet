@@ -486,6 +486,7 @@ func (d *DB) CreateAIMessage(ctx context.Context, m *AIMessage) error {
 		return err
 	}
 	m.ID, _ = result.LastInsertId()
+	m.CreatedAt = time.Now()
 	return nil
 }
 
@@ -520,8 +521,8 @@ func (d *DB) CreateTempDocument(ctx context.Context, doc *TempDocument) error {
 	if doc.Status == "" {
 		doc.Status = "pending"
 	}
-	query := `INSERT INTO temp_documents (id, title, content, conversation_id, summary, status) VALUES (?, ?, ?, ?, ?, ?)`
-	_, err := d.ExecContext(ctx, query, doc.ID, doc.Title, doc.Content, doc.ConversationID, doc.Summary, doc.Status)
+	query := `INSERT INTO temp_documents (id, title, content, conversation_id, summary, status, message_id) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.ExecContext(ctx, query, doc.ID, doc.Title, doc.Content, doc.ConversationID, doc.Summary, doc.Status, doc.MessageID)
 	return err
 }
 
