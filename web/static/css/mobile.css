@@ -1350,6 +1350,8 @@
     .all-tasks-filter-bar {
         flex-direction: column;
         align-items: stretch;
+        margin: 0 8px 12px;
+        padding: 8px 10px;
     }
 
     .filter-group {
@@ -1359,11 +1361,15 @@
     .filter-select {
         flex: 1;
         min-width: 0;
+        font-size: 13px;
+        padding: 8px 10px;
     }
 
     .filter-search {
         min-width: 0;
         width: 100%;
+        font-size: 13px;
+        padding: 8px 10px;
     }
 
     .all-tasks-stat-cards {
@@ -1373,9 +1379,13 @@
     }
 
     .stat-card {
-        padding: 6px 4px;
+        padding: 8px 4px;
         min-width: 0;
         flex: unset;
+    }
+
+    .stat-card:hover {
+        transform: none;
     }
 
     .stat-card .stat-number {
