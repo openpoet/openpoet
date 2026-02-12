@@ -2,14 +2,17 @@ package handlers
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"devmanager/internal/database"
 	"devmanager/internal/files"
 	"devmanager/internal/configsync"
+	"devmanager/internal/mcp"
 	"devmanager/internal/notifications"
 	"devmanager/internal/security"
 	"devmanager/internal/session"
 	"devmanager/internal/websocket"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -22,6 +25,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+)
+
+var (
+	cryptoRandRead = rand.Read
+	hexEncode      = hex.EncodeToString
 )
 
 // pendingMemoryDoc holds a proposed memory doc edit awaiting user approval.
@@ -250,9 +258,10 @@ func (a *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	project := &database.Project{
-		Name: input.Name,
-		Path: input.Path,
-		Type: input.Type,
+		Name:       input.Name,
+		Path:       input.Path,
+		Type:       input.Type,
+		ToolPolicy: input.ToolPolicy,
 	}
 
 	if input.Type == "remote" {
@@ -319,6 +328,7 @@ func (a *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	project.Name = input.Name
 	project.Path = input.Path
 	project.Type = input.Type
+	project.ToolPolicy = input.ToolPolicy
 
 	if input.Type == "remote" {
 		project.SSHHost = sql.NullString{String: input.SSHHost, Valid: input.SSHHost != ""}
@@ -1768,6 +1778,267 @@ func (a *API) GetTaskSessionSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, summary)
+}
+
+// SendSessionInput sends text to a running session's terminal PTY.
+func (a *API) SendSessionInput(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var input struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	if input.Text == "" {
+		respondError(w, http.StatusBadRequest, "text is required")
+		return
+	}
+
+	// Append newline to simulate Enter
+	data := []byte(input.Text + "\n")
+	if err := a.sessionMgr.WriteToSession(id, data); err != nil {
+		respondError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+}
+
+// GenerateMCPAPIKey generates a new random API key for MCP HTTP access.
+func (a *API) GenerateMCPAPIKey(w http.ResponseWriter, r *http.Request) {
+	b := make([]byte, 32)
+	if _, err := cryptoRandRead(b); err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to generate key")
+		return
+	}
+	key := fmt.Sprintf("dm_%s", hexEncode(b))
+
+	if err := a.db.SetSetting(r.Context(), "mcp_api_key", key); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{
+		"key":    key,
+		"status": "generated",
+	})
+}
+
+// GetMCPAPIKeyStatus returns whether an API key exists and its prefix.
+func (a *API) GetMCPAPIKeyStatus(w http.ResponseWriter, r *http.Request) {
+	key, _ := a.db.GetSetting(r.Context(), "mcp_api_key")
+	if key == "" {
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"exists": false,
+		})
+		return
+	}
+	prefix := key
+	if len(prefix) > 10 {
+		prefix = prefix[:10] + "..."
+	}
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"exists": true,
+		"prefix": prefix,
+	})
+}
+
+// RevokeMCPAPIKey removes the MCP API key.
+func (a *API) RevokeMCPAPIKey(w http.ResponseWriter, r *http.Request) {
+	if err := a.db.SetSetting(r.Context(), "mcp_api_key", ""); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+}
+
+// GetToolPolicies returns the global tool policies for each context.
+func (a *API) GetToolPolicies(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	session, _ := a.db.GetSetting(ctx, "mcp_tool_policy_session")
+	chat, _ := a.db.GetSetting(ctx, "mcp_tool_policy_chat")
+	httpPolicy, _ := a.db.GetSetting(ctx, "mcp_tool_policy_http")
+
+	respondJSON(w, http.StatusOK, map[string]string{
+		"session": session,
+		"chat":    chat,
+		"http":    httpPolicy,
+	})
+}
+
+// UpdateToolPolicies updates the global tool policies.
+func (a *API) UpdateToolPolicies(w http.ResponseWriter, r *http.Request) {
+	var input map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	ctx := r.Context()
+	validKeys := map[string]bool{
+		"session": true,
+		"chat":    true,
+		"http":    true,
+	}
+	for key, value := range input {
+		if !validKeys[key] {
+			continue
+		}
+		if err := a.db.SetSetting(ctx, "mcp_tool_policy_"+key, value); err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// GetProjectToolPolicy returns the tool policy for a specific project.
+func (a *API) GetProjectToolPolicy(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	project, err := a.db.GetProject(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{
+		"project_id":  fmt.Sprintf("%d", project.ID),
+		"tool_policy": project.ToolPolicy,
+	})
+}
+
+// UpdateProjectToolPolicy updates the tool policy for a specific project.
+func (a *API) UpdateProjectToolPolicy(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	project, err := a.db.GetProject(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	var input struct {
+		ToolPolicy string `json:"tool_policy"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	project.ToolPolicy = input.ToolPolicy
+	if err := a.db.UpdateProject(r.Context(), project); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// GetResolvedTools returns the effective list of tools available for a given context.
+// For sessions: GET /api/sessions/{id}/tools
+// For projects: GET /api/projects/{id}/tools
+func (a *API) GetResolvedProjectTools(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	ctx := r.Context()
+	allTools := mcp.AllTools()
+
+	// Global session policy (sessions default to deny_all)
+	globalPolicy := mcp.ToolPolicy{Mode: "deny_all"}
+	if policyStr, _ := a.db.GetSetting(ctx, "mcp_tool_policy_session"); policyStr != "" {
+		globalPolicy = mcp.ParsePolicy(policyStr)
+	}
+
+	// Project policy
+	project, err := a.db.GetProject(ctx, projectID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	effectivePolicy := globalPolicy
+	if project.ToolPolicy != "" {
+		projPolicy := mcp.ParsePolicy(project.ToolPolicy)
+		if projPolicy.Mode != "" {
+			effectivePolicy = mcp.MergePolicy(globalPolicy, projPolicy)
+		}
+	}
+
+	type toolInfo struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Enabled     bool   `json:"enabled"`
+	}
+	result := make([]toolInfo, 0, len(allTools))
+	for _, t := range allTools {
+		result = append(result, toolInfo{
+			Name:        t.Name,
+			Description: t.Description,
+			Enabled:     effectivePolicy.IsAllowed(t.Name),
+		})
+	}
+	respondJSON(w, http.StatusOK, result)
+}
+
+func (a *API) GetResolvedSessionTools(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+
+	ctx := r.Context()
+	sess, err := a.db.GetSession(ctx, sessionID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Session not found")
+		return
+	}
+
+	allTools := mcp.AllTools()
+
+	// Global session policy (sessions default to deny_all)
+	globalPolicy := mcp.ToolPolicy{Mode: "deny_all"}
+	if policyStr, _ := a.db.GetSetting(ctx, "mcp_tool_policy_session"); policyStr != "" {
+		globalPolicy = mcp.ParsePolicy(policyStr)
+	}
+
+	effectivePolicy := globalPolicy
+	if sess.ProjectID > 0 {
+		project, err := a.db.GetProject(ctx, sess.ProjectID)
+		if err == nil && project.ToolPolicy != "" {
+			projPolicy := mcp.ParsePolicy(project.ToolPolicy)
+			if projPolicy.Mode != "" {
+				effectivePolicy = mcp.MergePolicy(globalPolicy, projPolicy)
+			}
+		}
+	}
+
+	type toolInfo struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Enabled     bool   `json:"enabled"`
+	}
+	result := make([]toolInfo, 0, len(allTools))
+	for _, t := range allTools {
+		result = append(result, toolInfo{
+			Name:        t.Name,
+			Description: t.Description,
+			Enabled:     effectivePolicy.IsAllowed(t.Name),
+		})
+	}
+	respondJSON(w, http.StatusOK, result)
 }
 
 // DecryptFunc returns the decrypt function for use by other components

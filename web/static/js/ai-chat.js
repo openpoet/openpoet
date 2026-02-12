@@ -19,22 +19,33 @@ class AIChatManager {
         this.editorSend = document.getElementById('ai-chat-editor-send');
         this.editorVoice = document.getElementById('ai-chat-editor-voice');
 
+        this.toolsBtn = document.getElementById('ai-chat-tools');
+        this.toolsCountEl = document.getElementById('ai-chat-tools-count');
+        this.toolsPanel = document.getElementById('ai-chat-tools-panel');
+        this.toolsList = document.getElementById('ai-chat-tools-list');
+
         this.isOpen = false;
         this.isStreaming = false;
         this.abortController = null;
         this.currentConversationId = null;
         this.conversations = [];
+        this._toolsLoaded = false;
+        this._toolsPanelOpen = false;
 
         if (this.panel) {
             this.setupEventListeners();
             this.checkStatus();
             this.checkActiveStream();
+            this.loadToolDefinitions();
         }
     }
 
     setupEventListeners() {
         // Close button
         this.closeBtn?.addEventListener('click', () => this.close());
+
+        // Tools button
+        this.toolsBtn?.addEventListener('click', () => this.toggleToolsPanel());
 
         // Send
         this.sendBtn?.addEventListener('click', () => this.sendMessage());
@@ -221,6 +232,38 @@ class AIChatManager {
         this.isOpen = false;
         this.panel.classList.remove('open');
         document.body.classList.remove('ai-chat-open');
+        if (this._toolsPanelOpen) this.toggleToolsPanel();
+    }
+
+    async loadToolDefinitions() {
+        try {
+            const resp = await fetch('/api/ai/tool-definitions');
+            if (!resp.ok) return;
+            const tools = await resp.json();
+            if (!Array.isArray(tools) || tools.length === 0) return;
+
+            this._tools = tools;
+            this._toolsLoaded = true;
+            if (this.toolsBtn) this.toolsBtn.style.display = '';
+            if (this.toolsCountEl) this.toolsCountEl.textContent = tools.length;
+        } catch (e) {
+            // silently ignore
+        }
+    }
+
+    toggleToolsPanel() {
+        if (!this.toolsPanel) return;
+        this._toolsPanelOpen = !this._toolsPanelOpen;
+        this.toolsPanel.style.display = this._toolsPanelOpen ? '' : 'none';
+        this.toolsBtn?.classList.toggle('active', this._toolsPanelOpen);
+
+        if (this._toolsPanelOpen && this._tools && this.toolsList) {
+            this.toolsList.innerHTML = this._tools.map(t => {
+                const desc = t.description || '';
+                const shortDesc = desc.length > 80 ? desc.slice(0, 80) + '...' : desc;
+                return `<div class="ai-chat-tool-item"><strong>${this.escapeHtml(t.name)}</strong><span>${this.escapeHtml(shortDesc)}</span></div>`;
+            }).join('');
+        }
     }
 
     newConversation() {

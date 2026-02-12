@@ -83,6 +83,7 @@ func main() {
 	port := flag.Int("port", 0, "Port to listen on (default: 8080)")
 	dbPath := flag.String("db", "", "Database path (default: devmanager.db)")
 	openaiKey := flag.String("openai-key", "", "OpenAI API key for voice transcription")
+	mcpHTTP := flag.Bool("mcp-http", false, "Enable MCP HTTP endpoint at /mcp")
 	flag.Parse()
 
 	// Load configuration
@@ -235,6 +236,28 @@ func main() {
 		aiHandler.EvaluateSession(context.Background(), sessionID, trigger, outputSnapshot)
 	}
 
+	// Determine if MCP HTTP endpoint should be enabled
+	mcpHTTPEnabled := *mcpHTTP
+	if !mcpHTTPEnabled {
+		if v, _ := db.GetSetting(ctx, "mcp_http_enabled"); v == "true" {
+			mcpHTTPEnabled = true
+		}
+	}
+
+	// Initialize MCP HTTP handler if enabled
+	var mcpHandler *mcp.HTTPHandler
+	if mcpHTTPEnabled {
+		mcpHandler = mcp.NewHTTPHandler(
+			fmt.Sprintf("http://localhost:%d", cfg.Port),
+			func() string { key, _ := db.GetSetting(context.Background(), "mcp_api_key"); return key },
+			func() mcp.ToolPolicy {
+				policyStr, _ := db.GetSetting(context.Background(), "mcp_tool_policy_http")
+				return mcp.ParsePolicy(policyStr)
+			},
+		)
+		log.Printf("MCP HTTP endpoint enabled at /mcp")
+	}
+
 	// Set up router
 	r := chi.NewRouter()
 
@@ -277,6 +300,11 @@ func main() {
 			next.ServeHTTP(w, r)
 		})
 	})
+
+	// MCP HTTP endpoint (if enabled)
+	if mcpHandler != nil {
+		r.Handle("/mcp", mcpHandler)
+	}
 
 	// API routes
 	// DEBUG: Client error reporting endpoint
@@ -342,6 +370,10 @@ func main() {
 		r.Delete("/sessions/{id}", api.DeleteSession)
 		r.Post("/sessions/{id}/reopen", api.ReopenSession)
 
+		// Session input
+		r.Post("/sessions/{id}/input", api.SendSessionInput)
+		r.Get("/sessions/{id}/tools", api.GetResolvedSessionTools)
+
 		// Session-Task integration
 		r.Get("/sessions/{id}/task", api.GetSessionLinkedTask)
 		r.Post("/sessions/{id}/evaluate", api.TriggerSessionEvaluation)
@@ -377,6 +409,41 @@ func main() {
 		r.Get("/config/settings", api.GetSettings)
 		r.Put("/config/settings", api.UpdateSettings)
 		r.Post("/config/sync-all", api.SyncAllConfig)
+
+		// Config - MCP Tools list (all available tool names per context)
+		r.Get("/config/mcp-tools", func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.URL.Query().Get("context")
+			type toolInfo struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			}
+			var result []toolInfo
+			if ctx == "chat" {
+				for _, t := range llm.ChatTools() {
+					result = append(result, toolInfo{Name: t.Name, Description: t.Description})
+				}
+			} else {
+				for _, t := range mcp.AllTools() {
+					result = append(result, toolInfo{Name: t.Name, Description: t.Description})
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(result)
+		})
+
+		// Config - MCP API Key
+		r.Post("/config/mcp-api-key/generate", api.GenerateMCPAPIKey)
+		r.Get("/config/mcp-api-key/status", api.GetMCPAPIKeyStatus)
+		r.Delete("/config/mcp-api-key", api.RevokeMCPAPIKey)
+
+		// Config - Tool Policies
+		r.Get("/config/tool-policies", api.GetToolPolicies)
+		r.Put("/config/tool-policies", api.UpdateToolPolicies)
+
+		// Project Tool Policy
+		r.Get("/projects/{id}/tool-policy", api.GetProjectToolPolicy)
+		r.Put("/projects/{id}/tool-policy", api.UpdateProjectToolPolicy)
+		r.Get("/projects/{id}/tools", api.GetResolvedProjectTools)
 
 		// Voice
 		r.Post("/voice/transcribe", voiceHandler.Transcribe)

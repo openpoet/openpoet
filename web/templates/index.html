@@ -218,6 +218,12 @@
                             </div>
                         </div>
                         <div class="terminal-actions">
+                            <button id="btn-session-tools" class="btn-icon" title="Session Tools" onclick="app.toggleSessionToolsPanel()">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
+                                </svg>
+                                <span id="session-tools-count" class="session-tools-count" style="display:none;"></span>
+                            </button>
                             <button id="btn-tool-activity" class="btn-icon" title="Tool Activity">
                                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
@@ -257,6 +263,19 @@
                             </button>
                         </div>
                     </header>
+                    <div id="session-tools-panel" class="session-tools-panel" style="display:none;">
+                        <div class="session-tools-panel-header">
+                            <strong>Session Tools</strong>
+                            <span id="session-tools-panel-summary" style="font-size: 11px; color: var(--color-text-muted);"></span>
+                            <button class="btn-icon btn-sm" onclick="app.toggleSessionToolsPanel()" style="margin-left:auto;">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                                </svg>
+                            </button>
+                        </div>
+                        <div id="session-tools-panel-list" class="session-tools-panel-list"></div>
+                    </div>
                     <div id="terminal-containers-wrapper" class="terminal-containers-wrapper">
                         <!-- Multiple terminal containers will be created here dynamically -->
                     </div>
@@ -492,6 +511,12 @@
                         <span id="ai-chat-status" class="ai-chat-status-badge">Checking...</span>
                     </div>
                     <div class="ai-chat-header-actions">
+                        <button id="ai-chat-tools" class="btn-icon btn-sm ai-chat-tools-btn" title="Available tools" style="display:none;">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                            </svg>
+                            <span id="ai-chat-tools-count" class="ai-chat-tools-count"></span>
+                        </button>
                         <button id="ai-chat-history" class="btn-icon btn-sm" title="History">
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <circle cx="12" cy="12" r="10"/>
@@ -517,6 +542,9 @@
                             </svg>
                         </button>
                     </div>
+                </div>
+                <div id="ai-chat-tools-panel" class="ai-chat-tools-panel" style="display:none;">
+                    <div class="ai-chat-tools-list" id="ai-chat-tools-list"></div>
                 </div>
                 <div id="ai-chat-messages" class="ai-chat-messages"></div>
                 <div class="ai-chat-input-area">

@@ -35,6 +35,11 @@ func toolsDef(context string) []MCPTool {
 	return filtered
 }
 
+// AllTools returns all MCP tool definitions. Used by the API to expose tool metadata.
+func AllTools() []MCPTool {
+	return allToolsDef()
+}
+
 func allToolsDef() []MCPTool {
 	return []MCPTool{
 		{
@@ -147,6 +152,38 @@ func allToolsDef() []MCPTool {
 			Name:        "devmanager_request_task_evaluation",
 			Description: "Request the DevManager AI Assistant to evaluate the current session and proactively suggest task actions (create, update, link, or complete tasks). The AI Assistant will analyze the session output and suggest actions to the user via floating notification cards. Use this when you believe the session's work is relevant to task management.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+		},
+		// Composite tools for token efficiency
+		{
+			Name:        "devmanager_dashboard",
+			Description: "Compact state summary: projects with task counts, active sessions, recent changes. Use this first to understand the current state before making changes.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+		},
+		{
+			Name:        "devmanager_batch",
+			Description: "Execute multiple tools in one call. Returns array of results. Max 10 calls per batch.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"calls":{"type":"array","items":{"type":"object","properties":{"tool":{"type":"string","description":"Tool name"},"args":{"type":"object","description":"Tool arguments"}},"required":["tool"]},"maxItems":10}},"required":["calls"]}`),
+		},
+		// Session management tools
+		{
+			Name:        "devmanager_start_session",
+			Description: "Start a Claude Code session for a project. Returns session ID.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"project_id":{"type":"number","description":"Project ID"},"task_id":{"type":"number","description":"Optional task ID to link"},"name":{"type":"string","description":"Optional session name"}},"required":["project_id"]}`),
+		},
+		{
+			Name:        "devmanager_stop_session",
+			Description: "Stop a running session.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"session_id":{"type":"string","description":"Session ID to stop"}},"required":["session_id"]}`),
+		},
+		{
+			Name:        "devmanager_list_sessions",
+			Description: "List all sessions with status.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"status":{"type":"string","description":"Filter: running, stopped, completed"},"project_id":{"type":"number","description":"Filter by project"}}}`),
+		},
+		{
+			Name:        "devmanager_send_to_session",
+			Description: "Send text input to a running Claude Code session terminal.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"session_id":{"type":"string","description":"Session ID"},"text":{"type":"string","description":"Text to send (Enter appended automatically)"}},"required":["session_id","text"]}`),
 		},
 	}
 }
@@ -484,9 +521,229 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return "Task evaluation requested. The AI Assistant will analyze this session and suggest relevant task actions to the user via notification cards.", nil
 
+	// ---- Composite tools ----
+
+	case "devmanager_dashboard":
+		return executeDashboard(client)
+
+	case "devmanager_batch":
+		return executeBatch(client, args, sessionID, conversationID)
+
+	// ---- Session management tools ----
+
+	case "devmanager_start_session":
+		payload, _ := json.Marshal(params)
+		body, err := client.Post("/api/sessions", string(payload))
+		if err != nil {
+			return "", err
+		}
+		var sess struct {
+			ID        string `json:"id"`
+			ProjectID int64  `json:"project_id"`
+			Status    string `json:"status"`
+		}
+		if json.Unmarshal(body, &sess) == nil {
+			return fmt.Sprintf("Session started: %s (project: %d, status: %s)", sess.ID, sess.ProjectID, sess.Status), nil
+		}
+		return string(body), nil
+
+	case "devmanager_stop_session":
+		sid, _ := params["session_id"].(string)
+		if sid == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		_, err := client.Delete(fmt.Sprintf("/api/sessions/%s", sid))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Session %s stopped", sid), nil
+
+	case "devmanager_list_sessions":
+		body, err := client.Get("/api/sessions")
+		if err != nil {
+			return "", err
+		}
+		return formatSessionsList(body, params)
+
+	case "devmanager_send_to_session":
+		sid, _ := params["session_id"].(string)
+		text, _ := params["text"].(string)
+		if sid == "" || text == "" {
+			return "", fmt.Errorf("session_id and text are required")
+		}
+		payload, _ := json.Marshal(map[string]string{"text": text})
+		_, err := client.Post(fmt.Sprintf("/api/sessions/%s/input", sid), string(payload))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Sent to session %s: %s", sid[:8], truncate(text, 100)), nil
+
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
+}
+
+// executeDashboard returns a compact JSON summary of the entire DevManager state.
+func executeDashboard(client *APIClient) (string, error) {
+	type projectSummary struct {
+		ID             int64            `json:"id"`
+		Name           string           `json:"name"`
+		Type           string           `json:"type"`
+		Tasks          map[string]int   `json:"tasks"`
+		ActiveSessions int              `json:"active_sessions"`
+	}
+
+	// Fetch projects
+	projectsBody, err := client.Get("/api/projects")
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch projects: %w", err)
+	}
+	var projects []struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+	json.Unmarshal(projectsBody, &projects)
+
+	// Fetch sessions
+	sessionsBody, err := client.Get("/api/sessions")
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch sessions: %w", err)
+	}
+	var sessions []struct {
+		ID        string `json:"id"`
+		ProjectID int64  `json:"project_id"`
+		Status    string `json:"status"`
+		Name      string `json:"name"`
+	}
+	json.Unmarshal(sessionsBody, &sessions)
+
+	// Count active sessions per project
+	activeByProject := make(map[int64]int)
+	var activeSessions []map[string]interface{}
+	for _, s := range sessions {
+		if s.Status == "running" || s.Status == "starting" {
+			activeByProject[s.ProjectID]++
+			activeSessions = append(activeSessions, map[string]interface{}{
+				"id": s.ID, "project_id": s.ProjectID, "status": s.Status, "name": s.Name,
+			})
+		}
+	}
+
+	// Build project summaries with task counts
+	totalTasks := map[string]int{"todo": 0, "in_progress": 0, "done": 0, "blocked": 0}
+	var projectSummaries []projectSummary
+	for _, p := range projects {
+		tasksBody, _ := client.Get(fmt.Sprintf("/api/projects/%d/tasks", p.ID))
+		var tasks []struct {
+			Status string `json:"status"`
+		}
+		json.Unmarshal(tasksBody, &tasks)
+
+		taskCounts := map[string]int{"todo": 0, "in_progress": 0, "done": 0, "blocked": 0}
+		for _, t := range tasks {
+			taskCounts[t.Status]++
+			totalTasks[t.Status]++
+		}
+
+		projectSummaries = append(projectSummaries, projectSummary{
+			ID: p.ID, Name: p.Name, Type: p.Type,
+			Tasks: taskCounts, ActiveSessions: activeByProject[p.ID],
+		})
+	}
+
+	dashboard := map[string]interface{}{
+		"projects":        projectSummaries,
+		"active_sessions": activeSessions,
+		"total_tasks":     totalTasks,
+	}
+
+	result, _ := json.Marshal(dashboard)
+	return string(result), nil
+}
+
+// executeBatch runs multiple tool calls in a single request.
+func executeBatch(client *APIClient, args json.RawMessage, sessionID, conversationID string) (string, error) {
+	var batchParams struct {
+		Calls []struct {
+			Tool string          `json:"tool"`
+			Args json.RawMessage `json:"args"`
+		} `json:"calls"`
+	}
+	if err := json.Unmarshal(args, &batchParams); err != nil {
+		return "", fmt.Errorf("invalid batch params: %w", err)
+	}
+
+	if len(batchParams.Calls) > 10 {
+		return "", fmt.Errorf("batch limited to 10 calls, got %d", len(batchParams.Calls))
+	}
+
+	var results []map[string]interface{}
+	for _, call := range batchParams.Calls {
+		// Prevent recursion
+		if call.Tool == "devmanager_batch" {
+			results = append(results, map[string]interface{}{
+				"tool": call.Tool, "error": "cannot nest batch calls",
+			})
+			continue
+		}
+
+		result, err := executeTool(client, call.Tool, call.Args, sessionID, conversationID)
+		if err != nil {
+			results = append(results, map[string]interface{}{
+				"tool": call.Tool, "error": err.Error(),
+			})
+		} else {
+			results = append(results, map[string]interface{}{
+				"tool": call.Tool, "result": result,
+			})
+		}
+	}
+
+	out, _ := json.Marshal(results)
+	return string(out), nil
+}
+
+// formatSessionsList formats and optionally filters the sessions list.
+func formatSessionsList(body []byte, params map[string]interface{}) (string, error) {
+	var sessions []struct {
+		ID        string `json:"id"`
+		ProjectID int64  `json:"project_id"`
+		Status    string `json:"status"`
+		Name      string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &sessions); err != nil {
+		return string(body), nil
+	}
+
+	filterStatus, _ := params["status"].(string)
+	filterProjectID := int64(0)
+	if v, ok := params["project_id"].(float64); ok {
+		filterProjectID = int64(v)
+	}
+
+	if len(sessions) == 0 {
+		return "No sessions found.", nil
+	}
+
+	result := ""
+	for _, s := range sessions {
+		if filterStatus != "" && s.Status != filterStatus {
+			continue
+		}
+		if filterProjectID > 0 && s.ProjectID != filterProjectID {
+			continue
+		}
+		name := s.Name
+		if name == "" {
+			name = s.ID[:8]
+		}
+		result += fmt.Sprintf("- [%s] %s (project: %d, status: %s)\n", s.ID[:8], name, s.ProjectID, s.Status)
+	}
+	if result == "" {
+		return "No sessions matching filter.", nil
+	}
+	return result, nil
 }
 
 // getID extracts an integer ID from the params map.
