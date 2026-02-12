@@ -345,6 +345,9 @@ func main() {
 		r.Post("/memory-doc/propose", api.ProposeMemoryDoc)
 		r.Post("/memory-doc/approve/{docId}", api.ApproveMemoryDoc)
 		r.Post("/memory-doc/reject/{docId}", api.RejectMemoryDoc)
+		// Planning approval (AI-proposed task changes)
+		r.Post("/planning/approve/{docId}", api.ApprovePlanning)
+		r.Post("/planning/reject/{docId}", api.RejectPlanning)
 		// Project Tasks
 		r.Get("/projects/{id}/tasks", api.ListProjectTasks)
 		r.Post("/projects/{id}/tasks", api.CreateProjectTask)

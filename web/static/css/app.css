@@ -3399,6 +3399,21 @@ body {
     background: rgba(239, 68, 68, 0.15);
     color: #dc2626;
 }
+.ai-chat-doc-card-planning {
+    border-left-color: #06b6d4;
+    background: color-mix(in srgb, #06b6d4 5%, var(--color-surface));
+}
+.ai-chat-doc-card-planning .ai-chat-doc-card-icon {
+    color: #06b6d4;
+}
+.ai-chat-doc-card-planning .ai-chat-doc-card-btn {
+    background: #06b6d4;
+}
+.ai-chat-doc-card-task-count {
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    margin-top: 1px;
+}
 
 /* Input area */
 .ai-chat-input-area {

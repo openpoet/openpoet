@@ -25,6 +25,30 @@ import (
 
 var docLinkRe = regexp.MustCompile(`/app/doc/([a-zA-Z0-9-]+)`)
 
+// planningCollector accumulates task actions during planning mode for batch proposal.
+type planningCollector struct {
+	mu      sync.Mutex
+	actions []PlanningTaskAction
+}
+
+func (pc *planningCollector) add(action PlanningTaskAction) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	pc.actions = append(pc.actions, action)
+}
+
+func (pc *planningCollector) getActions() []PlanningTaskAction {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return append([]PlanningTaskAction{}, pc.actions...)
+}
+
+func (pc *planningCollector) hasActions() bool {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return len(pc.actions) > 0
+}
+
 // sseEvent represents a Server-Sent Event for broadcasting to reconnected clients.
 type sseEvent struct {
 	Type string
@@ -574,11 +598,13 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Handle tool use loop — session providers handle tools internally, skip for them
 	maxIter := 5
+	var collector *planningCollector
 	if isPlanning {
 		maxIter = 15
+		collector = &planningCollector{}
 	}
 	if resp != nil && resp.StopReason == "tool_use" && !isSessionProvider {
-		loopUsage, loopErr := h.handleToolLoop(streamCtx, safeSendSSE, p, req, resp, conv, &assistantText, &toolCalls, &textMu, maxIter)
+		loopUsage, loopErr := h.handleToolLoop(streamCtx, safeSendSSE, p, req, resp, conv, &assistantText, &toolCalls, &textMu, maxIter, collector)
 		if loopErr != nil {
 			log.Printf("[AI] Tool loop error: %v", loopErr)
 			if streamCtx.Err() == context.Canceled {
@@ -595,6 +621,98 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		totalUsage.OutputTokens += loopUsage.OutputTokens
 		totalUsage.CacheReadTokens += loopUsage.CacheReadTokens
 		totalUsage.CacheCreationTokens += loopUsage.CacheCreationTokens
+	}
+
+	// In planning mode, create a proposal document if task actions were collected
+	if collector != nil && collector.hasActions() {
+		actions := collector.getActions()
+		projectID := actions[0].ProjectID
+
+		project, err := h.api.db.GetProject(ctx, projectID)
+		projectName := "Projeto"
+		if err == nil {
+			projectName = project.Name
+		}
+
+		// Build summary
+		var summaryParts []string
+		createCount, updateCount, deleteCount := 0, 0, 0
+		for _, a := range actions {
+			switch a.Action {
+			case "create":
+				createCount++
+			case "update":
+				updateCount++
+			case "delete":
+				deleteCount++
+			}
+		}
+		if createCount > 0 {
+			summaryParts = append(summaryParts, fmt.Sprintf("criar %d tarefa(s)", createCount))
+		}
+		if updateCount > 0 {
+			summaryParts = append(summaryParts, fmt.Sprintf("atualizar %d tarefa(s)", updateCount))
+		}
+		if deleteCount > 0 {
+			summaryParts = append(summaryParts, fmt.Sprintf("remover %d tarefa(s)", deleteCount))
+		}
+		summary := fmt.Sprintf("Plano para %s: %s", projectName, strings.Join(summaryParts, ", "))
+
+		// Build markdown content for preview
+		var contentBuilder strings.Builder
+		contentBuilder.WriteString(fmt.Sprintf("# Proposta de Planejamento — %s\n\n", projectName))
+		contentBuilder.WriteString(fmt.Sprintf("**Resumo:** %s\n\n", summary))
+		contentBuilder.WriteString("## Ações propostas\n\n")
+
+		for i, a := range actions {
+			switch a.Action {
+			case "create":
+				contentBuilder.WriteString(fmt.Sprintf("### %d. Criar tarefa: %s\n", i+1, a.Title))
+				if a.Description != "" {
+					contentBuilder.WriteString(fmt.Sprintf("**Descrição:** %s\n", a.Description))
+				}
+				contentBuilder.WriteString(fmt.Sprintf("**Prioridade:** %s | **Status:** %s\n", a.Priority, a.Status))
+				if a.DueDate != "" {
+					contentBuilder.WriteString(fmt.Sprintf("**Data limite:** %s\n", a.DueDate))
+				}
+			case "update":
+				contentBuilder.WriteString(fmt.Sprintf("### %d. Atualizar tarefa #%d: %s\n", i+1, a.TaskID, a.Title))
+				if a.Status != "" {
+					contentBuilder.WriteString(fmt.Sprintf("**Novo status:** %s\n", a.Status))
+				}
+				if a.Priority != "" {
+					contentBuilder.WriteString(fmt.Sprintf("**Nova prioridade:** %s\n", a.Priority))
+				}
+			case "delete":
+				contentBuilder.WriteString(fmt.Sprintf("### %d. Remover tarefa #%d: %s\n", i+1, a.TaskID, a.Title))
+			}
+			contentBuilder.WriteString("\n")
+		}
+
+		// Create temp document
+		docID := uuid.New().String()[:8]
+		tempDoc := &database.TempDocument{
+			ID:             docID,
+			Title:          fmt.Sprintf("Planejamento: %s", projectName),
+			Content:        contentBuilder.String(),
+			ConversationID: sql.NullInt64{Int64: conv.ID, Valid: conv.ID > 0},
+			Summary:        summary,
+		}
+		if err := h.api.db.CreateTempDocument(ctx, tempDoc); err != nil {
+			log.Printf("[Planning] Failed to create temp document: %v", err)
+		} else {
+			// Store pending planning proposal
+			h.api.storePendingPlanning(docID, projectID, actions, summary)
+
+			// Emit doc_card for the planning proposal
+			safeSendSSE("doc_card", map[string]interface{}{
+				"doc_id":     docID,
+				"type":       "planning",
+				"title":      fmt.Sprintf("Proposta de Planejamento — %s", projectName),
+				"summary":    summary,
+				"task_count": len(actions),
+			})
+		}
 	}
 
 	// Record token usage — prefer model from response (actual model used)
@@ -702,6 +820,7 @@ func (h *AIHandler) handleToolLoop(
 	toolCalls *[]map[string]interface{},
 	textMu *sync.Mutex,
 	maxIterations int,
+	collector *planningCollector,
 ) (llm.Usage, error) {
 	var accumulated llm.Usage
 
@@ -733,7 +852,7 @@ func (h *AIHandler) handleToolLoop(
 			})
 
 			toolCtx, toolCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			result, err := h.executeTool(toolCtx, block.Name, inputMap, conv.ID)
+			result, err := h.executeTool(toolCtx, block.Name, inputMap, conv.ID, collector)
 			toolCancel()
 			if err != nil {
 				result = fmt.Sprintf("Error: %s", err.Error())
@@ -804,11 +923,11 @@ func (h *AIHandler) handleToolLoop(
 // ExecuteTool implements llm.ToolExecutor. It wraps the private executeTool method
 // so that SDK providers can call DevManager tools from their in-process MCP servers.
 func (h *AIHandler) ExecuteTool(ctx context.Context, name string, input map[string]any, conversationID int64) (string, error) {
-	return h.executeTool(ctx, name, input, conversationID)
+	return h.executeTool(ctx, name, input, conversationID, nil)
 }
 
 // executeTool runs a tool and returns the result as a string.
-func (h *AIHandler) executeTool(ctx context.Context, name string, input map[string]interface{}, conversationID int64) (string, error) {
+func (h *AIHandler) executeTool(ctx context.Context, name string, input map[string]interface{}, conversationID int64, collector *planningCollector) (string, error) {
 	switch name {
 	case "create_skill":
 		skillName, _ := input["name"].(string)
@@ -1127,6 +1246,32 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if priority == "" {
 			priority = "medium"
 		}
+		dueDateStr, _ := input["due_date"].(string)
+
+		var parentID int64
+		if parentIDStr, ok := input["parent_id"].(string); ok && parentIDStr != "" {
+			pid, err := strconv.ParseInt(parentIDStr, 10, 64)
+			if err == nil {
+				parentID = pid
+			}
+		} else if pidF, ok := input["parent_id"].(float64); ok {
+			parentID = int64(pidF)
+		}
+
+		// In planning mode, collect into proposal instead of creating directly
+		if collector != nil {
+			collector.add(PlanningTaskAction{
+				Action:      "create",
+				ProjectID:   projectID,
+				Title:       title,
+				Description: description,
+				Status:      status,
+				Priority:    priority,
+				DueDate:     dueDateStr,
+				ParentID:    parentID,
+			})
+			return fmt.Sprintf("Task '%s' adicionada ao plano (será criada após aprovação)", title), nil
+		}
 
 		task := &database.ProjectTask{
 			ProjectID:   projectID,
@@ -1136,20 +1281,15 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			Priority:    priority,
 		}
 
-		if dueDateStr, ok := input["due_date"].(string); ok && dueDateStr != "" {
+		if dueDateStr != "" {
 			t, err := parseFlexibleTime(dueDateStr)
 			if err == nil {
 				task.DueDate = sql.NullTime{Time: t, Valid: true}
 			}
 		}
 
-		if parentIDStr, ok := input["parent_id"].(string); ok && parentIDStr != "" {
-			pid, err := strconv.ParseInt(parentIDStr, 10, 64)
-			if err == nil {
-				task.ParentID = sql.NullInt64{Int64: pid, Valid: true}
-			}
-		} else if pidF, ok := input["parent_id"].(float64); ok {
-			task.ParentID = sql.NullInt64{Int64: int64(pidF), Valid: true}
+		if parentID > 0 {
+			task.ParentID = sql.NullInt64{Int64: parentID, Valid: true}
 		}
 
 		if err := h.api.db.CreateTask(ctx, task); err != nil {
@@ -1173,19 +1313,30 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			return "", fmt.Errorf("task not found")
 		}
 
+		newTitle := task.Title
+		newStatus := ""
+		newPriority := ""
+		newDescription := ""
+		newDueDate := ""
+
 		if t, ok := input["title"].(string); ok && t != "" {
+			newTitle = t
 			task.Title = t
 		}
 		if d, ok := input["description"].(string); ok {
+			newDescription = d
 			task.Description = d
 		}
 		if s, ok := input["status"].(string); ok && s != "" {
+			newStatus = s
 			task.Status = s
 		}
 		if p, ok := input["priority"].(string); ok && p != "" {
+			newPriority = p
 			task.Priority = p
 		}
 		if dueDateStr, ok := input["due_date"].(string); ok {
+			newDueDate = dueDateStr
 			if dueDateStr == "" {
 				task.DueDate = sql.NullTime{}
 			} else {
@@ -1195,6 +1346,21 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 					task.DueNotified = false
 				}
 			}
+		}
+
+		// In planning mode, collect into proposal instead of updating directly
+		if collector != nil {
+			collector.add(PlanningTaskAction{
+				Action:      "update",
+				ProjectID:   projectID,
+				TaskID:      taskID,
+				Title:       newTitle,
+				Description: newDescription,
+				Status:      newStatus,
+				Priority:    newPriority,
+				DueDate:     newDueDate,
+			})
+			return fmt.Sprintf("Atualização da task '%s' adicionada ao plano (será aplicada após aprovação)", newTitle), nil
 		}
 
 		if err := h.api.db.UpdateTask(ctx, task); err != nil {
@@ -1216,6 +1382,17 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		task, err := h.api.db.GetTask(ctx, taskID)
 		if err != nil || task.ProjectID != projectID {
 			return "", fmt.Errorf("task not found")
+		}
+
+		// In planning mode, collect into proposal instead of deleting directly
+		if collector != nil {
+			collector.add(PlanningTaskAction{
+				Action:    "delete",
+				ProjectID: projectID,
+				TaskID:    taskID,
+				Title:     task.Title,
+			})
+			return fmt.Sprintf("Remoção da task '%s' adicionada ao plano (será removida após aprovação)", task.Title), nil
 		}
 		taskTitle := task.Title
 
@@ -1589,7 +1766,7 @@ func (h *AIHandler) HandleExecuteTool(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	result, err := h.executeTool(ctx, input.Name, input.Args, input.ConversationID)
+	result, err := h.executeTool(ctx, input.Name, input.Args, input.ConversationID, nil)
 	if err != nil {
 		respondJSON(w, http.StatusOK, map[string]interface{}{
 			"result": "",
