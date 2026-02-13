@@ -20,8 +20,7 @@ type ToolDef struct {
 	MCPDescription string              // Override description for MCP context (if empty, uses Description)
 	InputSchema    ToolDefinitionInput // Typed Go schema (single source of truth)
 	Context        ToolContext         // Where this tool is available
-	ChatOnly       bool                // If true, filtered out from MCP sessions (only available in MCP context "chat")
-	PlanningTool   bool                // If true, included in PlanningTools()
+	ChatOnly bool // If true, filtered out from MCP sessions (only available in MCP context "chat")
 }
 
 // MCPToolDef is the MCP protocol format with JSON raw schema.
@@ -97,7 +96,7 @@ func AllToolDefs() []ToolDef {
 				Properties: map[string]ToolPropertySchema{},
 			},
 			Context:      ToolContextBoth,
-			PlanningTool: true,
+
 		},
 		{
 			Name:           "list_mcp_servers",
@@ -188,7 +187,7 @@ func AllToolDefs() []ToolDef {
 				Required: []string{"project_id"},
 			},
 			Context:      ToolContextBoth,
-			PlanningTool: true,
+
 		},
 		{
 			Name:        "create_task",
@@ -209,7 +208,7 @@ func AllToolDefs() []ToolDef {
 				Required: []string{"project_id", "title"},
 			},
 			Context:      ToolContextBoth,
-			PlanningTool: true,
+
 		},
 		{
 			Name:           "update_task",
@@ -229,7 +228,7 @@ func AllToolDefs() []ToolDef {
 				Required: []string{"project_id", "task_id"},
 			},
 			Context:      ToolContextBoth,
-			PlanningTool: true,
+
 		},
 		{
 			Name:           "delete_task",
@@ -259,7 +258,7 @@ func AllToolDefs() []ToolDef {
 				Required: []string{"content"},
 			},
 			Context:      ToolContextBoth,
-			PlanningTool: true,
+
 		},
 		{
 			Name:           "list_directory",
@@ -275,7 +274,7 @@ func AllToolDefs() []ToolDef {
 				Required: []string{"project_id"},
 			},
 			Context:      ToolContextBoth,
-			PlanningTool: true,
+
 		},
 		{
 			Name:           "read_file",
@@ -293,7 +292,7 @@ func AllToolDefs() []ToolDef {
 				Required: []string{"project_id", "path"},
 			},
 			Context:      ToolContextBoth,
-			PlanningTool: true,
+
 		},
 
 		// ──── Chat-only tools ────
@@ -310,7 +309,7 @@ func AllToolDefs() []ToolDef {
 				Required: []string{"project_id", "pattern"},
 			},
 			Context:      ToolContextChat,
-			PlanningTool: true,
+
 		},
 		{
 			Name:        "grep_content",
@@ -326,7 +325,7 @@ func AllToolDefs() []ToolDef {
 				Required: []string{"project_id", "pattern"},
 			},
 			Context:      ToolContextChat,
-			PlanningTool: true,
+
 		},
 		{
 			Name:        "get_task_report",
@@ -339,21 +338,8 @@ func AllToolDefs() []ToolDef {
 				Required: []string{"project_id"},
 			},
 			Context:      ToolContextChat,
-			PlanningTool: true,
-		},
-		{
-			Name:        "activate_planning_mode",
-			Description: "Switch this conversation to planning mode for a specific project. This enables the planning workflow with file exploration tools and task creation. Use when the user wants to plan features, refactoring, or any development work that should be broken into tasks.",
-			InputSchema: ToolDefinitionInput{
-				Type: "object",
-				Properties: map[string]ToolPropertySchema{
-					"project_id": {Type: "string", Description: "The project ID (number) to plan for"},
-				},
-				Required: []string{"project_id"},
-			},
-			Context: ToolContextChat,
-		},
 
+		},
 		// ──── Session-only tools ────
 
 		{
@@ -505,26 +491,6 @@ func AllToolDefs() []ToolDef {
 func ChatTools() []ToolDefinition {
 	var result []ToolDefinition
 	for _, td := range AllToolDefs() {
-		if td.Context != ToolContextChat && td.Context != ToolContextBoth {
-			continue
-		}
-		result = append(result, ToolDefinition{
-			Name:        td.Name,
-			Description: td.Description,
-			InputSchema: td.InputSchema,
-		})
-	}
-	return result
-}
-
-// PlanningTools returns the subset of tools available in planning mode.
-func PlanningTools() []ToolDefinition {
-	var result []ToolDefinition
-	for _, td := range AllToolDefs() {
-		if !td.PlanningTool {
-			continue
-		}
-		// Planning tools come from ChatTools context
 		if td.Context != ToolContextChat && td.Context != ToolContextBoth {
 			continue
 		}

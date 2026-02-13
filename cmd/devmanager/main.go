@@ -488,7 +488,6 @@ func main() {
 		r.Get("/ai/active-stream", aiHandler.HandleActiveStream)
 		r.Get("/ai/conversations/{id}/stream", aiHandler.HandleStreamReconnect)
 		r.Post("/ai/initiate-memory-doc-edit", aiHandler.HandleInitiateMemoryDocEdit)
-		r.Post("/ai/initiate-planning", aiHandler.HandleInitiatePlanning)
 		r.Post("/ai/initiate-task-creation", aiHandler.HandleInitiateTaskCreation)
 		r.Post("/ai/initiate-task-discussion", aiHandler.HandleInitiateTaskDiscussion)
 		r.Post("/ai/generate-skill", aiHandler.HandleGenerateSkill)

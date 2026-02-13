@@ -62,7 +62,7 @@ type pendingPlanningProposal struct {
 	Summary   string
 }
 
-// pendingTaskProposal holds a single-task proposal awaiting user approval.
+// pendingTaskProposal holds a task proposal awaiting user approval.
 type pendingTaskProposal struct {
 	Actions []PlanningTaskAction
 	Summary string

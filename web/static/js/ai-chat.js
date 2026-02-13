@@ -569,14 +569,11 @@ class AIChatManager {
         if (data.doc_id) card.dataset.docId = data.doc_id;
 
         const isProposal = data.type === 'proposal';
-        const isPlanning = data.type === 'planning';
-        const isTaskProposal = data.type === 'task_proposal';
+        const isTaskProposal = data.type === 'task_proposal' || data.type === 'planning';
         const status = data.status || 'pending';
 
         let icon;
-        if (isPlanning) {
-            icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 14l2 2 4-4"/></svg>';
-        } else if (isProposal) {
+        if (isProposal) {
             icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
         } else if (isTaskProposal) {
             icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
@@ -594,7 +591,7 @@ class AIChatManager {
         } else if (status === 'rejected') {
             actionHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-rejected">Rejeitado</span>';
         } else {
-            const btnLabel = isTaskProposal ? 'Revisar Tarefa' : (isPlanning ? 'Revisar Plano' : (isProposal ? 'Revisar Proposta' : 'Ver Documento'));
+            const btnLabel = isTaskProposal ? 'Revisar Tarefa' : (isProposal ? 'Revisar Proposta' : 'Ver Documento');
             actionHtml = `<button class="ai-chat-doc-card-btn">${btnLabel}</button>`;
         }
 
@@ -678,7 +675,6 @@ class AIChatManager {
             'read_file': 'Reading file',
             'find_files': 'Searching files',
             'grep_content': 'Searching content',
-            'activate_planning_mode': 'Activating planning mode',
         };
         return labels[name] || name;
     }
@@ -840,8 +836,7 @@ class AIChatManager {
                 for (const doc of data.doc_cards) {
                     let type = 'document';
                     if (doc.title && doc.title.startsWith('Memory Doc:')) type = 'proposal';
-                    else if (doc.title && doc.title.startsWith('Planejamento:')) type = 'planning';
-                    else if (doc.title && doc.title.startsWith('Tarefa:')) type = 'task_proposal';
+                    else if (doc.title && (doc.title.startsWith('Tarefa:') || doc.title.startsWith('Planejamento:'))) type = 'task_proposal';
 
                     // Find the specific assistant message this doc card belongs to
                     let targetContent = null;

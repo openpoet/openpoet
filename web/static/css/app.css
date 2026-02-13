@@ -4246,48 +4246,6 @@ body {
 }
 
 /* Planning project selection modal */
-.planning-project-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    max-height: 300px;
-    overflow-y: auto;
-}
-.planning-project-option {
-    cursor: pointer;
-    display: block;
-}
-.planning-project-option input[type="radio"] {
-    display: none;
-}
-.planning-project-card {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 12px;
-    border: 2px solid var(--color-border);
-    border-radius: 8px;
-    transition: border-color 0.15s, background 0.15s;
-}
-.planning-project-option input[type="radio"]:checked + .planning-project-card {
-    border-color: var(--color-primary);
-    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
-}
-.planning-project-card:hover {
-    border-color: var(--color-primary);
-}
-.planning-project-card strong {
-    flex: 1;
-}
-.planning-project-path {
-    font-size: 0.8em;
-    color: var(--color-text-secondary);
-    max-width: 200px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
 .task-card {
     background: var(--color-surface);
     border: 1px solid var(--color-border);

@@ -25,11 +25,10 @@ import (
 
 var docLinkRe = regexp.MustCompile(`/app/doc/([a-zA-Z0-9-]+)`)
 
-// planningCollector accumulates task actions during planning mode for batch proposal.
+// planningCollector accumulates task actions during a chat stream for batch proposal.
 type planningCollector struct {
-	mu           sync.Mutex
-	actions      []PlanningTaskAction
-	planningMode bool // true = formal planning mode; false = regular chat batch
+	mu      sync.Mutex
+	actions []PlanningTaskAction
 }
 
 func (pc *planningCollector) add(action PlanningTaskAction) {
@@ -427,21 +426,9 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		proactiveCtx = conv.ProactiveContext
 	}
 
-	// Check if this is a planning conversation — use specialized prompt and tools
-	isPlanning := conv.ProactiveType == "planning"
 	_, isSessionProvider := p.(llm.SessionProvider)
 
-	var systemPrompt string
-	if isPlanning {
-		var projectNames []string
-		projects, _ := h.api.db.ListProjects(ctx)
-		for _, pr := range projects {
-			projectNames = append(projectNames, fmt.Sprintf("[%d] %s (%s)", pr.ID, pr.Name, pr.Type))
-		}
-		systemPrompt = llm.PlanningSystemPrompt(projectNames, proactiveCtx)
-	} else {
-		systemPrompt = h.buildSystemPromptWithContext(ctx, proactiveCtx)
-	}
+	systemPrompt := h.buildSystemPromptWithContext(ctx, proactiveCtx)
 
 	// Get model — empty string means "let the provider use its own default"
 	model, _ := h.api.db.GetSetting(ctx, "ai_model")
@@ -451,11 +438,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	// - API key provider uses native Anthropic tool definitions
 	var tools []llm.ToolDefinition
 	if !isSessionProvider && p.Name() == "apikey" {
-		if isPlanning {
-			tools = llm.PlanningTools()
-		} else {
-			tools = llm.ChatTools()
-		}
+		tools = llm.ChatTools()
 	}
 
 	// Set SSE headers
@@ -499,16 +482,11 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		"title": conv.Title,
 	})
 
-	// Stream response — planning mode gets more tokens for detailed responses
-	maxTokens := 2048
-	if isPlanning {
-		maxTokens = 4096
-	}
 	req := &llm.Request{
 		System:         systemPrompt,
 		Messages:       messages,
 		Tools:          tools,
-		MaxTokens:      maxTokens,
+		MaxTokens:      4096,
 		Model:          model,
 		ConversationID: conv.ID,
 	}
@@ -539,7 +517,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Create task collector and make it accessible to GoSDK tool execution.
 	// Must be stored BEFORE streaming starts, since GoSDK calls tools during streaming.
-	collector := &planningCollector{planningMode: isPlanning}
+	collector := &planningCollector{}
 	h.streamCollectorsMu.Lock()
 	if h.streamCollectors == nil {
 		h.streamCollectors = make(map[int64]*planningCollector)
@@ -648,13 +626,8 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle tool use loop — session providers handle tools internally, skip for them
-	maxIter := 5
-	if isPlanning {
-		maxIter = 15
-	}
-
 	if resp != nil && resp.StopReason == "tool_use" && !isSessionProvider {
-		loopUsage, loopErr := h.handleToolLoop(streamCtx, safeSendSSE, p, req, resp, conv, &assistantText, &toolCalls, &textMu, maxIter, collector, assistantMsg.ID)
+		loopUsage, loopErr := h.handleToolLoop(streamCtx, safeSendSSE, p, req, resp, conv, &assistantText, &toolCalls, &textMu, 15, collector, assistantMsg.ID)
 		if loopErr != nil {
 			log.Printf("[AI] Tool loop error: %v", loopErr)
 			if streamCtx.Err() == context.Canceled {
@@ -810,78 +783,42 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 		docID := uuid.New().String()[:8]
 
-		if isPlanning {
-			// Planning mode: "Planejamento:" doc with full planning approval
-			summary := fmt.Sprintf("Plano para %s: %s", projectName, strings.Join(summaryParts, ", "))
+		// "Tarefa:" doc with task proposal approval
+		summary := fmt.Sprintf("%s — %s", strings.Join(summaryParts, ", "), projectName)
 
-			var fullContent strings.Builder
-			fullContent.WriteString(fmt.Sprintf("# Proposta de Planejamento — %s\n\n", projectName))
-			fullContent.WriteString(fmt.Sprintf("**Resumo:** %s\n\n", summary))
-			fullContent.WriteString("## Ações propostas\n\n")
-			fullContent.WriteString(contentBuilder.String())
+		// Title: task name for single task, project name for batch
+		docTitle := fmt.Sprintf("Tarefa: %s", projectName)
+		if len(actions) == 1 {
+			docTitle = fmt.Sprintf("Tarefa: %s", actions[0].Title)
+		}
 
-			tempDoc := &database.TempDocument{
-				ID:             docID,
-				Title:          fmt.Sprintf("Planejamento: %s", projectName),
-				Content:        fullContent.String(),
-				ConversationID: sql.NullInt64{Int64: conv.ID, Valid: conv.ID > 0},
-				Summary:        summary,
-				MessageID:      assistantMsg.ID,
-			}
-			if err := h.api.db.CreateTempDocument(ctx, tempDoc); err != nil {
-				log.Printf("[Planning] Failed to create temp document: %v", err)
-			} else {
-				h.api.storePendingPlanning(docID, projectID, actions, summary)
+		var fullContent strings.Builder
+		fullContent.WriteString(fmt.Sprintf("# Proposta de Tarefas — %s\n\n", projectName))
+		fullContent.WriteString(fmt.Sprintf("**Resumo:** %s\n\n", summary))
+		fullContent.WriteString(contentBuilder.String())
 
-				// Emit doc_card only for non-session providers (GoSDK emits via session provider code below)
-				if !isSessionProvider {
-					safeSendSSE("doc_card", map[string]interface{}{
-						"doc_id":     docID,
-						"type":       "planning",
-						"title":      fmt.Sprintf("Proposta de Planejamento — %s", projectName),
-						"summary":    summary,
-						"task_count": len(actions),
-					})
-				}
-			}
+		tempDoc := &database.TempDocument{
+			ID:             docID,
+			Title:          docTitle,
+			Content:        fullContent.String(),
+			ConversationID: sql.NullInt64{Int64: conv.ID, Valid: conv.ID > 0},
+			Summary:        summary,
+			MessageID:      assistantMsg.ID,
+		}
+		if err := h.api.db.CreateTempDocument(ctx, tempDoc); err != nil {
+			log.Printf("[TaskProposal] Failed to create temp document: %v", err)
 		} else {
-			// Regular mode: "Tarefa:" doc with task proposal approval
-			summary := fmt.Sprintf("%s — %s", strings.Join(summaryParts, ", "), projectName)
+			h.api.storePendingTaskProposal(docID, actions, summary)
 
-			// Title: task name for single task, project name for batch
-			docTitle := fmt.Sprintf("Tarefa: %s", projectName)
-			if len(actions) == 1 {
-				docTitle = fmt.Sprintf("Tarefa: %s", actions[0].Title)
-			}
-
-			var fullContent strings.Builder
-			fullContent.WriteString(fmt.Sprintf("# Proposta de Tarefas — %s\n\n", projectName))
-			fullContent.WriteString(fmt.Sprintf("**Resumo:** %s\n\n", summary))
-			fullContent.WriteString(contentBuilder.String())
-
-			tempDoc := &database.TempDocument{
-				ID:             docID,
-				Title:          docTitle,
-				Content:        fullContent.String(),
-				ConversationID: sql.NullInt64{Int64: conv.ID, Valid: conv.ID > 0},
-				Summary:        summary,
-				MessageID:      assistantMsg.ID,
-			}
-			if err := h.api.db.CreateTempDocument(ctx, tempDoc); err != nil {
-				log.Printf("[TaskProposal] Failed to create temp document: %v", err)
-			} else {
-				h.api.storePendingTaskProposal(docID, actions, summary)
-
-				// Emit doc_card only for non-session providers
-				if !isSessionProvider {
-					safeSendSSE("doc_card", map[string]interface{}{
-						"doc_id":     docID,
-						"type":       "task_proposal",
-						"title":      docTitle,
-						"summary":    summary,
-						"task_count": len(actions),
-					})
-				}
+			// Emit doc_card only for non-session providers
+			if !isSessionProvider {
+				safeSendSSE("doc_card", map[string]interface{}{
+					"doc_id":     docID,
+					"type":       "task_proposal",
+					"title":      docTitle,
+					"summary":    summary,
+					"task_count": len(actions),
+				})
 			}
 		}
 	}
@@ -901,9 +838,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			cardType := "document"
 			if strings.HasPrefix(doc.Title, "Memory Doc:") {
 				cardType = "proposal"
-			} else if strings.HasPrefix(doc.Title, "Planejamento:") {
-				cardType = "planning"
-			} else if strings.HasPrefix(doc.Title, "Tarefa:") {
+			} else if strings.HasPrefix(doc.Title, "Tarefa:") || strings.HasPrefix(doc.Title, "Planejamento:") {
 				cardType = "task_proposal"
 			}
 			safeSendSSE("doc_card", map[string]interface{}{
@@ -1495,18 +1430,6 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		// Collect task actions into the batch collector (if available).
 		// A single proposal card with all tasks is created after streaming completes.
 		if collector != nil {
-			// In planning mode: enforce hierarchy. If there's already 1+ create in the
-			// collector, any new create MUST have parent_ref. If this is the 2nd+ create
-			// without parent_ref, reject it with an error so the AI retries correctly.
-			if collector.planningMode && collector.countCreates() >= 1 && parentRef == 0 && parentID == 0 {
-				return "", fmt.Errorf(
-					"ERRO DE HIERARQUIA: Em modo de planejamento, quando há múltiplas tarefas, "+
-						"a primeira tarefa criada é a tarefa PRINCIPAL (pai) e todas as demais DEVEM ser subtarefas. "+
-						"Você já criou a tarefa principal. Agora, esta tarefa '%s' PRECISA do parâmetro parent_ref=1 "+
-						"para ser uma subtarefa da tarefa principal. "+
-						"Recrie esta tarefa incluindo parent_ref=1.", title)
-			}
-
 			collector.add(PlanningTaskAction{
 				Action:      "create",
 				ProjectID:   projectID,
@@ -1610,16 +1533,6 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			return "", fmt.Errorf("task not found")
 		}
 
-		// In planning mode, collect into proposal; otherwise delete immediately
-		if collector != nil && collector.planningMode {
-			collector.add(PlanningTaskAction{
-				Action:    "delete",
-				ProjectID: projectID,
-				TaskID:    taskID,
-				Title:     task.Title,
-			})
-			return fmt.Sprintf("Remoção da task '%s' adicionada ao plano (será removida após aprovação)", task.Title), nil
-		}
 		taskTitle := task.Title
 
 		if err := h.api.db.DeleteTask(ctx, taskID); err != nil {
@@ -1940,31 +1853,6 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		}
 		return sb.String(), nil
 
-	case "activate_planning_mode":
-		projectID, err := parseIDParam(input, "project_id")
-		if err != nil {
-			return "", err
-		}
-		project, err := h.api.db.GetProject(ctx, projectID)
-		if err != nil {
-			return "", fmt.Errorf("project not found")
-		}
-
-		// Update conversation to planning mode
-		proactiveData, _ := json.Marshal(map[string]interface{}{
-			"intent":       "planning",
-			"project_id":   projectID,
-			"project_name": project.Name,
-		})
-		err = h.api.db.UpdateAIConversationMode(ctx, conversationID, "planning", string(proactiveData))
-		if err != nil {
-			return "", fmt.Errorf("failed to activate planning mode: %w", err)
-		}
-
-		return fmt.Sprintf("Planning mode activated for project **%s** (ID: %d). "+
-			"On the next message, you will have access to file exploration tools (list_directory, read_file, find_files, grep_content) and the planning system prompt. "+
-			"Tell the user that planning mode is now active and ask them to describe what they want to implement.", project.Name, projectID), nil
-
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
@@ -2174,55 +2062,6 @@ func (h *AIHandler) HandleInitiateMemoryDocEdit(w http.ResponseWriter, r *http.R
 
 	title := fmt.Sprintf("Edit Memory Doc: %s", project.Name)
 	conv, err := h.api.db.CreateProactiveConversation(ctx, title, "standard", "memory_doc_edit", string(proactiveCtx), assistantMsg)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to create conversation")
-		return
-	}
-
-	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"conversation_id": conv.ID,
-	})
-}
-
-// HandleInitiatePlanning creates an AI-initiated conversation for planning tasks.
-func (h *AIHandler) HandleInitiatePlanning(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		ProjectID int64 `json:"project_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid JSON")
-		return
-	}
-
-	if input.ProjectID <= 0 {
-		respondError(w, http.StatusBadRequest, "project_id is required")
-		return
-	}
-
-	ctx := r.Context()
-	project, err := h.api.db.GetProject(ctx, input.ProjectID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
-		return
-	}
-
-	proactiveCtx, _ := json.Marshal(map[string]interface{}{
-		"intent":       "planning",
-		"project_id":   input.ProjectID,
-		"project_name": project.Name,
-	})
-
-	assistantMsg := fmt.Sprintf(
-		"Modo de planejamento ativado para o projeto **%s**.\n\n"+
-			"Descreva o que você gostaria de implementar ou melhorar, e eu vou:\n"+
-			"1. Explorar o código do projeto\n"+
-			"2. Entender a arquitetura\n"+
-			"3. Quebrar o trabalho em tarefas detalhadas\n\n"+
-			"O que você tem em mente?",
-		project.Name)
-
-	title := fmt.Sprintf("Planejamento: %s", project.Name)
-	conv, err := h.api.db.CreateProactiveConversation(ctx, title, "standard", "planning", string(proactiveCtx), assistantMsg)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to create conversation")
 		return

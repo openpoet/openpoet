@@ -180,10 +180,6 @@ export function buildDevManagerTools(apiURL, conversationID = 0) {
                 glob: z.string().optional().describe('File name filter'),
             }, (args) => proxy('grep_content', args)),
 
-            // Planning mode
-            tool('activate_planning_mode', 'Switch conversation to planning mode for a project', {
-                project_id: z.string().describe('Project ID to plan for'),
-            }, (args) => proxy('activate_planning_mode', args)),
         ],
     });
 }
