@@ -739,10 +739,17 @@ class DevManager {
             iconEl.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-danger-light)" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
         }
 
-        // Show close button when all done or any error
-        if (status === 'done' && (step === 'memory_doc' || step === 'sync')) {
-            const closeBtn = document.getElementById('sync-modal-close');
-            if (closeBtn) closeBtn.style.display = '';
+        // When sync finishes: auto-close on success, show close button on error
+        const isFinalStep = step === 'memory_doc' || step === 'sync';
+        if (status === 'done' && isFinalStep) {
+            // Reload project data to update sync date in the UI
+            this.loadProjects().then(() => {
+                if (this._detailProject) {
+                    this.showProjectDetail(this._detailProject.id);
+                }
+            });
+            // Auto-close modal after a brief pause so the user sees completion
+            setTimeout(() => this.closeSyncModal(), 800);
         }
         if (status === 'error') {
             const closeBtn = document.getElementById('sync-modal-close');
@@ -775,7 +782,7 @@ class DevManager {
         const container = document.getElementById('project-detail-content');
         if (!container) return;
 
-        const syncDate = project.last_sync ? this.formatTime(project.last_sync) : 'Never synced';
+        const syncDate = project.config_synced_at?.Valid ? this.formatTime(project.config_synced_at.Time) : 'Never synced';
         const createdDate = project.created_at ? this.formatTime(project.created_at) : '—';
         const updatedDate = project.updated_at ? this.formatTime(project.updated_at) : '—';
 
@@ -5028,7 +5035,17 @@ class DevManager {
                         <input type="text" class="form-input" name="title" value="${this.escapeHtml(task?.title || '')}" required placeholder="Task title...">
                     </div>
                     <div class="form-group">
-                        <label class="form-label">Description</label>
+                        <div class="hook-input-label-row">
+                            <label class="form-label" style="margin-bottom:0">Description</label>
+                            <button type="button" class="btn-icon btn-sm hook-voice-btn" id="task-description-voice-btn" title="Voice input">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                    <line x1="12" y1="19" x2="12" y2="23"></line>
+                                    <line x1="8" y1="23" x2="16" y2="23"></line>
+                                </svg>
+                            </button>
+                        </div>
                         <textarea class="form-input" name="description" rows="3" placeholder="Optional description...">${this.escapeHtml(task?.description || '')}</textarea>
                     </div>
                     <div class="form-row">
@@ -5059,14 +5076,38 @@ class DevManager {
                 </form>
             `;
 
+            const aiBtn = !isEdit ? `<button class="btn btn-primary" style="background:var(--color-ai,#8b5cf6)" onclick="app.createTaskWithAI(${projectId}, ${parentId})">&#10022; Criar com IA</button>` : '';
+
             const actions = `
                 <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
+                ${aiBtn}
                 <button class="btn btn-primary" onclick="app.saveTask(${projectId}, ${taskId}, ${parentId})">
                     ${isEdit ? 'Update' : 'Create'}
                 </button>
             `;
 
             this.showModal(title, content, actions);
+
+            // Setup voice input for description field
+            const voiceBtn = document.getElementById('task-description-voice-btn');
+            const descTextarea = document.querySelector('#task-form textarea[name="description"]');
+            if (voiceBtn && descTextarea && window.voiceInput) {
+                voiceBtn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (window.voiceInput.isRecording) {
+                        window.voiceInput.stopRecording();
+                        voiceBtn.classList.remove('recording');
+                        return;
+                    }
+                    voiceBtn.classList.add('recording');
+                    window.voiceInput.startRecordingWithCallback((text) => {
+                        voiceBtn.classList.remove('recording');
+                        descTextarea.value = (descTextarea.value ? descTextarea.value + ' ' : '') + text;
+                        descTextarea.focus();
+                    });
+                });
+            }
         };
 
         loadAndShow();
@@ -5197,6 +5238,37 @@ class DevManager {
             this.showToast('Error', e.message, 'error');
         }
     }
+
+    async createTaskWithAI(projectId, parentId) {
+        const form = document.getElementById('task-form');
+        if (!form) return;
+
+        const formData = new FormData(form);
+        const payload = {
+            project_id: projectId,
+            title: formData.get('title') || '',
+            description: formData.get('description') || '',
+            status: formData.get('status') || 'todo',
+            priority: formData.get('priority') || 'medium',
+            due_date: formData.get('due_date') || '',
+        };
+        if (parentId) {
+            payload.parent_id = parentId;
+        }
+
+        this.hideModal();
+
+        try {
+            const result = await this.api('POST', '/ai/initiate-task-creation', payload);
+            if (result?.conversation_id) {
+                window.aiChat.open();
+                window.aiChat.loadConversation(result.conversation_id);
+            }
+        } catch (e) {
+            this.showToast('Erro ao iniciar criação com IA', e.message, 'error');
+        }
+    }
+
     // ============ Session-Task Integration ============
 
     showSessionReopenChoiceModal() {
