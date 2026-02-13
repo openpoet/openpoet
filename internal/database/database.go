@@ -598,6 +598,41 @@ func (d *DB) DeleteTask(ctx context.Context, id int64) error {
 	return err
 }
 
+// ReorderTasks batch-updates sort_order and parent_id for multiple tasks in a single transaction.
+func (d *DB) ReorderTasks(ctx context.Context, projectID int64, items []ReorderItem) error {
+	tx, err := d.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, "UPDATE project_tasks SET sort_order=?, parent_id=?, updated_at=? WHERE id=? AND project_id=?")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	now := time.Now()
+	for _, item := range items {
+		var parentID sql.NullInt64
+		if item.ParentID != nil && *item.ParentID > 0 {
+			parentID = sql.NullInt64{Int64: *item.ParentID, Valid: true}
+		}
+		if _, err := stmt.ExecContext(ctx, item.SortOrder, parentID, now, item.ID, projectID); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// ReorderItem represents a single item in a batch reorder operation.
+type ReorderItem struct {
+	ID        int64  `json:"id"`
+	SortOrder int    `json:"sort_order"`
+	ParentID  *int64 `json:"parent_id"`
+}
+
 func (d *DB) DuplicateTask(ctx context.Context, id int64) (*ProjectTask, error) {
 	original, err := d.GetTask(ctx, id)
 	if err != nil {

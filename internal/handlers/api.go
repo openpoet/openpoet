@@ -50,6 +50,8 @@ type PlanningTaskAction struct {
 	Priority    string                 `json:"priority,omitempty"`
 	DueDate     string                 `json:"due_date,omitempty"`
 	ParentID    int64                  `json:"parent_id,omitempty"`
+	ParentRef   int                    `json:"parent_ref,omitempty"` // 1-based index referencing another task in the same batch
+	SortOrder   int                    `json:"sort_order,omitempty"`
 	Extra       map[string]interface{} `json:"extra,omitempty"` // for update fields
 }
 
@@ -218,7 +220,10 @@ func (a *API) ApprovePlanning(w http.ResponseWriter, r *http.Request) {
 	updated := 0
 	deleted := 0
 
-	for _, action := range pending.Actions {
+	// Map action index (1-based) -> created task ID, for resolving parent_ref
+	createdTaskIDs := make(map[int]int64)
+
+	for i, action := range pending.Actions {
 		switch action.Action {
 		case "create":
 			task := &database.ProjectTask{
@@ -227,6 +232,7 @@ func (a *API) ApprovePlanning(w http.ResponseWriter, r *http.Request) {
 				Description: action.Description,
 				Status:      action.Status,
 				Priority:    action.Priority,
+				SortOrder:   action.SortOrder,
 			}
 			if task.Status == "" {
 				task.Status = "todo"
@@ -240,13 +246,19 @@ func (a *API) ApprovePlanning(w http.ResponseWriter, r *http.Request) {
 					task.DueDate = sql.NullTime{Time: t, Valid: true}
 				}
 			}
-			if action.ParentID > 0 {
+			// Resolve parent: parent_ref (batch reference) takes priority over parent_id
+			if action.ParentRef > 0 {
+				if realID, ok := createdTaskIDs[action.ParentRef]; ok {
+					task.ParentID = sql.NullInt64{Int64: realID, Valid: true}
+				}
+			} else if action.ParentID > 0 {
 				task.ParentID = sql.NullInt64{Int64: action.ParentID, Valid: true}
 			}
 			if err := a.db.CreateTask(r.Context(), task); err != nil {
 				log.Printf("[Planning] Failed to create task '%s': %v", action.Title, err)
 				continue
 			}
+			createdTaskIDs[i+1] = task.ID // Store with 1-based index
 			a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "created", "project_id": action.ProjectID, "task": task})
 			created++
 
@@ -356,7 +368,10 @@ func (a *API) ApproveTaskProposal(w http.ResponseWriter, r *http.Request) {
 	created := 0
 	updated := 0
 
-	for _, action := range pending.Actions {
+	// Map action index (1-based) -> created task ID, for resolving parent_ref
+	createdTaskIDs := make(map[int]int64)
+
+	for i, action := range pending.Actions {
 		switch action.Action {
 		case "create":
 			task := &database.ProjectTask{
@@ -365,6 +380,7 @@ func (a *API) ApproveTaskProposal(w http.ResponseWriter, r *http.Request) {
 				Description: action.Description,
 				Status:      action.Status,
 				Priority:    action.Priority,
+				SortOrder:   action.SortOrder,
 			}
 			if task.Status == "" {
 				task.Status = "todo"
@@ -378,13 +394,19 @@ func (a *API) ApproveTaskProposal(w http.ResponseWriter, r *http.Request) {
 					task.DueDate = sql.NullTime{Time: t, Valid: true}
 				}
 			}
-			if action.ParentID > 0 {
+			// Resolve parent: parent_ref (batch reference) takes priority over parent_id
+			if action.ParentRef > 0 {
+				if realID, ok := createdTaskIDs[action.ParentRef]; ok {
+					task.ParentID = sql.NullInt64{Int64: realID, Valid: true}
+				}
+			} else if action.ParentID > 0 {
 				task.ParentID = sql.NullInt64{Int64: action.ParentID, Valid: true}
 			}
 			if err := a.db.CreateTask(r.Context(), task); err != nil {
 				log.Printf("[TaskProposal] Failed to create task '%s': %v", action.Title, err)
 				continue
 			}
+			createdTaskIDs[i+1] = task.ID // Store with 1-based index
 			a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "created", "project_id": action.ProjectID, "task": task})
 			created++
 
@@ -1950,6 +1972,42 @@ func (a *API) UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, task)
 }
 
+// ReorderProjectTasks batch-updates sort_order and parent_id for multiple tasks.
+func (a *API) ReorderProjectTasks(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	var items []database.ReorderItem
+	if err := json.NewDecoder(r.Body).Decode(&items); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if len(items) == 0 {
+		respondError(w, http.StatusBadRequest, "Empty reorder list")
+		return
+	}
+	if len(items) > 100 {
+		respondError(w, http.StatusBadRequest, "Too many items (max 100)")
+		return
+	}
+
+	if err := a.db.ReorderTasks(r.Context(), projectID, items); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("task", map[string]interface{}{
+		"action":     "reordered",
+		"project_id": projectID,
+	})
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (a *API) DeleteProjectTask(w http.ResponseWriter, r *http.Request) {
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -2288,13 +2346,7 @@ func (a *API) GetResolvedProjectTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	effectivePolicy := globalPolicy
-	if project.ToolPolicy != "" {
-		projPolicy := mcp.ParsePolicy(project.ToolPolicy)
-		if projPolicy.Mode != "" {
-			effectivePolicy = mcp.MergePolicy(globalPolicy, projPolicy)
-		}
-	}
+	effectivePolicy := mcp.ResolveProjectPolicy(globalPolicy, project.ToolPolicy)
 
 	type toolInfo struct {
 		Name        string `json:"name"`
@@ -2330,16 +2382,15 @@ func (a *API) GetResolvedSessionTools(w http.ResponseWriter, r *http.Request) {
 		globalPolicy = mcp.ParsePolicy(policyStr)
 	}
 
-	effectivePolicy := globalPolicy
+	// Resolve: project policy overrides global if set, otherwise inherit global
+	var projectPolicyJSON string
 	if sess.ProjectID > 0 {
 		project, err := a.db.GetProject(ctx, sess.ProjectID)
-		if err == nil && project.ToolPolicy != "" {
-			projPolicy := mcp.ParsePolicy(project.ToolPolicy)
-			if projPolicy.Mode != "" {
-				effectivePolicy = mcp.MergePolicy(globalPolicy, projPolicy)
-			}
+		if err == nil {
+			projectPolicyJSON = project.ToolPolicy
 		}
 	}
+	effectivePolicy := mcp.ResolveProjectPolicy(globalPolicy, projectPolicyJSON)
 
 	type toolInfo struct {
 		Name        string `json:"name"`

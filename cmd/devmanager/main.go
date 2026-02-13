@@ -354,6 +354,7 @@ func main() {
 		// Project Tasks
 		r.Get("/projects/{id}/tasks", api.ListProjectTasks)
 		r.Post("/projects/{id}/tasks", api.CreateProjectTask)
+		r.Put("/projects/{id}/tasks/reorder", api.ReorderProjectTasks)
 		r.Get("/projects/{id}/tasks/session-summary", api.GetTaskSessionSummary)
 		r.Get("/projects/{id}/tasks/{taskId}", api.GetProjectTask)
 		r.Put("/projects/{id}/tasks/{taskId}", api.UpdateProjectTask)

@@ -3,195 +3,23 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+
+	"devmanager/internal/llm"
 )
 
-// MCPTool represents a tool definition in MCP protocol format.
-type MCPTool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"inputSchema"`
-}
+// MCPTool is a type alias for llm.MCPToolDef — the unified tool definition for MCP protocol.
+type MCPTool = llm.MCPToolDef
 
-// chatOnlyTools lists tools that should only be available in chat context (no session ID).
-var chatOnlyTools = map[string]bool{
-	"devmanager_update_memory_doc": true,
-}
-
-// toolsDef returns the list of MCP tools exposed by DevManager.
-// When context is "chat" (spawned by AI Assistant), all tools are included.
-// Otherwise (terminal sessions), chat-only tools are excluded.
-func toolsDef(context string) []MCPTool {
-	all := allToolsDef()
-	if context == "chat" {
-		return all
-	}
-	// Filter out chat-only tools for terminal sessions
-	var filtered []MCPTool
-	for _, t := range all {
-		if !chatOnlyTools[t.Name] {
-			filtered = append(filtered, t)
-		}
-	}
-	return filtered
-}
-
-// AllTools returns all MCP tool definitions. Used by the API to expose tool metadata.
+// AllTools returns all MCP tool definitions (with devmanager_ prefix).
+// Used by the API to expose tool metadata and by session manager for policy checks.
 func AllTools() []MCPTool {
-	return allToolsDef()
+	return llm.MCPTools("session")
 }
 
-func allToolsDef() []MCPTool {
-	return []MCPTool{
-		{
-			Name:        "devmanager_list_skills",
-			Description: "List all skills in DevManager. Skills are markdown instruction templates stored in the database.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
-		},
-		{
-			Name:        "devmanager_create_skill",
-			Description: "Create a new skill in DevManager. Skills are markdown instructions synced to projects as .claude/skills/<name>/SKILL.md for Claude Code to follow.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Unique name for the skill. MUST be lowercase with hyphens, no spaces (e.g. 'python-best-practices', 'git-workflow'). Max 64 chars."},"content":{"type":"string","description":"Markdown content with instructions for Claude Code. Do NOT include YAML frontmatter (---) — it is auto-generated during sync."},"category":{"type":"string","description":"Category label (e.g. coding, testing, deployment, documentation, workflow)"}},"required":["name","content"]}`),
-		},
-		{
-			Name:        "devmanager_update_skill",
-			Description: "Update an existing skill by ID.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"id":{"type":"number","description":"The skill ID"},"name":{"type":"string","description":"New name for the skill"},"content":{"type":"string","description":"New markdown content"},"category":{"type":"string","description":"New category label"}},"required":["id"]}`),
-		},
-		{
-			Name:        "devmanager_delete_skill",
-			Description: "Delete a skill by ID.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"id":{"type":"number","description":"The skill ID"}},"required":["id"]}`),
-		},
-		{
-			Name:        "devmanager_list_projects",
-			Description: "List all projects managed by DevManager.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
-		},
-		{
-			Name:        "devmanager_list_mcp_servers",
-			Description: "List all MCP server configurations in DevManager.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
-		},
-		{
-			Name:        "devmanager_create_mcp_server",
-			Description: "Create a new MCP server configuration.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Name of the MCP server"},"command":{"type":"string","description":"Command to run the server"},"args":{"type":"string","description":"JSON array of arguments, e.g. '[\"--headless\"]'. Can also be passed as a native array."},"env":{"type":"string","description":"JSON object of environment variables, e.g. '{\"KEY\":\"val\"}'. Can also be passed as a native object."}},"required":["name","command"]}`),
-		},
-		{
-			Name:        "devmanager_update_mcp_server",
-			Description: "Update a DevManager MCP server configuration by ID.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"id":{"type":"number","description":"The MCP server ID"},"name":{"type":"string","description":"New name"},"command":{"type":"string","description":"New command"},"args":{"type":"string","description":"JSON array of arguments, e.g. '[\"--headless\"]'. Can also be passed as a native array."},"env":{"type":"string","description":"JSON object of environment variables. Can also be passed as a native object."},"enabled":{"type":"boolean","description":"Whether the MCP server is enabled"}},"required":["id"]}`),
-		},
-		{
-			Name:        "devmanager_delete_mcp_server",
-			Description: "Delete a DevManager MCP server configuration by ID.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"id":{"type":"number","description":"The MCP server ID"}},"required":["id"]}`),
-		},
-		{
-			Name:        "devmanager_update_setting",
-			Description: "Update a DevManager setting.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","description":"Setting key"},"value":{"type":"string","description":"Setting value"}},"required":["key","value"]}`),
-		},
-		{
-			Name:        "devmanager_sync_config",
-			Description: "Sync configuration (skills and hooks) to all projects. MCP servers are injected via --mcp-config CLI flag at session start.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
-		},
-		{
-			Name:        "devmanager_list_project_files",
-			Description: "List files and directories in a project. Returns names, sizes, and types. Use path parameter to navigate subdirectories.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"project_id":{"type":"number","description":"The project ID"},"path":{"type":"string","description":"Relative path within the project (empty or omit for root)"}},"required":["project_id"]}`),
-		},
-		{
-			Name:        "devmanager_read_project_file",
-			Description: "Read the content of a text file from a project. Max 2MB, text files only. Returns the file content as text.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"project_id":{"type":"number","description":"The project ID"},"path":{"type":"string","description":"Relative path to the file within the project"}},"required":["project_id","path"]}`),
-		},
-		{
-			Name:        "devmanager_get_memory_doc",
-			Description: "Get the memory doc for a project. The memory doc tracks project goals, progress, and key decisions. Returns the markdown content or empty if none exists.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"project_id":{"type":"number","description":"The project ID"}},"required":["project_id"]}`),
-		},
-		{
-			Name:        "devmanager_update_memory_doc",
-			Description: "Propose changes to a project's memory doc. Changes are NOT applied immediately — they create a proposal that the user must approve via the DevManager UI.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"project_id":{"type":"number","description":"The project ID"},"content":{"type":"string","description":"Full markdown content for the memory doc"},"summary":{"type":"string","description":"Brief summary of what changed in this update"}},"required":["project_id","content"]}`),
-		},
-		{
-			Name:        "devmanager_list_tasks",
-			Description: "List all tasks for a project. Returns task title, status, priority, due date, and subtask relationships.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"project_id":{"type":"number","description":"The project ID"}},"required":["project_id"]}`),
-		},
-		{
-			Name:        "devmanager_create_task",
-			Description: "Create a new task in a project.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"project_id":{"type":"number","description":"The project ID"},"title":{"type":"string","description":"Task title"},"description":{"type":"string","description":"Task description"},"status":{"type":"string","description":"Status: todo, in_progress, done, blocked"},"priority":{"type":"string","description":"Priority: low, medium, high, urgent"},"due_date":{"type":"string","description":"Due date in ISO 8601 format (e.g. 2025-01-15T14:00)"},"parent_id":{"type":"number","description":"Parent task ID for subtasks"}},"required":["project_id","title"]}`),
-		},
-		{
-			Name:        "devmanager_update_task",
-			Description: "Update an existing task by project_id and task_id.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"project_id":{"type":"number","description":"The project ID"},"task_id":{"type":"number","description":"The task ID"},"title":{"type":"string","description":"New title"},"description":{"type":"string","description":"New description"},"status":{"type":"string","description":"New status: todo, in_progress, done, blocked"},"priority":{"type":"string","description":"New priority: low, medium, high, urgent"},"due_date":{"type":"string","description":"New due date in ISO 8601 format (empty string to clear)"}},"required":["project_id","task_id"]}`),
-		},
-		{
-			Name:        "devmanager_delete_task",
-			Description: "Delete a task by project_id and task_id. Also deletes subtasks.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"project_id":{"type":"number","description":"The project ID"},"task_id":{"type":"number","description":"The task ID"}},"required":["project_id","task_id"]}`),
-		},
-		// Session-aware tools (available when running inside a DevManager session)
-		{
-			Name:        "devmanager_get_my_task",
-			Description: "Get the task linked to the current session (if any). Returns the task details including status, title, description. Only works within a DevManager session.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
-		},
-		{
-			Name:        "devmanager_get_session_info",
-			Description: "Get information about the current DevManager session, including session ID, project, status, and linked task. Only works within a DevManager session.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
-		},
-		{
-			Name:        "devmanager_request_task_evaluation",
-			Description: "Request the DevManager AI Assistant to evaluate the current session and proactively suggest task actions (create, update, link, or complete tasks). The AI Assistant will analyze the session output and suggest actions to the user via floating notification cards. Use this when you believe the session's work is relevant to task management.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
-		},
-		// Composite tools for token efficiency
-		{
-			Name:        "devmanager_dashboard",
-			Description: "Compact state summary: projects with task counts, active sessions, recent changes. Use this first to understand the current state before making changes.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
-		},
-		{
-			Name:        "devmanager_batch",
-			Description: "Execute multiple tools in one call. Returns array of results. Max 10 calls per batch.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"calls":{"type":"array","items":{"type":"object","properties":{"tool":{"type":"string","description":"Tool name"},"args":{"type":"object","description":"Tool arguments"}},"required":["tool"]},"maxItems":10}},"required":["calls"]}`),
-		},
-		// Session management tools
-		{
-			Name:        "devmanager_start_session",
-			Description: "Start a Claude Code session for a project. Returns session ID.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"project_id":{"type":"number","description":"Project ID"},"task_id":{"type":"number","description":"Optional task ID to link"},"name":{"type":"string","description":"Optional session name"}},"required":["project_id"]}`),
-		},
-		{
-			Name:        "devmanager_stop_session",
-			Description: "Stop a running session.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"session_id":{"type":"string","description":"Session ID to stop"}},"required":["session_id"]}`),
-		},
-		{
-			Name:        "devmanager_list_sessions",
-			Description: "List all sessions with status.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"status":{"type":"string","description":"Filter: running, stopped, completed"},"project_id":{"type":"number","description":"Filter by project"}}}`),
-		},
-		{
-			Name:        "devmanager_send_to_session",
-			Description: "Send text input to a running Claude Code session terminal.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"session_id":{"type":"string","description":"Session ID"},"text":{"type":"string","description":"Text to send (Enter appended automatically)"}},"required":["session_id","text"]}`),
-		},
-		// Document creation tool
-		{
-			Name:        "devmanager_create_document",
-			Description: "Create a temporary markdown document for the user to view. Use for ANY response longer than ~5 lines (lists, explanations, code, reports). Keeps the chat clean.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"title":{"type":"string","description":"Short document title"},"content":{"type":"string","description":"Full markdown content"},"conversation_id":{"type":"string","description":"Current conversation ID (if available)"}},"required":["content"]}`),
-		},
-	}
+// toolsDef returns MCP tools filtered by context.
+// "chat" includes all tools (even ChatOnly); other values exclude ChatOnly tools.
+func toolsDef(context string) []MCPTool {
+	return llm.MCPTools(context)
 }
 
 // executeTool runs a tool by name with the given arguments, calling the DevManager API.

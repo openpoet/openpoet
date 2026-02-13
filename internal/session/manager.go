@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"devmanager/internal/database"
+	"devmanager/internal/mcp"
 	"devmanager/internal/websocket"
 	"encoding/json"
 	"fmt"
@@ -150,7 +151,7 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 
 	// Build MCP config for --mcp-config CLI flag (additive, preserves project's existing MCPs)
 	var cliArgs []string
-	if mcpJSON := m.buildMCPConfigJSON(ctx); mcpJSON != "" {
+	if mcpJSON := m.buildMCPConfigJSON(ctx, project); mcpJSON != "" {
 		cliArgs = []string{"--mcp-config", mcpJSON}
 	}
 
@@ -261,7 +262,7 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	cliArgs = append(cliArgs, "--continue")
 
 	// Build MCP config for --mcp-config CLI flag
-	if mcpJSON := m.buildMCPConfigJSON(ctx); mcpJSON != "" {
+	if mcpJSON := m.buildMCPConfigJSON(ctx, project); mcpJSON != "" {
 		cliArgs = append(cliArgs, "--mcp-config", mcpJSON)
 	}
 
@@ -563,7 +564,8 @@ func (m *Manager) checkForNotificationTriggers(sessionID string, data []byte) {
 
 // buildMCPConfigJSON builds a JSON string for the --mcp-config CLI flag.
 // It includes user-configured MCP servers from the DB plus DevManager's own MCP server.
-func (m *Manager) buildMCPConfigJSON(ctx context.Context) string {
+// DevManager's MCP server is only included if the effective tool policy allows at least one tool.
+func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Project) string {
 	mcpServers := make(map[string]interface{})
 
 	// Add user-configured MCP servers from DB
@@ -589,8 +591,20 @@ func (m *Manager) buildMCPConfigJSON(ctx context.Context) string {
 		mcpServers[server.Name] = serverConfig
 	}
 
-	// Inject DevManager's own MCP server
+	// Resolve effective tool policy for the project to decide whether to inject DevManager MCP.
+	// If the project has an explicit policy, it overrides the global policy entirely.
+	// If the project has no explicit policy, the global session policy is inherited.
+	shouldInjectDevManager := false
 	if m.serverAddr != "" {
+		globalPolicy := mcp.ToolPolicy{Mode: "deny_all"}
+		if policyStr, _ := m.db.GetSetting(ctx, "mcp_tool_policy_session"); policyStr != "" {
+			globalPolicy = mcp.ParsePolicy(policyStr)
+		}
+		effectivePolicy := mcp.ResolveProjectPolicy(globalPolicy, project.ToolPolicy)
+		shouldInjectDevManager = effectivePolicy.HasTools(mcp.AllTools())
+	}
+
+	if shouldInjectDevManager {
 		execPath, err := os.Executable()
 		if err == nil {
 			mcpServers["devmanager"] = map[string]interface{}{
@@ -673,7 +687,7 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 
 	// Build MCP config for --mcp-config CLI flag
 	var cliArgs []string
-	if mcpJSON := m.buildMCPConfigJSON(ctx); mcpJSON != "" {
+	if mcpJSON := m.buildMCPConfigJSON(ctx, project); mcpJSON != "" {
 		cliArgs = []string{"--mcp-config", mcpJSON}
 	}
 
