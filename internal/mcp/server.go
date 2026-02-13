@@ -177,7 +177,8 @@ func Serve(apiURL string) {
 			}
 		}
 	}
-	// Also merge project-level policy if session has a project
+	// Per-project policy: if the project has an explicit policy, it overrides global entirely.
+	// If the project has no explicit policy (empty), it inherits the global policy.
 	if sessionID != "" {
 		if data, err := client.Get("/api/sessions/" + sessionID); err == nil {
 			var sess struct {
@@ -185,10 +186,14 @@ func Serve(apiURL string) {
 			}
 			if json.Unmarshal(data, &sess) == nil && sess.ProjectID > 0 {
 				if data, err := client.Get(fmt.Sprintf("/api/projects/%d/tool-policy", sess.ProjectID)); err == nil {
-					var projPolicy ToolPolicy
-					if json.Unmarshal(data, &projPolicy) == nil && projPolicy.Mode != "" {
-						policy = MergePolicy(policy, projPolicy)
+					var resp struct {
+						ToolPolicy string `json:"tool_policy"`
 					}
+					if json.Unmarshal(data, &resp) == nil && resp.ToolPolicy != "" {
+						// Project has an explicit policy — use it (overrides global)
+						policy = ParsePolicy(resp.ToolPolicy)
+					}
+					// else: project has no explicit policy — keep global (inherit)
 				}
 			}
 		}

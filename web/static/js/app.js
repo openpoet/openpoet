@@ -4416,23 +4416,27 @@ class DevManager {
 
             let html = '';
             for (const task of topLevel) {
-                html += this.renderTaskCard(task, projectId);
-                if (children[task.id]) {
-                    html += '<div class="task-subtasks">';
+                const hasChildren = children[task.id] && children[task.id].length > 0;
+                html += this.renderTaskCard(task, projectId, hasChildren);
+                if (hasChildren) {
+                    const collapsed = this._collapsedTasks?.has(task.id) ? ' collapsed' : '';
+                    html += `<div class="task-subtasks${collapsed}" data-parent-id="${task.id}">`;
+                    let subOrder = 1;
                     for (const sub of children[task.id]) {
-                        html += this.renderTaskCard(sub, projectId);
+                        html += this.renderTaskCard(sub, projectId, false, subOrder++);
                     }
                     html += `<button class="btn-add-task" onclick="app.showTaskModal(${projectId}, null, ${task.id})" style="margin-top:4px;padding:4px 8px;font-size:11px;">+ Subtask</button>`;
                     html += '</div>';
                 }
             }
             container.innerHTML = html;
+            this.setupTaskDragAndDrop(projectId);
         } catch (e) {
             container.innerHTML = '<div class="task-empty">Failed to load tasks.</div>';
         }
     }
 
-    renderTaskCard(task, projectId) {
+    renderTaskCard(task, projectId, hasChildren = false, subIndex = 0) {
         const now = new Date();
         const isOverdue = task.due_date?.Valid && new Date(task.due_date.Time) < now && task.status !== 'done';
         const isDone = task.status === 'done';
@@ -4475,11 +4479,35 @@ class DevManager {
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
             </button>` : '';
 
+        // Order number badge
+        const orderNum = task.sort_order > 0 ? `<span class="task-order-num">${task.sort_order}</span>` : '';
+        const subIndexLabel = subIndex > 0 ? `<span class="task-sub-index">${subIndex}.</span>` : '';
+
+        // Collapse button for parent tasks with children
+        const collapseBtn = hasChildren ? `
+            <button class="btn-icon task-collapse-btn${this._collapsedTasks?.has(task.id) ? ' collapsed' : ''}" onclick="event.stopPropagation();app.toggleTaskCollapse(${task.id})" title="Collapse/Expand">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>` : '';
+
+        // Drag handle (desktop)
+        const dragHandle = `
+            <div class="task-drag-handle" title="Drag to reorder">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/>
+                    <circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/>
+                    <circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/>
+                </svg>
+            </div>`;
+
         return `
-            <div class="task-card${overdueClass}${doneClass}" data-task-id="${task.id}">
+            <div class="task-card${overdueClass}${doneClass}" data-task-id="${task.id}" data-sort-order="${task.sort_order || 0}" data-project-id="${projectId}">
+                ${dragHandle}
                 <div class="task-priority-indicator ${priorityClass}"></div>
                 <div class="task-card-body">
                     <div class="task-card-top">
+                        ${subIndexLabel}
+                        ${orderNum}
+                        ${collapseBtn}
                         <span class="task-title" onclick="app.viewTaskDetail(${projectId}, ${task.id})" style="cursor:pointer;">${this.escapeHtml(task.title)}</span>
                         ${sessionIndicatorHtml}
                         <span class="task-status-badge badge-${task.status}" onclick="app.cycleTaskStatus(${projectId}, ${task.id}, '${task.status}')">${task.status.replace('_', ' ')}</span>
@@ -4503,6 +4531,53 @@ class DevManager {
                 </div>
             </div>
         `;
+    }
+
+    // Move a task up or down by swapping with its sibling, then persist via API.
+    async moveTask(projectId, taskId, direction) {
+        // Find the card in any visible container (project or global view)
+        const card = document.querySelector(`.task-card[data-task-id="${taskId}"]`);
+        if (!card) return;
+
+        const parent = card.parentElement;
+        const siblings = Array.from(parent.querySelectorAll(':scope > .task-card'));
+        const idx = siblings.indexOf(card);
+
+        let swapCard = null;
+        if (direction === 'up' && idx > 0) {
+            swapCard = siblings[idx - 1];
+            // Move card (and its subtask container) before swap target
+            const subtasks = parent.querySelector(`.task-subtasks[data-parent-id="${taskId}"]`);
+            const swapSubtasks = parent.querySelector(`.task-subtasks[data-parent-id="${swapCard.dataset.taskId}"]`);
+            parent.insertBefore(card, swapCard);
+            if (subtasks) parent.insertBefore(subtasks, swapCard);
+        } else if (direction === 'down' && idx < siblings.length - 1) {
+            swapCard = siblings[idx + 1];
+            const subtasks = parent.querySelector(`.task-subtasks[data-parent-id="${taskId}"]`);
+            const swapSubtasks = parent.querySelector(`.task-subtasks[data-parent-id="${swapCard.dataset.taskId}"]`);
+            // Insert after swap target (skip its subtask container)
+            let insertRef = swapCard.nextSibling;
+            if (insertRef?.classList?.contains('task-subtasks') && insertRef.dataset.parentId === swapCard.dataset.taskId) {
+                insertRef = insertRef.nextSibling;
+            }
+            parent.insertBefore(card, insertRef);
+            if (subtasks) parent.insertBefore(subtasks, card.nextSibling);
+        }
+
+        if (!swapCard) return;
+
+        // Determine which container holds these tasks and save accordingly
+        const projectContainer = document.getElementById('project-tasks-list');
+        const globalContainer = document.getElementById('all-tasks-list');
+
+        if (projectContainer && projectContainer.contains(card)) {
+            this.saveTaskReorder(projectId);
+        } else if (globalContainer && globalContainer.contains(card)) {
+            this._saveAllTasksReorder(globalContainer);
+        } else {
+            // Fallback: direct API swap
+            this.saveTaskReorder(projectId);
+        }
     }
 
     async cycleTaskStatus(projectId, taskId, currentStatus) {
@@ -4551,6 +4626,356 @@ class DevManager {
             this.showToast('Success', 'Task duplicated', 'success');
         } catch (e) {
             this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    // ============ Task Collapse/Expand ============
+
+    toggleTaskCollapse(taskId) {
+        if (!this._collapsedTasks) this._collapsedTasks = new Set();
+
+        const subtaskContainer = document.querySelector(`.task-subtasks[data-parent-id="${taskId}"]`);
+        const collapseBtn = subtaskContainer?.previousElementSibling?.querySelector('.task-collapse-btn');
+
+        if (this._collapsedTasks.has(taskId)) {
+            this._collapsedTasks.delete(taskId);
+            subtaskContainer?.classList.remove('collapsed');
+            collapseBtn?.classList.remove('collapsed');
+        } else {
+            this._collapsedTasks.add(taskId);
+            subtaskContainer?.classList.add('collapsed');
+            collapseBtn?.classList.add('collapsed');
+        }
+    }
+
+    // ============ Task Drag-and-Drop Reorder (SortableJS) ============
+
+    _sortableInstances = [];
+    _draggedSubtaskContainer = null;
+    _wasCollapsed = null;
+
+    setupTaskDragAndDrop(projectId) {
+        const container = document.getElementById('project-tasks-list');
+        if (!container) return;
+        this._initSortable(container, projectId);
+    }
+
+    _destroySortables() {
+        this._sortableInstances.forEach(s => s.destroy());
+        this._sortableInstances = [];
+    }
+
+    _initSortable(container, projectId) {
+        this._destroySortables();
+
+        const sortableOpts = {
+            group: { name: 'tasks', pull: true, put: true },
+            animation: 150,
+            handle: '.task-drag-handle',
+            draggable: '.task-card',
+            ghostClass: 'sortable-ghost',
+            chosenClass: 'sortable-chosen',
+            dragClass: 'sortable-drag',
+            delay: 150,
+            delayOnTouchOnly: true,
+            touchStartThreshold: 5,
+            forceFallback: true,
+            fallbackOnBody: true,
+            swapThreshold: 0.65,
+            scrollSensitivity: 60,
+            scrollSpeed: 12,
+            filter: '.btn-add-task, .task-subtasks, .task-indent-dropzone',
+            onStart: (evt) => this._onDragStart(evt, container, projectId),
+            onEnd: (evt) => this._onDragEnd(evt, container, projectId),
+        };
+
+        // Root-level Sortable (top-level tasks)
+        const root = new Sortable(container, sortableOpts);
+        this._sortableInstances.push(root);
+
+        // Sortable on each subtask container
+        container.querySelectorAll('.task-subtasks').forEach(sc => {
+            this._initSubtaskSortable(sc, container, projectId);
+        });
+    }
+
+    _initSubtaskSortable(subtaskContainer, rootContainer, projectId) {
+        const sortable = new Sortable(subtaskContainer, {
+            group: {
+                name: 'tasks',
+                pull: true,
+                put: (to, from, dragEl) => {
+                    // Prevent drop into own subtask container
+                    const parentId = to.el.dataset.parentId;
+                    if (dragEl.dataset.taskId === parentId) return false;
+                    // In global view, prevent cross-project nesting
+                    if (!projectId) {
+                        const parentCard = to.el.previousElementSibling;
+                        if (parentCard?.dataset?.projectId !== dragEl.dataset.projectId) return false;
+                    }
+                    return true;
+                }
+            },
+            animation: 150,
+            handle: '.task-drag-handle',
+            draggable: '.task-card',
+            ghostClass: 'sortable-ghost',
+            chosenClass: 'sortable-chosen',
+            dragClass: 'sortable-drag',
+            delay: 150,
+            delayOnTouchOnly: true,
+            touchStartThreshold: 5,
+            forceFallback: true,
+            fallbackOnBody: true,
+            swapThreshold: 0.65,
+            filter: '.btn-add-task',
+            onStart: (evt) => this._onDragStart(evt, rootContainer, projectId),
+            onEnd: (evt) => this._onDragEnd(evt, rootContainer, projectId),
+        });
+        this._sortableInstances.push(sortable);
+    }
+
+    // --- Horizontal drag tracking for indent/outdent ---
+    _dragStartX = 0;
+    _dragIndent = null; // 'indent' | 'outdent' | null
+    _dragPointerHandler = null;
+
+    _onDragStart(evt, container, projectId) {
+        // Haptic feedback on mobile
+        if (navigator.vibrate) navigator.vibrate(50);
+
+        // Record starting X for horizontal tracking
+        const origEvt = evt.originalEvent;
+        this._dragStartX = origEvt?.touches?.[0]?.clientX ?? origEvt?.clientX ?? 0;
+        this._dragIndent = null;
+
+        // Auto-expand collapsed subtask containers so they can accept drops
+        this._wasCollapsed = new Set();
+        container.querySelectorAll('.task-subtasks.collapsed').forEach(sc => {
+            sc.classList.remove('collapsed');
+            this._wasCollapsed.add(sc.dataset.parentId);
+            const btn = sc.previousElementSibling?.querySelector('.task-collapse-btn');
+            if (btn) btn.classList.remove('collapsed');
+        });
+
+        // Hide subtasks of the dragged card to reduce visual noise
+        const draggedId = evt.item.dataset.taskId;
+        const subtasks = container.querySelector(`.task-subtasks[data-parent-id="${draggedId}"]`);
+        if (subtasks) {
+            subtasks.classList.add('dragging-parent');
+            this._draggedSubtaskContainer = subtasks;
+        }
+
+        // Create temporary indent drop zones after each top-level card (except dragged)
+        const isInSubtask = evt.item.parentElement.classList.contains('task-subtasks');
+        container.querySelectorAll(':scope > .task-card').forEach(card => {
+            const taskId = card.dataset.taskId;
+            if (taskId === draggedId) return;
+            // Skip if this card already has a subtask container
+            const existing = container.querySelector(`.task-subtasks[data-parent-id="${taskId}"]`);
+            if (existing) return;
+            // In global view, only create zone for same project
+            if (!projectId && card.dataset.projectId !== evt.item.dataset.projectId) return;
+
+            const zone = document.createElement('div');
+            zone.className = 'task-subtasks task-indent-dropzone';
+            zone.dataset.parentId = taskId;
+            card.parentElement.insertBefore(zone, card.nextSibling);
+            this._initSubtaskSortable(zone, container, projectId);
+        });
+
+        // Track pointer movement for horizontal feedback
+        const INDENT_THRESHOLD = 50;
+        this._dragPointerHandler = (e) => {
+            const clientX = e.touches?.[0]?.clientX ?? e.clientX ?? 0;
+            const deltaX = clientX - this._dragStartX;
+            const isCurrentlySubtask = evt.item.parentElement.classList.contains('task-subtasks') || isInSubtask;
+
+            // Clear previous indicators
+            container.querySelectorAll('.indent-indicator, .outdent-indicator').forEach(el => {
+                el.classList.remove('indent-indicator', 'outdent-indicator');
+            });
+
+            if (deltaX > INDENT_THRESHOLD && !isCurrentlySubtask) {
+                this._dragIndent = 'indent';
+                // Show indent feedback on the fallback clone
+                const clone = document.querySelector('.sortable-fallback');
+                if (clone) clone.classList.add('indent-indicator');
+            } else if (deltaX < -INDENT_THRESHOLD && isCurrentlySubtask) {
+                this._dragIndent = 'outdent';
+                const clone = document.querySelector('.sortable-fallback');
+                if (clone) clone.classList.add('outdent-indicator');
+            } else {
+                this._dragIndent = null;
+            }
+        };
+        document.addEventListener('touchmove', this._dragPointerHandler, { passive: true });
+        document.addEventListener('mousemove', this._dragPointerHandler, { passive: true });
+    }
+
+    _onDragEnd(evt, container, projectId) {
+        const draggedCard = evt.item;
+        const indent = this._dragIndent;
+
+        // Remove pointer tracking
+        if (this._dragPointerHandler) {
+            document.removeEventListener('touchmove', this._dragPointerHandler);
+            document.removeEventListener('mousemove', this._dragPointerHandler);
+            this._dragPointerHandler = null;
+        }
+        this._dragIndent = null;
+
+        try {
+            // --- Horizontal hierarchy change (indent/outdent) ---
+            if (indent === 'indent') {
+                // Find the card above the dragged card in the DOM to use as parent
+                let prevEl = draggedCard.previousElementSibling;
+                // Skip over subtask containers to find the actual card
+                while (prevEl && !prevEl.classList.contains('task-card')) {
+                    prevEl = prevEl.previousElementSibling;
+                }
+                if (prevEl && prevEl.classList.contains('task-card')) {
+                    const targetId = prevEl.dataset.taskId;
+                    // In global view, check same project
+                    if (projectId || prevEl.dataset.projectId === draggedCard.dataset.projectId) {
+                        let subtaskContainer = container.querySelector(`.task-subtasks[data-parent-id="${targetId}"]`);
+                        if (!subtaskContainer) {
+                            subtaskContainer = document.createElement('div');
+                            subtaskContainer.className = 'task-subtasks';
+                            subtaskContainer.dataset.parentId = targetId;
+                            prevEl.parentElement.insertBefore(subtaskContainer, prevEl.nextSibling);
+                        }
+                        subtaskContainer.appendChild(draggedCard);
+                        // Flatten children if dragged card had subtasks
+                        if (this._draggedSubtaskContainer) {
+                            this._draggedSubtaskContainer.classList.remove('dragging-parent');
+                            this._draggedSubtaskContainer.querySelectorAll(':scope > .task-card').forEach(child => {
+                                subtaskContainer.appendChild(child);
+                            });
+                            this._draggedSubtaskContainer.remove();
+                            this._draggedSubtaskContainer = null;
+                        }
+                        if (navigator.vibrate) navigator.vibrate(30);
+                    }
+                }
+            } else if (indent === 'outdent') {
+                // Move card out of subtask container to top-level
+                const subtasksDiv = draggedCard.closest('.task-subtasks');
+                if (subtasksDiv) {
+                    const parentEl = subtasksDiv.parentElement;
+                    parentEl.insertBefore(draggedCard, subtasksDiv.nextSibling);
+                    // Move its subtask container too if it has one
+                    if (this._draggedSubtaskContainer) {
+                        this._draggedSubtaskContainer.classList.remove('dragging-parent');
+                        parentEl.insertBefore(this._draggedSubtaskContainer, draggedCard.nextSibling);
+                        this._draggedSubtaskContainer = null;
+                    }
+                    if (navigator.vibrate) navigator.vibrate(30);
+                }
+            }
+
+            // --- Handle subtask container of dragged card (non-indent/outdent case) ---
+            if (this._draggedSubtaskContainer) {
+                this._draggedSubtaskContainer.classList.remove('dragging-parent');
+                const newParent = draggedCard.parentElement;
+
+                if (newParent.classList.contains('task-subtasks')) {
+                    // Card became a subtask via group drop — flatten its children
+                    this._draggedSubtaskContainer.querySelectorAll(':scope > .task-card').forEach(child => {
+                        newParent.appendChild(child);
+                    });
+                    this._draggedSubtaskContainer.remove();
+                } else {
+                    // Card is still top-level — move subtask container to follow it
+                    newParent.insertBefore(this._draggedSubtaskContainer, draggedCard.nextSibling);
+                }
+                this._draggedSubtaskContainer = null;
+            }
+
+            // Re-collapse previously collapsed containers
+            if (this._wasCollapsed) {
+                this._wasCollapsed.forEach(parentId => {
+                    const sc = container.querySelector(`.task-subtasks[data-parent-id="${parentId}"]`);
+                    if (sc) {
+                        sc.classList.add('collapsed');
+                        const btn = sc.previousElementSibling?.querySelector('.task-collapse-btn');
+                        if (btn) btn.classList.add('collapsed');
+                    }
+                });
+                this._wasCollapsed = null;
+            }
+        } finally {
+            // ALWAYS clean up — even if errors occurred above
+            // Remove any stuck fallback clones (fixes ghost card bug)
+            document.querySelectorAll('.sortable-fallback').forEach(el => el.remove());
+
+            // Remove temporary indent drop zones
+            container.querySelectorAll('.task-indent-dropzone').forEach(sc => {
+                if (!sc.querySelector('.task-card')) {
+                    sc.remove();
+                } else {
+                    // Drop zone received a card — promote it to real subtask container
+                    sc.classList.remove('task-indent-dropzone');
+                }
+            });
+
+            // Remove empty subtask containers
+            container.querySelectorAll('.task-subtasks').forEach(sc => {
+                if (!sc.querySelector('.task-card') && !sc.querySelector('.btn-add-task')) sc.remove();
+            });
+
+            // Clear visual indicators
+            container.querySelectorAll('.indent-indicator, .outdent-indicator').forEach(el => {
+                el.classList.remove('indent-indicator', 'outdent-indicator');
+            });
+        }
+
+        // Save via existing API
+        if (projectId) {
+            this.saveTaskReorder(projectId);
+        } else {
+            this._saveAllTasksReorder(container);
+        }
+    }
+
+    async saveTaskReorder(projectId) {
+        const container = document.getElementById('project-tasks-list');
+        if (!container) return;
+
+        const reorderData = [];
+        let sortOrder = 1;
+
+        // Top-level cards (direct children of container)
+        container.querySelectorAll(':scope > .task-card').forEach(card => {
+            reorderData.push({
+                id: parseInt(card.dataset.taskId),
+                sort_order: sortOrder++,
+                parent_id: null,
+            });
+        });
+
+        // Subtask containers
+        container.querySelectorAll('.task-subtasks').forEach(subtaskContainer => {
+            const parentCard = subtaskContainer.previousElementSibling;
+            if (!parentCard?.classList.contains('task-card')) return;
+            const parentId = parseInt(parentCard.dataset.taskId);
+
+            subtaskContainer.querySelectorAll(':scope > .task-card').forEach(card => {
+                reorderData.push({
+                    id: parseInt(card.dataset.taskId),
+                    sort_order: sortOrder++,
+                    parent_id: parentId,
+                });
+            });
+        });
+
+        if (reorderData.length === 0) return;
+
+        try {
+            await this.api('PUT', `/projects/${projectId}/tasks/reorder`, reorderData);
+        } catch (e) {
+            this.showToast('Error', 'Failed to reorder tasks', 'error');
+            this.loadProjectTasks(projectId);
         }
     }
 
@@ -4887,18 +5312,50 @@ class DevManager {
             const projectMap = {};
             (this.projects || []).forEach(p => { projectMap[p.id] = p.name; });
 
+            // Group by parent for hierarchy display
+            const topLevel = tasks.filter(t => !t.parent_id?.Valid);
+            const children = {};
+            tasks.filter(t => t.parent_id?.Valid).forEach(t => {
+                const pid = t.parent_id.Int64;
+                if (!children[pid]) children[pid] = [];
+                children[pid].push(t);
+            });
+
+            // Render with hierarchy: parents first, then their children indented
             let html = '';
-            for (const task of tasks) {
+            const renderedIds = new Set();
+            for (const task of topLevel) {
                 const projectName = projectMap[task.project_id] || `Project #${task.project_id}`;
-                html += this.renderAllTaskCard(task, projectName);
+                const hasKids = children[task.id] && children[task.id].length > 0;
+                html += this.renderAllTaskCard(task, projectName, hasKids);
+                renderedIds.add(task.id);
+                if (hasKids) {
+                    const collapsed = this._collapsedTasks?.has(task.id) ? ' collapsed' : '';
+                    html += `<div class="task-subtasks all-tasks-subtasks${collapsed}" data-parent-id="${task.id}">`;
+                    let subIdx = 1;
+                    for (const sub of children[task.id]) {
+                        const subProjectName = projectMap[sub.project_id] || `Project #${sub.project_id}`;
+                        html += this.renderAllTaskCard(sub, subProjectName, false, subIdx++);
+                        renderedIds.add(sub.id);
+                    }
+                    html += '</div>';
+                }
+            }
+            // Render any orphan subtasks whose parent wasn't in the filtered results
+            for (const task of tasks) {
+                if (!renderedIds.has(task.id)) {
+                    const projectName = projectMap[task.project_id] || `Project #${task.project_id}`;
+                    html += this.renderAllTaskCard(task, projectName);
+                }
             }
             container.innerHTML = html;
+            this.setupAllTasksDragAndDrop(container);
         } catch (e) {
             container.innerHTML = '<div class="empty-state">Failed to load tasks.</div>';
         }
     }
 
-    renderAllTaskCard(task, projectName) {
+    renderAllTaskCard(task, projectName, hasChildren = false, subIndex = 0) {
         const now = new Date();
         const hasDue = task.due_date?.Valid;
         const isOverdue = hasDue && new Date(task.due_date.Time) < now && task.status !== 'done';
@@ -4928,11 +5385,38 @@ class DevManager {
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
             </button>` : '';
 
+        // Order number badge
+        const orderNum = task.sort_order > 0 ? `<span class="task-order-num">${task.sort_order}</span>` : '';
+        const subIndexLabel = subIndex > 0 ? `<span class="task-sub-index">${subIndex}.</span>` : '';
+
+        // Collapse button for parent tasks with children
+        const collapseBtn = hasChildren ? `
+            <button class="btn-icon task-collapse-btn${this._collapsedTasks?.has(task.id) ? ' collapsed' : ''}" onclick="event.stopPropagation();app.toggleTaskCollapse(${task.id})" title="Collapse/Expand">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>` : '';
+
+        // Children count badge (shown when collapsed)
+        const childCountBadge = hasChildren ? `<span class="task-children-count">${this._collapsedTasks?.has(task.id) ? '' : ''}</span>` : '';
+
+        // Drag handle (desktop)
+        const dragHandle = `
+            <div class="task-drag-handle" title="Drag to reorder">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/>
+                    <circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/>
+                    <circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/>
+                </svg>
+            </div>`;
+
         return `
-            <div class="task-card${overdueClass}${doneClass}" data-task-id="${task.id}">
+            <div class="task-card${overdueClass}${doneClass}" data-task-id="${task.id}" data-project-id="${task.project_id}">
+                ${dragHandle}
                 <div class="task-priority-indicator ${priorityClass}"></div>
                 <div class="task-card-body">
                     <div class="task-card-top">
+                        ${subIndexLabel}
+                        ${orderNum}
+                        ${collapseBtn}
                         <span class="task-title" onclick="app.viewTaskDetail(${task.project_id}, ${task.id})" style="cursor:pointer;">${this.escapeHtml(task.title)}</span>
                         <span class="task-status-badge badge-${task.status}" onclick="app.cycleTaskStatus(${task.project_id}, ${task.id}, '${task.status}')">${task.status.replace('_', ' ')}</span>
                     </div>
@@ -4956,6 +5440,58 @@ class DevManager {
                 </div>
             </div>
         `;
+    }
+
+    // Drag-and-drop for global tasks view
+    setupAllTasksDragAndDrop(container) {
+        if (!container) return;
+        this._initSortable(container, null);
+    }
+
+    // Save reorder for global tasks view: groups tasks by project and calls reorder API for each
+    async _saveAllTasksReorder(container) {
+        if (!container) return;
+
+        // Build reorder data grouped by project
+        const projectTasks = {}; // projectId -> [{id, sort_order, parent_id}]
+
+        let sortOrder = 1;
+        // Top-level cards
+        container.querySelectorAll(':scope > .task-card').forEach(card => {
+            const pid = card.dataset.projectId;
+            if (!projectTasks[pid]) projectTasks[pid] = [];
+            projectTasks[pid].push({
+                id: parseInt(card.dataset.taskId),
+                sort_order: sortOrder++,
+                parent_id: null,
+            });
+        });
+
+        // Subtask containers
+        container.querySelectorAll('.task-subtasks').forEach(subtaskContainer => {
+            const parentCard = subtaskContainer.previousElementSibling;
+            if (!parentCard?.classList?.contains('task-card')) return;
+            const parentId = parseInt(parentCard.dataset.taskId);
+            const pid = parentCard.dataset.projectId;
+
+            subtaskContainer.querySelectorAll(':scope > .task-card').forEach(card => {
+                if (!projectTasks[pid]) projectTasks[pid] = [];
+                projectTasks[pid].push({
+                    id: parseInt(card.dataset.taskId),
+                    sort_order: sortOrder++,
+                    parent_id: parentId,
+                });
+            });
+        });
+
+        // Call reorder API for each project that has tasks
+        const promises = Object.entries(projectTasks).map(([pid, items]) =>
+            this.api('PUT', `/projects/${pid}/tasks/reorder`, items).catch(e => {
+                console.error(`Failed to reorder project ${pid}:`, e);
+            })
+        );
+        await Promise.all(promises);
+        this.loadAllTasks(); // Reload to fix visual state
     }
 
     _populateProjectFilter() {
