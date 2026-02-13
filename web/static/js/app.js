@@ -86,12 +86,6 @@ class DevManager {
     }
 
     showView(viewName) {
-        // Intercept 'sessions' view: go directly to terminal with most recent session
-        if (viewName === 'sessions') {
-            this._goToMostRecentSession();
-            return;
-        }
-
         // Hide all views
         document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
 
@@ -167,7 +161,7 @@ class DevManager {
                         <line x1="12" y1="19" x2="20" y2="19"></line>
                     </svg>
                     <h3>No active sessions</h3>
-                    <p>Start a session from the Projects view</p>
+                    <p>Click "New Session" to start one</p>
                 </div>
             `;
         }
@@ -282,6 +276,11 @@ class DevManager {
                     if (tab) {
                         const nameSpan = tab.querySelector('.terminal-tab-name');
                         if (nameSpan) nameSpan.textContent = newName;
+                    }
+                    // Hide link-task button if this is the active session (task was just linked)
+                    if (window.terminalManager?.activeSessionId === sessionId) {
+                        const linkBtn = document.getElementById('btn-link-task');
+                        if (linkBtn) linkBtn.style.display = 'none';
                     }
                 }
                 break;
@@ -447,6 +446,72 @@ class DevManager {
         } catch (error) {
             this.showToast('Error', error.message, 'error');
         }
+    }
+
+    showNewSessionProjectSelect() {
+        return new Promise((resolve) => {
+            const modal = document.getElementById('project-select-modal');
+            const listEl = document.getElementById('project-select-list');
+            const cancelBtn = document.getElementById('project-select-cancel');
+
+            let resolved = false;
+            const finish = (value) => {
+                if (resolved) return;
+                resolved = true;
+                cleanup();
+                resolve(value);
+            };
+
+            const cleanup = () => {
+                modal.classList.add('hidden');
+                cancelBtn.removeEventListener('click', handleCancel);
+                document.removeEventListener('keydown', handleKeydown);
+            };
+
+            const handleCancel = () => finish(null);
+            const handleKeydown = (e) => {
+                if (e.key === 'Escape') finish(null);
+            };
+
+            modal.classList.remove('hidden');
+            cancelBtn.addEventListener('click', handleCancel);
+            document.addEventListener('keydown', handleKeydown);
+
+            const projects = this.projects || [];
+
+            if (projects.length === 0) {
+                listEl.innerHTML = `
+                    <div class="empty-state" style="padding: 24px 0;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 40px; height: 40px; margin-bottom: 8px; opacity: 0.5;">
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                        <h3 style="margin: 0 0 4px;">No projects yet</h3>
+                        <p style="margin: 0; color: var(--color-text-secondary, #666);">Create a project first to start a session.</p>
+                    </div>`;
+                return;
+            }
+
+            listEl.innerHTML = projects.map(project => {
+                const typeIcon = project.type === 'remote'
+                    ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>'
+                    : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>';
+                const pathDisplay = project.type === 'remote'
+                    ? `${project.ssh_user?.String || ''}@${project.ssh_host?.String || ''}:${project.path}`
+                    : project.path;
+                return `
+                    <div class="task-select-item" style="cursor: pointer;" onclick="(() => { document.getElementById('project-select-modal').classList.add('hidden'); app.startSession(${project.id}); })()">
+                        <div class="task-select-item-body" style="gap: 2px;">
+                            <div class="task-select-item-title" style="display: flex; align-items: center; gap: 6px;">
+                                ${typeIcon}
+                                ${this.escapeHtml(project.name)}
+                            </div>
+                            <div class="task-select-item-meta">
+                                <span>${this.escapeHtml(pathDisplay)}</span>
+                            </div>
+                        </div>
+                    </div>`;
+            }).join('');
+        });
     }
 
     showSessionNameModal(defaultName) {
@@ -658,6 +723,257 @@ class DevManager {
                 finish(null);
             }
         });
+    }
+
+    async _updateLinkTaskButton(sessionId) {
+        const btn = document.getElementById('btn-link-task');
+        if (!btn) return;
+
+        if (!sessionId) {
+            btn.style.display = 'none';
+            return;
+        }
+
+        try {
+            await this.api('GET', `/sessions/${sessionId}/task`);
+            btn.style.display = 'none';
+        } catch {
+            btn.style.display = '';
+        }
+    }
+
+    async showLinkTaskModal(sessionId) {
+        const tabData = this.openTabs.get(sessionId);
+        if (!tabData) return;
+
+        const projectId = tabData.projectId;
+
+        const content = `
+            <div class="link-task-modal-content">
+                <div class="link-task-tabs">
+                    <button class="link-task-tab active" data-tab="existing">Select Existing</button>
+                    <button class="link-task-tab" data-tab="create">Create New</button>
+                </div>
+                <div id="link-task-existing" class="link-task-panel">
+                    <div id="link-task-list" class="task-select-list">
+                        <div class="task-select-loading"><div class="spinner"></div> Loading tasks...</div>
+                    </div>
+                </div>
+                <div id="link-task-create" class="link-task-panel" style="display:none;">
+                    <form id="link-task-form">
+                        <div style="text-align: right; margin-bottom: 12px;">
+                            <button type="button" id="link-task-autofill" class="btn btn-sm btn-secondary" title="Auto-fill fields using AI session analysis">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 4px; vertical-align: -2px;">
+                                    <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z"></path>
+                                </svg>
+                                Auto-fill with AI
+                            </button>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Title *</label>
+                            <input type="text" class="form-input" name="title" required placeholder="Task title">
+                        </div>
+                        <div class="form-group">
+                            <div class="hook-input-label-row">
+                                <label class="form-label" style="margin-bottom:0">Description</label>
+                                <button type="button" class="btn-icon btn-sm hook-voice-btn" id="link-task-desc-voice-btn" title="Voice input">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                        <line x1="12" y1="19" x2="12" y2="23"></line>
+                                        <line x1="8" y1="23" x2="16" y2="23"></line>
+                                    </svg>
+                                </button>
+                            </div>
+                            <textarea class="form-input" name="description" rows="3" placeholder="Optional description"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Priority</label>
+                            <select class="form-input" name="priority">
+                                <option value="low">Low</option>
+                                <option value="medium" selected>Medium</option>
+                                <option value="high">High</option>
+                                <option value="urgent">Urgent</option>
+                            </select>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        `;
+
+        const actions = `
+            <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
+            <button id="link-task-submit" class="btn btn-primary" disabled>Link Task</button>
+        `;
+
+        this.showModal('Link Task to Session', content, actions);
+
+        let selectedTaskId = null;
+        let currentTab = 'existing';
+
+        // Tab switching
+        document.querySelectorAll('.link-task-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.link-task-tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                currentTab = tab.dataset.tab;
+
+                document.getElementById('link-task-existing').style.display = currentTab === 'existing' ? '' : 'none';
+                document.getElementById('link-task-create').style.display = currentTab === 'create' ? '' : 'none';
+
+                const submitBtn = document.getElementById('link-task-submit');
+                if (currentTab === 'create') {
+                    const titleInput = document.querySelector('#link-task-form input[name="title"]');
+                    submitBtn.disabled = !titleInput?.value.trim();
+                } else {
+                    submitBtn.disabled = !selectedTaskId;
+                }
+            });
+        });
+
+        // Load tasks
+        try {
+            const tasks = await this.api('GET', `/projects/${projectId}/tasks`);
+            const pendingTasks = (tasks || []).filter(t =>
+                (t.status === 'todo' || t.status === 'in_progress') && !t.parent_id?.Valid
+            );
+
+            const listEl = document.getElementById('link-task-list');
+            if (pendingTasks.length === 0) {
+                listEl.innerHTML = '<p style="color: var(--color-text-secondary); text-align:center; padding: 20px;">No pending tasks. Switch to "Create New" tab.</p>';
+            } else {
+                listEl.innerHTML = pendingTasks.map(task => {
+                    const priorityClass = `priority-${task.priority || 'medium'}`;
+                    const statusLabel = (task.status || 'todo').replace('_', ' ');
+                    return `
+                        <div class="task-select-item link-task-item" data-task-id="${task.id}">
+                            <div class="task-priority-indicator ${priorityClass}"></div>
+                            <div class="task-select-item-body">
+                                <div class="task-select-item-title">${this.escapeHtml(task.title)}</div>
+                                <div class="task-select-item-meta">
+                                    <span class="task-status-badge badge-${task.status}">${statusLabel}</span>
+                                </div>
+                            </div>
+                        </div>`;
+                }).join('');
+
+                listEl.querySelectorAll('.link-task-item').forEach(item => {
+                    item.addEventListener('click', () => {
+                        listEl.querySelectorAll('.link-task-item').forEach(i => i.classList.remove('selected'));
+                        item.classList.add('selected');
+                        selectedTaskId = parseInt(item.dataset.taskId, 10);
+                        document.getElementById('link-task-submit').disabled = false;
+                    });
+                });
+            }
+        } catch (err) {
+            document.getElementById('link-task-list').innerHTML = '<p style="color: var(--color-danger);">Failed to load tasks.</p>';
+        }
+
+        // Enable submit for "create" tab based on title input
+        const titleInput = document.querySelector('#link-task-form input[name="title"]');
+        if (titleInput) {
+            titleInput.addEventListener('input', () => {
+                if (currentTab === 'create') {
+                    document.getElementById('link-task-submit').disabled = !titleInput.value.trim();
+                }
+            });
+        }
+
+        // Auto-fill with AI button
+        const autofillBtn = document.getElementById('link-task-autofill');
+        const autofillOriginalHTML = autofillBtn?.innerHTML;
+        if (autofillBtn) {
+            autofillBtn.addEventListener('click', async () => {
+                autofillBtn.disabled = true;
+                autofillBtn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;margin-right:4px;display:inline-block;vertical-align:-2px;"></div> Analyzing session...';
+
+                try {
+                    const result = await this.api('POST', `/sessions/${sessionId}/suggest-task-data`);
+                    const form = document.getElementById('link-task-form');
+                    if (form && result) {
+                        if (result.title && titleInput) {
+                            titleInput.value = result.title;
+                            titleInput.dispatchEvent(new Event('input'));
+                        }
+                        const descInput = form.querySelector('[name="description"]');
+                        if (result.description && descInput) descInput.value = result.description;
+                        const prioritySelect = form.querySelector('[name="priority"]');
+                        if (result.priority && prioritySelect) prioritySelect.value = result.priority;
+                    }
+                    autofillBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:4px;vertical-align:-2px;"><path d="M20 6L9 17l-5-5"></path></svg> Done!';
+                    setTimeout(() => { autofillBtn.disabled = false; autofillBtn.innerHTML = autofillOriginalHTML; }, 2000);
+                } catch (err) {
+                    autofillBtn.disabled = false;
+                    autofillBtn.innerHTML = autofillOriginalHTML;
+                    this.showToast('Error', err.message || 'Failed to suggest task data', 'error');
+                }
+            });
+        }
+
+        // Voice input for Description
+        const descVoiceBtn = document.getElementById('link-task-desc-voice-btn');
+        const descFormInput = document.querySelector('#link-task-form textarea[name="description"]');
+        if (descVoiceBtn && descFormInput && window.voiceInput) {
+            descVoiceBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (window.voiceInput.isRecording) {
+                    window.voiceInput.stopRecording(false);
+                    descVoiceBtn.classList.remove('recording');
+                    return;
+                }
+                descVoiceBtn.classList.add('recording');
+                window.voiceInput.startRecordingWithCallback((text) => {
+                    descVoiceBtn.classList.remove('recording');
+                    descFormInput.value = (descFormInput.value ? descFormInput.value + ' ' : '') + text;
+                    descFormInput.focus();
+                });
+            });
+        }
+
+        // Submit handler
+        document.getElementById('link-task-submit').addEventListener('click', async () => {
+            const submitBtn = document.getElementById('link-task-submit');
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Linking...';
+
+            try {
+                let payload;
+                if (currentTab === 'existing' && selectedTaskId) {
+                    payload = { task_id: selectedTaskId };
+                } else if (currentTab === 'create') {
+                    const form = document.getElementById('link-task-form');
+                    payload = {
+                        task_data: {
+                            title: form.querySelector('[name="title"]').value.trim(),
+                            description: form.querySelector('[name="description"]').value.trim(),
+                            priority: form.querySelector('[name="priority"]').value,
+                        }
+                    };
+                }
+
+                const result = await this.api('POST', `/sessions/${sessionId}/link-task`, payload);
+                this.hideModal();
+                this._updateLinkTaskButton(sessionId);
+                this._showLinkTaskSuccess(result.task.title);
+            } catch (error) {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Link Task';
+                this.showToast('Error', error.message, 'error');
+            }
+        });
+    }
+
+    _showLinkTaskSuccess(taskTitle) {
+        const container = document.getElementById('toast-container');
+        const toast = document.createElement('div');
+        toast.className = 'toast toast-success';
+        toast.innerHTML = `
+            <span class="toast-message"><strong>Linked!</strong> Session linked to "${this.escapeHtml(taskTitle)}"</span>
+        `;
+        container.appendChild(toast);
+        setTimeout(() => toast.remove(), 3000);
     }
 
     async syncProjectConfig(projectId) {
@@ -1515,7 +1831,7 @@ class DevManager {
                         <line x1="12" y1="19" x2="20" y2="19"></line>
                     </svg>
                     <h3>No active sessions</h3>
-                    <p>Start a session from the Projects view</p>
+                    <p>Click "New Session" to start one</p>
                 </div>
             `;
             return;
@@ -1594,6 +1910,7 @@ class DevManager {
 
         // Update tools badge for this session
         this._updateSessionToolsBadge(sessionId);
+        this._updateLinkTaskButton(sessionId);
 
         // Close tools panel when switching sessions
         const toolsPanel = document.getElementById('session-tools-panel');
@@ -2728,6 +3045,18 @@ class DevManager {
                 e.preventDefault();
                 this.toggleSplitScreen();
             }
+
+            // Ctrl/Cmd + Shift + L - Link Task to session
+            if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'L') {
+                e.preventDefault();
+                const activeSessionId = window.terminalManager?.activeSessionId;
+                if (activeSessionId) {
+                    const linkBtn = document.getElementById('btn-link-task');
+                    if (linkBtn && linkBtn.style.display !== 'none') {
+                        this.showLinkTaskModal(activeSessionId);
+                    }
+                }
+            }
         });
     }
 
@@ -3534,6 +3863,12 @@ class DevManager {
         // Terminal back button
         document.getElementById('btn-back-sessions')?.addEventListener('click', () => {
             this.showView('projects');
+        });
+
+        // Link Task button
+        document.getElementById('btn-link-task')?.addEventListener('click', () => {
+            const sessionId = window.terminalManager?.activeSessionId || this.currentSession;
+            if (sessionId) this.showLinkTaskModal(sessionId);
         });
 
         // Stop session button

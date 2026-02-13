@@ -976,27 +976,24 @@ func (d *DB) GetAllTasksSummary(ctx context.Context) (map[string]int, error) {
 	return result, nil
 }
 
-// SessionTask operations
+// Session-Task linking operations (uses sessions.task_id directly — 1:1 relationship)
 
-func (d *DB) CreateSessionTask(ctx context.Context, st *SessionTask) error {
-	query := `INSERT INTO session_tasks (session_id, task_id, role) VALUES (?, ?, ?)
-	           ON CONFLICT(session_id, task_id, role) DO NOTHING`
-	result, err := d.ExecContext(ctx, query, st.SessionID, st.TaskID, st.Role)
-	if err != nil {
-		return err
-	}
-	st.ID, _ = result.LastInsertId()
-	return nil
+// LinkSessionToTask sets the task_id on a session.
+func (d *DB) LinkSessionToTask(ctx context.Context, sessionID string, taskID int64) error {
+	_, err := d.ExecContext(ctx, "UPDATE sessions SET task_id = ? WHERE id = ?", taskID, sessionID)
+	return err
 }
 
 func (d *DB) GetTaskForSession(ctx context.Context, sessionID string) (*ProjectTask, error) {
 	var task ProjectTask
 	err := d.GetContext(ctx, &task,
 		`SELECT t.* FROM project_tasks t
-		 INNER JOIN session_tasks st ON t.id = st.task_id
-		 WHERE st.session_id = ? AND st.role IN ('created_from', 'registered_as', 'works_on')
-		 ORDER BY st.created_at DESC LIMIT 1`, sessionID)
+		 INNER JOIN sessions s ON s.task_id = t.id
+		 WHERE s.id = ?`, sessionID)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return &task, nil
@@ -1005,10 +1002,7 @@ func (d *DB) GetTaskForSession(ctx context.Context, sessionID string) (*ProjectT
 func (d *DB) GetSessionsForTask(ctx context.Context, taskID int64) ([]Session, error) {
 	var sessions []Session
 	err := d.SelectContext(ctx, &sessions,
-		`SELECT s.* FROM sessions s
-		 INNER JOIN session_tasks st ON s.id = st.session_id
-		 WHERE st.task_id = ? AND st.role IN ('created_from', 'registered_as')
-		 ORDER BY s.start_time DESC`, taskID)
+		`SELECT * FROM sessions WHERE task_id = ? ORDER BY start_time DESC`, taskID)
 	return sessions, err
 }
 
@@ -1030,21 +1024,19 @@ func (d *DB) GetTaskSessionSummary(ctx context.Context, projectID int64) ([]stru
 	}
 	var results []taskSessionInfo
 	err := d.SelectContext(ctx, &results, `
-		SELECT st.task_id,
-		       COUNT(DISTINCT st.session_id) as session_count,
-		       COUNT(DISTINCT CASE WHEN s.status IN ('running', 'starting') THEN st.session_id END) as active_count,
-		       COUNT(DISTINCT CASE WHEN s.status IN ('stopped', 'completed') THEN st.session_id END) as stopped_count,
-		       COALESCE((SELECT s2.id FROM sessions s2 INNER JOIN session_tasks st2 ON s2.id = st2.session_id WHERE st2.task_id = st.task_id AND st2.role IN ('created_from', 'registered_as') ORDER BY s2.start_time DESC LIMIT 1), '') as latest_session,
-		       COALESCE((SELECT s2.id FROM sessions s2 INNER JOIN session_tasks st2 ON s2.id = st2.session_id WHERE st2.task_id = st.task_id AND st2.role IN ('created_from', 'registered_as') AND s2.status IN ('stopped', 'completed') ORDER BY s2.start_time DESC LIMIT 1), '') as latest_stopped_session
-		FROM session_tasks st
-		INNER JOIN sessions s ON s.id = st.session_id
-		INNER JOIN project_tasks t ON t.id = st.task_id
-		WHERE t.project_id = ? AND st.role IN ('created_from', 'registered_as')
-		GROUP BY st.task_id`, projectID)
+		SELECT s.task_id,
+		       COUNT(*) as session_count,
+		       COUNT(CASE WHEN s.status IN ('running', 'starting') THEN 1 END) as active_count,
+		       COUNT(CASE WHEN s.status IN ('stopped', 'completed') THEN 1 END) as stopped_count,
+		       COALESCE((SELECT s2.id FROM sessions s2 WHERE s2.task_id = s.task_id ORDER BY s2.start_time DESC LIMIT 1), '') as latest_session,
+		       COALESCE((SELECT s2.id FROM sessions s2 WHERE s2.task_id = s.task_id AND s2.status IN ('stopped', 'completed') ORDER BY s2.start_time DESC LIMIT 1), '') as latest_stopped_session
+		FROM sessions s
+		INNER JOIN project_tasks t ON t.id = s.task_id
+		WHERE t.project_id = ? AND s.task_id IS NOT NULL
+		GROUP BY s.task_id`, projectID)
 	if err != nil {
 		return nil, err
 	}
-	// Convert to the return type
 	out := make([]struct {
 		TaskID               int64  `db:"task_id" json:"task_id"`
 		SessionCount         int    `db:"session_count" json:"session_count"`

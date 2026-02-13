@@ -122,6 +122,13 @@
             <section id="view-sessions" class="view">
                 <header class="view-header">
                     <h2>Active Sessions</h2>
+                    <button id="btn-new-session" class="btn btn-primary" onclick="app.showNewSessionProjectSelect()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                        </svg>
+                        New Session
+                    </button>
                 </header>
                 <div id="sessions-list" class="session-list">
                     <!-- Sessions will be rendered here -->
@@ -246,6 +253,13 @@
                                     <rect x="3" y="3" width="7" height="18" stroke-width="2"/>
                                     <rect x="14" y="3" width="7" height="18" stroke-width="2"/>
                                 </svg>
+                            </button>
+                            <button id="btn-link-task" class="btn btn-sm btn-outline" title="Link Task (Ctrl+Shift+L)" style="display:none;">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+                                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+                                </svg>
+                                <span class="desktop-only">Link Task</span>
                             </button>
                             <button id="btn-stop-session" class="btn btn-danger btn-sm" title="Encerrar sessão">
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
@@ -682,6 +696,26 @@
             <div class="modal-footer">
                 <button id="task-select-cancel" class="btn btn-secondary">Cancel</button>
                 <button id="task-select-skip" class="btn btn-primary">Skip / No task</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Project Select Modal (for new session from sessions view) -->
+    <div id="project-select-modal" class="modal-overlay hidden">
+        <div class="modal-container" style="max-width: 540px;">
+            <div class="modal-header">
+                <h3>Select a Project</h3>
+            </div>
+            <div class="modal-body" style="padding: 12px 20px;">
+                <p style="margin-bottom: 12px; color: var(--color-text-secondary, #666); font-size: 13px;">
+                    Choose a project to start a new session:
+                </p>
+                <div id="project-select-list" class="task-select-list">
+                    <!-- Dynamically populated -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="project-select-cancel" class="btn btn-secondary">Cancel</button>
             </div>
         </div>
     </div>

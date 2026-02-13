@@ -158,14 +158,6 @@ type ProjectTask struct {
 	UpdatedAt   time.Time    `db:"updated_at" json:"updated_at"`
 }
 
-type SessionTask struct {
-	ID        int64     `db:"id" json:"id"`
-	SessionID string    `db:"session_id" json:"session_id"`
-	TaskID    int64     `db:"task_id" json:"task_id"`
-	Role      string    `db:"role" json:"role"` // 'works_on', 'created_from', 'registered_as'
-	CreatedAt time.Time `db:"created_at" json:"created_at"`
-}
-
 type AISuggestion struct {
 	ID             int64         `db:"id" json:"id"`
 	SessionID      string        `db:"session_id" json:"session_id"`

@@ -5483,3 +5483,57 @@ body {
         width: 100%;
     }
 }
+
+/* ============ Link Task Modal ============ */
+
+#btn-link-task {
+    background: transparent;
+    border: 1px solid var(--color-border);
+    color: var(--color-text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+#btn-link-task:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+}
+
+.link-task-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--color-border);
+    margin-bottom: 12px;
+}
+
+.link-task-tab {
+    flex: 1;
+    padding: 8px 16px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--color-text-secondary);
+    transition: all 0.15s;
+}
+
+.link-task-tab:hover {
+    color: var(--color-text-primary);
+}
+
+.link-task-tab.active {
+    color: var(--color-primary);
+    border-bottom-color: var(--color-primary);
+}
+
+.link-task-item.selected {
+    background-color: rgba(79, 70, 229, 0.1);
+    border-color: var(--color-primary);
+}

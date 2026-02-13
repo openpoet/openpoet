@@ -117,6 +117,16 @@ func (p *GoSDKProvider) buildOneShotOptions(req *Request) []claudecode.Option {
 		opts = append(opts, claudecode.WithSystemPrompt(req.System))
 	}
 
+	// Safety: disallow all built-in tools in one-shot mode.
+	// One-shot queries are pure text generation — no tool use needed.
+	opts = append(opts, claudecode.WithDisallowedTools(
+		"Bash", "Read", "Write", "Edit", "Glob", "Grep",
+		"WebFetch", "WebSearch", "Task", "NotebookEdit",
+		"EnterPlanMode", "ExitPlanMode", "AskUserQuestion",
+		"TodoRead", "TodoWrite", "Skill",
+		"TaskCreate", "TaskGet", "TaskUpdate", "TaskList",
+	))
+
 	return opts
 }
 
@@ -259,6 +269,23 @@ func (p *GoSDKProvider) streamOneShot(ctx context.Context, prompt string, req *R
 					callback(StreamEvent{Type: "content_block_stop", Index: 0})
 				}
 				return nil, fmt.Errorf("gosdk one-shot result error: %s", errText)
+			}
+			// Fallback: if no AssistantMessage text was received, use ResultMessage.Result
+			if m.Result != nil && *m.Result != "" && fullText.Len() == 0 {
+				if !blockStarted {
+					callback(StreamEvent{
+						Type:         "content_block_start",
+						Index:        0,
+						ContentBlock: &ContentBlock{Type: "text", Text: ""},
+					})
+					blockStarted = true
+				}
+				callback(StreamEvent{
+					Type:  "content_block_delta",
+					Index: 0,
+					Delta: &StreamDelta{Type: "text_delta", Text: *m.Result},
+				})
+				fullText.WriteString(*m.Result)
 			}
 		}
 	}
