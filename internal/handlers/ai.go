@@ -50,6 +50,18 @@ func (pc *planningCollector) hasActions() bool {
 	return len(pc.actions) > 0
 }
 
+func (pc *planningCollector) countCreates() int {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	count := 0
+	for _, a := range pc.actions {
+		if a.Action == "create" {
+			count++
+		}
+	}
+	return count
+}
+
 // sseEvent represents a Server-Sent Event for broadcasting to reconnected clients.
 type sseEvent struct {
 	Type string
@@ -668,6 +680,15 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		actions := collector.getActions()
 		projectID := actions[0].ProjectID
 
+		// Auto-assign sequential sort_order for create actions that have sort_order=0
+		createIdx := 0
+		for i := range actions {
+			if actions[i].Action == "create" && actions[i].SortOrder == 0 {
+				createIdx++
+				actions[i].SortOrder = createIdx
+			}
+		}
+
 		project, err := h.api.db.GetProject(ctx, projectID)
 		projectName := "Projeto"
 		if err == nil {
@@ -697,21 +718,84 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			summaryParts = append(summaryParts, fmt.Sprintf("remover %d tarefa(s)", deleteCount))
 		}
 
-		// Build markdown content for preview
+		// Build markdown content for preview — group subtasks under parents
 		var contentBuilder strings.Builder
+
+		// Identify parent (no parent_id) vs subtask actions for create
+		type indexedAction struct {
+			idx    int
+			action PlanningTaskAction
+		}
+		var parentActions []indexedAction
+		childActions := map[int][]indexedAction{} // parent sort_order -> children
+		var otherActions []indexedAction           // update, delete actions
+
 		for i, a := range actions {
 			switch a.Action {
 			case "create":
-				contentBuilder.WriteString(fmt.Sprintf("### %d. Criar tarefa: %s\n", i+1, a.Title))
-				if a.Description != "" {
-					contentBuilder.WriteString(fmt.Sprintf("**Descrição:** %s\n", a.Description))
+				if a.ParentRef > 0 {
+					// Group by parent_ref (1-based index into the batch)
+					parentIdx := a.ParentRef - 1 // convert to 0-based
+					childActions[parentIdx] = append(childActions[parentIdx], indexedAction{i, a})
+				} else if a.ParentID > 0 {
+					// Legacy: group by parent_id (find matching parent in batch)
+					parentIdx := -1
+					for j, p := range actions {
+						if p.Action == "create" && j < i {
+							parentIdx = j
+						}
+					}
+					if parentIdx >= 0 {
+						childActions[parentIdx] = append(childActions[parentIdx], indexedAction{i, a})
+					} else {
+						parentActions = append(parentActions, indexedAction{i, a})
+					}
+				} else {
+					parentActions = append(parentActions, indexedAction{i, a})
 				}
-				contentBuilder.WriteString(fmt.Sprintf("**Prioridade:** %s | **Status:** %s\n", a.Priority, a.Status))
-				if a.DueDate != "" {
-					contentBuilder.WriteString(fmt.Sprintf("**Data limite:** %s\n", a.DueDate))
+			default:
+				otherActions = append(otherActions, indexedAction{i, a})
+			}
+		}
+
+		num := 0
+		for _, pa := range parentActions {
+			a := pa.action
+			num++
+			orderLabel := ""
+			if a.SortOrder > 0 {
+				orderLabel = fmt.Sprintf(" (Ordem: %d)", a.SortOrder)
+			}
+			contentBuilder.WriteString(fmt.Sprintf("### %d. Criar tarefa: %s%s\n", num, a.Title, orderLabel))
+			if a.Description != "" {
+				contentBuilder.WriteString(fmt.Sprintf("**Descrição:** %s\n", a.Description))
+			}
+			contentBuilder.WriteString(fmt.Sprintf("**Prioridade:** %s | **Status:** %s\n", a.Priority, a.Status))
+			if a.DueDate != "" {
+				contentBuilder.WriteString(fmt.Sprintf("**Data limite:** %s\n", a.DueDate))
+			}
+
+			// Render subtasks indented
+			if children, ok := childActions[pa.idx]; ok {
+				contentBuilder.WriteString("\n**Subtarefas:**\n")
+				for subNum, ca := range children {
+					contentBuilder.WriteString(fmt.Sprintf("- **%d.%d** %s", num, subNum+1, ca.action.Title))
+					if ca.action.Description != "" {
+						contentBuilder.WriteString(fmt.Sprintf(" — %s", ca.action.Description))
+					}
+					contentBuilder.WriteString("\n")
 				}
+			}
+			contentBuilder.WriteString("\n")
+		}
+
+		// Render update/delete actions
+		for _, oa := range otherActions {
+			a := oa.action
+			num++
+			switch a.Action {
 			case "update":
-				contentBuilder.WriteString(fmt.Sprintf("### %d. Atualizar tarefa #%d: %s\n", i+1, a.TaskID, a.Title))
+				contentBuilder.WriteString(fmt.Sprintf("### %d. Atualizar tarefa #%d: %s\n", num, a.TaskID, a.Title))
 				if a.Status != "" {
 					contentBuilder.WriteString(fmt.Sprintf("**Novo status:** %s\n", a.Status))
 				}
@@ -719,7 +803,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 					contentBuilder.WriteString(fmt.Sprintf("**Nova prioridade:** %s\n", a.Priority))
 				}
 			case "delete":
-				contentBuilder.WriteString(fmt.Sprintf("### %d. Remover tarefa #%d: %s\n", i+1, a.TaskID, a.Title))
+				contentBuilder.WriteString(fmt.Sprintf("### %d. Remover tarefa #%d: %s\n", num, a.TaskID, a.Title))
 			}
 			contentBuilder.WriteString("\n")
 		}
@@ -1388,9 +1472,41 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			parentID = int64(pidF)
 		}
 
+		var parentRef int
+		if prStr, ok := input["parent_ref"].(string); ok && prStr != "" {
+			pr, err := strconv.Atoi(prStr)
+			if err == nil {
+				parentRef = pr
+			}
+		} else if prF, ok := input["parent_ref"].(float64); ok {
+			parentRef = int(prF)
+		}
+
+		var sortOrder int
+		if soStr, ok := input["sort_order"].(string); ok && soStr != "" {
+			so, err := strconv.Atoi(soStr)
+			if err == nil {
+				sortOrder = so
+			}
+		} else if soF, ok := input["sort_order"].(float64); ok {
+			sortOrder = int(soF)
+		}
+
 		// Collect task actions into the batch collector (if available).
 		// A single proposal card with all tasks is created after streaming completes.
 		if collector != nil {
+			// In planning mode: enforce hierarchy. If there's already 1+ create in the
+			// collector, any new create MUST have parent_ref. If this is the 2nd+ create
+			// without parent_ref, reject it with an error so the AI retries correctly.
+			if collector.planningMode && collector.countCreates() >= 1 && parentRef == 0 && parentID == 0 {
+				return "", fmt.Errorf(
+					"ERRO DE HIERARQUIA: Em modo de planejamento, quando há múltiplas tarefas, "+
+						"a primeira tarefa criada é a tarefa PRINCIPAL (pai) e todas as demais DEVEM ser subtarefas. "+
+						"Você já criou a tarefa principal. Agora, esta tarefa '%s' PRECISA do parâmetro parent_ref=1 "+
+						"para ser uma subtarefa da tarefa principal. "+
+						"Recrie esta tarefa incluindo parent_ref=1.", title)
+			}
+
 			collector.add(PlanningTaskAction{
 				Action:      "create",
 				ProjectID:   projectID,
@@ -1400,6 +1516,8 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 				Priority:    priority,
 				DueDate:     dueDateStr,
 				ParentID:    parentID,
+				ParentRef:   parentRef,
+				SortOrder:   sortOrder,
 			})
 			return fmt.Sprintf(
 				"IMPORTANTE: Task '%s' NÃO foi criada ainda — será criada após aprovação do usuário. "+

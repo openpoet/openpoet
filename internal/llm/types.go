@@ -61,6 +61,9 @@ type ToolPropertySchema struct {
 	Description string                        `json:"description,omitempty"`
 	Enum        []string                      `json:"enum,omitempty"`
 	Properties  map[string]ToolPropertySchema `json:"properties,omitempty"`
+	Items       *ToolPropertySchema           `json:"items,omitempty"`
+	Required    []string                      `json:"required,omitempty"`
+	MaxItems    int                           `json:"maxItems,omitempty"`
 }
 
 // StreamEvent represents a streaming event from the model.

@@ -29,14 +29,27 @@ func ParsePolicy(s string) ToolPolicy {
 	return p
 }
 
-// MergePolicy combines a global policy with a project-level policy.
-// If the project policy has a non-empty mode, it overrides the global policy.
-// If the project policy is empty/default, the global policy is used.
-func MergePolicy(global, project ToolPolicy) ToolPolicy {
-	if project.Mode == "" || project.Mode == "allow_all" && len(project.Denied) == 0 && len(project.Allowed) == 0 {
-		return global
+// ResolveProjectPolicy returns the effective policy for a project.
+// If the project has an explicit policy (non-empty JSON), it overrides the global entirely.
+// If the project has no explicit policy (empty string), the global policy is inherited.
+func ResolveProjectPolicy(globalPolicy ToolPolicy, projectPolicyJSON string) ToolPolicy {
+	if projectPolicyJSON != "" {
+		return ParsePolicy(projectPolicyJSON)
 	}
-	return project
+	return globalPolicy
+}
+
+// HasTools returns true if this policy would allow at least one tool.
+func (p ToolPolicy) HasTools(allTools []MCPTool) bool {
+	if p.Mode == "" || p.Mode == "allow_all" && len(p.Denied) == 0 {
+		return len(allTools) > 0
+	}
+	for _, t := range allTools {
+		if p.IsAllowed(t.Name) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsAllowed checks if a specific tool name is permitted by this policy.
