@@ -151,8 +151,9 @@ type ProjectTask struct {
 	Status      string       `db:"status" json:"status"`       // 'todo', 'in_progress', 'done', 'blocked'
 	Priority    string       `db:"priority" json:"priority"`   // 'low', 'medium', 'high', 'urgent'
 	DueDate     sql.NullTime `db:"due_date" json:"due_date,omitempty"`
-	SortOrder   int          `db:"sort_order" json:"sort_order"`
-	DueNotified bool         `db:"due_notified" json:"due_notified"`
+	SortOrder       int          `db:"sort_order" json:"sort_order"`
+	GlobalSortOrder int          `db:"global_sort_order" json:"global_sort_order"`
+	DueNotified     bool         `db:"due_notified" json:"due_notified"`
 	CreatedAt   time.Time    `db:"created_at" json:"created_at"`
 	UpdatedAt   time.Time    `db:"updated_at" json:"updated_at"`
 }

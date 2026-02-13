@@ -1967,7 +1967,12 @@ func (a *API) UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task.Status = input.Status
+	// Re-fetch to get updated sort_order
+	task, err = a.db.GetTask(r.Context(), taskID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
 	respondJSON(w, http.StatusOK, task)
 }
@@ -2003,6 +2008,35 @@ func (a *API) ReorderProjectTasks(w http.ResponseWriter, r *http.Request) {
 	a.hub.BroadcastStateUpdate("task", map[string]interface{}{
 		"action":     "reordered",
 		"project_id": projectID,
+	})
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// ReorderAllTasks batch-updates global_sort_order for cross-project reordering.
+func (a *API) ReorderAllTasks(w http.ResponseWriter, r *http.Request) {
+	var items []database.GlobalReorderItem
+	if err := json.NewDecoder(r.Body).Decode(&items); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if len(items) == 0 {
+		respondError(w, http.StatusBadRequest, "Empty reorder list")
+		return
+	}
+	if len(items) > 200 {
+		respondError(w, http.StatusBadRequest, "Too many items (max 200)")
+		return
+	}
+
+	if err := a.db.ReorderTasksGlobal(r.Context(), items); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("task", map[string]interface{}{
+		"action": "reordered",
 	})
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
