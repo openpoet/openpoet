@@ -181,9 +181,6 @@ class HookManager {
         document.getElementById('hook-task-loaded-start')?.addEventListener('click', () => {
             this.respondToTaskLoaded('start');
         });
-        document.getElementById('hook-task-loaded-plan')?.addEventListener('click', () => {
-            this.respondToTaskLoaded('plan');
-        });
         document.getElementById('hook-task-loaded-add-prompt')?.addEventListener('click', () => {
             this.toggleTaskLoadedExtra();
         });
@@ -1119,8 +1116,6 @@ class HookManager {
             const extraInput = document.getElementById('hook-task-loaded-extra-prompt');
             prompt = extraInput ? extraInput.value.trim() : '';
             if (!prompt) prompt = 'Start working on the assigned task.';
-        } else if (mode === 'plan') {
-            prompt = 'Plan the implementation for the assigned task. Enter plan mode and present the plan before making any changes.';
         } else {
             prompt = 'Start working on the assigned task.';
         }

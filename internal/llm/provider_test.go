@@ -156,18 +156,6 @@ func TestChatToolsNotEmpty(t *testing.T) {
 	}
 }
 
-func TestPlanningToolsSubset(t *testing.T) {
-	chatTools := ChatTools()
-	planningTools := PlanningTools()
-
-	if len(planningTools) >= len(chatTools) {
-		t.Error("PlanningTools should be a subset of ChatTools")
-	}
-	if len(planningTools) == 0 {
-		t.Error("PlanningTools should not be empty")
-	}
-}
-
 func TestConvertInputSchema(t *testing.T) {
 	schema := ToolDefinitionInput{
 		Type: "object",
