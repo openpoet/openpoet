@@ -4313,6 +4313,74 @@ body {
     opacity: 0.6;
 }
 
+/* ============ Done Tasks Section ============ */
+.done-section {
+    margin-top: 16px;
+    border-top: 1px solid var(--color-border);
+    padding-top: 8px;
+}
+
+.done-section-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: background 0.15s;
+    user-select: none;
+}
+
+.done-section-header:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.done-section-chevron {
+    transition: transform 0.2s;
+    color: var(--color-text-secondary);
+    flex-shrink: 0;
+}
+
+.done-section-chevron.collapsed {
+    transform: rotate(-90deg);
+}
+
+.done-section-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.done-section-count {
+    font-size: 11px;
+    background: var(--color-badge-done-bg);
+    color: var(--color-badge-done-text);
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-weight: 600;
+}
+
+.done-section-body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 4px;
+}
+
+.done-section-body.collapsed {
+    display: none;
+}
+
+.done-section-body .task-card {
+    opacity: 0.7;
+}
+
+.done-section-body .task-card:hover {
+    opacity: 1;
+}
+
 .task-priority-indicator {
     width: 4px;
     min-height: 28px;

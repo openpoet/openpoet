@@ -2310,6 +2310,123 @@ func (h *AIHandler) HandleInitiateTaskCreation(w http.ResponseWriter, r *http.Re
 	})
 }
 
+// HandleInitiateTaskDiscussion creates a proactive AI conversation to discuss an existing task.
+func (h *AIHandler) HandleInitiateTaskDiscussion(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		TaskID    int64 `json:"task_id"`
+		ProjectID int64 `json:"project_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if input.TaskID <= 0 || input.ProjectID <= 0 {
+		respondError(w, http.StatusBadRequest, "task_id and project_id are required")
+		return
+	}
+
+	ctx := r.Context()
+	project, err := h.api.db.GetProject(ctx, input.ProjectID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	task, err := h.api.db.GetTask(ctx, input.TaskID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Task not found")
+		return
+	}
+
+	if task.ProjectID != input.ProjectID {
+		respondError(w, http.StatusBadRequest, "Task does not belong to this project")
+		return
+	}
+
+	// Fetch existing subtasks
+	var subtasks []database.ProjectTask
+	_ = h.api.db.SelectContext(ctx, &subtasks, "SELECT * FROM project_tasks WHERE parent_id = ? ORDER BY sort_order, created_at", input.TaskID)
+
+	// Build proactive context
+	ctxData := map[string]interface{}{
+		"intent":           "task_discussion",
+		"project_id":       input.ProjectID,
+		"project_name":     project.Name,
+		"task_id":          task.ID,
+		"task_title":       task.Title,
+		"task_description": task.Description,
+		"task_status":      task.Status,
+		"task_priority":    task.Priority,
+	}
+	if task.DueDate.Valid {
+		ctxData["task_due_date"] = task.DueDate.Time.Format("2006-01-02 15:04")
+	}
+	if len(subtasks) > 0 {
+		subtaskList := make([]map[string]interface{}, len(subtasks))
+		for i, st := range subtasks {
+			subtaskList[i] = map[string]interface{}{
+				"id":       st.ID,
+				"title":    st.Title,
+				"status":   st.Status,
+				"priority": st.Priority,
+			}
+		}
+		ctxData["existing_subtasks"] = subtaskList
+	}
+	proactiveCtx, _ := json.Marshal(ctxData)
+
+	// Build assistant message
+	assistantMsg := fmt.Sprintf(
+		"Discussão sobre a tarefa **%s** do projeto **%s**.\n\n", task.Title, project.Name)
+	assistantMsg += fmt.Sprintf("**Status:** %s | **Prioridade:** %s\n\n",
+		task.Status, task.Priority)
+	if task.DueDate.Valid {
+		assistantMsg += fmt.Sprintf("**Prazo:** %s\n\n",
+			task.DueDate.Time.Format("02/01/2006 15:04"))
+	}
+	if task.Description != "" {
+		desc := task.Description
+		if len(desc) > 500 {
+			desc = desc[:500] + "..."
+		}
+		assistantMsg += fmt.Sprintf("**Descrição:**\n%s\n\n", desc)
+	}
+	if len(subtasks) > 0 {
+		assistantMsg += fmt.Sprintf("**Subtarefas existentes (%d):**\n", len(subtasks))
+		for _, st := range subtasks {
+			statusEmoji := map[string]string{
+				"todo": "⬜", "in_progress": "🔄", "done": "✅", "blocked": "🚫",
+			}[st.Status]
+			if statusEmoji == "" {
+				statusEmoji = "⬜"
+			}
+			assistantMsg += fmt.Sprintf("- %s %s (%s)\n", statusEmoji, st.Title, st.Status)
+		}
+		assistantMsg += "\n"
+	}
+	assistantMsg += "Como posso ajudar? Posso:\n" +
+		"- **Refinar** o título ou descrição da tarefa\n" +
+		"- **Quebrar** em subtarefas detalhadas\n" +
+		"- **Ajustar** status, prioridade ou prazo\n\n" +
+		"O que você gostaria de fazer?"
+
+	taskTitle := task.Title
+	if len(taskTitle) > 60 {
+		taskTitle = taskTitle[:60] + "..."
+	}
+	title := fmt.Sprintf("Discussão: %s", taskTitle)
+	conv, err := h.api.db.CreateProactiveConversation(ctx, title, "standard", "task_discussion", string(proactiveCtx), assistantMsg)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to create conversation")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+}
+
 // HandleListConversations lists all conversations.
 func (h *AIHandler) HandleListConversations(w http.ResponseWriter, r *http.Request) {
 	// Auto-prune: keep only the last 15 conversations

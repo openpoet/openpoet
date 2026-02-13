@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -550,8 +552,32 @@ func (d *DB) GetTempDocument(ctx context.Context, id string) (*TempDocument, err
 
 // Project Task operations
 func (d *DB) CreateTask(ctx context.Context, t *ProjectTask) error {
-	query := `INSERT INTO project_tasks (project_id, parent_id, title, description, status, priority, due_date, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, t.ProjectID, t.ParentID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.SortOrder)
+	// Auto-assign sort_order = MAX(sort_order) + 1 among siblings
+	if t.SortOrder == 0 && t.Status != "done" {
+		var maxOrder sql.NullInt64
+		if t.ParentID.Valid {
+			d.GetContext(ctx, &maxOrder, "SELECT MAX(sort_order) FROM project_tasks WHERE project_id=? AND parent_id=?", t.ProjectID, t.ParentID.Int64)
+		} else {
+			d.GetContext(ctx, &maxOrder, "SELECT MAX(sort_order) FROM project_tasks WHERE project_id=? AND parent_id IS NULL", t.ProjectID)
+		}
+		if maxOrder.Valid {
+			t.SortOrder = int(maxOrder.Int64) + 1
+		} else {
+			t.SortOrder = 1
+		}
+	}
+	// Auto-assign global_sort_order = MAX(global_sort_order) + 1 across all tasks
+	if t.GlobalSortOrder == 0 && t.Status != "done" {
+		var maxGlobal sql.NullInt64
+		d.GetContext(ctx, &maxGlobal, "SELECT MAX(global_sort_order) FROM project_tasks")
+		if maxGlobal.Valid {
+			t.GlobalSortOrder = int(maxGlobal.Int64) + 1
+		} else {
+			t.GlobalSortOrder = 1
+		}
+	}
+	query := `INSERT INTO project_tasks (project_id, parent_id, title, description, status, priority, due_date, sort_order, global_sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, t.ProjectID, t.ParentID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.SortOrder, t.GlobalSortOrder)
 	if err != nil {
 		return err
 	}
@@ -571,7 +597,7 @@ func (d *DB) GetTask(ctx context.Context, id int64) (*ProjectTask, error) {
 
 func (d *DB) ListTasksByProject(ctx context.Context, projectID int64) ([]ProjectTask, error) {
 	var tasks []ProjectTask
-	err := d.SelectContext(ctx, &tasks, "SELECT * FROM project_tasks WHERE project_id = ? ORDER BY sort_order, created_at", projectID)
+	err := d.SelectContext(ctx, &tasks, "SELECT * FROM project_tasks WHERE project_id = ? ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END, sort_order, created_at", projectID)
 	return tasks, err
 }
 
@@ -589,8 +615,83 @@ func (d *DB) UpdateTask(ctx context.Context, t *ProjectTask) error {
 }
 
 func (d *DB) UpdateTaskStatus(ctx context.Context, id int64, status string) error {
-	_, err := d.ExecContext(ctx, "UPDATE project_tasks SET status=?, updated_at=? WHERE id=?", status, time.Now(), id)
-	return err
+	tx, err := d.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	now := time.Now()
+
+	// Get task info
+	var task struct {
+		ProjectID int64  `db:"project_id"`
+		ParentID  sql.NullInt64 `db:"parent_id"`
+		OldStatus string `db:"status"`
+	}
+	if err := tx.GetContext(ctx, &task, "SELECT project_id, parent_id, status FROM project_tasks WHERE id=?", id); err != nil {
+		return err
+	}
+
+	if status == "done" {
+		// Done tasks lose both sort_orders
+		_, err = tx.ExecContext(ctx, "UPDATE project_tasks SET status=?, sort_order=0, global_sort_order=0, updated_at=? WHERE id=?", status, now, id)
+	} else if task.OldStatus == "done" {
+		// Undoing: assign next sort_order among siblings
+		var maxOrder sql.NullInt64
+		if task.ParentID.Valid {
+			tx.GetContext(ctx, &maxOrder, "SELECT MAX(sort_order) FROM project_tasks WHERE project_id=? AND parent_id=? AND status != 'done'", task.ProjectID, task.ParentID.Int64)
+		} else {
+			tx.GetContext(ctx, &maxOrder, "SELECT MAX(sort_order) FROM project_tasks WHERE project_id=? AND parent_id IS NULL AND status != 'done'", task.ProjectID)
+		}
+		newOrder := 1
+		if maxOrder.Valid {
+			newOrder = int(maxOrder.Int64) + 1
+		}
+		// Assign next global_sort_order across all tasks
+		var maxGlobal sql.NullInt64
+		tx.GetContext(ctx, &maxGlobal, "SELECT MAX(global_sort_order) FROM project_tasks WHERE status != 'done'")
+		newGlobal := 1
+		if maxGlobal.Valid {
+			newGlobal = int(maxGlobal.Int64) + 1
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE project_tasks SET status=?, sort_order=?, global_sort_order=?, updated_at=? WHERE id=?", status, newOrder, newGlobal, now, id)
+	} else {
+		_, err = tx.ExecContext(ctx, "UPDATE project_tasks SET status=?, updated_at=? WHERE id=?", status, now, id)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	// Renumber ALL active task groups in the project to ensure sequential sort_order
+	if status == "done" || task.OldStatus == "done" {
+		// 1. Renumber top-level active tasks
+		var topLevel []struct {
+			ID int64 `db:"id"`
+		}
+		tx.SelectContext(ctx, &topLevel, "SELECT id FROM project_tasks WHERE project_id=? AND parent_id IS NULL AND status != 'done' ORDER BY sort_order, created_at", task.ProjectID)
+		for i, t := range topLevel {
+			tx.ExecContext(ctx, "UPDATE project_tasks SET sort_order=? WHERE id=?", i+1, t.ID)
+		}
+
+		// 2. Renumber children of each parent that has subtasks
+		var parents []struct {
+			ID int64 `db:"id"`
+		}
+		tx.SelectContext(ctx, &parents, "SELECT DISTINCT parent_id AS id FROM project_tasks WHERE project_id=? AND parent_id IS NOT NULL", task.ProjectID)
+		for _, p := range parents {
+			var children []struct {
+				ID int64 `db:"id"`
+			}
+			tx.SelectContext(ctx, &children, "SELECT id FROM project_tasks WHERE project_id=? AND parent_id=? AND status != 'done' ORDER BY sort_order, created_at", task.ProjectID, p.ID)
+			for i, c := range children {
+				tx.ExecContext(ctx, "UPDATE project_tasks SET sort_order=? WHERE id=?", i+1, c.ID)
+			}
+		}
+	}
+
+	return tx.Commit()
 }
 
 func (d *DB) DeleteTask(ctx context.Context, id int64) error {
@@ -599,6 +700,7 @@ func (d *DB) DeleteTask(ctx context.Context, id int64) error {
 }
 
 // ReorderTasks batch-updates sort_order and parent_id for multiple tasks in a single transaction.
+// Also syncs global_sort_order to maintain consistent relative ordering across views.
 func (d *DB) ReorderTasks(ctx context.Context, projectID int64, items []ReorderItem) error {
 	tx, err := d.BeginTxx(ctx, nil)
 	if err != nil {
@@ -613,6 +715,7 @@ func (d *DB) ReorderTasks(ctx context.Context, projectID int64, items []ReorderI
 	defer stmt.Close()
 
 	now := time.Now()
+	taskIDs := make([]int64, 0, len(items))
 	for _, item := range items {
 		var parentID sql.NullInt64
 		if item.ParentID != nil && *item.ParentID > 0 {
@@ -620,6 +723,41 @@ func (d *DB) ReorderTasks(ctx context.Context, projectID int64, items []ReorderI
 		}
 		if _, err := stmt.ExecContext(ctx, item.SortOrder, parentID, now, item.ID, projectID); err != nil {
 			return err
+		}
+		taskIDs = append(taskIDs, item.ID)
+	}
+	stmt.Close()
+
+	// Sync global_sort_order: redistribute existing global values to match new sort_order
+	if len(taskIDs) > 0 {
+		// Build IN clause
+		placeholders := make([]string, len(taskIDs))
+		args := make([]interface{}, 0, len(taskIDs)+1)
+		args = append(args, projectID)
+		for i, id := range taskIDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		inClause := strings.Join(placeholders, ",")
+
+		// Get tasks ordered by NEW sort_order, with their current global_sort_order
+		var ordered []struct {
+			ID              int64 `db:"id"`
+			GlobalSortOrder int   `db:"global_sort_order"`
+		}
+		query := fmt.Sprintf("SELECT id, global_sort_order FROM project_tasks WHERE project_id=? AND id IN (%s) ORDER BY sort_order, created_at", inClause)
+		tx.SelectContext(ctx, &ordered, query, args...)
+
+		// Collect and sort global values
+		globalValues := make([]int, len(ordered))
+		for i, o := range ordered {
+			globalValues[i] = o.GlobalSortOrder
+		}
+		sort.Ints(globalValues)
+
+		// Re-assign sorted global values in new sort_order
+		for i, o := range ordered {
+			tx.ExecContext(ctx, "UPDATE project_tasks SET global_sort_order=? WHERE id=?", globalValues[i], o.ID)
 		}
 	}
 
@@ -631,6 +769,79 @@ type ReorderItem struct {
 	ID        int64  `json:"id"`
 	SortOrder int    `json:"sort_order"`
 	ParentID  *int64 `json:"parent_id"`
+}
+
+// GlobalReorderItem represents a single item in a global reorder operation.
+type GlobalReorderItem struct {
+	ID              int64 `json:"id"`
+	GlobalSortOrder int   `json:"global_sort_order"`
+}
+
+// ReorderTasksGlobal updates global_sort_order for tasks and syncs sort_order per project.
+func (d *DB) ReorderTasksGlobal(ctx context.Context, items []GlobalReorderItem) error {
+	tx, err := d.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	now := time.Now()
+
+	// 1. Update global_sort_order for all items
+	stmt, err := tx.PrepareContext(ctx, "UPDATE project_tasks SET global_sort_order=?, updated_at=? WHERE id=?")
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if _, err := stmt.ExecContext(ctx, item.GlobalSortOrder, now, item.ID); err != nil {
+			stmt.Close()
+			return err
+		}
+	}
+	stmt.Close()
+
+	// 2. Sync sort_order: for each affected project, re-derive from global order
+	// Collect task IDs
+	taskIDs := make([]interface{}, len(items))
+	placeholders := make([]string, len(items))
+	for i, item := range items {
+		taskIDs[i] = item.ID
+		placeholders[i] = "?"
+	}
+	inClause := strings.Join(placeholders, ",")
+
+	// Get distinct project IDs
+	var projectIDs []int64
+	query := fmt.Sprintf("SELECT DISTINCT project_id FROM project_tasks WHERE id IN (%s)", inClause)
+	tx.SelectContext(ctx, &projectIDs, query, taskIDs...)
+
+	for _, pid := range projectIDs {
+		// Re-derive top-level sort_order from global order
+		var tasks []struct {
+			ID int64 `db:"id"`
+		}
+		tx.SelectContext(ctx, &tasks, "SELECT id FROM project_tasks WHERE project_id=? AND parent_id IS NULL AND status != 'done' ORDER BY global_sort_order, created_at", pid)
+		for i, t := range tasks {
+			tx.ExecContext(ctx, "UPDATE project_tasks SET sort_order=? WHERE id=?", i+1, t.ID)
+		}
+
+		// Re-derive subtask sort_order per parent
+		var parents []struct {
+			ID int64 `db:"id"`
+		}
+		tx.SelectContext(ctx, &parents, "SELECT DISTINCT parent_id AS id FROM project_tasks WHERE project_id=? AND parent_id IS NOT NULL", pid)
+		for _, p := range parents {
+			var children []struct {
+				ID int64 `db:"id"`
+			}
+			tx.SelectContext(ctx, &children, "SELECT id FROM project_tasks WHERE parent_id=? AND status != 'done' ORDER BY global_sort_order, created_at", p.ID)
+			for i, c := range children {
+				tx.ExecContext(ctx, "UPDATE project_tasks SET sort_order=? WHERE id=?", i+1, c.ID)
+			}
+		}
+	}
+
+	return tx.Commit()
 }
 
 func (d *DB) DuplicateTask(ctx context.Context, id int64) (*ProjectTask, error) {
@@ -749,7 +960,7 @@ func (d *DB) ListAllTasks(ctx context.Context, f TaskFilter) ([]ProjectTask, err
 		args = append(args, search, search)
 	}
 
-	query += " ORDER BY CASE status WHEN 'in_progress' THEN 0 WHEN 'todo' THEN 1 WHEN 'blocked' THEN 2 WHEN 'done' THEN 3 END, sort_order, created_at DESC"
+	query += " ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END, global_sort_order, created_at"
 
 	var tasks []ProjectTask
 	err := d.SelectContext(ctx, &tasks, query, args...)
