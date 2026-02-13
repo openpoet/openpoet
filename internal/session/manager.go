@@ -150,9 +150,11 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	envVars["OTEL_METRIC_EXPORT_INTERVAL"] = "10000" // 10 seconds for faster feedback
 
 	// Build MCP config for --mcp-config CLI flag (additive, preserves project's existing MCPs)
-	var cliArgs []string
+	// Use --session-id so Claude Code conversation ID matches DevManager session ID.
+	// This allows --resume to restore the exact conversation when reopening.
+	cliArgs := []string{"--session-id", sessionID}
 	if mcpJSON := m.buildMCPConfigJSON(ctx, project); mcpJSON != "" {
-		cliArgs = []string{"--mcp-config", mcpJSON}
+		cliArgs = append(cliArgs, "--mcp-config", mcpJSON)
 	}
 
 	// Inject task system prompt if present (set by API handler when session starts from a task)
@@ -257,9 +259,11 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	envVars["OTEL_RESOURCE_ATTRIBUTES"] = "devmanager.session_id=" + sessionID
 	envVars["OTEL_METRIC_EXPORT_INTERVAL"] = "10000"
 
-	// Build CLI args - start with --continue to resume conversation
+	// Build CLI args - resume the specific conversation by session ID.
+	// Using --resume <id> instead of --continue ensures each task reopens
+	// its own conversation, even when multiple tasks share the same project directory.
 	var cliArgs []string
-	cliArgs = append(cliArgs, "--continue")
+	cliArgs = append(cliArgs, "--resume", sessionID)
 
 	// Build MCP config for --mcp-config CLI flag
 	if mcpJSON := m.buildMCPConfigJSON(ctx, project); mcpJSON != "" {
