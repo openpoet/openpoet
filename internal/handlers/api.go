@@ -55,13 +55,6 @@ type PlanningTaskAction struct {
 	Extra       map[string]interface{} `json:"extra,omitempty"` // for update fields
 }
 
-// pendingPlanningProposal holds a planning proposal awaiting user approval.
-type pendingPlanningProposal struct {
-	ProjectID int64
-	Actions   []PlanningTaskAction
-	Summary   string
-}
-
 // pendingTaskProposal holds a task proposal awaiting user approval.
 type pendingTaskProposal struct {
 	Actions []PlanningTaskAction
@@ -80,9 +73,6 @@ type API struct {
 
 	pendingMemoryDocsMu sync.Mutex
 	pendingMemoryDocs   map[string]*pendingMemoryDoc // docID -> pending edit
-
-	pendingPlanningMu sync.Mutex
-	pendingPlanning   map[string]*pendingPlanningProposal // docID -> pending planning
 
 	pendingTaskProposalsMu sync.Mutex
 	pendingTaskProposals   map[string]*pendingTaskProposal // docID -> pending task
@@ -176,159 +166,6 @@ func (a *API) RejectMemoryDoc(w http.ResponseWriter, r *http.Request) {
 
 	if !ok {
 		respondError(w, http.StatusNotFound, "No pending memory doc edit found for this document")
-		return
-	}
-
-	a.db.UpdateTempDocumentStatus(r.Context(), docID, "rejected")
-
-	respondJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
-}
-
-// storePendingPlanning stores a proposed planning action set for later approval.
-func (a *API) storePendingPlanning(docID string, projectID int64, actions []PlanningTaskAction, summary string) {
-	a.pendingPlanningMu.Lock()
-	defer a.pendingPlanningMu.Unlock()
-	if a.pendingPlanning == nil {
-		a.pendingPlanning = make(map[string]*pendingPlanningProposal)
-	}
-	a.pendingPlanning[docID] = &pendingPlanningProposal{
-		ProjectID: projectID,
-		Actions:   actions,
-		Summary:   summary,
-	}
-}
-
-// ApprovePlanning applies all task actions from a pending planning proposal.
-func (a *API) ApprovePlanning(w http.ResponseWriter, r *http.Request) {
-	docID := chi.URLParam(r, "docId")
-
-	a.pendingPlanningMu.Lock()
-	pending, ok := a.pendingPlanning[docID]
-	if ok {
-		delete(a.pendingPlanning, docID)
-	}
-	a.pendingPlanningMu.Unlock()
-
-	if !ok {
-		respondError(w, http.StatusNotFound, "No pending planning proposal found for this document")
-		return
-	}
-
-	a.db.UpdateTempDocumentStatus(r.Context(), docID, "approved")
-
-	created := 0
-	updated := 0
-	deleted := 0
-
-	// Map action index (1-based) -> created task ID, for resolving parent_ref
-	createdTaskIDs := make(map[int]int64)
-
-	for i, action := range pending.Actions {
-		switch action.Action {
-		case "create":
-			task := &database.ProjectTask{
-				ProjectID:   action.ProjectID,
-				Title:       action.Title,
-				Description: action.Description,
-				Status:      action.Status,
-				Priority:    action.Priority,
-				SortOrder:   action.SortOrder,
-			}
-			if task.Status == "" {
-				task.Status = "todo"
-			}
-			if task.Priority == "" {
-				task.Priority = "medium"
-			}
-			if action.DueDate != "" {
-				t, err := parseFlexibleTime(action.DueDate)
-				if err == nil {
-					task.DueDate = sql.NullTime{Time: t, Valid: true}
-				}
-			}
-			// Resolve parent: parent_ref (batch reference) takes priority over parent_id
-			if action.ParentRef > 0 {
-				if realID, ok := createdTaskIDs[action.ParentRef]; ok {
-					task.ParentID = sql.NullInt64{Int64: realID, Valid: true}
-				}
-			} else if action.ParentID > 0 {
-				task.ParentID = sql.NullInt64{Int64: action.ParentID, Valid: true}
-			}
-			if err := a.db.CreateTask(r.Context(), task); err != nil {
-				log.Printf("[Planning] Failed to create task '%s': %v", action.Title, err)
-				continue
-			}
-			createdTaskIDs[i+1] = task.ID // Store with 1-based index
-			a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "created", "project_id": action.ProjectID, "task": task})
-			created++
-
-		case "update":
-			task, err := a.db.GetTask(r.Context(), action.TaskID)
-			if err != nil {
-				log.Printf("[Planning] Task %d not found for update: %v", action.TaskID, err)
-				continue
-			}
-			if action.Title != "" {
-				task.Title = action.Title
-			}
-			if action.Description != "" {
-				task.Description = action.Description
-			}
-			if action.Status != "" {
-				task.Status = action.Status
-			}
-			if action.Priority != "" {
-				task.Priority = action.Priority
-			}
-			if action.DueDate != "" {
-				t, err := parseFlexibleTime(action.DueDate)
-				if err == nil {
-					task.DueDate = sql.NullTime{Time: t, Valid: true}
-				}
-			}
-			if err := a.db.UpdateTask(r.Context(), task); err != nil {
-				log.Printf("[Planning] Failed to update task %d: %v", action.TaskID, err)
-				continue
-			}
-			a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": action.ProjectID, "task": task})
-			updated++
-
-		case "delete":
-			if err := a.db.DeleteTask(r.Context(), action.TaskID); err != nil {
-				log.Printf("[Planning] Failed to delete task %d: %v", action.TaskID, err)
-				continue
-			}
-			a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "deleted", "project_id": action.ProjectID, "id": action.TaskID})
-			deleted++
-		}
-	}
-
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{
-		"action":     "planning_approved",
-		"project_id": pending.ProjectID,
-	})
-
-	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"status":  "approved",
-		"created": created,
-		"updated": updated,
-		"deleted": deleted,
-	})
-}
-
-// RejectPlanning discards a pending planning proposal.
-func (a *API) RejectPlanning(w http.ResponseWriter, r *http.Request) {
-	docID := chi.URLParam(r, "docId")
-
-	a.pendingPlanningMu.Lock()
-	_, ok := a.pendingPlanning[docID]
-	if ok {
-		delete(a.pendingPlanning, docID)
-	}
-	a.pendingPlanningMu.Unlock()
-
-	if !ok {
-		respondError(w, http.StatusNotFound, "No pending planning proposal found for this document")
 		return
 	}
 

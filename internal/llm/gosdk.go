@@ -142,11 +142,21 @@ func (p *GoSDKProvider) buildInteractiveOptions(req *Request, convID int64) []cl
 		opts = append(opts, claudecode.WithSystemPrompt(req.System))
 	}
 
-	// MCP server with DevManager tools — ONLY allow these, disable everything else
+	// MCP server with DevManager tools — ONLY allow these, disable built-in tools.
+	// WithAllowedTools pre-approves MCP tools for auto-execution.
+	// WithDisallowedTools blocks all built-in Claude Code tools (Bash, Read, Write, etc.)
+	// so the AI assistant can only use DevManager's MCP tools.
 	mcpServer := p.buildMCPServer(convID)
 	if mcpServer != nil {
 		opts = append(opts, claudecode.WithSdkMcpServer("devmanager", mcpServer))
 		opts = append(opts, claudecode.WithAllowedTools("mcp__devmanager__*"))
+		opts = append(opts, claudecode.WithDisallowedTools(
+			"Bash", "Read", "Write", "Edit", "Glob", "Grep",
+			"WebFetch", "WebSearch", "Task", "NotebookEdit",
+			"EnterPlanMode", "ExitPlanMode", "AskUserQuestion",
+			"TodoRead", "TodoWrite", "Skill",
+			"TaskCreate", "TaskGet", "TaskUpdate", "TaskList",
+		))
 	}
 
 	return opts

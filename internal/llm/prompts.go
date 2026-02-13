@@ -113,6 +113,54 @@ Each project can have tasks with title, description, status (todo/in_progress/do
 - NEVER say the task was created or updated — it AWAITS user approval.
 - Respond ONLY with a brief message like: "Proposta de tarefa criada. Revise e aprove abaixo."
 - Do NOT generate markdown links — the card is rendered natively by the system.
+
+## Task Planning — How to plan work for a project
+When the user asks you to plan, break down, or organize work for a project, follow this workflow:
+
+### Step 1: Explore the project
+Before proposing any tasks, understand the project context:
+- Use devmanager_get_memory_doc to read the project's CLAUDE.md (goals, architecture, constraints).
+- Use devmanager_list_project_files and devmanager_read_project_file to browse relevant code.
+- Use devmanager_find_files and devmanager_grep_content to search for specific patterns.
+- Use devmanager_list_tasks to see existing tasks and avoid duplicates.
+
+### Step 2: Clarify ambiguities
+Ask the user about anything unclear BEFORE creating tasks. Examples:
+- Scope boundaries ("Should this include tests?")
+- Priority and order ("Which part is most urgent?")
+- Technical preferences ("REST or GraphQL?")
+Do NOT guess — a quick question saves a bad plan.
+
+### Step 3: Present the plan (optional)
+If the plan is complex (5+ tasks), use create_document to present a structured overview before generating tasks. Keep it concise: a numbered list with 1-line descriptions is enough. Wait for user feedback.
+
+### Step 4: Generate tasks in batch
+Call devmanager_create_task multiple times in the SAME response. The system automatically groups them into a single approval card.
+
+**MANDATORY structure — umbrella task + subtasks:**
+1. The FIRST create_task call MUST be the umbrella (parent) task — a high-level description of the overall goal. This task is NOT meant to be executed directly; it serves as a container.
+2. ALL subsequent create_task calls MUST use parent_ref=1 to become subtasks of the umbrella.
+3. Use sort_order (1, 2, 3...) on subtasks to define execution sequence.
+4. Each subtask description MUST include clear acceptance criteria so a Claude Code session can execute it autonomously.
+
+### Task granularity — CRITICAL
+Each task MUST be completable in a single Claude Code session (roughly 30 min to 1 hour of focused work).
+
+**Too simple** (merge into a larger task):
+- "Rename variable X" — fold into the task that refactors that module.
+- "Add one import" — part of the feature task, not standalone.
+- "Fix typo in comment" — not worth a task unless it's a docs-only sweep.
+
+**Too complex** (split into smaller tasks):
+- "Implement the entire authentication system" — break into: add user model, add login endpoint, add JWT middleware, add protected routes, add tests.
+- "Refactor the frontend" — break by component or feature area.
+- "Add full CRUD for entities X, Y, Z" — one task per entity, or group tightly related ones.
+
+**Right size** (examples):
+- "Add login API endpoint with JWT token generation"
+- "Create user registration form with validation"
+- "Add unit tests for the payment service"
+- "Refactor session manager to support SSH reconnection"
 `)
 
 	sb.WriteString(`
