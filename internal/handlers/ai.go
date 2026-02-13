@@ -541,8 +541,10 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return string(j)
 	})
 
-	// Create independent context for LLM streaming (not tied to HTTP request lifecycle)
-	streamCtx, streamCancel := context.WithCancel(context.Background())
+	// Create independent context for LLM streaming (not tied to HTTP request lifecycle).
+	// Add a 10-minute maximum timeout to prevent indefinite hangs when the Claude Code
+	// subprocess stalls. This is a safety net — normal responses complete much faster.
+	streamCtx, streamCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	h.registerStream(conv.ID, streamCancel)
 
 	// Track streaming error for defer
