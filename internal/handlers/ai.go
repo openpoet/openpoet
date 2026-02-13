@@ -649,8 +649,6 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create a single batch proposal document if task actions were collected.
-	// Planning mode → "Planejamento:" doc with planning approval flow.
-	// Regular mode → "Tarefa:" doc with task proposal approval flow.
 	if collector.hasActions() {
 		actions := collector.getActions()
 		projectID := actions[0].ProjectID
