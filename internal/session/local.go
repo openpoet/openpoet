@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -69,8 +70,17 @@ func (r *LocalRunner) Start(ctx context.Context) error {
 	r.cmd = exec.CommandContext(r.ctx, "claude", r.cliArgs...)
 	r.cmd.Dir = r.workDir
 
-	// Set environment variables
-	r.cmd.Env = os.Environ()
+	// Set environment variables — start from the current process env but strip
+	// Claude Code marker vars so that child `claude` processes are not rejected
+	// as "nested sessions". This matters when devmanager itself was launched from
+	// within a Claude Code session (e.g. via the deploy skill).
+	for _, env := range os.Environ() {
+		key := env[:strings.IndexByte(env, '=')]
+		if key == "CLAUDECODE" || key == "CLAUDE_CODE_ENTRYPOINT" {
+			continue
+		}
+		r.cmd.Env = append(r.cmd.Env, env)
+	}
 	for k, v := range r.envVars {
 		r.cmd.Env = append(r.cmd.Env, fmt.Sprintf("%s=%s", k, v))
 	}
