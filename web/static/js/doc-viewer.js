@@ -36,8 +36,7 @@ class DocViewer {
             const doc = await resp.json();
 
             const isPendingMemoryDoc = doc.title && doc.title.startsWith('Memory Doc:');
-            const isPlanningProposal = doc.title && doc.title.startsWith('Planejamento:');
-            const isTaskProposal = doc.title && doc.title.startsWith('Tarefa:');
+            const isTaskProposal = doc.title && (doc.title.startsWith('Tarefa:') || doc.title.startsWith('Planejamento:'));
 
             if (isPendingMemoryDoc) {
                 this.openWithContent(doc.title, doc.content, {
@@ -72,46 +71,6 @@ class DocViewer {
                                     }
                                 } catch (e) {
                                     window.app?.showToast('Erro ao aprovar', 'error');
-                                }
-                            }
-                        }
-                    ]
-                });
-            } else if (isPlanningProposal) {
-                this.openWithContent(doc.title, doc.content, {
-                    actions: [
-                        {
-                            label: 'Rejeitar Plano',
-                            class: 'btn btn-secondary',
-                            onClick: async () => {
-                                try {
-                                    await fetch(`/api/planning/reject/${docId}`, { method: 'POST' });
-                                    this.close();
-                                    window.aiChat?.updateDocCardStatus(docId, 'rejected');
-                                    window.app?.showToast('Plano rejeitado.', 'info');
-                                } catch (e) {
-                                    this.close();
-                                }
-                            }
-                        },
-                        {
-                            label: 'Aprovar Plano',
-                            class: 'btn btn-primary',
-                            onClick: async () => {
-                                try {
-                                    const r = await fetch(`/api/planning/approve/${docId}`, { method: 'POST' });
-                                    if (r.ok) {
-                                        const data = await r.json();
-                                        this.close();
-                                        window.aiChat?.updateDocCardStatus(docId, 'approved');
-                                        const msg = `Plano aprovado! ${data.created || 0} tarefa(s) criada(s), ${data.updated || 0} atualizada(s), ${data.deleted || 0} removida(s).`;
-                                        window.app?.showToast(msg, 'success');
-                                    } else {
-                                        const err = await r.json();
-                                        window.app?.showToast(err.error || 'Erro ao aprovar plano', 'error');
-                                    }
-                                } catch (e) {
-                                    window.app?.showToast('Erro ao aprovar plano', 'error');
                                 }
                             }
                         }
