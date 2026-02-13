@@ -569,7 +569,7 @@ class AIChatManager {
         if (data.doc_id) card.dataset.docId = data.doc_id;
 
         const isProposal = data.type === 'proposal';
-        const isTaskProposal = data.type === 'task_proposal' || data.type === 'planning';
+        const isTaskProposal = data.type === 'task_proposal';
         const status = data.status || 'pending';
 
         let icon;
@@ -836,7 +836,7 @@ class AIChatManager {
                 for (const doc of data.doc_cards) {
                     let type = 'document';
                     if (doc.title && doc.title.startsWith('Memory Doc:')) type = 'proposal';
-                    else if (doc.title && (doc.title.startsWith('Tarefa:') || doc.title.startsWith('Planejamento:'))) type = 'task_proposal';
+                    else if (doc.title && doc.title.startsWith('Tarefa:')) type = 'task_proposal';
 
                     // Find the specific assistant message this doc card belongs to
                     let targetContent = null;

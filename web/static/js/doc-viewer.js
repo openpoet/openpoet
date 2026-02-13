@@ -36,7 +36,7 @@ class DocViewer {
             const doc = await resp.json();
 
             const isPendingMemoryDoc = doc.title && doc.title.startsWith('Memory Doc:');
-            const isTaskProposal = doc.title && (doc.title.startsWith('Tarefa:') || doc.title.startsWith('Planejamento:'));
+            const isTaskProposal = doc.title && doc.title.startsWith('Tarefa:');
 
             if (isPendingMemoryDoc) {
                 this.openWithContent(doc.title, doc.content, {

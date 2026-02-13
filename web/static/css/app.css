@@ -3443,16 +3443,6 @@ body {
     background: rgba(239, 68, 68, 0.15);
     color: #dc2626;
 }
-.ai-chat-doc-card-planning {
-    border-left-color: #06b6d4;
-    background: color-mix(in srgb, #06b6d4 5%, var(--color-surface));
-}
-.ai-chat-doc-card-planning .ai-chat-doc-card-icon {
-    color: #06b6d4;
-}
-.ai-chat-doc-card-planning .ai-chat-doc-card-btn {
-    background: #06b6d4;
-}
 .ai-chat-doc-card-task_proposal {
     border-left-color: #22c55e;
     background: color-mix(in srgb, #22c55e 5%, var(--color-surface));
@@ -4235,17 +4225,6 @@ body {
     gap: 6px;
 }
 
-/* Planning button in tasks header */
-#btn-plan-tasks {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-}
-#btn-plan-tasks svg {
-    flex-shrink: 0;
-}
-
-/* Planning project selection modal */
 .task-card {
     background: var(--color-surface);
     border: 1px solid var(--color-border);

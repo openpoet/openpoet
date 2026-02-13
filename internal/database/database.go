@@ -443,14 +443,6 @@ func (d *DB) TouchAIConversation(ctx context.Context, id int64) error {
 	return err
 }
 
-// UpdateAIConversationMode updates the proactive type and context of a conversation (used for planning mode switch).
-func (d *DB) UpdateAIConversationMode(ctx context.Context, id int64, proactiveType, proactiveContext string) error {
-	_, err := d.ExecContext(ctx,
-		"UPDATE ai_conversations SET proactive_type=?, proactive_context=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-		proactiveType, proactiveContext, id)
-	return err
-}
-
 func (d *DB) DeleteAIConversation(ctx context.Context, id int64) error {
 	d.DeleteTempDocumentsByConversation(ctx, id)
 	_, err := d.ExecContext(ctx, "DELETE FROM ai_conversations WHERE id = ?", id)
