@@ -2233,6 +2233,83 @@ func (h *AIHandler) HandleInitiatePlanning(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// HandleInitiateTaskCreation creates a proactive AI conversation to assist with task creation.
+func (h *AIHandler) HandleInitiateTaskCreation(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		ProjectID   int64  `json:"project_id"`
+		ParentID    int64  `json:"parent_id"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Status      string `json:"status"`
+		Priority    string `json:"priority"`
+		DueDate     string `json:"due_date"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if input.ProjectID <= 0 {
+		respondError(w, http.StatusBadRequest, "project_id is required")
+		return
+	}
+
+	ctx := r.Context()
+	project, err := h.api.db.GetProject(ctx, input.ProjectID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	ctxData := map[string]interface{}{
+		"intent":       "task_creation",
+		"project_id":   input.ProjectID,
+		"project_name": project.Name,
+		"title":        input.Title,
+		"description":  input.Description,
+		"status":       input.Status,
+		"priority":     input.Priority,
+		"due_date":     input.DueDate,
+	}
+	if input.ParentID > 0 {
+		ctxData["parent_id"] = input.ParentID
+	}
+	proactiveCtx, _ := json.Marshal(ctxData)
+
+	// Build assistant message showing pre-filled data
+	var details string
+	if input.Title != "" {
+		details += fmt.Sprintf("- **Título:** %s\n", input.Title)
+	}
+	if input.Description != "" {
+		details += fmt.Sprintf("- **Descrição:** %s\n", input.Description)
+	}
+	if input.Priority != "" {
+		details += fmt.Sprintf("- **Prioridade:** %s\n", input.Priority)
+	}
+	if input.DueDate != "" {
+		details += fmt.Sprintf("- **Prazo:** %s\n", input.DueDate)
+	}
+
+	assistantMsg := fmt.Sprintf(
+		"Criação de tarefa com IA para o projeto **%s**.\n\n", project.Name)
+	if details != "" {
+		assistantMsg += fmt.Sprintf("Dados já preenchidos:\n%s\n", details)
+	}
+	assistantMsg += "Descreva melhor o que você precisa e eu vou ajudar a refinar a tarefa, quebrá-la em subtarefas se necessário, e criá-la no projeto."
+
+	title := fmt.Sprintf("Nova Tarefa: %s", project.Name)
+	conv, err := h.api.db.CreateProactiveConversation(ctx, title, "standard", "task_creation", string(proactiveCtx), assistantMsg)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to create conversation")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+}
+
 // HandleListConversations lists all conversations.
 func (h *AIHandler) HandleListConversations(w http.ResponseWriter, r *http.Request) {
 	// Auto-prune: keep only the last 15 conversations
