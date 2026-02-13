@@ -2448,6 +2448,145 @@ func (h *AIHandler) HandleGenerateSkill(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// HandleSuggestTaskData analyzes session output and suggests task title/description/priority.
+func (h *AIHandler) HandleSuggestTaskData(w http.ResponseWriter, r *http.Request) {
+	p := h.getProvider()
+	if p == nil {
+		respondError(w, http.StatusServiceUnavailable, "AI not configured")
+		return
+	}
+
+	if !h.checkRateLimit("suggest_task") {
+		respondError(w, http.StatusTooManyRequests, "Rate limit exceeded")
+		return
+	}
+
+	sessionID := chi.URLParam(r, "id")
+
+	output, err := h.api.sessionMgr.GetSessionOutput(sessionID)
+	if err != nil || len(output) == 0 {
+		respondError(w, http.StatusNotFound, "Session not running or no output")
+		return
+	}
+
+	// Truncate to last ~10KB for speed/cost
+	if len(output) > 10000 {
+		output = output[len(output)-10000:]
+	}
+
+	// Strip ANSI escape codes and control characters from terminal output
+	// These break the Claude CLI when passed as --print argument
+	ansiRe := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x1b]*\x1b\\|\x1b[^[\]].?`)
+	cleanOutput := ansiRe.ReplaceAll(output, nil)
+	// Also remove other control characters except newline, tab, carriage return
+	controlRe := regexp.MustCompile(`[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]`)
+	cleanOutput = controlRe.ReplaceAll(cleanOutput, nil)
+
+	if len(cleanOutput) == 0 {
+		respondError(w, http.StatusNotFound, "Session has no readable output")
+		return
+	}
+
+	sess, err := h.api.db.GetSession(r.Context(), sessionID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Session not found")
+		return
+	}
+
+	project, err := h.api.db.GetProject(r.Context(), sess.ProjectID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	model, _ := h.api.db.GetSetting(r.Context(), "ai_model")
+
+	prompt := fmt.Sprintf(`You are a project manager creating a task ticket. Analyze this terminal session and create a task that describes the OBJECTIVE — what needs to be accomplished.
+
+Project: %s
+Session output:
+%s
+
+Respond with ONLY valid JSON, no markdown:
+{"title": "...", "description": "...", "priority": "..."}
+
+Rules:
+- Title: imperative verb + objective, max 80 chars. Examples: "Implementar validação de formulário de login", "Corrigir erro 500 na API de pagamentos", "Refatorar módulo de autenticação"
+- Description: 1-2 sentences describing the GOAL and expected outcome, NOT what is currently happening. Write as a task assignment: what should be done and why.
+- Priority: "urgent" for hotfixes/production issues, "high" for important features/bugs, "medium" for regular work, "low" for nice-to-haves
+- Use Portuguese (pt-BR)`, project.Name, string(cleanOutput))
+
+	req := &llm.Request{
+		System:    "You are a task management assistant. Respond ONLY with valid JSON, no markdown.",
+		Messages:  []llm.Message{llm.NewTextMessage("user", prompt)},
+		MaxTokens: 256,
+		Model:     model,
+	}
+
+	var fullText strings.Builder
+	resp, err := p.StreamMessage(r.Context(), req, func(event llm.StreamEvent) error {
+		if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
+			fullText.WriteString(event.Delta.Text)
+		}
+		return nil
+	})
+
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "AI generation failed: "+err.Error())
+		return
+	}
+
+	// Record token usage
+	if resp != nil && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
+		usageModel := model
+		if resp.Model != "" {
+			usageModel = resp.Model
+		}
+		if usageModel == "" {
+			usageModel = "unknown"
+		}
+		h.api.db.CreateTokenUsage(r.Context(), &database.TokenUsage{
+			Source:              "ai_assistant",
+			Subcategory:         "suggest_task",
+			Model:               usageModel,
+			InputTokens:         resp.Usage.InputTokens,
+			OutputTokens:        resp.Usage.OutputTokens,
+			CacheReadTokens:     resp.Usage.CacheReadTokens,
+			CacheCreationTokens: resp.Usage.CacheCreationTokens,
+			CostUSD:             llm.CalculateCost(usageModel, resp.Usage.InputTokens, resp.Usage.OutputTokens),
+		})
+	}
+
+	// Parse JSON response
+	responseText := strings.TrimSpace(fullText.String())
+	// Strip markdown code blocks if present
+	if strings.HasPrefix(responseText, "```") {
+		lines := strings.Split(responseText, "\n")
+		if len(lines) > 2 {
+			responseText = strings.Join(lines[1:len(lines)-1], "\n")
+		}
+	}
+
+	var result struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Priority    string `json:"priority"`
+	}
+
+	if err := json.Unmarshal([]byte(responseText), &result); err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to parse AI response")
+		return
+	}
+
+	// Validate priority
+	validPriorities := map[string]bool{"low": true, "medium": true, "high": true, "urgent": true}
+	if !validPriorities[result.Priority] {
+		result.Priority = "medium"
+	}
+
+	respondJSON(w, http.StatusOK, result)
+}
+
 // HandleValidateSkill validates a skill's format and content.
 func (h *AIHandler) HandleValidateSkill(w http.ResponseWriter, r *http.Request) {
 	p := h.getProvider()
@@ -2944,12 +3083,7 @@ func (h *AIHandler) AcceptSuggestion(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusBadRequest, "Missing task_id or session_id for link_task")
 			return
 		}
-		st := &database.SessionTask{
-			SessionID: suggestion.SessionID,
-			TaskID:    *ctx.TaskID,
-			Role:      "works_on",
-		}
-		if err := h.api.db.CreateSessionTask(r.Context(), st); err != nil {
+		if err := h.api.db.LinkSessionToTask(r.Context(), suggestion.SessionID, *ctx.TaskID); err != nil {
 			respondError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -2988,12 +3122,7 @@ func (h *AIHandler) AcceptSuggestion(w http.ResponseWriter, r *http.Request) {
 		}
 		// Link session to new task if session exists
 		if suggestion.SessionID != "" {
-			st := &database.SessionTask{
-				SessionID: suggestion.SessionID,
-				TaskID:    task.ID,
-				Role:      "registered_as",
-			}
-			h.api.db.CreateSessionTask(r.Context(), st)
+			h.api.db.LinkSessionToTask(r.Context(), suggestion.SessionID, task.ID)
 		}
 		h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{
 			"action":     "created",

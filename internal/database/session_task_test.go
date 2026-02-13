@@ -2,7 +2,6 @@ package database
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -25,17 +24,61 @@ func setupTestDB(t *testing.T) *DB {
 	return db
 }
 
-func TestGetSessionsForTask_IsolatesPrimaryRoles(t *testing.T) {
+func TestLinkSessionToTask(t *testing.T) {
 	db := setupTestDB(t)
 	ctx := context.Background()
 
-	// Create a project
 	proj := &Project{Name: "test-project", Path: "/tmp/test", Type: "local"}
 	if err := db.CreateProject(ctx, proj); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create two tasks
+	task := &ProjectTask{ProjectID: proj.ID, Title: "Task A", Status: "todo", Priority: "medium"}
+	if err := db.CreateTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	sess := &Session{ID: "sess-1", ProjectID: proj.ID, Status: "running", Name: "Session 1", StartTime: time.Now()}
+	if err := db.CreateSession(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+
+	// Session should have no task initially
+	linkedTask, err := db.GetTaskForSession(ctx, "sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkedTask != nil {
+		t.Fatal("expected no linked task initially")
+	}
+
+	// Link session to task
+	if err := db.LinkSessionToTask(ctx, "sess-1", task.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now should return the task
+	linkedTask, err = db.GetTaskForSession(ctx, "sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkedTask == nil {
+		t.Fatal("expected linked task after LinkSessionToTask")
+	}
+	if linkedTask.ID != task.ID {
+		t.Errorf("expected task ID %d, got %d", task.ID, linkedTask.ID)
+	}
+}
+
+func TestGetSessionsForTask(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	proj := &Project{Name: "test-project", Path: "/tmp/test", Type: "local"}
+	if err := db.CreateProject(ctx, proj); err != nil {
+		t.Fatal(err)
+	}
+
 	taskA := &ProjectTask{ProjectID: proj.ID, Title: "Task A", Status: "in_progress", Priority: "medium"}
 	taskB := &ProjectTask{ProjectID: proj.ID, Title: "Task B", Status: "in_progress", Priority: "medium"}
 	if err := db.CreateTask(ctx, taskA); err != nil {
@@ -45,30 +88,25 @@ func TestGetSessionsForTask_IsolatesPrimaryRoles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create two sessions (Session 1 is older, Session 2 is newer)
 	sess1 := &Session{ID: "sess-1", ProjectID: proj.ID, Status: "stopped", Name: "Session 1", StartTime: time.Now().Add(-1 * time.Hour)}
-	sess2 := &Session{ID: "sess-2", ProjectID: proj.ID, Status: "stopped", Name: "Session 2", StartTime: time.Now()}
+	sess2 := &Session{ID: "sess-2", ProjectID: proj.ID, Status: "running", Name: "Session 2", StartTime: time.Now()}
+	sess3 := &Session{ID: "sess-3", ProjectID: proj.ID, Status: "running", Name: "Session 3 (no task)", StartTime: time.Now()}
 	if err := db.CreateSession(ctx, sess1); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.CreateSession(ctx, sess2); err != nil {
 		t.Fatal(err)
 	}
-
-	// Link Session 1 to Task A with 'created_from' (primary)
-	if err := db.CreateSessionTask(ctx, &SessionTask{SessionID: "sess-1", TaskID: taskA.ID, Role: "created_from"}); err != nil {
-		t.Fatal(err)
-	}
-	// Link Session 2 to Task B with 'created_from' (primary)
-	if err := db.CreateSessionTask(ctx, &SessionTask{SessionID: "sess-2", TaskID: taskB.ID, Role: "created_from"}); err != nil {
-		t.Fatal(err)
-	}
-	// Also link Session 2 to Task A with 'works_on' (secondary — should be excluded)
-	if err := db.CreateSessionTask(ctx, &SessionTask{SessionID: "sess-2", TaskID: taskA.ID, Role: "works_on"}); err != nil {
+	if err := db.CreateSession(ctx, sess3); err != nil {
 		t.Fatal(err)
 	}
 
-	// GetSessionsForTask for Task A should return ONLY Session 1
+	// Link sessions to tasks via task_id
+	db.LinkSessionToTask(ctx, "sess-1", taskA.ID)
+	db.LinkSessionToTask(ctx, "sess-2", taskB.ID)
+	// sess-3 has no task
+
+	// Task A should have only sess-1
 	sessions, err := db.GetSessionsForTask(ctx, taskA.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -77,10 +115,10 @@ func TestGetSessionsForTask_IsolatesPrimaryRoles(t *testing.T) {
 		t.Fatalf("expected 1 session for Task A, got %d", len(sessions))
 	}
 	if sessions[0].ID != "sess-1" {
-		t.Errorf("expected session 'sess-1' for Task A, got '%s'", sessions[0].ID)
+		t.Errorf("expected session 'sess-1', got '%s'", sessions[0].ID)
 	}
 
-	// GetSessionsForTask for Task B should return ONLY Session 2
+	// Task B should have only sess-2
 	sessions, err = db.GetSessionsForTask(ctx, taskB.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -89,21 +127,19 @@ func TestGetSessionsForTask_IsolatesPrimaryRoles(t *testing.T) {
 		t.Fatalf("expected 1 session for Task B, got %d", len(sessions))
 	}
 	if sessions[0].ID != "sess-2" {
-		t.Errorf("expected session 'sess-2' for Task B, got '%s'", sessions[0].ID)
+		t.Errorf("expected session 'sess-2', got '%s'", sessions[0].ID)
 	}
 }
 
-func TestGetTaskSessionSummary_IsolatesPrimaryRoles(t *testing.T) {
+func TestGetTaskSessionSummary(t *testing.T) {
 	db := setupTestDB(t)
 	ctx := context.Background()
 
-	// Create a project
 	proj := &Project{Name: "test-project", Path: "/tmp/test", Type: "local"}
 	if err := db.CreateProject(ctx, proj); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create two tasks
 	taskA := &ProjectTask{ProjectID: proj.ID, Title: "Task A", Status: "in_progress", Priority: "medium"}
 	taskB := &ProjectTask{ProjectID: proj.ID, Title: "Task B", Status: "in_progress", Priority: "medium"}
 	if err := db.CreateTask(ctx, taskA); err != nil {
@@ -113,7 +149,6 @@ func TestGetTaskSessionSummary_IsolatesPrimaryRoles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create sessions
 	sess1 := &Session{ID: "sess-1", ProjectID: proj.ID, Status: "stopped", Name: "Session 1", StartTime: time.Now().Add(-1 * time.Hour)}
 	sess2 := &Session{ID: "sess-2", ProjectID: proj.ID, Status: "running", Name: "Session 2", StartTime: time.Now()}
 	if err := db.CreateSession(ctx, sess1); err != nil {
@@ -123,17 +158,8 @@ func TestGetTaskSessionSummary_IsolatesPrimaryRoles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Primary links
-	if err := db.CreateSessionTask(ctx, &SessionTask{SessionID: "sess-1", TaskID: taskA.ID, Role: "created_from"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.CreateSessionTask(ctx, &SessionTask{SessionID: "sess-2", TaskID: taskB.ID, Role: "created_from"}); err != nil {
-		t.Fatal(err)
-	}
-	// Secondary link (should be excluded from summary)
-	if err := db.CreateSessionTask(ctx, &SessionTask{SessionID: "sess-2", TaskID: taskA.ID, Role: "works_on"}); err != nil {
-		t.Fatal(err)
-	}
+	db.LinkSessionToTask(ctx, "sess-1", taskA.ID)
+	db.LinkSessionToTask(ctx, "sess-2", taskB.ID)
 
 	summary, err := db.GetTaskSessionSummary(ctx, proj.ID)
 	if err != nil {
@@ -144,7 +170,6 @@ func TestGetTaskSessionSummary_IsolatesPrimaryRoles(t *testing.T) {
 		t.Fatalf("expected 2 task summaries, got %d", len(summary))
 	}
 
-	// Build a map for easy lookup
 	summaryMap := make(map[int64]struct {
 		SessionCount         int
 		ActiveCount          int
@@ -162,7 +187,7 @@ func TestGetTaskSessionSummary_IsolatesPrimaryRoles(t *testing.T) {
 		}{s.SessionCount, s.ActiveCount, s.StoppedCount, s.LatestSession, s.LatestStoppedSession}
 	}
 
-	// Task A: only sess-1 (stopped)
+	// Task A: sess-1 (stopped)
 	infoA, ok := summaryMap[taskA.ID]
 	if !ok {
 		t.Fatal("Task A not found in summary")
@@ -176,14 +201,8 @@ func TestGetTaskSessionSummary_IsolatesPrimaryRoles(t *testing.T) {
 	if infoA.StoppedCount != 1 {
 		t.Errorf("Task A: expected stopped_count=1, got %d", infoA.StoppedCount)
 	}
-	if infoA.LatestSession != "sess-1" {
-		t.Errorf("Task A: expected latest_session='sess-1', got '%s'", infoA.LatestSession)
-	}
-	if infoA.LatestStoppedSession != "sess-1" {
-		t.Errorf("Task A: expected latest_stopped_session='sess-1', got '%s'", infoA.LatestStoppedSession)
-	}
 
-	// Task B: only sess-2 (running)
+	// Task B: sess-2 (running)
 	infoB, ok := summaryMap[taskB.ID]
 	if !ok {
 		t.Fatal("Task B not found in summary")
@@ -194,12 +213,9 @@ func TestGetTaskSessionSummary_IsolatesPrimaryRoles(t *testing.T) {
 	if infoB.ActiveCount != 1 {
 		t.Errorf("Task B: expected active_count=1, got %d", infoB.ActiveCount)
 	}
-	if infoB.LatestSession != "sess-2" {
-		t.Errorf("Task B: expected latest_session='sess-2', got '%s'", infoB.LatestSession)
-	}
 }
 
-func TestGetSessionsForTask_IncludesRegisteredAs(t *testing.T) {
+func TestGetSessionsForTask_NoSessions(t *testing.T) {
 	db := setupTestDB(t)
 	ctx := context.Background()
 
@@ -208,54 +224,8 @@ func TestGetSessionsForTask_IncludesRegisteredAs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	task := &ProjectTask{ProjectID: proj.ID, Title: "Task C", Status: "todo", Priority: "medium"}
+	task := &ProjectTask{ProjectID: proj.ID, Title: "Lonely Task", Status: "todo", Priority: "medium"}
 	if err := db.CreateTask(ctx, task); err != nil {
-		t.Fatal(err)
-	}
-
-	sess := &Session{ID: "sess-3", ProjectID: proj.ID, Status: "running", Name: "Session 3", StartTime: time.Now()}
-	if err := db.CreateSession(ctx, sess); err != nil {
-		t.Fatal(err)
-	}
-
-	// Link with 'registered_as' (primary role — should be included)
-	if err := db.CreateSessionTask(ctx, &SessionTask{SessionID: "sess-3", TaskID: task.ID, Role: "registered_as"}); err != nil {
-		t.Fatal(err)
-	}
-
-	sessions, err := db.GetSessionsForTask(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sessions) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(sessions))
-	}
-	if sessions[0].ID != "sess-3" {
-		t.Errorf("expected 'sess-3', got '%s'", sessions[0].ID)
-	}
-}
-
-func TestGetSessionsForTask_ExcludesWorksOn(t *testing.T) {
-	db := setupTestDB(t)
-	ctx := context.Background()
-
-	proj := &Project{Name: "test-project", Path: "/tmp/test", Type: "local"}
-	if err := db.CreateProject(ctx, proj); err != nil {
-		t.Fatal(err)
-	}
-
-	task := &ProjectTask{ProjectID: proj.ID, Title: "Task D", Status: "todo", Priority: "medium"}
-	if err := db.CreateTask(ctx, task); err != nil {
-		t.Fatal(err)
-	}
-
-	sess := &Session{ID: "sess-4", ProjectID: proj.ID, Status: "running", Name: "Session 4", StartTime: time.Now()}
-	if err := db.CreateSession(ctx, sess); err != nil {
-		t.Fatal(err)
-	}
-
-	// Link with only 'works_on' (secondary — should be excluded)
-	if err := db.CreateSessionTask(ctx, &SessionTask{SessionID: "sess-4", TaskID: task.ID, Role: "works_on"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -264,9 +234,6 @@ func TestGetSessionsForTask_ExcludesWorksOn(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(sessions) != 0 {
-		for _, s := range sessions {
-			fmt.Printf("  unexpected session: %s\n", s.ID)
-		}
-		t.Fatalf("expected 0 sessions (works_on should be excluded), got %d", len(sessions))
+		t.Fatalf("expected 0 sessions, got %d", len(sessions))
 	}
 }
