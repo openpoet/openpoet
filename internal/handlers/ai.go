@@ -769,11 +769,17 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			switch a.Action {
 			case "update":
 				contentBuilder.WriteString(fmt.Sprintf("### %d. Atualizar tarefa #%d: %s\n", num, a.TaskID, a.Title))
+				if a.Description != "" {
+					contentBuilder.WriteString(fmt.Sprintf("**Nova descrição:** %s\n", a.Description))
+				}
 				if a.Status != "" {
 					contentBuilder.WriteString(fmt.Sprintf("**Novo status:** %s\n", a.Status))
 				}
 				if a.Priority != "" {
 					contentBuilder.WriteString(fmt.Sprintf("**Nova prioridade:** %s\n", a.Priority))
+				}
+				if a.DueDate != "" {
+					contentBuilder.WriteString(fmt.Sprintf("**Nova data limite:** %s\n", a.DueDate))
 				}
 			case "delete":
 				contentBuilder.WriteString(fmt.Sprintf("### %d. Remover tarefa #%d: %s\n", num, a.TaskID, a.Title))
