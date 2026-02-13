@@ -75,6 +75,18 @@
         width: 100%;
     }
 
+    /* Session cards - show full name on mobile */
+    .session-card-header {
+        flex-wrap: wrap;
+    }
+    .session-card-name {
+        white-space: normal;
+        overflow: visible;
+        text-overflow: unset;
+        word-break: break-word;
+        line-height: 1.4;
+    }
+
     /* Project Detail - mobile */
     #view-project-detail {
         padding-bottom: 0;
@@ -425,7 +437,7 @@
     /* Session item */
     .mobile-session-item {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         padding: 12px 16px;
         cursor: pointer;
         transition: background-color var(--transition);
@@ -453,6 +465,7 @@
         height: 8px;
         border-radius: 50%;
         flex-shrink: 0;
+        margin-top: 5px;
     }
 
     .mobile-session-item-status[data-status="running"] {
@@ -471,14 +484,13 @@
         background-color: var(--color-status-stopped);
     }
 
-    /* Session item name */
+    /* Session item name - show full name with wrap in dropdown */
     .mobile-session-item-name {
         flex: 1;
         font-size: 13px;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
         color: var(--color-text);
+        word-break: break-word;
+        line-height: 1.4;
     }
 
     /* Close button */
@@ -1408,5 +1420,52 @@
     .link-task-tab {
         font-size: 12px;
         padding: 6px 12px;
+    }
+
+    /* Notification panel: position above mobile nav */
+    .notification-panel {
+        top: auto;
+        bottom: calc(var(--mobile-nav-height) + 8px);
+        left: 8px;
+        right: 8px;
+        width: auto;
+        max-height: 60vh;
+    }
+
+    #mobile-nav-notifications {
+        position: relative;
+    }
+
+    #mobile-nav-notifications .notif-count-badge {
+        top: 0;
+        right: 50%;
+        transform: translateX(14px);
+    }
+
+    /* Session Name Popup (mobile long-press) */
+    .session-name-popup-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 9998;
+        background: transparent;
+    }
+    .session-name-popup {
+        position: fixed;
+        z-index: 9999;
+        max-width: calc(100vw - 32px);
+        padding: 12px 16px;
+        background-color: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--border-radius);
+        color: var(--color-text);
+        font-size: 14px;
+        line-height: 1.5;
+        word-break: break-word;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        animation: popupFadeIn 0.15s ease-out;
+    }
+    @keyframes popupFadeIn {
+        from { opacity: 0; transform: translateY(4px); }
+        to   { opacity: 1; transform: translateY(0); }
     }
 }

@@ -128,6 +128,11 @@ func (d *DB) EndSession(ctx context.Context, id string, status string) error {
 	return err
 }
 
+func (d *DB) TouchSessionActivity(ctx context.Context, id string) error {
+	_, err := d.ExecContext(ctx, "UPDATE sessions SET last_activity_at=? WHERE id=?", time.Now(), id)
+	return err
+}
+
 func (d *DB) DeleteSession(ctx context.Context, id string) error {
 	_, err := d.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
 	return err
@@ -391,6 +396,34 @@ func (d *DB) MarkAllNotificationsRead(ctx context.Context) error {
 func (d *DB) DeleteNotification(ctx context.Context, id int64) error {
 	_, err := d.ExecContext(ctx, "DELETE FROM notifications WHERE id = ?", id)
 	return err
+}
+
+func (d *DB) MarkSessionNotificationsRead(ctx context.Context, sessionID string) (int64, error) {
+	result, err := d.ExecContext(ctx, "UPDATE notifications SET read = 1 WHERE session_id = ? AND read = 0", sessionID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func (d *DB) CountUnreadNotifications(ctx context.Context) (int, error) {
+	var count int
+	err := d.GetContext(ctx, &count, `
+		SELECT COUNT(*) FROM notifications n
+		INNER JOIN sessions s ON s.id = n.session_id
+		WHERE n.read = 0 AND s.status IN ('starting', 'running')`)
+	return count, err
+}
+
+// ListActiveNotifications returns unread notifications only from active sessions.
+func (d *DB) ListActiveNotifications(ctx context.Context) ([]Notification, error) {
+	var notifications []Notification
+	err := d.SelectContext(ctx, &notifications, `
+		SELECT n.* FROM notifications n
+		INNER JOIN sessions s ON s.id = n.session_id
+		WHERE n.read = 0 AND s.status IN ('starting', 'running')
+		ORDER BY n.created_at DESC`)
+	return notifications, err
 }
 
 // AI Conversation operations

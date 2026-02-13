@@ -35,6 +35,7 @@ var migrations = []Migration{
 	{Version: 17, Description: "projects: add tool_policy column for per-project tool access control", Up: migrateV17},
 	{Version: 18, Description: "docs: add message_id to temp_documents", Up: migrateV18},
 	{Version: 19, Description: "tasks: add global_sort_order for cross-project ordering", Up: migrateV19},
+	{Version: 20, Description: "sessions: add last_activity_at for tracking last output/event", Up: migrateV20},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -528,6 +529,12 @@ func migrateV19(tx *sqlx.Tx) error {
 		}
 	}
 	return nil
+}
+
+// migrateV20 adds last_activity_at to sessions for tracking last output/event.
+func migrateV20(tx *sqlx.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE sessions ADD COLUMN last_activity_at TIMESTAMP`)
+	return err
 }
 
 // migrateV4 adds AI conversation and message tables.

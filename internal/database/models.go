@@ -41,8 +41,9 @@ type Session struct {
 	PID       sql.NullInt64 `db:"pid" json:"pid,omitempty"`
 	Name      string        `db:"name" json:"name"`
 	TaskID    sql.NullInt64 `db:"task_id" json:"task_id,omitempty"`
-	StartTime time.Time     `db:"start_time" json:"start_time"`
-	EndTime   sql.NullTime  `db:"end_time" json:"end_time,omitempty"`
+	StartTime      time.Time     `db:"start_time" json:"start_time"`
+	EndTime        sql.NullTime  `db:"end_time" json:"end_time,omitempty"`
+	LastActivityAt sql.NullTime  `db:"last_activity_at" json:"last_activity_at,omitempty"`
 }
 
 type Skill struct {

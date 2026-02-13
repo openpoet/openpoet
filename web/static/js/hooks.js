@@ -11,6 +11,9 @@ class HookManager {
         this.toolEventsBySession = this._loadFromStorage(this.storageKeyEvents) || {};
         this.dismissedRequests = this._loadFromStorage(this.storageKeyDismissed) || [];
 
+        // Execution mode tracking per session
+        this.sessionModes = {}; // sessionID -> 'plan_mode' | 'executing' | 'idle'
+
         this.setupUI();
     }
 
@@ -300,6 +303,7 @@ class HookManager {
                 break;
             case 'hook_tool_start':
                 this.addToolEvent(msg.data, 'running');
+                this._trackModeFromToolStart(msg.data);
                 break;
             case 'hook_tool_done':
                 this.updateToolEvent(msg.data, 'completed');
@@ -312,6 +316,7 @@ class HookManager {
                 break;
             case 'hook_stop':
                 this.handleStop(msg.data);
+                this._setSessionMode(msg.data?.session_id, 'idle');
                 break;
             case 'hook_task_loaded':
                 this._handleTaskLoaded(msg.data);
@@ -414,24 +419,10 @@ class HookManager {
             </button>
         `;
 
-        // Click toast to switch to that session and reopen dialog
+        // Click toast to switch to that session and reopen dialog simultaneously
         toast.addEventListener('click', () => {
             toast.remove();
-            // Switch to the session
-            if (window.terminalManager?.hasSession(sessionId)) {
-                window.terminalManager.switchToSession(sessionId);
-                if (window.app) {
-                    window.app.updateTabActiveState(sessionId);
-                }
-            } else if (window.app) {
-                window.app.openTerminal(sessionId);
-            }
-            // Reopen the dialog
-            const entry = this.dismissedRequests.find(e => e.id === entryId);
-            if (entry) {
-                // Small delay to let session switch complete
-                setTimeout(() => this.reopenDialog(entryId), 200);
-            }
+            this.openSessionAndDialog(sessionId, entryId);
         });
 
         document.body.appendChild(toast);
@@ -783,6 +774,9 @@ class HookManager {
                     tool_name: 'ExitPlanMode'
                 })
             });
+            if (behavior === 'allow') {
+                this._onExitPlanApproved(sessionId);
+            }
         } catch (err) {
             console.error('Failed to respond to plan:', err);
         }
@@ -834,6 +828,7 @@ class HookManager {
                         message: value // "1", "2", or "3" — backend writes to terminal after allow
                     })
                 });
+                this._onExitPlanApproved(sessionId);
             } catch (err) {
                 console.error('Failed to submit plan choice:', err);
             }
@@ -1222,6 +1217,69 @@ class HookManager {
         this.updateToolBadge();
     }
 
+    // Open session terminal and dialog at the same time.
+    // Used by toast click and notification panel click.
+    openSessionAndDialog(sessionId, entryId) {
+        // Open the session terminal first (non-blocking)
+        if (window.terminalManager?.hasSession(sessionId)) {
+            window.terminalManager.switchToSession(sessionId);
+            if (window.app) {
+                window.app.updateTabActiveState(sessionId);
+                window.app._updateNavForTerminal();
+            }
+        } else if (window.app) {
+            window.app.openTerminal(sessionId);
+        }
+
+        // Open the dialog immediately (no delay)
+        if (entryId) {
+            this.reopenDialog(entryId);
+        }
+    }
+
+    // Open session and show dialog for a given session by finding its dismissed entry.
+    // Called by notification panel when user clicks a notification.
+    openSessionWithPendingDialog(sessionId) {
+        // Open the session terminal
+        if (window.terminalManager?.hasSession(sessionId)) {
+            window.terminalManager.switchToSession(sessionId);
+            if (window.app) {
+                window.app.updateTabActiveState(sessionId);
+                window.app._updateNavForTerminal();
+            }
+        } else if (window.app) {
+            window.app.openTerminal(sessionId);
+        }
+
+        // Find and reopen any dismissed dialog for this session
+        const entry = this.dismissedRequests.find(e => e.sessionId === sessionId);
+        if (entry) {
+            this.reopenDialog(entry.id);
+            return;
+        }
+
+        // If there's a pending permission for this session, it may already be showing.
+        // If not, fetch from backend and show.
+        if (this.pendingPermission?.sessionId === sessionId) return;
+
+        fetch(`/api/hooks/pending/${sessionId}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(state => {
+                if (!state?.pending_permission) return;
+                const pp = state.pending_permission;
+                const data = { session_id: sessionId, event: pp.event };
+                this.pendingPermission = { sessionId, event: pp.event, timestamp: Date.now() };
+                if (pp.msg_type === 'permission') {
+                    this.showPermissionDialog(data);
+                } else if (pp.msg_type === 'askUser') {
+                    this.showAskUserDialog(data);
+                } else if (pp.msg_type === 'exitPlan') {
+                    this.showExitPlanDialog(data);
+                }
+            })
+            .catch(() => {});
+    }
+
     // ==================== TOOL ACTIVITY ====================
 
     addToolEvent(data, status) {
@@ -1462,9 +1520,40 @@ class HookManager {
         // not when the session ends. No toast needed.
     }
 
+    // ==================== EXECUTION MODE TRACKING ====================
+
+    _trackModeFromToolStart(data) {
+        const event = data?.event || {};
+        const toolName = event.tool_name || '';
+        const sessionId = data?.session_id;
+        if (!sessionId) return;
+
+        if (toolName === 'EnterPlanMode') {
+            this._setSessionMode(sessionId, 'plan_mode');
+        } else if (this.sessionModes[sessionId] !== 'plan_mode') {
+            this._setSessionMode(sessionId, 'executing');
+        }
+    }
+
+    _setSessionMode(sessionId, mode) {
+        if (!sessionId || this.sessionModes[sessionId] === mode) return;
+        this.sessionModes[sessionId] = mode;
+        document.dispatchEvent(new CustomEvent('session-mode-changed', {
+            detail: { sessionId, mode }
+        }));
+    }
+
+    // Called when ExitPlanMode is approved — transitions out of plan mode
+    _onExitPlanApproved(sessionId) {
+        this._setSessionMode(sessionId, 'executing');
+    }
+
+    // ==================== SESSION CLEANUP ====================
+
     // Clear events for a specific session
     clearSession(sessionId) {
         delete this.toolEventsBySession[sessionId];
+        delete this.sessionModes[sessionId];
         this._saveToolEvents();
 
         this.dismissedRequests = this.dismissedRequests.filter(e => e.sessionId !== sessionId);

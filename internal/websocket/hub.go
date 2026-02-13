@@ -38,6 +38,9 @@ const (
 	MsgTypeAISuggestion MessageType = "ai_suggestion"
 	MsgTypeAIProactive  MessageType = "ai_proactive"
 	MsgTypeChatDocCard  MessageType = "chat_doc_card"
+
+	// Notification count updates
+	MsgTypeNotificationCount MessageType = "notification_count"
 )
 
 type Message struct {
@@ -242,6 +245,15 @@ func (h *Hub) BroadcastNotification(notification interface{}) {
 	h.BroadcastToChannel("events", &Message{
 		Type: MsgTypeNotification,
 		Data: notification,
+	})
+}
+
+func (h *Hub) BroadcastNotificationCount(count int) {
+	h.BroadcastToChannel("events", &Message{
+		Type: MsgTypeNotificationCount,
+		Data: map[string]interface{}{
+			"unread_count": count,
+		},
 	})
 }
 
