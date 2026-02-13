@@ -355,105 +355,122 @@ func (p *GoSDKProvider) streamInteractive(ctx context.Context, prompt string, re
 		}
 	}
 
-	// Process response messages until ResultMessage
+	// Process response messages until ResultMessage.
+	// CRITICAL: Use select with ctx.Done() to break out if context is cancelled
+	// (e.g., user stops the stream, timeout). Without this, the for-range loop
+	// blocks indefinitely if the Claude Code subprocess stalls.
 	blockStarted := false
 	var fullText strings.Builder
 	var response Response
 	response.StopReason = "end_turn"
 
-	for msg := range session.msgChan {
-		switch m := msg.(type) {
-		case *claudecode.AssistantMessage:
-			if m.HasError() {
-				errMsg := string(m.GetError())
+	for {
+		select {
+		case <-ctx.Done():
+			// Context cancelled (user stopped stream or timeout).
+			// Disconnect the session to kill the underlying claude subprocess.
+			if blockStarted {
+				callback(StreamEvent{Type: "content_block_stop", Index: 0})
+			}
+			p.disconnectSession(convID)
+			return nil, fmt.Errorf("gosdk: stream cancelled: %w", ctx.Err())
+
+		case msg, ok := <-session.msgChan:
+			if !ok {
+				// Channel closed — client disconnected
 				if blockStarted {
 					callback(StreamEvent{Type: "content_block_stop", Index: 0})
 				}
-				return nil, fmt.Errorf("assistant error: %s", errMsg)
+				p.disconnectSession(convID)
+				return nil, fmt.Errorf("gosdk: client disconnected during response")
 			}
 
-			for _, block := range m.Content {
-				switch b := block.(type) {
-				case *claudecode.TextBlock:
-					if !blockStarted {
+			switch m := msg.(type) {
+			case *claudecode.AssistantMessage:
+				if m.HasError() {
+					errMsg := string(m.GetError())
+					if blockStarted {
+						callback(StreamEvent{Type: "content_block_stop", Index: 0})
+					}
+					return nil, fmt.Errorf("assistant error: %s", errMsg)
+				}
+
+				for _, block := range m.Content {
+					switch b := block.(type) {
+					case *claudecode.TextBlock:
+						if !blockStarted {
+							callback(StreamEvent{
+								Type:         "content_block_start",
+								Index:        0,
+								ContentBlock: &ContentBlock{Type: "text", Text: ""},
+							})
+							blockStarted = true
+						}
+						callback(StreamEvent{
+							Type:  "content_block_delta",
+							Index: 0,
+							Delta: &StreamDelta{Type: "text_delta", Text: b.Text},
+						})
+						fullText.WriteString(b.Text)
+
+					case *claudecode.ToolUseBlock:
 						callback(StreamEvent{
 							Type:         "content_block_start",
 							Index:        0,
-							ContentBlock: &ContentBlock{Type: "text", Text: ""},
+							ContentBlock: &ContentBlock{Type: "tool_use", ID: b.ToolUseID, Name: b.Name},
 						})
-						blockStarted = true
 					}
-					callback(StreamEvent{
-						Type:  "content_block_delta",
-						Index: 0,
-						Delta: &StreamDelta{Type: "text_delta", Text: b.Text},
-					})
-					fullText.WriteString(b.Text)
-
-				case *claudecode.ToolUseBlock:
-					callback(StreamEvent{
-						Type:         "content_block_start",
-						Index:        0,
-						ContentBlock: &ContentBlock{Type: "tool_use", ID: b.ToolUseID, Name: b.Name},
-					})
 				}
-			}
 
-			if m.Model != "" {
-				response.Model = m.Model
-			}
+				if m.Model != "" {
+					response.Model = m.Model
+				}
 
-		case *claudecode.SystemMessage:
-			if m.Subtype == "init" {
-				if sid, ok := m.Data["session_id"].(string); ok {
+			case *claudecode.SystemMessage:
+				if m.Subtype == "init" {
+					if sid, ok := m.Data["session_id"].(string); ok {
+						p.mu.Lock()
+						if s, ok := p.sessions[convID]; ok {
+							s.sessionID = sid
+						}
+						p.mu.Unlock()
+						response.SessionID = sid
+					}
+				}
+
+			case *claudecode.ResultMessage:
+				// Final result for this query — extract data and STOP reading
+				if m.SessionID != "" {
 					p.mu.Lock()
 					if s, ok := p.sessions[convID]; ok {
-						s.sessionID = sid
+						s.sessionID = m.SessionID
 					}
 					p.mu.Unlock()
-					response.SessionID = sid
+					response.SessionID = m.SessionID
 				}
-			}
 
-		case *claudecode.ResultMessage:
-			// Final result for this query — extract data and STOP reading
-			if m.SessionID != "" {
-				p.mu.Lock()
-				if s, ok := p.sessions[convID]; ok {
-					s.sessionID = m.SessionID
+				if m.TotalCostUSD != nil {
+					response.CostUSD = *m.TotalCostUSD
 				}
-				p.mu.Unlock()
-				response.SessionID = m.SessionID
-			}
+				p.extractUsage(m, &response)
 
-			if m.TotalCostUSD != nil {
-				response.CostUSD = *m.TotalCostUSD
-			}
-			p.extractUsage(m, &response)
-
-			if m.IsError {
-				errText := "unknown error"
-				if m.Result != nil {
-					errText = *m.Result
+				if m.IsError {
+					errText := "unknown error"
+					if m.Result != nil {
+						errText = *m.Result
+					}
+					if blockStarted {
+						callback(StreamEvent{Type: "content_block_stop", Index: 0})
+					}
+					return nil, fmt.Errorf("gosdk result error: %s", errText)
 				}
-				if blockStarted {
-					callback(StreamEvent{Type: "content_block_stop", Index: 0})
-				}
-				return nil, fmt.Errorf("gosdk result error: %s", errText)
-			}
 
-			// ResultMessage marks the end of this query's response.
-			// STOP reading — the client stays alive for the next message.
-			goto done
+				// ResultMessage marks the end of this query's response.
+				// STOP reading — the client stays alive for the next message.
+				goto done
+			}
 		}
 	}
-
-	// If we exit the loop without goto done, the channel closed (client disconnected)
-	if blockStarted {
-		callback(StreamEvent{Type: "content_block_stop", Index: 0})
-	}
-	p.disconnectSession(convID)
-	return nil, fmt.Errorf("gosdk: client disconnected during response")
 
 done:
 	// Close the text block
