@@ -1007,7 +1007,7 @@ func (d *DB) GetSessionsForTask(ctx context.Context, taskID int64) ([]Session, e
 	err := d.SelectContext(ctx, &sessions,
 		`SELECT s.* FROM sessions s
 		 INNER JOIN session_tasks st ON s.id = st.session_id
-		 WHERE st.task_id = ?
+		 WHERE st.task_id = ? AND st.role IN ('created_from', 'registered_as')
 		 ORDER BY s.start_time DESC`, taskID)
 	return sessions, err
 }
@@ -1034,12 +1034,12 @@ func (d *DB) GetTaskSessionSummary(ctx context.Context, projectID int64) ([]stru
 		       COUNT(DISTINCT st.session_id) as session_count,
 		       COUNT(DISTINCT CASE WHEN s.status IN ('running', 'starting') THEN st.session_id END) as active_count,
 		       COUNT(DISTINCT CASE WHEN s.status IN ('stopped', 'completed') THEN st.session_id END) as stopped_count,
-		       COALESCE((SELECT s2.id FROM sessions s2 INNER JOIN session_tasks st2 ON s2.id = st2.session_id WHERE st2.task_id = st.task_id ORDER BY s2.start_time DESC LIMIT 1), '') as latest_session,
-		       COALESCE((SELECT s2.id FROM sessions s2 INNER JOIN session_tasks st2 ON s2.id = st2.session_id WHERE st2.task_id = st.task_id AND s2.status IN ('stopped', 'completed') ORDER BY s2.start_time DESC LIMIT 1), '') as latest_stopped_session
+		       COALESCE((SELECT s2.id FROM sessions s2 INNER JOIN session_tasks st2 ON s2.id = st2.session_id WHERE st2.task_id = st.task_id AND st2.role IN ('created_from', 'registered_as') ORDER BY s2.start_time DESC LIMIT 1), '') as latest_session,
+		       COALESCE((SELECT s2.id FROM sessions s2 INNER JOIN session_tasks st2 ON s2.id = st2.session_id WHERE st2.task_id = st.task_id AND st2.role IN ('created_from', 'registered_as') AND s2.status IN ('stopped', 'completed') ORDER BY s2.start_time DESC LIMIT 1), '') as latest_stopped_session
 		FROM session_tasks st
 		INNER JOIN sessions s ON s.id = st.session_id
 		INNER JOIN project_tasks t ON t.id = st.task_id
-		WHERE t.project_id = ?
+		WHERE t.project_id = ? AND st.role IN ('created_from', 'registered_as')
 		GROUP BY st.task_id`, projectID)
 	if err != nil {
 		return nil, err
