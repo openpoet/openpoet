@@ -230,6 +230,9 @@ func main() {
 	sessionMgr.OnSessionFlush = func(sessionID string) {
 		log.Printf("[OTEL] >>> OnSessionFlush callback fired for session %s", sessionID[:8])
 		otelHandler.FlushSession(sessionID)
+		// Expire all notifications for this session and clean up hook state
+		go notifService.MarkSessionRead(context.Background(), sessionID)
+		hookHandler.ClearSession(sessionID)
 	}
 	sessionMgr.OnSessionEnd = func(sessionID string, output []byte) {
 		log.Printf("[AI-Session] >>> OnSessionEnd callback fired for session %s (outputLen=%d)", sessionID[:8], len(output))
@@ -240,6 +243,14 @@ func main() {
 	hookHandler.OnEvaluateSession = func(sessionID string, trigger string, outputSnapshot []byte) {
 		aiHandler.EvaluateSession(context.Background(), sessionID, trigger, outputSnapshot)
 	}
+
+	// Wire activity tracking callback into hook handler
+	hookHandler.OnActivityTouch = func(sessionID string) {
+		db.TouchSessionActivity(context.Background(), sessionID)
+	}
+
+	// Wire OTEL handler into API for live session metrics
+	api.SetOTELHandler(otelHandler)
 
 	// Determine if MCP HTTP endpoint should be enabled
 	mcpHTTPEnabled := *mcpHTTP
@@ -374,6 +385,7 @@ func main() {
 
 		// Sessions
 		r.Get("/sessions", api.ListSessions)
+		r.Get("/sessions/active-details", api.GetActiveSessionDetails)
 		r.Post("/sessions", api.CreateSession)
 		r.Get("/sessions/{id}", api.GetSession)
 		r.Get("/sessions/{id}/output", api.GetSessionOutput)
@@ -462,7 +474,10 @@ func main() {
 
 		// Notifications
 		r.Get("/notifications", api.GetNotifications)
+		r.Get("/notifications/active", api.GetActiveNotifications)
+		r.Get("/notifications/unread-count", api.GetNotificationUnreadCount)
 		r.Put("/notifications/{id}/read", api.MarkNotificationRead)
+		r.Put("/notifications/read-all", api.MarkAllNotificationsRead)
 		r.Post("/notifications/subscribe", wsHandler.HandlePushSubscribe)
 		r.Delete("/notifications/subscribe", wsHandler.HandlePushUnsubscribe)
 		r.Get("/notifications/vapid", wsHandler.HandleVAPIDPublicKey)
@@ -521,8 +536,10 @@ func main() {
 		r.Post("/api/test/seed-token-usage", api.SeedTokenUsage)
 	}
 
-	// OTLP metrics endpoint (standard path for OpenTelemetry HTTP/JSON)
+	// OTLP endpoints (standard paths for OpenTelemetry HTTP/JSON)
 	r.Post("/v1/metrics", otelHandler.HandleMetrics)
+	r.Post("/v1/traces", otelHandler.HandleTraces)
+	r.Post("/v1/logs", otelHandler.HandleLogs)
 
 	// WebSocket routes
 	r.Get("/ws/session/{id}", wsHandler.HandleSessionWS)

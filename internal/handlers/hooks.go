@@ -68,30 +68,113 @@ type HookHandler struct {
 	// Set by main.go to wire AI evaluation into hook events.
 	OnEvaluateSession func(sessionID string, trigger string, outputSnapshot []byte)
 
-	mu              sync.Mutex
-	pending         map[string]*pendingPermission  // sessionID -> pending permission
-	alwaysAllow     map[string]map[string]bool     // sessionID -> toolName -> true
-	toolEvents      map[string][]toolEventEntry    // sessionID -> recent tool events buffer
-	lastPushSent    map[string]time.Time           // sessionID -> last push timestamp (for rate-limiting)
-	userStopped     map[string]bool                // sessionID -> true if user explicitly stopped
-	lastEvaluation  map[string]time.Time           // sessionID -> last evaluation timestamp (3-min cooldown)
-	taskNotifs      map[string]map[string]interface{} // sessionID -> task notification data (pending until user responds)
+	// OnActivityTouch is called (debounced) when a session has activity, to update last_activity_at.
+	OnActivityTouch func(sessionID string)
+
+	mu                sync.Mutex
+	pending           map[string]*pendingPermission  // sessionID -> pending permission
+	alwaysAllow       map[string]map[string]bool     // sessionID -> toolName -> true
+	toolEvents        map[string][]toolEventEntry    // sessionID -> recent tool events buffer
+	lastPushSent      map[string]time.Time           // sessionID -> last push timestamp (for rate-limiting)
+	userStopped       map[string]bool                // sessionID -> true if user explicitly stopped
+	lastEvaluation    map[string]time.Time           // sessionID -> last evaluation timestamp (3-min cooldown)
+	taskNotifs        map[string]map[string]interface{} // sessionID -> task notification data (pending until user responds)
+	lastActivityTouch map[string]time.Time           // sessionID -> last DB touch for activity debounce
+	sessionMode       map[string]string              // sessionID -> "plan_mode" | "executing" | "idle"
+	modeIdleTimers    map[string]*time.Timer         // sessionID -> inactivity timer that sets mode to idle
 }
 
 // NewHookHandler creates a new hook handler
 func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, sessionMgr *session.Manager) *HookHandler {
 	return &HookHandler{
-		hub:            hub,
-		notifService:   notifService,
-		sessionMgr:     sessionMgr,
-		pending:        make(map[string]*pendingPermission),
-		alwaysAllow:    make(map[string]map[string]bool),
-		toolEvents:     make(map[string][]toolEventEntry),
-		lastPushSent:   make(map[string]time.Time),
-		userStopped:    make(map[string]bool),
-		lastEvaluation: make(map[string]time.Time),
-		taskNotifs:     make(map[string]map[string]interface{}),
+		hub:               hub,
+		notifService:      notifService,
+		sessionMgr:        sessionMgr,
+		pending:           make(map[string]*pendingPermission),
+		alwaysAllow:       make(map[string]map[string]bool),
+		toolEvents:        make(map[string][]toolEventEntry),
+		lastPushSent:      make(map[string]time.Time),
+		userStopped:       make(map[string]bool),
+		lastEvaluation:    make(map[string]time.Time),
+		taskNotifs:        make(map[string]map[string]interface{}),
+		lastActivityTouch: make(map[string]time.Time),
+		sessionMode:       make(map[string]string),
+		modeIdleTimers:    make(map[string]*time.Timer),
 	}
+}
+
+// modeIdleTimeout is how long to wait without events before assuming idle.
+const modeIdleTimeout = 15 * time.Second
+
+// setSessionMode updates the mode and broadcasts if changed. Must NOT hold h.mu.
+func (h *HookHandler) setSessionMode(sessionID, newMode, reason string) {
+	h.mu.Lock()
+	oldMode := h.sessionMode[sessionID]
+	if oldMode == newMode {
+		h.mu.Unlock()
+		return
+	}
+	h.sessionMode[sessionID] = newMode
+	h.mu.Unlock()
+
+	shortID := sessionID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	log.Printf("[hooks] Mode changed: session=%s old=%q new=%q (%s)", shortID, oldMode, newMode, reason)
+	h.hub.BroadcastStateUpdate("session", map[string]interface{}{
+		"action":     "mode_changed",
+		"session_id": sessionID,
+		"mode":       newMode,
+	})
+}
+
+// resetIdleTimer resets (or starts) the inactivity timer for a session.
+// When the timer fires, the session mode is set to idle.
+// Must NOT hold h.mu when calling.
+func (h *HookHandler) resetIdleTimer(sessionID string) {
+	h.mu.Lock()
+	if t, ok := h.modeIdleTimers[sessionID]; ok {
+		t.Stop()
+	}
+	h.modeIdleTimers[sessionID] = time.AfterFunc(modeIdleTimeout, func() {
+		h.setSessionMode(sessionID, "idle", "inactivity-timeout")
+	})
+	h.mu.Unlock()
+}
+
+// cancelIdleTimer stops the inactivity timer for a session (e.g. on explicit idle).
+func (h *HookHandler) cancelIdleTimer(sessionID string) {
+	h.mu.Lock()
+	if t, ok := h.modeIdleTimers[sessionID]; ok {
+		t.Stop()
+		delete(h.modeIdleTimers, sessionID)
+	}
+	h.mu.Unlock()
+}
+
+// GetSessionMode returns the current execution mode for a session.
+func (h *HookHandler) GetSessionMode(sessionID string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.sessionMode[sessionID]
+}
+
+// trackModeFromEvent reads the permission_mode field from a hook event,
+// updates the session mode, and resets the inactivity timer.
+func (h *HookHandler) trackModeFromEvent(sessionID string, hookEvent map[string]interface{}) {
+	permMode, _ := hookEvent["permission_mode"].(string)
+	var newMode string
+	if permMode == "plan" {
+		newMode = "plan_mode"
+	} else if permMode != "" {
+		newMode = "executing"
+	}
+	if newMode == "" {
+		return
+	}
+	h.setSessionMode(sessionID, newMode, "permission_mode="+permMode)
+	h.resetIdleTimer(sessionID)
 }
 
 // HandlePermission handles POST /api/hooks/permission
@@ -113,6 +196,13 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	// Check tool name for auto-allow logic
 	toolName, _ := hookEvent["tool_name"].(string)
 
+	// Log every incoming permission request
+	shortID := sessionID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	log.Printf("[hooks] Permission received: session=%s tool=%s", shortID, toolName)
+
 	// Auto-allow safe tools that should never show a permission dialog
 	safeTools := map[string]bool{
 		"TodoRead":      true,
@@ -125,6 +215,10 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	}
 	if safeTools[toolName] {
 		log.Printf("[hooks] Auto-allowing safe tool %s for session %s", toolName, sessionID)
+
+		// Track mode from permission_mode field (source of truth)
+		h.trackModeFromEvent(sessionID, hookEvent)
+
 		output := hookPermissionOutput{
 			HookSpecificOutput: hookSpecificOutput{
 				HookEventName: "PermissionRequest",
@@ -263,9 +357,9 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		delete(h.pending, sessionID)
 		h.mu.Unlock()
 
-		// Cancel push notifications for this session
+		// Mark session notifications as read and cancel push
 		if h.notifService != nil {
-			go h.notifService.SendCancel(context.Background(), sessionID)
+			go h.notifService.MarkSessionRead(context.Background(), sessionID)
 		}
 
 		// Build decision based on user response
@@ -388,6 +482,15 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		// Trigger plan_accepted evaluation when ExitPlanMode is approved
 		if isExitPlan && decision.Behavior == "allow" {
 			h.triggerSessionEvaluation(sessionID, "plan_accepted")
+			// Transition out of plan mode
+			h.mu.Lock()
+			h.sessionMode[sessionID] = "executing"
+			h.mu.Unlock()
+			h.hub.BroadcastStateUpdate("session", map[string]interface{}{
+				"action":     "mode_changed",
+				"session_id": sessionID,
+				"mode":       "executing",
+			})
 		}
 
 		// Return the response in Claude Code's expected envelope format
@@ -419,9 +522,9 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 
-		// Cancel push notifications for this session
+		// Mark session notifications as read and cancel push
 		if h.notifService != nil {
-			go h.notifService.SendCancel(context.Background(), sessionID)
+			go h.notifService.MarkSessionRead(context.Background(), sessionID)
 		}
 
 		// Return deny on timeout in Claude Code's expected envelope format
@@ -500,6 +603,14 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 
 	eventName, _ := hookEvent["hook_event_name"].(string)
 
+	// Log every incoming event for debugging
+	shortID := sessionID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	toolName, _ := hookEvent["tool_name"].(string)
+	log.Printf("[hooks] Event received: session=%s event=%s tool=%s", shortID, eventName, toolName)
+
 	// Map hook event to the appropriate WebSocket message type
 	var msgType websocket.MessageType
 	switch eventName {
@@ -527,6 +638,35 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 			"event":      hookEvent,
 		},
 	})
+
+	// Debounced activity tracking (max once per 30 seconds per session)
+	if h.OnActivityTouch != nil {
+		h.mu.Lock()
+		if last, ok := h.lastActivityTouch[sessionID]; !ok || time.Since(last) > 30*time.Second {
+			h.lastActivityTouch[sessionID] = time.Now()
+			h.mu.Unlock()
+			go h.OnActivityTouch(sessionID)
+		} else {
+			h.mu.Unlock()
+		}
+	}
+
+	// Track execution mode changes
+	switch eventName {
+	case "Stop":
+		h.cancelIdleTimer(sessionID)
+		h.setSessionMode(sessionID, "idle", "event=Stop")
+	case "Notification":
+		if msg, ok := hookEvent["message"].(string); ok {
+			if strings.Contains(msg, "waiting for your input") || strings.Contains(msg, "awaiting") {
+				h.cancelIdleTimer(sessionID)
+				h.setSessionMode(sessionID, "idle", "event=Notification")
+			}
+		}
+	default:
+		// Use permission_mode from the event + reset inactivity timer
+		h.trackModeFromEvent(sessionID, hookEvent)
+	}
 
 	// Buffer tool events for the GET endpoint (max 50 per session)
 	if eventName == "PreToolUse" || eventName == "PostToolUse" || eventName == "PostToolUseFailure" {
@@ -656,6 +796,8 @@ func (h *HookHandler) ClearSession(sessionID string) {
 	delete(h.lastPushSent, sessionID)
 	delete(h.userStopped, sessionID)
 	delete(h.lastEvaluation, sessionID)
+	delete(h.lastActivityTouch, sessionID)
+	delete(h.sessionMode, sessionID)
 	if pending, ok := h.pending[sessionID]; ok {
 		pending.cancel()
 		delete(h.pending, sessionID)

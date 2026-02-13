@@ -645,6 +645,122 @@ body {
     overflow-y: auto;
 }
 
+/* Session card (enriched view) */
+.session-card {
+    padding: 14px 16px;
+    background-color: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--border-radius);
+    margin-bottom: 12px;
+    cursor: pointer;
+    transition: all var(--transition);
+}
+
+.session-card:hover {
+    border-color: var(--color-primary);
+}
+
+.session-card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.session-card-name {
+    font-weight: 500;
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.session-card-stop {
+    flex-shrink: 0;
+    margin-left: auto;
+}
+
+.session-card-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+}
+
+.session-card-project {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.session-card-task {
+    color: var(--color-primary);
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
+}
+
+.session-card-task::before {
+    content: '\2192 ';
+}
+
+.session-card-stats {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 12px;
+    color: var(--color-text-muted);
+}
+
+.session-card-stat {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.session-card-stat svg {
+    flex-shrink: 0;
+    opacity: 0.6;
+}
+
+.badge-pending-perm {
+    background-color: rgba(var(--color-warning-rgb), 0.3);
+    color: var(--color-warning);
+    font-size: 10px;
+    font-weight: bold;
+    width: 18px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    animation: pulse 1.5s infinite;
+}
+
+/* Execution mode badges */
+.badge-mode-plan_mode {
+    background-color: rgba(var(--color-warning-rgb), 0.2);
+    color: var(--color-warning);
+    font-size: 10px;
+}
+
+.badge-mode-executing {
+    background-color: rgba(var(--color-success-rgb), 0.2);
+    color: var(--color-success);
+    font-size: 10px;
+}
+
+.badge-mode-idle {
+    background-color: rgba(128, 128, 128, 0.15);
+    color: var(--color-text-muted);
+    font-size: 10px;
+}
+
+/* Legacy session-item (used by tab sidebar) */
 .session-item {
     display: flex;
     align-items: center;
@@ -675,6 +791,16 @@ body {
 .session-time {
     font-size: 12px;
     color: var(--color-text-muted);
+}
+
+@media (max-width: 768px) {
+    .session-card-stats {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    .session-card-task {
+        max-width: 150px;
+    }
 }
 
 /* Terminal View with Tab Sidebar */
@@ -1259,6 +1385,26 @@ body {
     cursor: pointer;
     padding: 4px;
 }
+
+/* Session Name Tooltip (desktop hover) */
+.session-name-tooltip {
+    position: fixed;
+    z-index: 9999;
+    max-width: 400px;
+    padding: 8px 12px;
+    background-color: var(--color-bg-secondary);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    color: var(--color-text);
+    font-size: 13px;
+    line-height: 1.4;
+    word-break: break-word;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+.session-name-tooltip.visible { opacity: 1; }
 
 /* Voice Indicator */
 .voice-indicator {
@@ -5536,4 +5682,136 @@ body {
 .link-task-item.selected {
     background-color: rgba(79, 70, 229, 0.1);
     border-color: var(--color-primary);
+}
+
+/* Notification Badge */
+.nav-notifications,
+#mobile-nav-notifications {
+    position: relative;
+}
+
+.notif-count-badge {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 8px;
+    background-color: var(--color-danger);
+    color: white;
+    font-size: 10px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    pointer-events: none;
+}
+
+.notif-count-badge.hidden {
+    display: none;
+}
+
+/* Notification Panel */
+.notification-panel {
+    position: fixed;
+    top: 60px;
+    left: var(--sidebar-width);
+    width: 360px;
+    max-height: 480px;
+    background: var(--color-bg-secondary);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.notification-panel.hidden {
+    display: none;
+}
+
+.notification-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.notification-panel-header h3 {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0;
+    color: var(--color-text);
+}
+
+.notification-panel-list {
+    flex: 1;
+    overflow-y: auto;
+    max-height: 400px;
+}
+
+.notification-item {
+    display: flex;
+    flex-direction: column;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--color-border);
+    border-left: 3px solid transparent;
+    cursor: pointer;
+    transition: background 0.15s;
+    opacity: 0.6;
+}
+
+.notification-item:hover {
+    background: var(--color-bg-tertiary);
+}
+
+.notification-item.unread {
+    background: rgba(var(--color-primary-rgb), 0.12);
+    border-left-color: var(--color-primary);
+    opacity: 1;
+}
+
+.notification-item.unread .notification-item-title::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-primary);
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+.notification-item-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text);
+}
+
+.notification-item.unread .notification-item-title {
+    color: var(--color-primary-hover);
+}
+
+.notification-item-body {
+    font-size: 12px;
+    color: var(--color-text-muted);
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.notification-item.unread .notification-item-body {
+    color: var(--color-text-secondary);
+}
+
+.notification-item-time {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    margin-top: 4px;
 }

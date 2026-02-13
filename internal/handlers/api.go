@@ -70,6 +70,7 @@ type API struct {
 	notifService *notifications.Service
 	hookHandler  *HookHandler
 	aiHandler    *AIHandler
+	otelHandler  *OTELHandler
 
 	pendingMemoryDocsMu sync.Mutex
 	pendingMemoryDocs   map[string]*pendingMemoryDoc // docID -> pending edit
@@ -81,6 +82,11 @@ type API struct {
 // SetAIHandler sets the AI handler for AI chat functionality.
 func (a *API) SetAIHandler(h *AIHandler) {
 	a.aiHandler = h
+}
+
+// SetOTELHandler sets the OTEL handler for reading live session metrics.
+func (a *API) SetOTELHandler(h *OTELHandler) {
+	a.otelHandler = h
 }
 
 // writeClaudeMD writes content to the project's CLAUDE.md file.
@@ -666,6 +672,80 @@ func (a *API) ListSessions(w http.ResponseWriter, r *http.Request) {
 		sessions = []database.Session{}
 	}
 	respondJSON(w, http.StatusOK, sessions)
+}
+
+// ActiveSessionDetail is the enriched response for a single active session.
+type ActiveSessionDetail struct {
+	database.Session
+	ProjectName          string  `json:"project_name"`
+	ProjectType          string  `json:"project_type"`
+	ProjectSSHHost       string  `json:"project_ssh_host,omitempty"`
+	TaskTitle            string  `json:"task_title,omitempty"`
+	TotalInputTokens     int64   `json:"total_input_tokens"`
+	TotalOutputTokens    int64   `json:"total_output_tokens"`
+	TotalCost            float64 `json:"total_cost"`
+	HasPendingPermission bool    `json:"has_pending_permission"`
+	ExecutionMode        string  `json:"execution_mode"`
+}
+
+func (a *API) GetActiveSessionDetails(w http.ResponseWriter, r *http.Request) {
+	sessions, err := a.db.ListActiveSessions(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if len(sessions) == 0 {
+		respondJSON(w, http.StatusOK, []ActiveSessionDetail{})
+		return
+	}
+
+	// Fetch projects in batch
+	projects := make(map[int64]*database.Project)
+	for _, s := range sessions {
+		if _, ok := projects[s.ProjectID]; !ok {
+			if p, err := a.db.GetProject(r.Context(), s.ProjectID); err == nil {
+				projects[s.ProjectID] = p
+			}
+		}
+	}
+
+	// Build enriched response
+	details := make([]ActiveSessionDetail, 0, len(sessions))
+	for _, s := range sessions {
+		d := ActiveSessionDetail{Session: s}
+
+		if p, ok := projects[s.ProjectID]; ok {
+			d.ProjectName = p.Name
+			d.ProjectType = p.Type
+			if p.SSHHost.Valid {
+				d.ProjectSSHHost = p.SSHHost.String
+			}
+		}
+
+		if s.TaskID.Valid {
+			if task, err := a.db.GetTask(r.Context(), s.TaskID.Int64); err == nil {
+				d.TaskTitle = task.Title
+			}
+		}
+
+		if a.otelHandler != nil {
+			if metrics := a.otelHandler.GetLiveMetrics(s.ID); metrics != nil {
+				d.TotalInputTokens = metrics.TotalInputTokens
+				d.TotalOutputTokens = metrics.TotalOutputTokens
+				d.TotalCost = metrics.TotalCost
+			}
+		}
+
+		if a.hookHandler != nil {
+			d.HasPendingPermission = a.hookHandler.HasPendingPermission(s.ID)
+			d.ExecutionMode = a.hookHandler.GetSessionMode(s.ID)
+		}
+
+		details = append(details, d)
+	}
+
+	respondJSON(w, http.StatusOK, details)
 }
 
 func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
@@ -1364,6 +1444,32 @@ func (a *API) MarkNotificationRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) GetActiveNotifications(w http.ResponseWriter, r *http.Request) {
+	notifications, err := a.notifService.GetActive(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, notifications)
+}
+
+func (a *API) GetNotificationUnreadCount(w http.ResponseWriter, r *http.Request) {
+	count, err := a.notifService.GetUnreadCount(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]int{"unread_count": count})
+}
+
+func (a *API) MarkAllNotificationsRead(w http.ResponseWriter, r *http.Request) {
+	if err := a.notifService.MarkAllRead(r.Context()); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

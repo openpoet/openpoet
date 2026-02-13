@@ -28,9 +28,19 @@ func NewService(db *database.DB, hub *websocket.Hub, webpush *WebPushService) *S
 	}
 }
 
-// Send creates and broadcasts a notification
+// Send creates and broadcasts a notification.
+// For session-scoped notifications, marks previous unread ones as read first (one-active-per-session).
 func (s *Service) Send(ctx context.Context, sessionID, notifType, title, body string) error {
 	log.Printf("[NotifService] Send called: type=%s title=%q body=%q session=%s", notifType, title, body, sessionID)
+
+	// Expire previous unread notifications for this session
+	if sessionID != "" {
+		if affected, err := s.db.MarkSessionNotificationsRead(ctx, sessionID); err != nil {
+			log.Printf("[NotifService] Failed to mark old notifications read: %v", err)
+		} else if affected > 0 {
+			log.Printf("[NotifService] Expired %d old notifications for session %s", affected, sessionID)
+		}
+	}
 
 	notification := &database.Notification{
 		SessionID: sessionID,
@@ -75,6 +85,9 @@ func (s *Service) Send(ctx context.Context, sessionID, notifType, title, body st
 		handler(notification)
 	}
 
+	// Broadcast updated unread count
+	s.BroadcastUnreadCount(ctx)
+
 	return nil
 }
 
@@ -107,6 +120,11 @@ func (s *Service) GetUnread(ctx context.Context) ([]database.Notification, error
 	return s.db.ListUnreadNotifications(ctx)
 }
 
+// GetActive returns unread notifications from active sessions only (one per session max).
+func (s *Service) GetActive(ctx context.Context) ([]database.Notification, error) {
+	return s.db.ListActiveNotifications(ctx)
+}
+
 // GetRecent returns recent notifications
 func (s *Service) GetRecent(ctx context.Context, limit int) ([]database.Notification, error) {
 	if limit <= 0 {
@@ -115,14 +133,52 @@ func (s *Service) GetRecent(ctx context.Context, limit int) ([]database.Notifica
 	return s.db.ListNotifications(ctx, limit)
 }
 
-// MarkRead marks a notification as read
+// MarkRead marks a notification as read and broadcasts the updated count
 func (s *Service) MarkRead(ctx context.Context, id int64) error {
-	return s.db.MarkNotificationRead(ctx, id)
+	if err := s.db.MarkNotificationRead(ctx, id); err != nil {
+		return err
+	}
+	s.BroadcastUnreadCount(ctx)
+	return nil
 }
 
-// MarkAllRead marks all notifications as read
+// MarkAllRead marks all notifications as read and broadcasts the updated count
 func (s *Service) MarkAllRead(ctx context.Context) error {
-	return s.db.MarkAllNotificationsRead(ctx)
+	if err := s.db.MarkAllNotificationsRead(ctx); err != nil {
+		return err
+	}
+	s.BroadcastUnreadCount(ctx)
+	return nil
+}
+
+// MarkSessionRead marks all unread notifications for a session as read,
+// sends push cancel, and broadcasts the updated unread count.
+func (s *Service) MarkSessionRead(ctx context.Context, sessionID string) {
+	affected, err := s.db.MarkSessionNotificationsRead(ctx, sessionID)
+	if err != nil {
+		log.Printf("[NotifService] Failed to mark session notifications read for %s: %v", sessionID, err)
+		return
+	}
+	if affected > 0 {
+		log.Printf("[NotifService] Marked %d notifications read for session %s", affected, sessionID)
+		s.SendCancel(ctx, sessionID)
+		s.BroadcastUnreadCount(ctx)
+	}
+}
+
+// GetUnreadCount returns the count of unread notifications
+func (s *Service) GetUnreadCount(ctx context.Context) (int, error) {
+	return s.db.CountUnreadNotifications(ctx)
+}
+
+// BroadcastUnreadCount sends the current unread count via WebSocket
+func (s *Service) BroadcastUnreadCount(ctx context.Context) {
+	count, err := s.db.CountUnreadNotifications(ctx)
+	if err != nil {
+		log.Printf("[NotifService] Failed to count unread: %v", err)
+		return
+	}
+	s.hub.BroadcastNotificationCount(count)
 }
 
 // SendSessionStarted sends a notification when a session starts
