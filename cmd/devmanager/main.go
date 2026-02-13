@@ -68,6 +68,11 @@ func (dw *debugResponseWriter) Write(b []byte) (int, error) {
 }
 
 func main() {
+	// Strip Claude Code marker env vars so Go SDK subprocesses are not rejected
+	// as "nested sessions" when DevManager itself was launched from Claude Code.
+	os.Unsetenv("CLAUDECODE")
+	os.Unsetenv("CLAUDE_CODE_ENTRYPOINT")
+
 	// Handle mcp-serve subcommand before flag parsing
 	if len(os.Args) > 1 && os.Args[1] == "mcp-serve" {
 		apiURL := os.Getenv("DEVMANAGER_API_URL")
@@ -381,7 +386,9 @@ func main() {
 
 		// Session-Task integration
 		r.Get("/sessions/{id}/task", api.GetSessionLinkedTask)
+		r.Post("/sessions/{id}/link-task", api.LinkSessionTask)
 		r.Post("/sessions/{id}/evaluate", api.TriggerSessionEvaluation)
+		r.Post("/sessions/{id}/suggest-task-data", aiHandler.HandleSuggestTaskData)
 
 		// Session files
 		r.Get("/sessions/{id}/files", fileHandler.ListFiles)

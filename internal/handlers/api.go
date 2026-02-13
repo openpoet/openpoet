@@ -747,12 +747,7 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 
 	// Create session-task link if starting from a task
 	if linkedTask != nil {
-		st := &database.SessionTask{
-			SessionID: sess.ID,
-			TaskID:    linkedTask.ID,
-			Role:      "created_from",
-		}
-		a.db.CreateSessionTask(r.Context(), st)
+		a.db.LinkSessionToTask(r.Context(), sess.ID, linkedTask.ID)
 
 		// Auto-set task status to in_progress if it's currently todo
 		if linkedTask.Status == "todo" {
@@ -1958,12 +1953,114 @@ func (a *API) GetSessionLinkedTask(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
 
 	task, err := a.db.GetTaskForSession(r.Context(), sessionID)
-	if err != nil {
+	if err != nil || task == nil {
 		respondError(w, http.StatusNotFound, "No task linked to this session")
 		return
 	}
 
 	respondJSON(w, http.StatusOK, task)
+}
+
+// LinkSessionTask links an active session to an existing task or creates a new task and links it
+func (a *API) LinkSessionTask(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+
+	sess, err := a.db.GetSession(r.Context(), sessionID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Session not found")
+		return
+	}
+
+	// Check session does not already have a linked task
+	existingTask, _ := a.db.GetTaskForSession(r.Context(), sessionID)
+	if existingTask != nil {
+		respondError(w, http.StatusConflict, "Session already linked to a task")
+		return
+	}
+
+	var input struct {
+		TaskID   *int64 `json:"task_id,omitempty"`
+		TaskData *struct {
+			Title       string `json:"title"`
+			Description string `json:"description"`
+			Priority    string `json:"priority"`
+		} `json:"task_data,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	var linkedTask *database.ProjectTask
+
+	if input.TaskID != nil && *input.TaskID > 0 {
+		// Link to existing task
+		linkedTask, err = a.db.GetTask(r.Context(), *input.TaskID)
+		if err != nil {
+			respondError(w, http.StatusNotFound, "Task not found")
+			return
+		}
+		if linkedTask.ProjectID != sess.ProjectID {
+			respondError(w, http.StatusBadRequest, "Task belongs to a different project")
+			return
+		}
+	} else if input.TaskData != nil && strings.TrimSpace(input.TaskData.Title) != "" {
+		// Create new task and link
+		priority := input.TaskData.Priority
+		if priority == "" {
+			priority = "medium"
+		}
+		linkedTask = &database.ProjectTask{
+			ProjectID:   sess.ProjectID,
+			Title:       strings.TrimSpace(input.TaskData.Title),
+			Description: input.TaskData.Description,
+			Status:      "in_progress",
+			Priority:    priority,
+		}
+		if err := a.db.CreateTask(r.Context(), linkedTask); err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		a.hub.BroadcastStateUpdate("task", map[string]interface{}{
+			"action":     "created",
+			"project_id": sess.ProjectID,
+			"task":       linkedTask,
+		})
+	} else {
+		respondError(w, http.StatusBadRequest, "Either task_id or task_data with title is required")
+		return
+	}
+
+	// Link session to task and rename
+	newName := "Task: " + linkedTask.Title
+	if err := a.db.LinkSessionToTask(r.Context(), sessionID, linkedTask.ID); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	a.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, sessionID)
+
+	// Broadcast session rename
+	a.hub.BroadcastStateUpdate("session", map[string]interface{}{
+		"action":     "renamed",
+		"session_id": sessionID,
+		"name":       newName,
+	})
+
+	// Auto-set task to in_progress if currently todo
+	if linkedTask.Status == "todo" {
+		a.db.UpdateTaskStatus(r.Context(), linkedTask.ID, "in_progress")
+		linkedTask.Status = "in_progress"
+		a.hub.BroadcastStateUpdate("task", map[string]interface{}{
+			"action":     "updated",
+			"project_id": linkedTask.ProjectID,
+			"task":       linkedTask,
+		})
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"task":         linkedTask,
+		"session_name": newName,
+	})
 }
 
 // TriggerSessionEvaluation triggers an AI evaluation for the current session

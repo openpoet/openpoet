@@ -1399,4 +1399,14 @@
         overflow: hidden;
         text-overflow: ellipsis;
     }
+
+    /* Link Task button: icon only on mobile */
+    #btn-link-task {
+        padding: 6px;
+    }
+
+    .link-task-tab {
+        font-size: 12px;
+        padding: 6px 12px;
+    }
 }
