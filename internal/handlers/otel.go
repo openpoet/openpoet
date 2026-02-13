@@ -81,6 +81,49 @@ func (h *OTELHandler) HandleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{}`))
 }
 
+// HandleTraces receives OTLP traces at POST /v1/traces (accept and discard).
+func (h *OTELHandler) HandleTraces(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{}`))
+}
+
+// HandleLogs receives OTLP logs at POST /v1/logs (accept and discard).
+func (h *OTELHandler) HandleLogs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{}`))
+}
+
+// SessionTokenSummary holds live token usage for an active session.
+type SessionTokenSummary struct {
+	TotalInputTokens  int64   `json:"total_input_tokens"`
+	TotalOutputTokens int64   `json:"total_output_tokens"`
+	TotalCost         float64 `json:"total_cost"`
+}
+
+// GetLiveMetrics returns the current in-memory accumulated token metrics for a session.
+// Returns nil if no metrics have been received for this session.
+func (h *OTELHandler) GetLiveMetrics(sessionID string) *SessionTokenSummary {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	sm, ok := h.sessions[sessionID]
+	if !ok || len(sm.models) == 0 {
+		return nil
+	}
+
+	summary := &SessionTokenSummary{}
+	for model, mm := range sm.models {
+		summary.TotalInputTokens += mm.inputTokens
+		summary.TotalOutputTokens += mm.outputTokens
+		if cost, ok := sm.costByModel[model]; ok {
+			summary.TotalCost += cost
+		}
+	}
+	return summary
+}
+
 // FlushSession writes the accumulated metrics for a session to the database
 // and removes the session from the in-memory map.
 func (h *OTELHandler) FlushSession(sessionID string) {

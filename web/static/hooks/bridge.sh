@@ -52,7 +52,7 @@ case "$EVENT" in
             -H "X-Session-ID: ${SESSION_ID}" \
             -d "$INPUT" > /dev/null 2>&1 &
         ;;
-    Stop)
+    Stop|UserPromptSubmit)
         curl -s -X POST "${HOOK_URL}/api/hooks/event" \
             -H "Content-Type: application/json" \
             -H "X-Session-ID: ${SESSION_ID}" \

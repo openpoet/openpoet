@@ -29,8 +29,32 @@ class DevManager {
         this.setupKeyboardShortcuts();
         this.setupStatusListener();
 
+        // Tick elapsed times on session cards every 30s
+        setInterval(() => {
+            document.querySelectorAll('.session-elapsed[data-start]').forEach(el => {
+                el.textContent = this.formatElapsed(el.dataset.start);
+            });
+        }, 30000);
+
+        // Listen for real-time execution mode changes from HookManager
+        document.addEventListener('session-mode-changed', (e) => {
+            const { sessionId, mode } = e.detail;
+            const badge = document.querySelector(`[data-session-mode="${sessionId}"]`);
+            if (badge) {
+                const labels = { plan_mode: 'Plan', executing: 'Exec', idle: 'Idle' };
+                badge.className = `badge badge-mode-${mode}`;
+                badge.textContent = labels[mode] || mode;
+            }
+        });
+
         // Setup all tasks filters
         this.setupAllTasksFilters();
+
+        // Create tooltip singleton for truncated session names
+        this._tooltipEl = document.createElement('div');
+        this._tooltipEl.className = 'session-name-tooltip';
+        document.body.appendChild(this._tooltipEl);
+        this._activePopup = null;
 
         // Setup mobile session dropdown
         this.setupMobileSessionDropdown();
@@ -103,6 +127,10 @@ class DevManager {
 
         // Close sidebar on mobile
         document.getElementById('sidebar')?.classList.remove('open');
+
+        // Dismiss any active session name tooltip/popup
+        this._hideSessionTooltip();
+        this._hideSessionPopup();
 
         // Refresh view data
         this.refreshViewData(viewName);
@@ -225,6 +253,10 @@ class DevManager {
                 break;
             case 'notification':
                 this.showToast(msg.data.title, msg.data.body, msg.data.type);
+                window.notifBadge?.handleNewNotification(msg.data);
+                break;
+            case 'notification_count':
+                window.notifBadge?.handleCountUpdate(msg.data);
                 break;
             case 'sync_progress':
                 this.handleSyncProgress(msg.data);
@@ -266,6 +298,16 @@ class DevManager {
                 }
                 break;
             case 'session':
+                // Handle real-time mode changes without full re-fetch
+                if (data.data?.action === 'mode_changed' && data.data?.session_id && data.data?.mode) {
+                    const badge = document.querySelector(`[data-session-mode="${data.data.session_id}"]`);
+                    if (badge) {
+                        const labels = { plan_mode: 'Plan', executing: 'Exec', idle: 'Idle' };
+                        badge.className = `badge badge-mode-${data.data.mode}`;
+                        badge.textContent = labels[data.data.mode] || data.data.mode;
+                    }
+                    break;
+                }
                 this.loadSessions();
                 // Handle session rename (e.g. when dynamically linked to a task)
                 if (data.data?.action === 'renamed' && data.data?.session_id && data.data?.name) {
@@ -1805,7 +1847,12 @@ class DevManager {
     // Sessions
     async loadSessions() {
         try {
-            this.sessions = await this.api('GET', '/sessions');
+            const [sessions, activeDetails] = await Promise.all([
+                this.api('GET', '/sessions'),
+                this.api('GET', '/sessions/active-details')
+            ]);
+            this.sessions = sessions;
+            this.activeSessionDetails = activeDetails || [];
             this.renderSessions();
         } catch (error) {
             this.showToast('Error', error.message, 'error');
@@ -1816,12 +1863,11 @@ class DevManager {
         const container = document.getElementById('sessions-list');
         if (!container) return;
 
-        console.log('renderSessions called, total sessions:', this.sessions.length);
-        const activeSessions = this.sessions.filter(s => s.status === 'running' || s.status === 'starting');
-        console.log('Active sessions:', activeSessions.length);
+        const activeSessions = this.activeSessionDetails || [];
 
-        // Sync tab sidebar with all running sessions
-        this.syncSessionTabs(activeSessions);
+        // Sync tab sidebar (uses full sessions list)
+        const activeFromSessions = this.sessions.filter(s => s.status === 'running' || s.status === 'starting');
+        this.syncSessionTabs(activeFromSessions);
 
         if (activeSessions.length === 0) {
             container.innerHTML = `
@@ -1838,26 +1884,66 @@ class DevManager {
         }
 
         container.innerHTML = activeSessions.map(session => {
-            const project = this.projects.find(p => p.id === session.project_id);
+            const displayName = session.name || session.project_name || 'Unknown';
+            const projectLabel = session.project_name || 'Unknown';
+            const hostLabel = session.project_type === 'remote' && session.project_ssh_host
+                ? ` @ ${this.escapeHtml(session.project_ssh_host)}` : '';
+            const elapsed = this.formatElapsed(session.start_time);
+            const totalTokens = (session.total_input_tokens || 0) + (session.total_output_tokens || 0);
+            const tokenLabel = totalTokens > 0 ? this.formatTokens(totalTokens) : '--';
+            const costLabel = session.total_cost > 0 ? `$${session.total_cost.toFixed(3)}` : '';
+            const lastActivity = session.last_activity_at?.Valid
+                ? this.formatTimeAgo(session.last_activity_at.Time) : '';
+            const taskLabel = session.task_title
+                ? `<span class="session-card-task" title="${this.escapeHtml(session.task_title)}">${this.escapeHtml(this.truncateStr(session.task_title, 40))}</span>`
+                : '';
+            const pendingBadge = session.has_pending_permission
+                ? '<span class="badge badge-pending-perm" title="Awaiting input">!</span>' : '';
+            const mode = session.execution_mode || 'idle';
+            const modeLabels = { plan_mode: 'Plan', executing: 'Exec', idle: 'Idle' };
+            const modeLabel = modeLabels[mode] || mode;
+
             return `
-                <div class="session-item" onclick="app.openTerminal('${session.id}')">
-                    <div class="session-info">
-                        <span class="badge badge-${session.status}">${session.status}</span>
-                        <div>
-                            <div class="session-name">${this.escapeHtml(project?.name || 'Unknown')}</div>
-                            <div class="session-time">${this.formatTime(session.start_time)}</div>
-                        </div>
+                <div class="session-card" onclick="app.openTerminal('${session.id}')">
+                    <div class="session-card-header">
+                        <span class="badge badge-mode-${mode}" data-session-mode="${session.id}">${modeLabel}</span>
+                        ${pendingBadge}
+                        <span class="session-card-name">${this.escapeHtml(displayName)}</span>
+                        <button class="btn btn-danger btn-sm session-card-stop" onclick="event.stopPropagation(); app.stopSession('${session.id}')">
+                            Stop
+                        </button>
                     </div>
-                    <button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); app.stopSession('${session.id}')">
-                        Stop
-                    </button>
+                    <div class="session-card-meta">
+                        <span class="session-card-project">${this.escapeHtml(projectLabel)}${hostLabel}</span>
+                        ${taskLabel}
+                    </div>
+                    <div class="session-card-stats">
+                        <span class="session-card-stat" title="Elapsed time">
+                            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            <span class="session-elapsed" data-start="${session.start_time}">${elapsed}</span>
+                        </span>
+                        <span class="session-card-stat" title="Tokens used">
+                            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                            ${tokenLabel}${costLabel ? ` (${costLabel})` : ''}
+                        </span>
+                        ${lastActivity ? `<span class="session-card-stat" title="Last activity">${lastActivity}</span>` : ''}
+                    </div>
                 </div>
             `;
         }).join('');
+
+        // Attach tooltip to truncated session names
+        container.querySelectorAll('.session-card-name').forEach(nameEl => {
+            this._attachSessionNameTooltip(nameEl, nameEl.textContent);
+        });
     }
 
     async openTerminal(sessionId, sessionData = null, customName = null) {
         console.log('openTerminal called with:', sessionId);
+
+        // Dismiss any active tooltip/popup before switching views
+        this._hideSessionTooltip();
+        this._hideSessionPopup();
 
         // Find session data (use provided data or look it up)
         let session = sessionData || this.sessions.find(s => s.id === sessionId);
@@ -2077,6 +2163,7 @@ class DevManager {
         const nameSpan = document.createElement('span');
         nameSpan.className = 'terminal-tab-name';
         nameSpan.textContent = sessionName;
+        this._attachSessionNameTooltip(nameSpan, sessionName);
 
         // Close button
         const closeImg = document.createElement('img');
@@ -3827,6 +3914,143 @@ class DevManager {
     formatTime(timestamp) {
         const date = new Date(timestamp);
         return date.toLocaleString();
+    }
+
+    formatElapsed(startTime) {
+        const start = new Date(startTime);
+        const now = new Date();
+        const diffMs = now - start;
+        const diffMin = Math.floor(diffMs / 60000);
+        if (diffMin < 1) return '<1m';
+        if (diffMin < 60) return `${diffMin}m`;
+        const hours = Math.floor(diffMin / 60);
+        const mins = diffMin % 60;
+        if (hours < 24) return `${hours}h ${mins}m`;
+        const days = Math.floor(hours / 24);
+        return `${days}d ${hours % 24}h`;
+    }
+
+    formatTimeAgo(timestamp) {
+        if (!timestamp) return '';
+        const date = new Date(timestamp);
+        if (isNaN(date.getTime())) return '';
+        const now = new Date();
+        const diffMs = now - date;
+        const diffSec = Math.floor(diffMs / 1000);
+        if (diffSec < 60) return `${diffSec}s ago`;
+        const diffMin = Math.floor(diffSec / 60);
+        if (diffMin < 60) return `${diffMin}m ago`;
+        const hours = Math.floor(diffMin / 60);
+        return `${hours}h ago`;
+    }
+
+    formatTokens(count) {
+        if (count >= 1000000) return (count / 1000000).toFixed(1) + 'M';
+        if (count >= 1000) return (count / 1000).toFixed(1) + 'k';
+        return count.toString();
+    }
+
+    truncateStr(str, maxLen) {
+        if (!str || str.length <= maxLen) return str;
+        return str.substring(0, maxLen - 1) + '\u2026';
+    }
+
+    // ==================== SESSION NAME TOOLTIP ====================
+
+    _isTextTruncated(el) {
+        return el.scrollWidth > el.clientWidth;
+    }
+
+    _showSessionTooltip(el, text) {
+        if (!this._isTextTruncated(el)) return;
+
+        const rect = el.getBoundingClientRect();
+        const tooltip = this._tooltipEl;
+        tooltip.textContent = text;
+
+        // Position below the element, left-aligned
+        tooltip.style.left = `${rect.left}px`;
+        tooltip.style.top = `${rect.bottom + 6}px`;
+        tooltip.classList.add('visible');
+
+        // Clamp to viewport
+        const tipRect = tooltip.getBoundingClientRect();
+        if (tipRect.right > window.innerWidth - 8) {
+            tooltip.style.left = `${window.innerWidth - tipRect.width - 8}px`;
+        }
+        if (tipRect.bottom > window.innerHeight - 8) {
+            tooltip.style.top = `${rect.top - tipRect.height - 6}px`;
+        }
+    }
+
+    _hideSessionTooltip() {
+        this._tooltipEl.classList.remove('visible');
+    }
+
+    _showSessionPopup(el, text) {
+        if (!this._isTextTruncated(el)) return;
+        this._hideSessionPopup();
+
+        const rect = el.getBoundingClientRect();
+
+        const overlay = document.createElement('div');
+        overlay.className = 'session-name-popup-overlay';
+        overlay.addEventListener('click', () => this._hideSessionPopup());
+
+        const popup = document.createElement('div');
+        popup.className = 'session-name-popup';
+        popup.textContent = text;
+
+        document.body.appendChild(overlay);
+        document.body.appendChild(popup);
+
+        // Position centered above the element
+        const popupRect = popup.getBoundingClientRect();
+        let left = rect.left + (rect.width / 2) - (popupRect.width / 2);
+        left = Math.max(16, Math.min(left, window.innerWidth - popupRect.width - 16));
+        let top = rect.top - popupRect.height - 8;
+        if (top < 16) top = rect.bottom + 8;
+
+        popup.style.left = `${left}px`;
+        popup.style.top = `${top}px`;
+
+        this._activePopup = { overlay, popup };
+    }
+
+    _hideSessionPopup() {
+        if (this._activePopup) {
+            this._activePopup.overlay.remove();
+            this._activePopup.popup.remove();
+            this._activePopup = null;
+        }
+    }
+
+    _attachSessionNameTooltip(el, fullText) {
+        el.dataset.fullName = fullText;
+
+        if (el._tooltipAttached) return;
+        el._tooltipAttached = true;
+
+        // Desktop: hover
+        el.addEventListener('mouseenter', () => {
+            this._showSessionTooltip(el, el.dataset.fullName);
+        });
+        el.addEventListener('mouseleave', () => this._hideSessionTooltip());
+
+        // Mobile: long-press
+        let pressTimer = null;
+        el.addEventListener('touchstart', (e) => {
+            pressTimer = setTimeout(() => {
+                this._showSessionPopup(el, el.dataset.fullName);
+                pressTimer = null;
+            }, 500);
+        }, { passive: true });
+        el.addEventListener('touchend', () => {
+            if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+        });
+        el.addEventListener('touchmove', () => {
+            if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+        });
     }
 
     // Event listeners
