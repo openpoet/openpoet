@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 )
@@ -128,12 +130,25 @@ func (r *LocalRunner) Stop() error {
 	}
 
 	if r.cmd != nil && r.cmd.Process != nil {
-		// Send SIGTERM first
+		// Send SIGTERM first for graceful shutdown
 		r.cmd.Process.Signal(syscall.SIGTERM)
 
-		// Force kill after a short delay if needed
+		// Wait up to 5 seconds for graceful exit, then force kill.
+		// Without this, zombie processes accumulate and exhaust system resources
+		// (PTYs, file descriptors), causing cascading failures across all local sessions.
 		go func() {
-			<-r.done
+			select {
+			case <-r.done:
+				// Process exited gracefully
+			case <-time.After(5 * time.Second):
+				// Force kill — process didn't respond to SIGTERM
+				r.mu.Lock()
+				if r.cmd != nil && r.cmd.Process != nil {
+					log.Printf("[local] Process %d did not exit after SIGTERM, sending SIGKILL", r.cmd.Process.Pid)
+					r.cmd.Process.Signal(syscall.SIGKILL)
+				}
+				r.mu.Unlock()
+			}
 		}()
 	}
 
