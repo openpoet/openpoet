@@ -365,6 +365,7 @@ func main() {
 
 		// Global Tasks (cross-project)
 		r.Get("/tasks", api.ListAllTasks)
+		r.Put("/tasks/reorder", api.ReorderAllTasks)
 
 		r.Get("/projects/{id}/files", fileHandler.ListProjectFiles)
 		r.Get("/projects/{id}/files/view/*", fileHandler.ViewProjectFile)
@@ -489,6 +490,7 @@ func main() {
 		r.Post("/ai/initiate-memory-doc-edit", aiHandler.HandleInitiateMemoryDocEdit)
 		r.Post("/ai/initiate-planning", aiHandler.HandleInitiatePlanning)
 		r.Post("/ai/initiate-task-creation", aiHandler.HandleInitiateTaskCreation)
+		r.Post("/ai/initiate-task-discussion", aiHandler.HandleInitiateTaskDiscussion)
 		r.Post("/ai/generate-skill", aiHandler.HandleGenerateSkill)
 		r.Post("/ai/validate-skill", aiHandler.HandleValidateSkill)
 		r.Post("/ai/execute-tool", aiHandler.HandleExecuteTool)

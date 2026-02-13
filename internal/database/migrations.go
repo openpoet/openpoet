@@ -34,6 +34,7 @@ var migrations = []Migration{
 	{Version: 16, Description: "ai_messages: add status and error_info columns for streaming persistence", Up: migrateV16},
 	{Version: 17, Description: "projects: add tool_policy column for per-project tool access control", Up: migrateV17},
 	{Version: 18, Description: "docs: add message_id to temp_documents", Up: migrateV18},
+	{Version: 19, Description: "tasks: add global_sort_order for cross-project ordering", Up: migrateV19},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -513,6 +514,20 @@ func migrateV17(tx *sqlx.Tx) error {
 func migrateV18(tx *sqlx.Tx) error {
 	_, err := tx.Exec(`ALTER TABLE temp_documents ADD COLUMN message_id INTEGER NOT NULL DEFAULT 0`)
 	return err
+}
+
+// migrateV19 adds global_sort_order to project_tasks for cross-project ordering in the global view.
+func migrateV19(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE project_tasks ADD COLUMN global_sort_order INTEGER NOT NULL DEFAULT 0`,
+		`UPDATE project_tasks SET global_sort_order = id`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("statement failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
 }
 
 // migrateV4 adds AI conversation and message tables.

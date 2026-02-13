@@ -4421,8 +4421,12 @@ class DevManager {
                 children[pid].push(t);
             });
 
+            // Separate active and done top-level tasks
+            const activeTasks = topLevel.filter(t => t.status !== 'done');
+            const doneTasks = topLevel.filter(t => t.status === 'done');
+
             let html = '';
-            for (const task of topLevel) {
+            for (const task of activeTasks) {
                 const hasChildren = children[task.id] && children[task.id].length > 0;
                 html += this.renderTaskCard(task, projectId, hasChildren);
                 if (hasChildren) {
@@ -4430,12 +4434,43 @@ class DevManager {
                     html += `<div class="task-subtasks${collapsed}" data-parent-id="${task.id}">`;
                     let subOrder = 1;
                     for (const sub of children[task.id]) {
-                        html += this.renderTaskCard(sub, projectId, false, subOrder++);
+                        const subIdx = sub.status === 'done' ? 0 : subOrder++;
+                        html += this.renderTaskCard(sub, projectId, false, subIdx, task.sort_order);
                     }
                     html += `<button class="btn-add-task" onclick="app.showTaskModal(${projectId}, null, ${task.id})" style="margin-top:4px;padding:4px 8px;font-size:11px;">+ Subtask</button>`;
                     html += '</div>';
                 }
             }
+
+            // Done section at the bottom
+            if (doneTasks.length > 0) {
+                const doneCollapsed = this._doneCollapsed ? ' collapsed' : '';
+                html += `
+                    <div class="done-section">
+                        <div class="done-section-header" onclick="app.toggleDoneSection()">
+                            <svg class="done-section-chevron${this._doneCollapsed ? ' collapsed' : ''}" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                            <span class="done-section-title">Concluídas</span>
+                            <span class="done-section-count">${doneTasks.length}</span>
+                        </div>
+                        <div class="done-section-body${doneCollapsed}">`;
+                for (const task of doneTasks) {
+                    const hasChildren = children[task.id] && children[task.id].length > 0;
+                    html += this.renderTaskCard(task, projectId, hasChildren);
+                    if (hasChildren) {
+                        const collapsed = this._collapsedTasks?.has(task.id) ? ' collapsed' : '';
+                        html += `<div class="task-subtasks${collapsed}" data-parent-id="${task.id}">`;
+                        let subOrder = 1;
+                        for (const sub of children[task.id]) {
+                            html += this.renderTaskCard(sub, projectId, false, subOrder++);
+                        }
+                        html += '</div>';
+                    }
+                }
+                html += `
+                        </div>
+                    </div>`;
+            }
+
             container.innerHTML = html;
             this.setupTaskDragAndDrop(projectId);
         } catch (e) {
@@ -4443,7 +4478,7 @@ class DevManager {
         }
     }
 
-    renderTaskCard(task, projectId, hasChildren = false, subIndex = 0) {
+    renderTaskCard(task, projectId, hasChildren = false, subIndex = 0, parentOrder = 0) {
         const now = new Date();
         const isOverdue = task.due_date?.Valid && new Date(task.due_date.Time) < now && task.status !== 'done';
         const isDone = task.status === 'done';
@@ -4486,9 +4521,10 @@ class DevManager {
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
             </button>` : '';
 
-        // Order number badge
-        const orderNum = task.sort_order > 0 ? `<span class="task-order-num">${task.sort_order}</span>` : '';
-        const subIndexLabel = subIndex > 0 ? `<span class="task-sub-index">${subIndex}.</span>` : '';
+        // Order number badge (done tasks and subtasks never show order number)
+        const hasSubIndex = subIndex > 0 && parentOrder > 0;
+        const orderNum = (!isDone && !hasSubIndex && task.sort_order > 0) ? `<span class="task-order-num">${task.sort_order}</span>` : '';
+        const subIndexLabel = hasSubIndex ? `<span class="task-sub-index">${parentOrder}.${subIndex}</span>` : '';
 
         // Collapse button for parent tasks with children
         const collapseBtn = hasChildren ? `
@@ -4496,8 +4532,8 @@ class DevManager {
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
             </button>` : '';
 
-        // Drag handle (desktop)
-        const dragHandle = `
+        // Drag handle (desktop) - hidden for done tasks
+        const dragHandle = isDone ? '' : `
             <div class="task-drag-handle" title="Drag to reorder">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/>
@@ -4655,6 +4691,18 @@ class DevManager {
         }
     }
 
+    // ============ Done Section Collapse/Expand ============
+
+    _doneCollapsed = false;
+
+    toggleDoneSection() {
+        this._doneCollapsed = !this._doneCollapsed;
+        const body = document.querySelector('.done-section-body');
+        const chevron = document.querySelector('.done-section-chevron');
+        if (body) body.classList.toggle('collapsed', this._doneCollapsed);
+        if (chevron) chevron.classList.toggle('collapsed', this._doneCollapsed);
+    }
+
     // ============ Task Drag-and-Drop Reorder (SortableJS) ============
 
     _sortableInstances = [];
@@ -4691,7 +4739,7 @@ class DevManager {
             swapThreshold: 0.65,
             scrollSensitivity: 60,
             scrollSpeed: 12,
-            filter: '.btn-add-task, .task-subtasks, .task-indent-dropzone',
+            filter: '.btn-add-task, .task-subtasks, .task-indent-dropzone, .done-section',
             onStart: (evt) => this._onDragStart(evt, container, projectId),
             onEnd: (evt) => this._onDragEnd(evt, container, projectId),
         };
@@ -4961,8 +5009,8 @@ class DevManager {
             });
         });
 
-        // Subtask containers
-        container.querySelectorAll('.task-subtasks').forEach(subtaskContainer => {
+        // Subtask containers (only direct children, not inside done-section)
+        container.querySelectorAll(':scope > .task-subtasks').forEach(subtaskContainer => {
             const parentCard = subtaskContainer.previousElementSibling;
             if (!parentCard?.classList.contains('task-card')) return;
             const parentId = parseInt(parentCard.dataset.taskId);
@@ -5202,9 +5250,38 @@ class DevManager {
                 });
             }
 
+            // "Discuss with AI" button — always visible regardless of status
+            actions.push({
+                label: '💬 Discutir com IA',
+                class: 'btn btn-primary',
+                onClick: async () => {
+                    window.docViewer.close();
+                    await this.discussTaskWithAI(projectId, taskId);
+                }
+            });
+
             window.docViewer.openWithContent(task.title, md, { actions });
         } catch (e) {
             this.showToast('Erro', 'Falha ao carregar detalhes da tarefa', 'error');
+        }
+    }
+
+    async discussTaskWithAI(projectId, taskId) {
+        if (!window.aiChat) {
+            this.showToast('AI Chat não disponível', '', 'error');
+            return;
+        }
+        try {
+            const result = await this.api('POST', '/ai/initiate-task-discussion', {
+                project_id: projectId,
+                task_id: taskId,
+            });
+            if (result?.conversation_id) {
+                window.aiChat.open();
+                window.aiChat.loadConversation(result.conversation_id);
+            }
+        } catch (e) {
+            this.showToast('Erro', 'Falha ao iniciar discussão com IA', 'error');
         }
     }
 
@@ -5393,33 +5470,82 @@ class DevManager {
                 children[pid].push(t);
             });
 
-            // Render with hierarchy: parents first, then their children indented
+            // Separate active and done top-level tasks
+            const activeTopLevel = topLevel.filter(t => t.status !== 'done');
+            const doneTopLevel = topLevel.filter(t => t.status === 'done');
+
+            // Render active tasks with sequential global numbering
             let html = '';
             const renderedIds = new Set();
-            for (const task of topLevel) {
+            let globalOrder = 1;
+            for (const task of activeTopLevel) {
                 const projectName = projectMap[task.project_id] || `Project #${task.project_id}`;
                 const hasKids = children[task.id] && children[task.id].length > 0;
-                html += this.renderAllTaskCard(task, projectName, hasKids);
+                const currentOrder = globalOrder++;
+                html += this.renderAllTaskCard(task, projectName, hasKids, 0, 0, currentOrder);
                 renderedIds.add(task.id);
                 if (hasKids) {
                     const collapsed = this._collapsedTasks?.has(task.id) ? ' collapsed' : '';
                     html += `<div class="task-subtasks all-tasks-subtasks${collapsed}" data-parent-id="${task.id}">`;
-                    let subIdx = 1;
+                    let subOrder = 1;
                     for (const sub of children[task.id]) {
                         const subProjectName = projectMap[sub.project_id] || `Project #${sub.project_id}`;
-                        html += this.renderAllTaskCard(sub, subProjectName, false, subIdx++);
+                        const subIdx = sub.status === 'done' ? 0 : subOrder++;
+                        html += this.renderAllTaskCard(sub, subProjectName, false, subIdx, currentOrder);
                         renderedIds.add(sub.id);
                     }
                     html += '</div>';
                 }
             }
+
             // Render any orphan subtasks whose parent wasn't in the filtered results
             for (const task of tasks) {
-                if (!renderedIds.has(task.id)) {
+                if (!renderedIds.has(task.id) && task.status !== 'done') {
                     const projectName = projectMap[task.project_id] || `Project #${task.project_id}`;
-                    html += this.renderAllTaskCard(task, projectName);
+                    html += this.renderAllTaskCard(task, projectName, false, 0, 0, globalOrder++);
+                    renderedIds.add(task.id);
                 }
             }
+
+            // Done section at the bottom (includes done top-level and orphan done subtasks)
+            const allDone = [...doneTopLevel];
+            for (const task of tasks) {
+                if (!renderedIds.has(task.id) && task.status === 'done') {
+                    allDone.push(task);
+                }
+            }
+            if (allDone.length > 0) {
+                const doneCollapsed = this._doneCollapsed ? ' collapsed' : '';
+                html += `
+                    <div class="done-section">
+                        <div class="done-section-header" onclick="app.toggleDoneSection()">
+                            <svg class="done-section-chevron${this._doneCollapsed ? ' collapsed' : ''}" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                            <span class="done-section-title">Concluídas</span>
+                            <span class="done-section-count">${allDone.length}</span>
+                        </div>
+                        <div class="done-section-body${doneCollapsed}">`;
+                for (const task of allDone) {
+                    const projectName = projectMap[task.project_id] || `Project #${task.project_id}`;
+                    const hasKids = children[task.id] && children[task.id].length > 0;
+                    html += this.renderAllTaskCard(task, projectName, hasKids);
+                    renderedIds.add(task.id);
+                    if (hasKids) {
+                        const collapsed = this._collapsedTasks?.has(task.id) ? ' collapsed' : '';
+                        html += `<div class="task-subtasks all-tasks-subtasks${collapsed}" data-parent-id="${task.id}">`;
+                        let subOrder = 1;
+                        for (const sub of children[task.id]) {
+                            const subProjectName = projectMap[sub.project_id] || `Project #${sub.project_id}`;
+                            html += this.renderAllTaskCard(sub, subProjectName, false, subOrder++);
+                            renderedIds.add(sub.id);
+                        }
+                        html += '</div>';
+                    }
+                }
+                html += `
+                        </div>
+                    </div>`;
+            }
+
             container.innerHTML = html;
             this.setupAllTasksDragAndDrop(container);
         } catch (e) {
@@ -5427,7 +5553,7 @@ class DevManager {
         }
     }
 
-    renderAllTaskCard(task, projectName, hasChildren = false, subIndex = 0) {
+    renderAllTaskCard(task, projectName, hasChildren = false, subIndex = 0, parentOrder = 0, overrideOrder = 0) {
         const now = new Date();
         const hasDue = task.due_date?.Valid;
         const isOverdue = hasDue && new Date(task.due_date.Time) < now && task.status !== 'done';
@@ -5457,9 +5583,11 @@ class DevManager {
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
             </button>` : '';
 
-        // Order number badge
-        const orderNum = task.sort_order > 0 ? `<span class="task-order-num">${task.sort_order}</span>` : '';
-        const subIndexLabel = subIndex > 0 ? `<span class="task-sub-index">${subIndex}.</span>` : '';
+        // Order number badge (done tasks and subtasks never show order number)
+        const hasSubIndex = subIndex > 0 && parentOrder > 0;
+        const displayOrder = overrideOrder > 0 ? overrideOrder : task.sort_order;
+        const orderNum = (!isDone && !hasSubIndex && displayOrder > 0) ? `<span class="task-order-num">${displayOrder}</span>` : '';
+        const subIndexLabel = hasSubIndex ? `<span class="task-sub-index">${parentOrder}.${subIndex}</span>` : '';
 
         // Collapse button for parent tasks with children
         const collapseBtn = hasChildren ? `
@@ -5470,8 +5598,8 @@ class DevManager {
         // Children count badge (shown when collapsed)
         const childCountBadge = hasChildren ? `<span class="task-children-count">${this._collapsedTasks?.has(task.id) ? '' : ''}</span>` : '';
 
-        // Drag handle (desktop)
-        const dragHandle = `
+        // Drag handle (desktop) - hidden for done tasks
+        const dragHandle = isDone ? '' : `
             <div class="task-drag-handle" title="Drag to reorder">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/>
@@ -5520,50 +5648,35 @@ class DevManager {
         this._initSortable(container, null);
     }
 
-    // Save reorder for global tasks view: groups tasks by project and calls reorder API for each
+    // Save reorder for global tasks view: uses global reorder endpoint
     async _saveAllTasksReorder(container) {
         if (!container) return;
 
-        // Build reorder data grouped by project
-        const projectTasks = {}; // projectId -> [{id, sort_order, parent_id}]
+        const items = [];
+        let order = 1;
 
-        let sortOrder = 1;
-        // Top-level cards
+        // Top-level cards (skip done-section)
         container.querySelectorAll(':scope > .task-card').forEach(card => {
-            const pid = card.dataset.projectId;
-            if (!projectTasks[pid]) projectTasks[pid] = [];
-            projectTasks[pid].push({
-                id: parseInt(card.dataset.taskId),
-                sort_order: sortOrder++,
-                parent_id: null,
-            });
+            if (card.closest('.done-section')) return;
+            items.push({ id: parseInt(card.dataset.taskId), global_sort_order: order++ });
         });
 
-        // Subtask containers
-        container.querySelectorAll('.task-subtasks').forEach(subtaskContainer => {
-            const parentCard = subtaskContainer.previousElementSibling;
-            if (!parentCard?.classList?.contains('task-card')) return;
-            const parentId = parseInt(parentCard.dataset.taskId);
-            const pid = parentCard.dataset.projectId;
-
+        // Subtask containers (only direct children, not inside done-section)
+        container.querySelectorAll(':scope > .task-subtasks').forEach(subtaskContainer => {
+            if (subtaskContainer.closest('.done-section')) return;
             subtaskContainer.querySelectorAll(':scope > .task-card').forEach(card => {
-                if (!projectTasks[pid]) projectTasks[pid] = [];
-                projectTasks[pid].push({
-                    id: parseInt(card.dataset.taskId),
-                    sort_order: sortOrder++,
-                    parent_id: parentId,
-                });
+                items.push({ id: parseInt(card.dataset.taskId), global_sort_order: order++ });
             });
         });
 
-        // Call reorder API for each project that has tasks
-        const promises = Object.entries(projectTasks).map(([pid, items]) =>
-            this.api('PUT', `/projects/${pid}/tasks/reorder`, items).catch(e => {
-                console.error(`Failed to reorder project ${pid}:`, e);
-            })
-        );
-        await Promise.all(promises);
-        this.loadAllTasks(); // Reload to fix visual state
+        if (items.length > 0) {
+            try {
+                await this.api('PUT', '/tasks/reorder', items);
+            } catch (e) {
+                console.error('Failed to reorder global tasks:', e);
+            }
+            this.loadAllTasks();
+        }
     }
 
     _populateProjectFilter() {
