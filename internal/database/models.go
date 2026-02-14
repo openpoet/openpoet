@@ -117,6 +117,7 @@ type AIConversation struct {
 	ProactiveType    string    `db:"proactive_type" json:"proactive_type"`      // 'task_suggestion', 'memory_doc_update', 'insight', 'alert', or ''
 	ProactiveContext string    `db:"proactive_context" json:"proactive_context"` // JSON context for system prompt
 	IsRead           bool      `db:"is_read" json:"is_read"`
+	SessionID        string    `db:"session_id" json:"session_id"` // Claude Code session ID for resume across restarts
 	CreatedAt        time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt        time.Time `db:"updated_at" json:"updated_at"`
 }
@@ -140,6 +141,7 @@ type TempDocument struct {
 	Summary        string        `db:"summary" json:"summary"`
 	Status         string        `db:"status" json:"status"`
 	MessageID      int64         `db:"message_id" json:"message_id"`
+	FeedbackAck    bool          `db:"feedback_ack" json:"feedback_ack"` // true if AI has acknowledged the approval/rejection
 	CreatedAt      time.Time     `db:"created_at" json:"created_at"`
 }
 

@@ -36,6 +36,7 @@ var migrations = []Migration{
 	{Version: 18, Description: "docs: add message_id to temp_documents", Up: migrateV18},
 	{Version: 19, Description: "tasks: add global_sort_order for cross-project ordering", Up: migrateV19},
 	{Version: 20, Description: "sessions: add last_activity_at for tracking last output/event", Up: migrateV20},
+	{Version: 21, Description: "ai: add feedback_ack to temp_documents and session_id to ai_conversations", Up: migrateV21},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -535,6 +536,21 @@ func migrateV19(tx *sqlx.Tx) error {
 func migrateV20(tx *sqlx.Tx) error {
 	_, err := tx.Exec(`ALTER TABLE sessions ADD COLUMN last_activity_at TIMESTAMP`)
 	return err
+}
+
+// migrateV21 adds feedback_ack to temp_documents for tracking AI acknowledgment of proposal outcomes,
+// and session_id to ai_conversations for persisting Claude Code session IDs across restarts.
+func migrateV21(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE temp_documents ADD COLUMN feedback_ack INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE ai_conversations ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // migrateV4 adds AI conversation and message tables.

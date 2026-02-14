@@ -476,6 +476,12 @@ func (d *DB) TouchAIConversation(ctx context.Context, id int64) error {
 	return err
 }
 
+// UpdateAIConversationSessionID persists the Claude Code session ID for resume across restarts.
+func (d *DB) UpdateAIConversationSessionID(ctx context.Context, id int64, sessionID string) error {
+	_, err := d.ExecContext(ctx, "UPDATE ai_conversations SET session_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", sessionID, id)
+	return err
+}
+
 func (d *DB) DeleteAIConversation(ctx context.Context, id int64) error {
 	d.DeleteTempDocumentsByConversation(ctx, id)
 	_, err := d.ExecContext(ctx, "DELETE FROM ai_conversations WHERE id = ?", id)
@@ -573,6 +579,29 @@ func (d *DB) GetTempDocument(ctx context.Context, id string) (*TempDocument, err
 	var doc TempDocument
 	err := d.GetContext(ctx, &doc, "SELECT * FROM temp_documents WHERE id = ?", id)
 	return &doc, err
+}
+
+// ListUnacknowledgedFeedback returns temp documents that have been approved/rejected
+// but not yet acknowledged by the AI assistant in a conversation.
+func (d *DB) ListUnacknowledgedFeedback(ctx context.Context, conversationID int64) ([]TempDocument, error) {
+	var docs []TempDocument
+	err := d.SelectContext(ctx, &docs,
+		`SELECT * FROM temp_documents WHERE conversation_id = ? AND status IN ('approved','rejected') AND feedback_ack = 0 ORDER BY created_at ASC`,
+		conversationID)
+	return docs, err
+}
+
+// AcknowledgeFeedback marks temp documents as acknowledged by the AI assistant.
+func (d *DB) AcknowledgeFeedback(ctx context.Context, docIDs []string) error {
+	if len(docIDs) == 0 {
+		return nil
+	}
+	query, args, err := sqlx.In(`UPDATE temp_documents SET feedback_ack = 1 WHERE id IN (?)`, docIDs)
+	if err != nil {
+		return err
+	}
+	_, err = d.ExecContext(ctx, d.Rebind(query), args...)
+	return err
 }
 
 // Project Task operations
