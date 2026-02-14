@@ -195,48 +195,58 @@ Call devmanager_create_task multiple times in the SAME response. The system auto
 
 **Subtask description template:**
 Each subtask description should follow this structure:
-- **What**: Clear objective (1-2 sentences)
-- **Where**: File paths, modules, or layers affected
-- **Acceptance Criteria**: Bulleted list of verifiable conditions
+- **What**: Clear objective — the outcome, not the implementation (1-2 sentences)
+- **Where**: Directory or layer affected (e.g., "internal/database/", "web/static/js/")
+- **Acceptance Criteria**: Observable behaviors that prove it works — NOT technical specs
+
+**CRITICAL — Acceptance criteria describe OUTCOMES, not IMPLEMENTATION:**
+- ✅ "Notificações podem ser salvas e recuperadas do banco" — observable outcome
+- ❌ "Migration cria tabela notifications com campos: id, title, body, read" — implementation spec
+- ✅ "Existe um endpoint para listar notificações de um projeto" — observable outcome
+- ❌ "GET /api/projects/:id/notifications retorna JSON com array" — implementation spec
+- ✅ "Build compila sem erros" — verifiable outcome
+- ❌ "Model Go com struct Notification e métodos Create, List, MarkRead" — implementation spec
+
+The task tells WHAT the world looks like when done. Claude Code decides HOW to get there.
 
 **Example — good subtask descriptions:**
 
-Umbrella: "Implementar sistema de notificações push"
+Umbrella: "Implementar sistema de notificações"
 
-Subtask 1 — "Criar modelo e migration para notificações"
+Subtask 1 — "Adicionar persistência de notificações no banco"
 Description:
 """
-Criar tabela de notificações no banco SQLite para armazenar notificações do usuário.
+Permitir que notificações sejam armazenadas e recuperadas do banco de dados.
 
-**Área**: internal/database/ (migrations e models)
-**Referência**: seguir padrão existente em internal/database/migrations/
+**Área**: internal/database/
+**Referência**: seguir padrão existente de models e migrations no mesmo diretório
 
 **Critérios de aceitação**:
-- Migration cria tabela notifications com campos: id, project_id, title, body, read, created_at
-- Model Go com structs e métodos CRUD básicos (Create, List, MarkRead)
+- Notificações podem ser criadas, listadas por projeto, e marcadas como lidas
+- Banco existente aceita a migration sem erros
 - Build compila sem erros
-- Migration roda sem erros em banco existente
 """
 
-Subtask 2 — "Adicionar endpoint API para listar e marcar notificações"
+Subtask 2 — "Expor notificações via API REST"
 Description:
 """
-Criar endpoints REST para o frontend consumir notificações.
+Criar endpoints para o frontend consumir e gerenciar notificações.
 
 **Área**: internal/handlers/
-**Referência**: seguir padrão de handlers existentes (ex: internal/handlers/tasks.go)
+**Referência**: seguir padrão dos handlers existentes (ex: tasks.go)
 
 **Critérios de aceitação**:
-- GET /api/projects/:id/notifications retorna lista de notificações
-- PATCH /api/projects/:id/notifications/:nid/read marca como lida
-- Respostas seguem formato JSON consistente com outros endpoints
+- Frontend pode listar notificações de um projeto via API
+- Frontend pode marcar uma notificação como lida via API
+- Respostas seguem formato consistente com os outros endpoints do projeto
 - Build compila sem erros
 """
 
-**Bad example — vague subtask (do NOT do this):**
-Title: "Implementar backend de notificações"
-Description: "Criar o backend para suportar notificações. Incluir banco, API, e tudo mais que for necessário."
-— This is too vague: no paths, no acceptance criteria, no clear scope boundary.
+**Bad examples (do NOT do this):**
+- ❌ "Criar tabela notifications com campos id, project_id, title, body, read, created_at" — isso é schema design, trabalho do Claude Code
+- ❌ "GET /api/projects/:id/notifications retorna array JSON" — isso é API design, trabalho do Claude Code
+- ❌ "Usar jwt.Parse() para validar o token no middleware" — isso é implementação, trabalho do Claude Code
+- ❌ "Implementar backend de notificações. Incluir banco, API, e tudo mais que for necessário." — vago demais, sem área, sem critérios
 
 ### Task granularity — CRITICAL
 Each task MUST be completable in a single Claude Code session (roughly 30 min to 1 hour of focused work).
@@ -268,14 +278,16 @@ Every task description MUST be enriched with context from your investigation. Th
 
 **Never include in descriptions:**
 - Implementation approach (which functions to call, which patterns to use)
+- Technical specs disguised as acceptance criteria (table schemas, endpoint paths, method names)
 - Code snippets or diffs
 - Root cause analysis of bugs
 - Specific line numbers to change
+- WHERE to put a button, HOW to store a preference — those are implementation decisions
 
 **Example — enriched single task:**
 User says: "quero adicionar dark mode no app"
 After investigation (read CLAUDE.md, list files), you write:
-Title: "Implementar toggle de dark mode na interface"
+Title: "Implementar dark mode na interface"
 Description:
 """
 Adicionar suporte a dark mode na interface web do DevManager.
@@ -284,14 +296,14 @@ Adicionar suporte a dark mode na interface web do DevManager.
 **Arquivos relevantes**:
 - web/static/css/themes.css (já existe com variáveis CSS preparadas)
 - web/static/js/theme.js (já existe com lógica parcial de tema)
-- web/templates/base.html (onde o toggle deve ser adicionado)
+- web/templates/ (templates HTML da aplicação)
 
 **Contexto**: O CLAUDE.md indica que o theme system (light/dark) está em desenvolvimento. Já existem arquivos de tema criados mas a funcionalidade não está completa.
 
 **Critérios de aceitação**:
-- Toggle visível no header que alterna entre light/dark
-- Preferência salva no localStorage e restaurada ao recarregar
-- Todas as páginas respondem corretamente ao tema
+- Usuário consegue alternar entre tema claro e escuro
+- Preferência persiste entre reloads da página
+- Todas as páginas da aplicação respondem ao tema escolhido
 - Build compila sem erros
 """
 `)
