@@ -206,6 +206,16 @@ class AIChatManager {
         this.isOpen = true;
         this.panel.classList.add('open');
         document.body.classList.add('ai-chat-open');
+
+        // If a proposal notification is pending, auto-load that conversation
+        const chatToggle = document.getElementById('ai-chat-toggle');
+        if (chatToggle?.dataset.pendingConvId) {
+            const pendingConvId = parseInt(chatToggle.dataset.pendingConvId);
+            delete chatToggle.dataset.pendingConvId;
+            chatToggle.classList.remove('has-notification');
+            this.loadConversation(pendingConvId);
+        }
+
         if (window.innerWidth > 768) {
             this.input?.focus();
         }
@@ -631,11 +641,27 @@ class AIChatManager {
     // Called by WebSocket handler when a chat_doc_card event arrives (e.g. from MCP propose endpoint).
     // Queues the card for injection when the stream ends (to avoid being wiped by innerHTML updates).
     injectDocCardFromWS(data) {
-        // Only queue if the conversation_id matches the current chat conversation
         const convId = data.conversation_id;
-        if (convId && String(convId) !== String(this.currentConversationId)) return;
-        if (!this._pendingWSDocCards) this._pendingWSDocCards = [];
-        this._pendingWSDocCards.push(data);
+
+        // If this conversation is currently loaded, queue the card for injection on stream done
+        if (convId && String(convId) === String(this.currentConversationId)) {
+            if (!this._pendingWSDocCards) this._pendingWSDocCards = [];
+            this._pendingWSDocCards.push(data);
+            return;
+        }
+
+        // Conversation is not active — show a notification so the user knows a proposal is ready
+        this._showProposalNotification(convId, data);
+    }
+
+    // Shows a visual indicator on the chat toggle button when a proposal is ready
+    // in a conversation that isn't currently loaded.
+    _showProposalNotification(convId, data) {
+        const chatToggle = document.getElementById('ai-chat-toggle');
+        if (chatToggle) {
+            chatToggle.classList.add('has-notification');
+            chatToggle.dataset.pendingConvId = convId;
+        }
     }
 
     formatToolName(name) {
@@ -973,6 +999,8 @@ class AIChatManager {
         }).catch((e) => {
             if (e.name !== 'AbortError') {
                 console.error('Stream reconnect error:', e);
+                // Restore conversation state from DB so doc cards are not lost
+                this.loadConversation(convId);
             }
             this.setStreaming(false);
         });
