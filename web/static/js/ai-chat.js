@@ -10,7 +10,6 @@ class AIChatManager {
         this.historyBtn = document.getElementById('ai-chat-history');
         this.deleteCurrentBtn = document.getElementById('ai-chat-delete-current');
         this.closeBtn = document.getElementById('ai-chat-close');
-        this.statusEl = document.getElementById('ai-chat-status');
         this.expandBtn = document.getElementById('ai-chat-expand');
         this.voiceBtn = document.getElementById('ai-chat-voice');
         this.editor = document.getElementById('ai-chat-editor');
@@ -176,7 +175,6 @@ class AIChatManager {
             this.configured = data.configured;
             this.provider = data.provider;
             this.model = data.model;
-            this.updateStatusDisplay();
         } catch (e) {
             this.configured = false;
         }
@@ -192,18 +190,6 @@ class AIChatManager {
             }
         } catch (e) {
             // Ignore — no active stream
-        }
-    }
-
-    updateStatusDisplay() {
-        if (!this.statusEl) return;
-        if (this.configured) {
-            const providerLabel = this.provider === 'apikey' ? 'API Key' : 'Claude Code';
-            this.statusEl.textContent = providerLabel;
-            this.statusEl.className = 'ai-chat-status-badge configured';
-        } else {
-            this.statusEl.textContent = 'Not configured';
-            this.statusEl.className = 'ai-chat-status-badge not-configured';
         }
     }
 
