@@ -316,8 +316,13 @@ class DevManager {
                     window.terminalManager?.renameSession(sessionId, newName);
                     const tab = document.querySelector(`.terminal-tab[data-session-id="${sessionId}"]`);
                     if (tab) {
-                        const nameSpan = tab.querySelector('.terminal-tab-name');
-                        if (nameSpan) nameSpan.textContent = newName;
+                        const nameContainer = tab.querySelector('.terminal-tab-name');
+                        if (nameContainer) {
+                            const nameText = nameContainer.querySelector('.terminal-tab-name-text');
+                            if (nameText) nameText.textContent = newName;
+                            else nameContainer.textContent = newName;
+                            nameContainer.dataset.fullName = newName;
+                        }
                     }
                     // Hide link-task button if this is the active session (task was just linked)
                     if (window.terminalManager?.activeSessionId === sessionId) {
@@ -1973,11 +1978,21 @@ class DevManager {
             const tabData = this.openTabs.get(sessionId);
             if (tabData) {
                 tabData.sessionName = customName;
-                // Update tab name in UI
+                // Update tab name in UI (preserve task subtitle)
                 const tab = document.querySelector(`.terminal-tab[data-session-id="${sessionId}"]`);
                 if (tab) {
-                    const nameSpan = tab.querySelector('.terminal-tab-name');
-                    if (nameSpan) nameSpan.textContent = customName;
+                    const nameContainer = tab.querySelector('.terminal-tab-name');
+                    if (nameContainer) {
+                        const nameText = nameContainer.querySelector('.terminal-tab-name-text');
+                        if (nameText) {
+                            nameText.textContent = customName;
+                        } else {
+                            nameContainer.textContent = customName;
+                        }
+                        // Update tooltip with full task title or custom name
+                        const taskSpan = nameContainer.querySelector('.terminal-tab-task');
+                        nameContainer.dataset.fullName = taskSpan ? taskSpan.textContent : customName;
+                    }
                 }
             }
         }
@@ -2160,10 +2175,26 @@ class DevManager {
         statusDot.dataset.status = 'running';
         statusDot.title = 'Running';
 
-        const nameSpan = document.createElement('span');
-        nameSpan.className = 'terminal-tab-name';
-        nameSpan.textContent = sessionName;
-        this._attachSessionNameTooltip(nameSpan, sessionName);
+        const nameContainer = document.createElement('div');
+        nameContainer.className = 'terminal-tab-name';
+
+        const nameText = document.createElement('span');
+        nameText.className = 'terminal-tab-name-text';
+        nameText.textContent = sessionName;
+        nameContainer.appendChild(nameText);
+
+        // Task title subtitle (desktop)
+        const taskTitle = session.task_title || '';
+        if (taskTitle) {
+            const taskSpan = document.createElement('span');
+            taskSpan.className = 'terminal-tab-task';
+            taskSpan.textContent = taskTitle;
+            nameContainer.appendChild(taskSpan);
+        }
+
+        // Tooltip: show full task title on hover
+        const tooltipText = taskTitle || sessionName;
+        this._attachSessionNameTooltip(nameContainer, tooltipText);
 
         // Close button
         const closeImg = document.createElement('img');
@@ -2172,7 +2203,7 @@ class DevManager {
         closeImg.alt = 'Close';
 
         tabDiv.appendChild(statusDot);
-        tabDiv.appendChild(nameSpan);
+        tabDiv.appendChild(nameContainer);
         tabDiv.appendChild(closeImg);
 
         // Tab click - connect terminal if needed, then switch to session
@@ -2339,7 +2370,7 @@ class DevManager {
             // Create tab for this session
             const project = this.projects.find(p => p.id === session.project_id);
             const projectName = project?.name || 'Unknown';
-            const tabName = `${projectName} (${new Date(session.start_time).toLocaleTimeString()})`;
+            const tabName = session.name || `${projectName} (${new Date(session.start_time).toLocaleTimeString()})`;
 
             // Add to tracking (but terminal not connected yet)
             if (!this.openTabs.has(session.id)) {
@@ -3057,8 +3088,12 @@ class DevManager {
                         window.terminalManager.renameSession(tabData.sessionId, tabData.sessionName);
                         const tab = document.querySelector(`.terminal-tab[data-session-id="${tabData.sessionId}"]`);
                         if (tab) {
-                            const nameSpan = tab.querySelector('.terminal-tab-name');
-                            if (nameSpan) nameSpan.textContent = tabData.sessionName;
+                            const nameContainer = tab.querySelector('.terminal-tab-name');
+                            if (nameContainer) {
+                                const nameText = nameContainer.querySelector('.terminal-tab-name-text');
+                                if (nameText) nameText.textContent = tabData.sessionName;
+                                else nameContainer.textContent = tabData.sessionName;
+                            }
                         }
                     }
                 }
@@ -3958,7 +3993,12 @@ class DevManager {
     // ==================== SESSION NAME TOOLTIP ====================
 
     _isTextTruncated(el) {
-        return el.scrollWidth > el.clientWidth;
+        if (el.scrollWidth > el.clientWidth) return true;
+        // Check children too (for container divs with truncated child spans)
+        for (const child of el.children) {
+            if (child.scrollWidth > child.clientWidth) return true;
+        }
+        return false;
     }
 
     _showSessionTooltip(el, text) {
