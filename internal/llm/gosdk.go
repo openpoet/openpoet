@@ -325,6 +325,10 @@ func (p *GoSDKProvider) getOrCreateSession(ctx context.Context, req *Request, co
 	if exists && session != nil && session.sessionID != "" {
 		opts = append(opts, claudecode.WithResume(session.sessionID))
 		log.Printf("[GoSDK] Resuming session %s for conversation %d", session.sessionID, convID)
+	} else if !exists && req.SessionID != "" {
+		// Fallback: resume using session ID persisted in the database (survives server restarts)
+		opts = append(opts, claudecode.WithResume(req.SessionID))
+		log.Printf("[GoSDK] Resuming session from DB: %s for conversation %d", req.SessionID, convID)
 	}
 
 	// Create a persistent context for this conversation's client

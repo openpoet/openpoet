@@ -420,6 +420,40 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Inject proposal feedback (approved/rejected) into the user's message context.
+	// This notifies the AI about outcomes of proposals it created earlier.
+	feedbackDocs, _ := h.api.db.ListUnacknowledgedFeedback(ctx, conv.ID)
+	if len(feedbackDocs) > 0 {
+		var fb strings.Builder
+		fb.WriteString("[Notificação do sistema — Feedback de propostas]\n")
+		for _, doc := range feedbackDocs {
+			statusLabel := "APROVADA"
+			if doc.Status == "rejected" {
+				statusLabel = "REJEITADA"
+			}
+			fb.WriteString(fmt.Sprintf("- %s: %s — %s\n", doc.Title, doc.Summary, statusLabel))
+		}
+		fb.WriteString("\n---\n")
+
+		// Prepend feedback to the last user message to avoid consecutive user messages
+		if len(messages) > 0 {
+			last := &messages[len(messages)-1]
+			if last.Role == "user" && len(last.Content) > 0 {
+				last.Content[0].Text = fb.String() + last.Content[0].Text
+			}
+		}
+
+		// Mark as acknowledged
+		var docIDs []string
+		for _, doc := range feedbackDocs {
+			docIDs = append(docIDs, doc.ID)
+		}
+		if err := h.api.db.AcknowledgeFeedback(ctx, docIDs); err != nil {
+			log.Printf("[AIFeedback] Failed to acknowledge feedback: %v", err)
+		}
+		log.Printf("[AIFeedback] Injected %d proposal feedback(s) for conv %d", len(feedbackDocs), conv.ID)
+	}
+
 	// Build system prompt with current state (inject proactive context if AI-initiated)
 	var proactiveCtx string
 	if conv.Source == "ai" && conv.ProactiveContext != "" && conv.ProactiveContext != "{}" {
@@ -489,6 +523,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		MaxTokens:      4096,
 		Model:          model,
 		ConversationID: conv.ID,
+		SessionID:      conv.SessionID,
 	}
 
 	var assistantText strings.Builder
@@ -881,6 +916,15 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			CacheCreationTokens: totalUsage.CacheCreationTokens,
 			CostUSD:             costUSD,
 		})
+	}
+
+	// Persist Claude Code session ID for resume across server restarts
+	if resp != nil && resp.SessionID != "" && resp.SessionID != conv.SessionID {
+		if err := h.api.db.UpdateAIConversationSessionID(dbCtx, conv.ID, resp.SessionID); err != nil {
+			log.Printf("[AI] Failed to persist session ID: %v", err)
+		} else {
+			log.Printf("[AI] Persisted session ID %s for conv %d", resp.SessionID, conv.ID)
+		}
 	}
 
 	safeSendSSE("done", map[string]interface{}{

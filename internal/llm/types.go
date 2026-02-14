@@ -125,7 +125,8 @@ type Request struct {
 	Tools          []ToolDefinition
 	MaxTokens      int
 	Model          string
-	ConversationID int64 // Optional: passed to MCP subprocess for correlation
+	ConversationID int64  // Optional: passed to MCP subprocess for correlation
+	SessionID      string // Optional: session ID for resume (from DB persistence)
 }
 
 // Response is the output of a non-streaming provider call.
