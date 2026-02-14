@@ -2,6 +2,7 @@
 class NotifBadge {
     constructor() {
         this.unreadCount = 0;
+        this.activeCount = 0;
         this.panelVisible = false;
         this.notifications = [];
 
@@ -10,6 +11,7 @@ class NotifBadge {
 
     async init() {
         await this.fetchUnreadCount();
+        await this.fetchActiveCount();
 
         document.getElementById('btn-mark-all-read')?.addEventListener('click', () => {
             this.markAllRead();
@@ -20,7 +22,8 @@ class NotifBadge {
             if (this.panelVisible &&
                 !e.target.closest('#notification-panel') &&
                 !e.target.closest('#nav-notifications') &&
-                !e.target.closest('#mobile-nav-notifications')) {
+                !e.target.closest('#mobile-nav-notifications') &&
+                !e.target.closest('#notif-float-btn')) {
                 this.hide();
             }
         });
@@ -52,13 +55,46 @@ class NotifBadge {
             mobileBadge.textContent = count > 99 ? '99+' : count;
             mobileBadge.classList.toggle('hidden', count === 0);
         }
+
+        // Update floating button badge and visibility
+        const floatBadge = document.getElementById('notif-count-float');
+        if (floatBadge) {
+            floatBadge.textContent = count > 99 ? '99+' : count;
+            floatBadge.classList.toggle('hidden', count === 0);
+        }
+        this.updateFloatingBtn();
+    }
+
+    // Fetch total active notifications count (read or unread) to control floating button visibility
+    async fetchActiveCount() {
+        try {
+            const resp = await fetch('/api/notifications/active');
+            if (resp.ok) {
+                const data = await resp.json();
+                this.activeCount = data ? data.length : 0;
+                this.updateFloatingBtn();
+            }
+        } catch (err) {
+            console.warn('[NotifBadge] Failed to fetch active count:', err);
+        }
+    }
+
+    // Show/hide the desktop floating notification button based on active notifications
+    updateFloatingBtn() {
+        const btn = document.getElementById('notif-float-btn');
+        if (!btn) return;
+        const hasNotifications = (this.activeCount > 0) || (this.unreadCount > 0);
+        btn.classList.toggle('hidden', !hasNotifications);
     }
 
     handleCountUpdate(data) {
         this.updateCount(data.unread_count || 0);
+        this.fetchActiveCount();
     }
 
     handleNewNotification(_data) {
+        this.activeCount = (this.activeCount || 0) + 1;
+        this.updateFloatingBtn();
         if (this.panelVisible) {
             this.loadNotifications();
         }
@@ -90,6 +126,8 @@ class NotifBadge {
             const resp = await fetch('/api/notifications/active');
             if (!resp.ok) return;
             this.notifications = await resp.json();
+            this.activeCount = this.notifications ? this.notifications.length : 0;
+            this.updateFloatingBtn();
             this.renderPanel();
         } catch (err) {
             console.warn('[NotifBadge] Failed to load notifications:', err);
@@ -126,6 +164,8 @@ class NotifBadge {
                 this.markRead(parseInt(id));
                 el.remove();
                 this.notifications = this.notifications.filter(n => String(n.id) !== id);
+                this.activeCount = this.notifications.length;
+                this.updateFloatingBtn();
                 if (this.notifications.length === 0) {
                     list.innerHTML = '<div class="empty-state" style="padding:24px;"><p>No notifications</p></div>';
                 }
@@ -154,6 +194,8 @@ class NotifBadge {
         try {
             await fetch('/api/notifications/read-all', { method: 'PUT' });
             this.notifications.forEach(n => n.read = true);
+            this.activeCount = 0;
+            this.updateCount(0);
             this.renderPanel();
         } catch (err) {
             console.warn('[NotifBadge] Failed to mark all read:', err);

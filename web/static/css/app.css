@@ -2804,6 +2804,55 @@ body {
 
 /* ============ AI Chat Panel ============ */
 
+/* Floating notification button (desktop) */
+.notif-float-btn {
+    position: fixed;
+    bottom: 20px;
+    right: 76px;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: var(--color-bg-secondary);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 150;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    transition: transform 0.2s, box-shadow 0.2s;
+    overflow: visible;
+}
+.notif-float-btn:hover {
+    transform: scale(1.1);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
+}
+.notif-float-btn.hidden {
+    display: none;
+}
+.notif-float-badge {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background-color: var(--color-danger);
+    color: white;
+    font-size: 10px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    pointer-events: none;
+}
+.notif-float-badge.hidden {
+    display: none;
+}
+
 .ai-chat-toggle-btn {
     position: fixed;
     bottom: 20px;
@@ -5688,7 +5737,11 @@ body {
 }
 
 /* Notification Badge */
-.nav-notifications,
+/* Hide notification button from desktop sidebar - moved to floating button */
+.nav-notifications {
+    display: none;
+}
+
 #mobile-nav-notifications {
     position: relative;
 }
@@ -5719,8 +5772,10 @@ body {
 /* Notification Panel */
 .notification-panel {
     position: fixed;
-    top: 60px;
-    left: var(--sidebar-width);
+    bottom: 76px;
+    right: 20px;
+    top: auto;
+    left: auto;
     width: 360px;
     max-height: 480px;
     background: var(--color-bg-secondary);
