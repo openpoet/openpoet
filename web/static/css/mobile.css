@@ -194,6 +194,12 @@
         display: none;
     }
 
+    /* Hide image/voice buttons from header on mobile (already in mobile input bar) */
+    #btn-image-picker,
+    #btn-voice-input {
+        display: none;
+    }
+
     /* Terminal container - use flexbox instead of absolute positioning */
     .terminal-main-area {
         position: relative;
