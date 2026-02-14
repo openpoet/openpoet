@@ -2877,6 +2877,18 @@ body {
     transform: scale(1.1);
     box-shadow: 0 6px 16px rgba(var(--color-primary-rgb), 0.5);
 }
+.ai-chat-toggle-btn.has-notification::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 12px;
+    height: 12px;
+    background: var(--color-warning, #ff6b35);
+    border-radius: 50%;
+    border: 2px solid var(--color-bg, #1a1a2e);
+    animation: pulse 1.5s infinite;
+}
 
 .ai-chat-panel {
     position: fixed;
