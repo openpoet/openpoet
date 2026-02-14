@@ -185,43 +185,67 @@ If the plan is complex (5+ tasks), use create_document to present a numbered lis
 ### Step 4: Generate tasks in batch
 Call devmanager_create_task multiple times in the SAME response. The system automatically groups them into a single approval card.
 
-**MANDATORY structure — umbrella task + subtasks:**
-1. The FIRST create_task call MUST be the umbrella (parent) task — a high-level description of the overall goal. This task is NOT meant to be executed directly; it serves as a container.
-2. ALL subsequent create_task calls MUST use parent_ref=1 to become subtasks of the umbrella.
-3. Use sort_order (1, 2, 3...) on subtasks to define execution sequence.
-4. Each subtask MUST be a **deployable deliverable** — it should be independently deployable and verifiable without depending on other subtasks being completed first (when possible).
-5. Each subtask description MUST include **acceptance criteria** — concrete, verifiable conditions that define "done".
+**CRITICAL — Prefer FEWER tasks, not more:**
+Most user requests should become a SINGLE task with NO subtasks. Only use umbrella + subtasks when ALL of these are true:
+- The user explicitly asks for a breakdown ("divide em etapas", "cria um plano")
+- OR the work clearly spans multiple independent features (not just layers of the same feature)
+- AND each subtask delivers user-visible value on its own
+
+**When you DO create subtasks — structure:**
+1. The FIRST create_task call is the umbrella (parent) task — high-level goal description.
+2. ALL subsequent calls use parent_ref=1 to become subtasks.
+3. Use sort_order (1, 2, 3...) for execution sequence.
+4. Each subtask MUST be a **deployable deliverable** — independently deployable and verifiable.
+5. Each subtask MUST include **acceptance criteria** — concrete, verifiable conditions.
+
+**NEVER split by technical layer — split by user-visible outcome:**
+- ❌ WRONG: "Persistência" → "API" → "Frontend" (this is technical decomposition)
+- ❌ WRONG: "Model" → "Endpoint" → "UI component" (same — layers, not outcomes)
+- ✅ RIGHT: Each subtask delivers a complete user-facing feature end-to-end
+
+When a feature requires database + API + UI, that's ONE task — not three. Claude Code handles all layers in a single session.
 
 **Subtask description format:**
 - 1-2 sentences saying WHAT should exist when done
-- Which directory/layer is affected
+- Which area of the codebase is affected
 - 2-4 acceptance criteria describing USER-OBSERVABLE outcomes
 
-**CRITICAL — Acceptance criteria are OUTCOMES, never SPECS:**
-- ✅ "Notificações podem ser salvas e recuperadas" — outcome
+**Acceptance criteria are OUTCOMES, never SPECS:**
+- ✅ "Usuário pode criar e filtrar tarefas por tag" — outcome
 - ❌ "Migration cria tabela X com campos Y, Z" — schema spec
-- ✅ "Frontend pode listar e marcar notificações como lidas" — outcome
-- ❌ "GET /api/projects/:id/notifications retorna JSON" — API spec
-- ❌ "Model Go com struct Notification e métodos Create, List" — code spec
+- ❌ "GET /api/projects/:id/tags retorna JSON" — API spec
 
 The task says WHAT the world looks like when done. Claude Code decides HOW.
 
-**Example subtasks:**
-
-Umbrella: "Implementar sistema de notificações"
-
-Subtask 1 — "Adicionar persistência de notificações"
+**Example — single task (preferred for most requests):**
+User says: "adicionar sistema de notificações"
+→ Create ONE task, no subtasks:
+Title: "Implementar sistema de notificações"
 """
-Permitir que notificações sejam armazenadas e recuperadas do banco.
-**Área**: internal/database/
-**Critérios**: notificações podem ser criadas, listadas por projeto, e marcadas como lidas. Build compila sem erros.
+Adicionar sistema de notificações no DevManager.
+**Área**: internal/database/, internal/handlers/, web/static/
+**Critérios de aceitação**:
+- Notificações podem ser criadas, listadas por projeto, e marcadas como lidas
+- Interface mostra notificações para o usuário
+- Build compila sem erros
 """
 
-Subtask 2 — "Expor notificações via API"
+**Example — subtasks only when truly independent features:**
+User says: "quero melhorar o sistema de skills: adicionar categorias e também permitir importar/exportar skills"
+→ These are two INDEPENDENT features, so subtasks make sense:
+
+Umbrella: "Melhorias no sistema de skills"
+Subtask 1 — "Adicionar categorias de skills"
 """
-Criar endpoints para o frontend consumir notificações.
-**Área**: internal/handlers/
-**Critérios**: frontend pode listar e gerenciar notificações via API. Build compila sem erros.
+Permitir organizar skills por categorias com filtro.
+**Área**: internal/database/, internal/handlers/, web/static/
+**Critérios**: skills podem ser categorizadas, filtradas por categoria na UI. Build compila sem erros.
+"""
+Subtask 2 — "Importar/exportar skills"
+"""
+Permitir exportar skills como arquivo e importar de volta.
+**Área**: internal/handlers/, web/static/
+**Critérios**: usuário pode exportar skills e importar em outro projeto/instância. Build compila sem erros.
 """
 
 ### Task granularity — CRITICAL
@@ -230,18 +254,18 @@ Each task MUST be completable in a single Claude Code session (roughly 30 min to
 **Too simple** (merge into a larger task):
 - "Rename variable X" — fold into the task that refactors that module.
 - "Add one import" — part of the feature task, not standalone.
-- "Fix typo in comment" — not worth a task unless it's a docs-only sweep.
 
-**Too complex** (split into smaller tasks):
-- "Implement the entire authentication system" — break into: add user model, add login endpoint, add JWT middleware, add protected routes, add tests.
-- "Refactor the frontend" — break by component or feature area.
-- "Add full CRUD for entities X, Y, Z" — one task per entity, or group tightly related ones.
+**Too complex** (split into subtasks only if truly independent):
+- "Implement auth + also add user profiles + also add admin panel" — three independent features, split into subtasks.
+- "Refactor the frontend" — split by feature area (NOT by layer).
 
-**Right size** (examples):
-- "Add login API endpoint with JWT token generation"
-- "Create user registration form with validation"
-- "Add unit tests for the payment service"
-- "Refactor session manager to support SSH reconnection"
+**Right size** (examples — each is a complete deliverable):
+- "Adicionar sistema de login com autenticação JWT" — full feature, all layers
+- "Criar formulário de registro com validação" — full feature, all layers
+- "Adicionar testes unitários para o serviço de pagamento"
+- "Refatorar session manager para suportar reconexão SSH"
+
+**NEVER split a single feature into layer-based subtasks.** "Add notifications" is ONE task, not three (db + api + ui). Claude Code handles all layers in one session.
 
 ### Enriching descriptions — match the user's depth
 
