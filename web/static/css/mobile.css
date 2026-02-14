@@ -1109,6 +1109,9 @@
     .ai-chat-toggle-btn {
         display: none;
     }
+    .notif-float-btn {
+        display: none !important;
+    }
 
     /* AI button in mobile nav - highlighted style */
     .mobile-nav-ai {
