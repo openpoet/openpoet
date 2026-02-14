@@ -869,16 +869,22 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 
-			// Also broadcast via WebSocket so the frontend gets notified
-			// even if the SSE connection is closed (user navigated away).
-			h.api.hub.BroadcastChatDocCard(map[string]interface{}{
-				"doc_id":          docID,
-				"type":            "task_proposal",
-				"title":           docTitle,
-				"summary":         summary,
-				"task_count":      len(actions),
-				"conversation_id": conv.ID,
-			})
+			// Broadcast via WebSocket only when the SSE connection is closed
+			// (user navigated away). This avoids duplicate cards when both
+			// SSE and WebSocket are active simultaneously.
+			sseMu.Lock()
+			disconnected := sseDisconnected
+			sseMu.Unlock()
+			if disconnected {
+				h.api.hub.BroadcastChatDocCard(map[string]interface{}{
+					"doc_id":          docID,
+					"type":            "task_proposal",
+					"title":           docTitle,
+					"summary":         summary,
+					"task_count":      len(actions),
+					"conversation_id": conv.ID,
+				})
+			}
 		}
 	}
 
