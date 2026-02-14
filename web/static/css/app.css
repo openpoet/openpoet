@@ -2859,21 +2859,6 @@ body {
     gap: 4px;
 }
 
-.ai-chat-status-badge {
-    font-size: 10px;
-    padding: 2px 8px;
-    border-radius: 10px;
-    background: var(--color-surface);
-    color: var(--color-text-muted);
-}
-.ai-chat-status-badge.configured {
-    background: rgba(var(--color-success-rgb), 0.15);
-    color: var(--color-success);
-}
-.ai-chat-status-badge.not-configured {
-    background: rgba(var(--color-danger-rgb), 0.15);
-    color: var(--color-danger);
-}
 
 .ai-chat-messages {
     flex: 1;
