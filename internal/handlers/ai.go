@@ -684,7 +684,14 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create a single batch proposal document if task actions were collected.
+	// Use a background-derived context because the HTTP request context (ctx) may
+	// already be canceled if the user navigated away during streaming.  The LLM
+	// streaming itself is resilient (uses streamCtx), but the post-processing code
+	// was incorrectly using ctx, causing CreateTempDocument to fail silently.
 	if collector.hasActions() {
+		proposalCtx, proposalCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer proposalCancel()
+
 		actions := collector.getActions()
 		projectID := actions[0].ProjectID
 
@@ -697,7 +704,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		project, err := h.api.db.GetProject(ctx, projectID)
+		project, err := h.api.db.GetProject(proposalCtx, projectID)
 		projectName := "Projeto"
 		if err == nil {
 			projectName = project.Name
@@ -846,7 +853,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			Summary:        summary,
 			MessageID:      assistantMsg.ID,
 		}
-		if err := h.api.db.CreateTempDocument(ctx, tempDoc); err != nil {
+		if err := h.api.db.CreateTempDocument(proposalCtx, tempDoc); err != nil {
 			log.Printf("[TaskProposal] Failed to create temp document: %v", err)
 		} else {
 			h.api.storePendingTaskProposal(docID, actions, summary)
@@ -861,6 +868,17 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 					"task_count": len(actions),
 				})
 			}
+
+			// Also broadcast via WebSocket so the frontend gets notified
+			// even if the SSE connection is closed (user navigated away).
+			h.api.hub.BroadcastChatDocCard(map[string]interface{}{
+				"doc_id":          docID,
+				"type":            "task_proposal",
+				"title":           docTitle,
+				"summary":         summary,
+				"task_count":      len(actions),
+				"conversation_id": conv.ID,
+			})
 		}
 	}
 
