@@ -507,6 +507,15 @@
 
         </main>
 
+        <!-- Notification Toggle Button (floating, desktop only) -->
+        <button id="notif-float-btn" class="notif-float-btn hidden" title="Notifications" onclick="window.notifBadge?.toggle()">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+                <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+            </svg>
+            <span class="notif-float-badge hidden" id="notif-count-float">0</span>
+        </button>
+
         <!-- AI Chat Toggle Button (floating) -->
         <button id="ai-chat-toggle" class="ai-chat-toggle-btn" title="AI Assistant" onclick="window.aiChat?.toggle()">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
