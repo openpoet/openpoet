@@ -366,6 +366,17 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 	// ---- Session management tools ----
 
 	case "devmanager_start_session":
+		// Convert string IDs to numbers for API compatibility
+		if pid, ok := params["project_id"].(string); ok {
+			var id int64
+			fmt.Sscanf(pid, "%d", &id)
+			params["project_id"] = id
+		}
+		if tid, ok := params["task_id"].(string); ok && tid != "" {
+			var id int64
+			fmt.Sscanf(tid, "%d", &id)
+			params["task_id"] = id
+		}
 		payload, _ := json.Marshal(params)
 		body, err := client.Post("/api/sessions", string(payload))
 		if err != nil {
