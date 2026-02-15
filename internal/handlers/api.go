@@ -787,6 +787,7 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 	if input.EnvVars == nil {
 		input.EnvVars = make(map[string]string)
 	}
+
 	if linkedTask != nil {
 		input.EnvVars["DEVMANAGER_TASK_ID"] = fmt.Sprintf("%d", linkedTask.ID)
 		input.EnvVars["DEVMANAGER_TASK_TITLE"] = linkedTask.Title
@@ -805,6 +806,39 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 				"You can use the devmanager_get_my_task MCP tool to fetch updated task details or the devmanager_request_task_evaluation tool when you believe you have completed significant work.",
 			linkedTask.Title, description,
 		)
+	}
+
+	// Inject Ollama env vars if ollama provider is configured
+	provider, _ := a.db.GetSetting(r.Context(), "ai_provider")
+	if provider == "ollama" {
+		ollamaURL, _ := a.db.GetSetting(r.Context(), "ollama_base_url")
+		if ollamaURL == "" {
+			ollamaURL = "http://localhost:11434"
+		}
+		ollamaKey, _ := a.db.GetSetting(r.Context(), "ollama_api_key")
+		ollamaModel, _ := a.db.GetSetting(r.Context(), "ollama_model")
+		if ollamaModel == "" {
+			ollamaModel = "qwen3-coder"
+		}
+
+		log.Printf("[Ollama] Injecting env vars: url=%s, model=%s, has_key=%v", ollamaURL, ollamaModel, ollamaKey != "")
+
+		input.EnvVars["ANTHROPIC_BASE_URL"] = ollamaURL
+
+		// Override model env vars to use configured Ollama model
+		input.EnvVars["ANTHROPIC_DEFAULT_OPUS_MODEL"] = ollamaModel
+		input.EnvVars["ANTHROPIC_DEFAULT_SONNET_MODEL"] = ollamaModel
+		input.EnvVars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = ollamaModel
+		input.EnvVars["CLAUDE_CODE_SUBAGENT_MODEL"] = ollamaModel
+
+		// For Ollama: use ANTHROPIC_AUTH_TOKEN for authentication
+		// - Remote Ollama: ANTHROPIC_AUTH_TOKEN=<api_key>
+		// - Local Ollama: ANTHROPIC_AUTH_TOKEN=ollama
+		if ollamaKey != "" {
+			input.EnvVars["ANTHROPIC_AUTH_TOKEN"] = ollamaKey
+		} else {
+			input.EnvVars["ANTHROPIC_AUTH_TOKEN"] = "ollama"
+		}
 	}
 
 	var sess *database.Session
@@ -2220,6 +2254,16 @@ func (a *API) GetTaskSessionSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	summary, err := a.db.GetTaskSessionSummary(r.Context(), projectID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to fetch session summary")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, summary)
+}
+
+func (a *API) GetAllTaskSessionSummary(w http.ResponseWriter, r *http.Request) {
+	summary, err := a.db.GetAllTaskSessionSummary(r.Context())
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to fetch session summary")
 		return
