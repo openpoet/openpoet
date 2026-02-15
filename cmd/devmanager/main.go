@@ -377,6 +377,7 @@ func main() {
 		r.Get("/projects/{id}/tasks/{taskId}/sessions", api.ListTaskSessions)
 
 		// Global Tasks (cross-project)
+		r.Get("/tasks/session-summary", api.GetAllTaskSessionSummary)
 		r.Get("/tasks", api.ListAllTasks)
 		r.Put("/tasks/reorder", api.ReorderAllTasks)
 
@@ -751,6 +752,19 @@ func initAIProvider(db *database.DB, apiURL string) llm.Provider {
 		}
 		log.Printf("[AI] Provider set to gosdk but Claude CLI not available")
 		return nil
+
+	case "ollama":
+		ollamaURL, _ := db.GetSetting(ctx, "ollama_base_url")
+		ollamaKey, _ := db.GetSetting(ctx, "ollama_api_key")
+		ollamaModel, _ := db.GetSetting(ctx, "ollama_model")
+		if ollamaURL == "" {
+			ollamaURL = "http://localhost:11434"
+		}
+		if ollamaModel == "" {
+			ollamaModel = "qwen3-coder"
+		}
+		log.Printf("[AI] Using Ollama provider at %s with model %s", ollamaURL, ollamaModel)
+		return llm.NewOllamaProvider(ollamaURL, ollamaKey, ollamaModel)
 
 	case "nodesdk":
 		log.Printf("[AI] Using Node.js Agent SDK sidecar provider")

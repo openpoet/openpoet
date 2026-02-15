@@ -18,6 +18,10 @@ class DevManager {
         this.splitScreenMode = false;
         this.splitScreenSessions = []; // Max 2 sessions in split view
 
+        // Session creation tracking (prevent race conditions)
+        this.pendingSessionOpen = null; // { sessionId, timestamp }
+        this.recentlyCreatedSessions = new Set(); // Track sessions created in last 5 seconds
+
         this.init();
     }
 
@@ -488,6 +492,11 @@ class DevManager {
             const payload = { project_id: projectId, name: customName };
             if (taskId) payload.task_id = taskId;
             const session = await this.api('POST', '/sessions', payload);
+
+            // Mark this session as recently created (protect from restoreTabsFromStorage)
+            this.recentlyCreatedSessions.add(session.id);
+            setTimeout(() => this.recentlyCreatedSessions.delete(session.id), 5000);
+
             this.showToast('Success', taskId ? 'Session started from task' : 'Session started', 'success');
             this.openTerminal(session.id, session, customName);
         } catch (error) {
@@ -1946,6 +1955,9 @@ class DevManager {
     async openTerminal(sessionId, sessionData = null, customName = null) {
         console.log('openTerminal called with:', sessionId);
 
+        // Set pending session flag to prevent race conditions with restoreTabsFromStorage
+        this.pendingSessionOpen = { sessionId, timestamp: Date.now() };
+
         // Dismiss any active tooltip/popup before switching views
         this._hideSessionTooltip();
         this._hideSessionPopup();
@@ -1954,6 +1966,7 @@ class DevManager {
         let session = sessionData || this.sessions.find(s => s.id === sessionId);
         if (!session) {
             console.error('Session not found:', sessionId);
+            this.pendingSessionOpen = null;
             return;
         }
 
@@ -2019,6 +2032,28 @@ class DevManager {
 
         // Save tabs to storage
         this.saveTabsToStorage();
+
+        // Clear pending session flag and ensure this session remains active
+        this.pendingSessionOpen = null;
+
+        // Check if the session tab still exists (it may have been removed by
+        // syncSessionTabs if the session died immediately after creation)
+        if (!this.openTabs.has(sessionId)) {
+            console.error(`[openTerminal] Session ${sessionId} died before terminal could connect`);
+            this.showToast('Session ended unexpectedly. Check server logs for details.', 'error');
+            // Navigate back to sessions view
+            this.navigateTo('sessions');
+            return;
+        }
+
+        // Double-check that the requested session is actually active
+        // (protect against race conditions from restoreTabsFromStorage)
+        if (window.terminalManager.activeSessionId !== sessionId) {
+            console.warn(`[openTerminal] Active session mismatch! Requested: ${sessionId}, Active: ${window.terminalManager.activeSessionId}. Forcing switch...`);
+            window.terminalManager.switchToSession(sessionId);
+            this.currentSession = sessionId;
+            this.updateTabActiveState(sessionId);
+        }
     }
 
     async stopSession(sessionId) {
@@ -3075,9 +3110,24 @@ class DevManager {
                 return;
             }
 
+            // Check if a session is currently being opened manually
+            if (this.pendingSessionOpen) {
+                const elapsed = Date.now() - this.pendingSessionOpen.timestamp;
+                if (elapsed < 5000) {
+                    console.log('[restoreTabsFromStorage] Skipping - session being opened manually:', this.pendingSessionOpen.sessionId);
+                    return;
+                }
+            }
+
             // Restore each tab if session still exists
             for (const tabData of state.tabs) {
                 const session = this.sessions.find(s => s.id === tabData.sessionId);
+
+                // Skip recently created sessions (they're already being opened)
+                if (this.recentlyCreatedSessions.has(tabData.sessionId)) {
+                    console.log('[restoreTabsFromStorage] Skipping recently created session:', tabData.sessionId);
+                    continue;
+                }
 
                 // Only restore if session is still running
                 if (session && session.status === 'running') {
@@ -3099,11 +3149,16 @@ class DevManager {
                 }
             }
 
-            // Restore active tab
+            // Restore active tab (but respect pending session open)
             if (state.activeSessionId && this.openTabs.has(state.activeSessionId)) {
-                window.terminalManager.switchToSession(state.activeSessionId);
-                this.currentSession = state.activeSessionId;
-                this.updateTabActiveState(state.activeSessionId);
+                // Don't override if a session is currently being opened
+                if (this.pendingSessionOpen && this.pendingSessionOpen.sessionId !== state.activeSessionId) {
+                    console.log('[restoreTabsFromStorage] Not restoring active tab - session being opened:', this.pendingSessionOpen.sessionId);
+                } else if (!this.recentlyCreatedSessions.has(state.activeSessionId)) {
+                    window.terminalManager.switchToSession(state.activeSessionId);
+                    this.currentSession = state.activeSessionId;
+                    this.updateTabActiveState(state.activeSessionId);
+                }
             }
 
             // Restore tab order
@@ -3501,19 +3556,37 @@ class DevManager {
                     </p>
                     <div class="form-group">
                         <label class="form-label">Provider</label>
-                        <select class="form-input" id="ai-provider">
+                        <select class="form-input" id="ai-provider" onchange="app.onAIProviderChange()">
                             <option value="">Auto-detect</option>
                             <option value="gosdk">Agent SDK (Claude CLI)</option>
+                            <option value="ollama">Ollama (Remote)</option>
                             <option value="nodesdk">Agent SDK (Node.js)</option>
                             <option value="apikey">Anthropic API Key</option>
                         </select>
                     </div>
-                    <div class="form-group">
+                    <div id="ollama-settings" style="display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-color, #333);">
+                        <div class="form-group">
+                            <label class="form-label">Ollama Base URL</label>
+                            <input type="text" class="form-input" id="ollama-base-url" placeholder="http://localhost:11434" value="http://localhost:11434">
+                            <small class="text-muted">Remote Ollama server URL</small>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Ollama API Key</label>
+                            <input type="password" class="form-input" id="ollama-api-key" placeholder="ollama-key">
+                            <small class="text-muted">API key for remote Ollama (optional for local)</small>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Model</label>
+                            <input type="text" class="form-input" id="ollama-model" placeholder="qwen3-coder" value="qwen3-coder">
+                            <small class="text-muted">Ollama model name (e.g., qwen3-coder, llama3.2)</small>
+                        </div>
+                    </div>
+                    <div class="form-group" id="anthropic-key-group">
                         <label class="form-label">Anthropic API Key</label>
                         <input type="password" class="form-input" id="anthropic-key" placeholder="sk-ant-...">
-                        <small style="color: var(--color-text-muted); font-size: 11px;">Only needed for API Key or Node.js SDK provider. Key is stored securely and never exposed to the frontend.</small>
+                        <small class="text-muted">Only needed for API Key provider.</small>
                     </div>
-                    <div class="form-group">
+                    <div class="form-group" id="ai-model-group">
                         <label class="form-label">Model</label>
                         <select class="form-input" id="ai-model">
                             <option value="claude-sonnet-4-5-20250929">Claude Sonnet 4.5</option>
@@ -3583,6 +3656,21 @@ class DevManager {
                 const aiModelSelect = document.getElementById('ai-model');
                 if (aiModelSelect && this.settings.ai_model) {
                     aiModelSelect.value = this.settings.ai_model;
+                }
+                const ollamaURLInput = document.getElementById('ollama-base-url');
+                if (ollamaURLInput && this.settings.ollama_base_url) {
+                    ollamaURLInput.value = this.settings.ollama_base_url;
+                }
+                const ollamaKeyInput = document.getElementById('ollama-api-key');
+                if (ollamaKeyInput && this.settings.ollama_api_key) {
+                    ollamaKeyInput.value = this.settings.ollama_api_key;
+                }
+                const ollamaModelInput = document.getElementById('ollama-model');
+                if (ollamaModelInput && this.settings.ollama_model) {
+                    ollamaModelInput.value = this.settings.ollama_model;
+                }
+                if (aiProviderSelect) {
+                    this.onAIProviderChange();
                 }
                 const mcpHttpCheckbox = document.getElementById('mcp-http-enabled');
                 if (mcpHttpCheckbox) {
@@ -4574,11 +4662,17 @@ class DevManager {
         const aiProvider = document.getElementById('ai-provider').value;
         const anthropicKey = document.getElementById('anthropic-key').value;
         const aiModel = document.getElementById('ai-model').value;
+        const ollamaURL = document.getElementById('ollama-base-url')?.value;
+        const ollamaKey = document.getElementById('ollama-api-key')?.value;
+        const ollamaModel = document.getElementById('ollama-model')?.value;
 
         const settings = {};
         if (aiProvider) settings.ai_provider = aiProvider;
         if (anthropicKey) settings.anthropic_api_key = anthropicKey;
         if (aiModel) settings.ai_model = aiModel;
+        if (ollamaURL) settings.ollama_base_url = ollamaURL;
+        if (ollamaKey) settings.ollama_api_key = ollamaKey;
+        if (ollamaModel) settings.ollama_model = ollamaModel;
 
         try {
             await this.api('PUT', '/config/settings', settings);
@@ -4586,6 +4680,27 @@ class DevManager {
         } catch (error) {
             this.showToast('Error', error.message, 'error');
         }
+    }
+
+    toggleAISettings() {
+        const provider = document.getElementById('ai-provider')?.value;
+        const ollamaSettings = document.getElementById('ollama-settings');
+        const anthropicKeyGroup = document.getElementById('anthropic-key-group');
+        const aiModelGroup = document.getElementById('ai-model-group');
+
+        if (ollamaSettings) {
+            ollamaSettings.style.display = provider === 'ollama' ? 'block' : 'none';
+        }
+        if (anthropicKeyGroup) {
+            anthropicKeyGroup.style.display = provider === 'apikey' ? 'block' : 'none';
+        }
+        if (aiModelGroup) {
+            aiModelGroup.style.display = provider === 'ollama' || provider === 'apikey' ? 'none' : 'block';
+        }
+    }
+
+    onAIProviderChange() {
+        this.toggleAISettings();
     }
 
     async saveMCPHTTPSettings() {
@@ -4779,9 +4894,13 @@ class DevManager {
             const resp = await fetch('/api/ai/status');
             const data = await resp.json();
             if (data.configured) {
-                const providerNames = { apikey: 'API Key', gosdk: 'Agent SDK (Go)', nodesdk: 'Agent SDK (Node.js)', claudecode: 'Claude CLI' };
+                const providerNames = { apikey: 'API Key', gosdk: 'Agent SDK (Go)', nodesdk: 'Agent SDK (Node.js)', claudecode: 'Claude CLI', ollama: 'Ollama' };
                 const provider = providerNames[data.provider] || data.provider;
-                if (resultEl) resultEl.innerHTML = `<span style="color: var(--color-success);">Connected (${provider}, model: ${data.model})</span>`;
+                if (data.error) {
+                    if (resultEl) resultEl.innerHTML = `<span style="color: var(--color-danger);">Error: ${data.error}</span>`;
+                } else {
+                    if (resultEl) resultEl.innerHTML = `<span style="color: var(--color-success);">Connected (${provider}, model: ${data.model})</span>`;
+                }
             } else {
                 if (resultEl) resultEl.innerHTML = '<span style="color: var(--color-danger);">Not configured. Select a provider and configure it in settings.</span>';
             }
@@ -5720,6 +5839,7 @@ class DevManager {
             }
 
             // Session history
+            const activeSession = sessions?.find(s => s.status === 'running' || s.status === 'starting');
             if (sessions && sessions.length > 0) {
                 md += `---\n\n### Sessões\n\n`;
                 for (const s of sessions) {
@@ -5727,7 +5847,8 @@ class DevManager {
                     const name = s.name || s.id.substring(0, 8);
                     const isActive = s.status === 'running' || s.status === 'starting';
                     const badge = isActive ? '🟢 running' : s.status;
-                    md += `- **${this.escapeHtml(name)}** — ${badge} — ${date}\n`;
+                    const sessionId = s.id.substring(0, 8);
+                    md += `- **${this.escapeHtml(name)}** \`${sessionId}\` — ${badge} — ${date}\n`;
                 }
             }
 
@@ -5769,14 +5890,26 @@ class DevManager {
                     }
                 });
 
-                actions.push({
-                    label: 'Iniciar Sessão',
-                    class: 'btn btn-success',
-                    onClick: () => {
-                        window.docViewer.close();
-                        this.startSessionFromTask(projectId, taskId);
-                    }
-                });
+                if (activeSession) {
+                    const sessionLabel = activeSession.name || activeSession.id.substring(0, 8);
+                    actions.push({
+                        label: `Ir para Sessão (${sessionLabel})`,
+                        class: 'btn btn-success',
+                        onClick: () => {
+                            window.docViewer.close();
+                            this.openTerminal(activeSession.id);
+                        }
+                    });
+                } else {
+                    actions.push({
+                        label: 'Iniciar Sessão',
+                        class: 'btn btn-success',
+                        onClick: () => {
+                            window.docViewer.close();
+                            this.startSessionFromTask(projectId, taskId);
+                        }
+                    });
+                }
             }
 
             // "Discuss with AI" button — always visible regardless of status
@@ -5934,6 +6067,11 @@ class DevManager {
                 task_id: taskId,
                 name: customName
             });
+
+            // Mark this session as recently created (protect from restoreTabsFromStorage)
+            this.recentlyCreatedSessions.add(session.id);
+            setTimeout(() => this.recentlyCreatedSessions.delete(session.id), 5000);
+
             this.showToast('Success', 'Session started from task', 'success');
             this.openTerminal(session.id, session, customName);
         } catch (e) {
@@ -5962,9 +6100,14 @@ class DevManager {
         const queryStr = params.toString() ? `?${params.toString()}` : '';
 
         try {
-            const data = await this.api('GET', `/tasks${queryStr}`);
+            const [data, sessionSummaryRaw] = await Promise.all([
+                this.api('GET', `/tasks${queryStr}`),
+                this.api('GET', '/tasks/session-summary').catch(() => [])
+            ]);
             const tasks = data.tasks || [];
             const summary = data.summary || {};
+            this._taskSessionSummary = {};
+            (sessionSummaryRaw || []).forEach(s => { this._taskSessionSummary[s.task_id] = s; });
 
             if (statsEl) {
                 const total = Object.values(summary).reduce((a, b) => a + b, 0);
@@ -6107,6 +6250,19 @@ class DevManager {
         const descPreview = task.description ? `<span class="task-description-preview">${this.escapeHtml(task.description.substring(0, 80))}</span>` : '';
         const projectBadge = `<span class="task-project-badge" onclick="event.stopPropagation();app.showProjectDetail(${task.project_id})" title="Go to project">${this.escapeHtml(projectName)}</span>`;
 
+        // Session indicator
+        const sessSummary = this._taskSessionSummary?.[task.id];
+        let sessionIndicatorHtml = '';
+        if (sessSummary?.active_count > 0) {
+            sessionIndicatorHtml = `<span class="task-session-indicator active" title="${sessSummary.active_count} active session(s)">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            </span>`;
+        } else if (sessSummary?.session_count > 0) {
+            sessionIndicatorHtml = `<span class="task-session-indicator past" title="${sessSummary.session_count} past session(s)">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+            </span>`;
+        }
+
         const startSessionBtn = !isDone ? `
             <button class="btn-icon btn-start-session" onclick="event.stopPropagation();app.startSessionFromTask(${task.project_id}, ${task.id})" title="Start Session">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -6147,6 +6303,7 @@ class DevManager {
                         ${orderNum}
                         ${collapseBtn}
                         <span class="task-title" onclick="app.viewTaskDetail(${task.project_id}, ${task.id})" style="cursor:pointer;">${this.escapeHtml(task.title)}</span>
+                        ${sessionIndicatorHtml}
                         <span class="task-status-badge badge-${task.status}" onclick="app.cycleTaskStatus(${task.project_id}, ${task.id}, '${task.status}')">${task.status.replace('_', ' ')}</span>
                     </div>
                     <div class="task-card-meta">

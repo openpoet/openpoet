@@ -30,6 +30,7 @@ type RemoteRunner struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	done            chan struct{}
+	waitErr         error
 }
 
 func NewRemoteRunner(
@@ -124,7 +125,7 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 	// Using 'export' so env vars are inherited by claude and its child processes (bridge.sh)
 	cmd := ""
 	for k, v := range r.envVars {
-		cmd += fmt.Sprintf("export %s=%s && ", k, v)
+		cmd += fmt.Sprintf("export %s=%s && ", k, shellQuote(v))
 	}
 	cmd += fmt.Sprintf("cd %s && claude", r.project.Path)
 	for _, arg := range r.cliArgs {
@@ -145,7 +146,10 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 
 	// Monitor for completion
 	go func() {
-		session.Wait()
+		if err := session.Wait(); err != nil {
+			log.Printf("[remote] Session exited with error: %v", err)
+			r.waitErr = err
+		}
 		close(r.done)
 	}()
 
@@ -368,7 +372,7 @@ func (r *RemoteRunner) Resize(rows, cols uint16) error {
 
 func (r *RemoteRunner) Wait() error {
 	<-r.done
-	return nil
+	return r.waitErr
 }
 
 func (r *RemoteRunner) PID() int {

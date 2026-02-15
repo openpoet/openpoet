@@ -1118,6 +1118,55 @@ func (d *DB) GetTaskSessionSummary(ctx context.Context, projectID int64) ([]stru
 	return out, nil
 }
 
+func (d *DB) GetAllTaskSessionSummary(ctx context.Context) ([]struct {
+	TaskID               int64  `db:"task_id" json:"task_id"`
+	SessionCount         int    `db:"session_count" json:"session_count"`
+	ActiveCount          int    `db:"active_count" json:"active_count"`
+	StoppedCount         int    `db:"stopped_count" json:"stopped_count"`
+	LatestSession        string `db:"latest_session" json:"latest_session"`
+	LatestStoppedSession string `db:"latest_stopped_session" json:"latest_stopped_session"`
+}, error) {
+	type taskSessionInfo struct {
+		TaskID               int64  `db:"task_id" json:"task_id"`
+		SessionCount         int    `db:"session_count" json:"session_count"`
+		ActiveCount          int    `db:"active_count" json:"active_count"`
+		StoppedCount         int    `db:"stopped_count" json:"stopped_count"`
+		LatestSession        string `db:"latest_session" json:"latest_session"`
+		LatestStoppedSession string `db:"latest_stopped_session" json:"latest_stopped_session"`
+	}
+	var results []taskSessionInfo
+	err := d.SelectContext(ctx, &results, `
+		SELECT s.task_id,
+		       COUNT(*) as session_count,
+		       COUNT(CASE WHEN s.status IN ('running', 'starting') THEN 1 END) as active_count,
+		       COUNT(CASE WHEN s.status IN ('stopped', 'completed') THEN 1 END) as stopped_count,
+		       COALESCE((SELECT s2.id FROM sessions s2 WHERE s2.task_id = s.task_id ORDER BY s2.start_time DESC LIMIT 1), '') as latest_session,
+		       COALESCE((SELECT s2.id FROM sessions s2 WHERE s2.task_id = s.task_id AND s2.status IN ('stopped', 'completed') ORDER BY s2.start_time DESC LIMIT 1), '') as latest_stopped_session
+		FROM sessions s
+		WHERE s.task_id IS NOT NULL
+		GROUP BY s.task_id`)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]struct {
+		TaskID               int64  `db:"task_id" json:"task_id"`
+		SessionCount         int    `db:"session_count" json:"session_count"`
+		ActiveCount          int    `db:"active_count" json:"active_count"`
+		StoppedCount         int    `db:"stopped_count" json:"stopped_count"`
+		LatestSession        string `db:"latest_session" json:"latest_session"`
+		LatestStoppedSession string `db:"latest_stopped_session" json:"latest_stopped_session"`
+	}, len(results))
+	for i, r := range results {
+		out[i].TaskID = r.TaskID
+		out[i].SessionCount = r.SessionCount
+		out[i].ActiveCount = r.ActiveCount
+		out[i].StoppedCount = r.StoppedCount
+		out[i].LatestSession = r.LatestSession
+		out[i].LatestStoppedSession = r.LatestStoppedSession
+	}
+	return out, nil
+}
+
 func (d *DB) ReopenSession(ctx context.Context, id string) error {
 	_, err := d.ExecContext(ctx,
 		"UPDATE sessions SET status='starting', end_time=NULL, start_time=?, pid=NULL WHERE id=? AND status IN ('stopped', 'completed')",
