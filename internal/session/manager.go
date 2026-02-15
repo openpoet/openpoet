@@ -153,7 +153,7 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	// Use --session-id so Claude Code conversation ID matches DevManager session ID.
 	// This allows --resume to restore the exact conversation when reopening.
 	cliArgs := []string{"--session-id", sessionID}
-	if mcpJSON := m.buildMCPConfigJSON(ctx, project); mcpJSON != "" {
+	if mcpJSON := m.buildMCPConfigJSON(ctx, project, sessionID); mcpJSON != "" {
 		cliArgs = append(cliArgs, "--mcp-config", mcpJSON)
 	}
 
@@ -266,7 +266,7 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	cliArgs = append(cliArgs, "--resume", sessionID)
 
 	// Build MCP config for --mcp-config CLI flag
-	if mcpJSON := m.buildMCPConfigJSON(ctx, project); mcpJSON != "" {
+	if mcpJSON := m.buildMCPConfigJSON(ctx, project, sessionID); mcpJSON != "" {
 		cliArgs = append(cliArgs, "--mcp-config", mcpJSON)
 	}
 
@@ -569,7 +569,7 @@ func (m *Manager) checkForNotificationTriggers(sessionID string, data []byte) {
 // buildMCPConfigJSON builds a JSON string for the --mcp-config CLI flag.
 // It includes user-configured MCP servers from the DB plus DevManager's own MCP server.
 // DevManager's MCP server is only included if the effective tool policy allows at least one tool.
-func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Project) string {
+func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Project, sessionID string) string {
 	mcpServers := make(map[string]interface{})
 
 	// Add user-configured MCP servers from DB
@@ -615,7 +615,8 @@ func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Proj
 				"command": execPath,
 				"args":    []string{"mcp-serve"},
 				"env": map[string]string{
-					"DEVMANAGER_API_URL": "http://" + m.serverAddr,
+					"DEVMANAGER_API_URL":    "http://" + m.serverAddr,
+					"DEVMANAGER_SESSION_ID": sessionID,
 				},
 			}
 		}
@@ -689,10 +690,11 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	envVars["OTEL_RESOURCE_ATTRIBUTES"] = "devmanager.session_id=" + sessionID
 	envVars["OTEL_METRIC_EXPORT_INTERVAL"] = "10000" // 10 seconds for faster feedback
 
-	// Build MCP config for --mcp-config CLI flag
-	var cliArgs []string
-	if mcpJSON := m.buildMCPConfigJSON(ctx, project); mcpJSON != "" {
-		cliArgs = []string{"--mcp-config", mcpJSON}
+	// Use --session-id so Claude Code conversation ID matches DevManager session ID.
+	// This allows --resume to restore the exact conversation when reopening.
+	cliArgs := []string{"--session-id", sessionID}
+	if mcpJSON := m.buildMCPConfigJSON(ctx, project, sessionID); mcpJSON != "" {
+		cliArgs = append(cliArgs, "--mcp-config", mcpJSON)
 	}
 
 	// Inject task system prompt if present (set by API handler when session starts from a task)

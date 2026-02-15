@@ -50,7 +50,7 @@ func (r *LocalRunner) Start(ctx context.Context) error {
 
 	r.ctx, r.cancel = context.WithCancel(ctx)
 
-	// Check if claude command exists
+	// Check if claude command exists and get full path
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		errMsg := fmt.Sprintf("\r\n\x1b[31mError: Claude Code CLI not found in PATH.\r\nPlease install it with: npm install -g @anthropic-ai/claude-code\x1b[0m\r\n")
@@ -66,23 +66,30 @@ func (r *LocalRunner) Start(ctx context.Context) error {
 		r.outputHandler([]byte(startMsg))
 	}
 
-	// Create command to run claude with optional CLI args (e.g. --mcp-config)
-	r.cmd = exec.CommandContext(r.ctx, "claude", r.cliArgs...)
+	// Create command using full path to claude (avoids needing PATH in env)
+	r.cmd = exec.CommandContext(r.ctx, claudePath, r.cliArgs...)
 	r.cmd.Dir = r.workDir
 
-	// Set environment variables — start from the current process env but strip
-	// Claude Code marker vars so that child `claude` processes are not rejected
-	// as "nested sessions". This matters when devmanager itself was launched from
-	// within a Claude Code session (e.g. via the deploy skill).
-	for _, env := range os.Environ() {
-		key := env[:strings.IndexByte(env, '=')]
-		if key == "CLAUDECODE" || key == "CLAUDE_CODE_ENTRYPOINT" {
-			continue
-		}
-		r.cmd.Env = append(r.cmd.Env, env)
+	// NO parent environment variables are inherited.
+	// Only use injected envVars for complete isolation from parent shell.
+	// Add minimal system vars needed for the process to function.
+	r.cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+		"USER=" + os.Getenv("USER"),
+		"TERM=xterm-256color",
 	}
+	// Add all injected env vars
 	for k, v := range r.envVars {
 		r.cmd.Env = append(r.cmd.Env, fmt.Sprintf("%s=%s", k, v))
+		// Log ANTHROPIC vars for debugging
+		if strings.HasPrefix(k, "ANTHROPIC_") {
+			if k == "ANTHROPIC_API_KEY" && len(v) > 10 {
+				log.Printf("[Session] Env: %s=%s... (len=%d)", k, v[:10]+"...", len(v))
+			} else {
+				log.Printf("[Session] Env: %s=%s", k, v)
+			}
+		}
 	}
 
 	// Start with PTY

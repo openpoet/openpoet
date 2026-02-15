@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -319,12 +320,50 @@ func (h *AIHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
 		result["provider"] = p.Name()
 	}
 
-	// Get model setting
-	model, _ := h.api.db.GetSetting(r.Context(), "ai_model")
+	// Get model setting based on provider
+	providerType, _ := h.api.db.GetSetting(r.Context(), "ai_provider")
+	var model string
+	if providerType == "ollama" {
+		model, _ = h.api.db.GetSetting(r.Context(), "ollama_model")
+	} else {
+		model, _ = h.api.db.GetSetting(r.Context(), "ai_model")
+	}
 	if model == "" {
 		model = "(provider default)"
 	}
 	result["model"] = model
+
+	// For Ollama, actually test the connection
+	if providerType == "ollama" && p != nil {
+		ollamaURL, _ := h.api.db.GetSetting(r.Context(), "ollama_base_url")
+		if ollamaURL == "" {
+			ollamaURL = "http://localhost:11434"
+		}
+
+		// Test if the model exists by calling /v1/models
+		resp, err := http.Get(ollamaURL + "/v1/models")
+		if err != nil {
+			result["error"] = "Cannot connect to Ollama server"
+		} else {
+			resp.Body.Close()
+			if resp.StatusCode != 200 {
+				result["error"] = "Ollama server returned error"
+			}
+		}
+
+		// Optionally test if the specific model is available
+		if model != "" && model != "(provider default)" {
+			modelResp, err := http.Get(ollamaURL + "/v1/models")
+			if err == nil {
+				body, _ := io.ReadAll(modelResp.Body)
+				modelResp.Body.Close()
+				// Check if model name is in the response
+				if !bytes.Contains(body, []byte(model)) {
+					result["error"] = fmt.Sprintf("Model '%s' not found on Ollama server", model)
+				}
+			}
+		}
+	}
 
 	respondJSON(w, http.StatusOK, result)
 }
@@ -464,8 +503,14 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	systemPrompt := h.buildSystemPromptWithContext(ctx, proactiveCtx)
 
-	// Get model — empty string means "let the provider use its own default"
-	model, _ := h.api.db.GetSetting(ctx, "ai_model")
+	// Get model based on provider
+	providerType, _ := h.api.db.GetSetting(ctx, "ai_provider")
+	var model string
+	if providerType == "ollama" {
+		model, _ = h.api.db.GetSetting(ctx, "ollama_model")
+	} else {
+		model, _ = h.api.db.GetSetting(ctx, "ai_model")
+	}
 
 	// Determine if we should use tools:
 	// - Session providers (gosdk, nodesdk) handle tools internally via MCP — no tools in request
