@@ -1836,6 +1836,7 @@ func (a *API) ListProjectTasks(w http.ResponseWriter, r *http.Request) {
 	if tasks == nil {
 		tasks = []database.ProjectTask{}
 	}
+	database.ApplyUmbrellaStatus(tasks)
 	respondJSON(w, http.StatusOK, tasks)
 }
 
@@ -1939,6 +1940,18 @@ func (a *API) GetProjectTask(w http.ResponseWriter, r *http.Request) {
 	if err != nil || task.ProjectID != projectID {
 		respondError(w, http.StatusNotFound, "Task not found")
 		return
+	}
+
+	// Compute umbrella status dynamically from children
+	allTasks, err := a.db.ListTasksByProject(r.Context(), projectID)
+	if err == nil {
+		database.ApplyUmbrellaStatus(allTasks)
+		for _, t := range allTasks {
+			if t.ID == taskID {
+				task.Status = t.Status
+				break
+			}
+		}
 	}
 
 	respondJSON(w, http.StatusOK, task)

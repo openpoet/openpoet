@@ -670,6 +670,43 @@ func (d *DB) GetTask(ctx context.Context, id int64) (*ProjectTask, error) {
 	return &t, err
 }
 
+// ApplyUmbrellaStatus overwrites the Status field of umbrella tasks (parents)
+// with a value computed from their children's statuses:
+//   - all children todo   → todo
+//   - all children done   → done
+//   - otherwise           → in_progress
+func ApplyUmbrellaStatus(tasks []ProjectTask) {
+	childrenByParent := make(map[int64][]ProjectTask)
+	for _, t := range tasks {
+		if t.ParentID.Valid {
+			childrenByParent[t.ParentID.Int64] = append(childrenByParent[t.ParentID.Int64], t)
+		}
+	}
+	for i := range tasks {
+		kids, isUmbrella := childrenByParent[tasks[i].ID]
+		if !isUmbrella {
+			continue
+		}
+		allTodo, allDone := true, true
+		for _, k := range kids {
+			if k.Status != "todo" {
+				allTodo = false
+			}
+			if k.Status != "done" {
+				allDone = false
+			}
+		}
+		switch {
+		case allDone:
+			tasks[i].Status = "done"
+		case allTodo:
+			tasks[i].Status = "todo"
+		default:
+			tasks[i].Status = "in_progress"
+		}
+	}
+}
+
 func (d *DB) ListTasksByProject(ctx context.Context, projectID int64) ([]ProjectTask, error) {
 	var tasks []ProjectTask
 	err := d.SelectContext(ctx, &tasks, "SELECT * FROM project_tasks WHERE project_id = ? ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END, sort_order, created_at", projectID)
