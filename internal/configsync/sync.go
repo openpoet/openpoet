@@ -77,7 +77,7 @@ func (cs *ConfigSyncer) syncToLocal(ctx context.Context, project *database.Proje
 
 	// Sync skills with smart tracking
 	cs.reportProgress(project.ID, "skills", "running", "Syncing skills...")
-	if err := cs.syncSkillsToLocal(ctx, skillsDir, projectPath); err != nil {
+	if err := cs.syncSkillsToLocal(ctx, skillsDir, project); err != nil {
 		cs.reportProgress(project.ID, "skills", "error", err.Error())
 		return fmt.Errorf("failed to sync skills: %w", err)
 	}
@@ -216,28 +216,79 @@ func (cs *ConfigSyncer) syncToRemote(ctx context.Context, project *database.Proj
 	return nil
 }
 
-// syncSkillsToLocal syncs skills to a local project, tracking which files DevManager manages.
-// Skills are written as .claude/skills/<name>/SKILL.md with YAML frontmatter.
-func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string, projectPath string) error {
-	// Get project ID from path
-	var projectID int64
-	projects, _ := cs.db.ListProjects(ctx)
-	for _, p := range projects {
-		if p.Path == projectPath {
-			projectID = p.ID
-			break
+// syncableSkill is a unified representation for syncing both global and project-specific skills.
+type syncableSkill struct {
+	Name           string
+	Content        string
+	GlobalSkillID  int64 // >0 for global skills, 0 for project skills
+	ProjectSkillID int64 // >0 for project skills, 0 for global skills
+}
+
+// getSkillsForProject returns the effective list of skills to sync for a project,
+// respecting the project's skill_policy and per-project overrides.
+func (cs *ConfigSyncer) getSkillsForProject(ctx context.Context, project *database.Project) ([]syncableSkill, error) {
+	var result []syncableSkill
+
+	if project.SkillPolicy == "custom" {
+		// Custom: use per-project global skill overrides
+		globalSkills, err := cs.db.ListEnabledSkillsForProject(ctx, project.ID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list enabled skills for project: %w", err)
+		}
+		for _, s := range globalSkills {
+			result = append(result, syncableSkill{Name: s.Name, Content: s.Content, GlobalSkillID: s.ID})
+		}
+	} else {
+		// Inherit: use all globally enabled skills
+		globalSkills, err := cs.db.ListEnabledSkills(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list enabled skills: %w", err)
+		}
+		for _, s := range globalSkills {
+			result = append(result, syncableSkill{Name: s.Name, Content: s.Content, GlobalSkillID: s.ID})
 		}
 	}
 
-	skills, err := cs.db.ListEnabledSkills(ctx)
+	// Always add enabled project-specific skills
+	projectSkills, err := cs.db.ListEnabledProjectSkills(ctx, project.ID)
 	if err != nil {
-		return fmt.Errorf("failed to list skills: %w", err)
+		return nil, fmt.Errorf("failed to list project skills: %w", err)
+	}
+	// Project skills override global skills with the same name
+	globalNames := make(map[string]bool)
+	for _, s := range result {
+		globalNames[s.Name] = true
+	}
+	for _, ps := range projectSkills {
+		if globalNames[ps.Name] {
+			// Project skill overrides global — remove the global one
+			for i, s := range result {
+				if s.Name == ps.Name {
+					result = append(result[:i], result[i+1:]...)
+					break
+				}
+			}
+		}
+		result = append(result, syncableSkill{Name: ps.Name, Content: ps.Content, ProjectSkillID: ps.ID})
+	}
+
+	return result, nil
+}
+
+// syncSkillsToLocal syncs skills to a local project, tracking which files DevManager manages.
+// Skills are written as .claude/skills/<name>/SKILL.md with YAML frontmatter.
+func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string, project *database.Project) error {
+	projectID := project.ID
+
+	skills, err := cs.getSkillsForProject(ctx, project)
+	if err != nil {
+		return err
 	}
 
 	// Build set of expected directory names (new format: <name>/SKILL.md)
-	expectedDirs := make(map[string]int64) // dirName -> skillID
+	expectedDirs := make(map[string]bool)
 	for _, skill := range skills {
-		expectedDirs[skill.Name] = skill.ID
+		expectedDirs[skill.Name] = true
 	}
 
 	// Get previously synced files for this project and clean up stale ones
@@ -256,7 +307,7 @@ func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string,
 				dirName = strings.TrimSuffix(dirName, "/SKILL.md")
 			}
 
-			if _, stillNeeded := expectedDirs[dirName]; !stillNeeded {
+			if !expectedDirs[dirName] {
 				// Skill deleted/disabled/renamed — remove directory
 				dirPath := filepath.Join(skillsDir, dirName)
 				os.RemoveAll(dirPath)
@@ -265,7 +316,7 @@ func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string,
 		}
 	}
 
-	// Write enabled skills as <name>/SKILL.md
+	// Write skills as <name>/SKILL.md
 	for _, skill := range skills {
 		skillDirPath := filepath.Join(skillsDir, skill.Name)
 		if err := os.MkdirAll(skillDirPath, 0755); err != nil {
@@ -285,9 +336,15 @@ func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string,
 		// Track with new format
 		trackedName := skill.Name + "/SKILL.md"
 		if projectID > 0 {
-			cs.db.UpsertSyncedSkillFile(ctx, projectID, skill.ID, trackedName)
+			if skill.GlobalSkillID > 0 {
+				cs.db.UpsertSyncedSkillFile(ctx, projectID, skill.GlobalSkillID, trackedName)
+				cs.db.IncrementSkillSyncCount(ctx, skill.GlobalSkillID)
+			} else {
+				// Project skill — track with skill_id 0 (NULL)
+				cs.db.UpsertSyncedSkillFile(ctx, projectID, 0, trackedName)
+				cs.db.IncrementProjectSkillSyncCount(ctx, skill.ProjectSkillID)
+			}
 		}
-		cs.db.IncrementSkillSyncCount(ctx, skill.ID)
 	}
 
 	return nil
@@ -296,15 +353,15 @@ func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string,
 // syncSkillsToRemote syncs skills to a remote project via SFTP, tracking which files DevManager manages.
 // Skills are written as .claude/skills/<name>/SKILL.md with YAML frontmatter.
 func (cs *ConfigSyncer) syncSkillsToRemote(ctx context.Context, sftpClient *sftp.Client, skillsDir string, project *database.Project) error {
-	skills, err := cs.db.ListEnabledSkills(ctx)
+	skills, err := cs.getSkillsForProject(ctx, project)
 	if err != nil {
 		return err
 	}
 
 	// Build set of expected directory names
-	expectedDirs := make(map[string]int64)
+	expectedDirs := make(map[string]bool)
 	for _, skill := range skills {
-		expectedDirs[skill.Name] = skill.ID
+		expectedDirs[skill.Name] = true
 	}
 
 	// Get previously synced files for this project and remove stale ones
@@ -320,7 +377,7 @@ func (cs *ConfigSyncer) syncSkillsToRemote(ctx context.Context, sftpClient *sftp
 			dirName = strings.TrimSuffix(dirName, "/SKILL.md")
 		}
 
-		if _, stillNeeded := expectedDirs[dirName]; !stillNeeded {
+		if !expectedDirs[dirName] {
 			dirPath := filepath.Join(skillsDir, dirName)
 			// Remove SKILL.md then directory
 			sftpClient.Remove(filepath.Join(dirPath, "SKILL.md"))
@@ -329,7 +386,7 @@ func (cs *ConfigSyncer) syncSkillsToRemote(ctx context.Context, sftpClient *sftp
 		}
 	}
 
-	// Write enabled skills as <name>/SKILL.md
+	// Write skills as <name>/SKILL.md
 	for _, skill := range skills {
 		skillDirPath := filepath.Join(skillsDir, skill.Name)
 		sftpClient.MkdirAll(skillDirPath)
@@ -347,8 +404,13 @@ func (cs *ConfigSyncer) syncSkillsToRemote(ctx context.Context, sftpClient *sftp
 		sftpClient.Remove(filepath.Join(skillsDir, skill.Name+".md"))
 
 		trackedName := skill.Name + "/SKILL.md"
-		cs.db.UpsertSyncedSkillFile(ctx, project.ID, skill.ID, trackedName)
-		cs.db.IncrementSkillSyncCount(ctx, skill.ID)
+		if skill.GlobalSkillID > 0 {
+			cs.db.UpsertSyncedSkillFile(ctx, project.ID, skill.GlobalSkillID, trackedName)
+			cs.db.IncrementSkillSyncCount(ctx, skill.GlobalSkillID)
+		} else {
+			cs.db.UpsertSyncedSkillFile(ctx, project.ID, 0, trackedName)
+			cs.db.IncrementProjectSkillSyncCount(ctx, skill.ProjectSkillID)
+		}
 	}
 
 	return nil

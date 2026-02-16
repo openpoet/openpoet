@@ -41,6 +41,7 @@ var migrations = []Migration{
 	{Version: 23, Description: "tasks: add task_history table for activity tracking", Up: migrateV23},
 	{Version: 24, Description: "tasks: add awaiting_approval status and verification_doc_id column", Up: migrateV24},
 	{Version: 25, Description: "docs: add task_id to temp_documents for task-document linking", Up: migrateV25},
+	{Version: 26, Description: "skills: per-project skill config and project-specific skills", Up: migrateV26},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -652,6 +653,44 @@ func migrateV25(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			log.Printf("migrateV25: %v (may already exist)", err)
+		}
+	}
+	return nil
+}
+
+// migrateV26 adds per-project skill configuration and project-specific skills.
+func migrateV26(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE projects ADD COLUMN skill_policy TEXT NOT NULL DEFAULT ''`,
+		`CREATE TABLE IF NOT EXISTS project_skill_config (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL,
+			skill_id INTEGER NOT NULL,
+			enabled BOOLEAN NOT NULL DEFAULT 1,
+			UNIQUE(project_id, skill_id),
+			FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+			FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_skill_config_project ON project_skill_config(project_id)`,
+		`CREATE TABLE IF NOT EXISTS project_skills (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			content TEXT NOT NULL DEFAULT '',
+			enabled BOOLEAN NOT NULL DEFAULT 1,
+			category TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			sync_count INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(project_id, name),
+			FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_skills_project ON project_skills(project_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			log.Printf("migrateV26: %v (may already exist)", err)
 		}
 	}
 	return nil
