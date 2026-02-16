@@ -534,6 +534,13 @@ func main() {
 		r.Put("/projects/{id}/tool-policy", api.UpdateProjectToolPolicy)
 		r.Get("/projects/{id}/tools", api.GetResolvedProjectTools)
 
+		// Project Skills
+		r.Get("/projects/{id}/skills", api.GetProjectSkills)
+		r.Put("/projects/{id}/skill-config", api.SaveProjectSkillConfig)
+		r.Post("/projects/{id}/skills", api.CreateProjectSkillHandler)
+		r.Put("/projects/{id}/skills/{skillId}", api.UpdateProjectSkillHandler)
+		r.Delete("/projects/{id}/skills/{skillId}", api.DeleteProjectSkillHandler)
+
 		// Voice
 		r.Post("/voice/transcribe", voiceHandler.Transcribe)
 
