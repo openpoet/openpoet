@@ -190,6 +190,20 @@ func AllToolDefs() []ToolDef {
 
 		},
 		{
+			Name:           "get_task",
+			Description:    "Get full details of a single task: title, description, status, priority, due date, parent, subtasks.",
+			MCPDescription: "Get the full details of a task by project_id and task_id. Returns all metadata including description.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"task_id":    {Type: "string", Description: "The task ID (number)"},
+				},
+				Required: []string{"project_id", "task_id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
 			Name:        "create_task",
 			Description: "Create a new task in a project.",
 			InputSchema: ToolDefinitionInput{

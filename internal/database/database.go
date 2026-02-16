@@ -827,8 +827,9 @@ type ReorderItem struct {
 
 // GlobalReorderItem represents a single item in a global reorder operation.
 type GlobalReorderItem struct {
-	ID              int64 `json:"id"`
-	GlobalSortOrder int   `json:"global_sort_order"`
+	ID              int64  `json:"id"`
+	GlobalSortOrder int    `json:"global_sort_order"`
+	ParentID        *int64 `json:"parent_id"`
 }
 
 // ReorderTasksGlobal updates global_sort_order for tasks and syncs sort_order per project.
@@ -841,13 +842,13 @@ func (d *DB) ReorderTasksGlobal(ctx context.Context, items []GlobalReorderItem) 
 
 	now := time.Now()
 
-	// 1. Update global_sort_order for all items
-	stmt, err := tx.PrepareContext(ctx, "UPDATE project_tasks SET global_sort_order=?, updated_at=? WHERE id=?")
+	// 1. Update global_sort_order and parent_id for all items
+	stmt, err := tx.PrepareContext(ctx, "UPDATE project_tasks SET global_sort_order=?, parent_id=?, updated_at=? WHERE id=?")
 	if err != nil {
 		return err
 	}
 	for _, item := range items {
-		if _, err := stmt.ExecContext(ctx, item.GlobalSortOrder, now, item.ID); err != nil {
+		if _, err := stmt.ExecContext(ctx, item.GlobalSortOrder, item.ParentID, now, item.ID); err != nil {
 			stmt.Close()
 			return err
 		}
@@ -1014,7 +1015,7 @@ func (d *DB) ListAllTasks(ctx context.Context, f TaskFilter) ([]ProjectTask, err
 		args = append(args, search, search)
 	}
 
-	query += " ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END, global_sort_order, created_at"
+	query += " ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END, CASE WHEN status = 'done' THEN NULL ELSE global_sort_order END, CASE WHEN status = 'done' THEN updated_at END DESC, created_at"
 
 	var tasks []ProjectTask
 	err := d.SelectContext(ctx, &tasks, query, args...)

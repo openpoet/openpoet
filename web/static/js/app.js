@@ -3559,7 +3559,8 @@ class DevManager {
                         <select class="form-input" id="ai-provider" onchange="app.onAIProviderChange()">
                             <option value="">Auto-detect</option>
                             <option value="gosdk">Agent SDK (Claude CLI)</option>
-                            <option value="ollama">Ollama (Remote)</option>
+                            <option value="ollama">Ollama (Direct API)</option>
+                            <option value="ollama-sdk">Ollama (via Claude CLI)</option>
                             <option value="nodesdk">Agent SDK (Node.js)</option>
                             <option value="apikey">Anthropic API Key</option>
                         </select>
@@ -3661,10 +3662,6 @@ class DevManager {
                 if (ollamaURLInput && this.settings.ollama_base_url) {
                     ollamaURLInput.value = this.settings.ollama_base_url;
                 }
-                const ollamaKeyInput = document.getElementById('ollama-api-key');
-                if (ollamaKeyInput && this.settings.ollama_api_key) {
-                    ollamaKeyInput.value = this.settings.ollama_api_key;
-                }
                 const ollamaModelInput = document.getElementById('ollama-model');
                 if (ollamaModelInput && this.settings.ollama_model) {
                     ollamaModelInput.value = this.settings.ollama_model;
@@ -3675,6 +3672,29 @@ class DevManager {
                 const mcpHttpCheckbox = document.getElementById('mcp-http-enabled');
                 if (mcpHttpCheckbox) {
                     mcpHttpCheckbox.checked = this.settings.mcp_http_enabled === 'true';
+                }
+
+                // Show API key previews
+                const apiKeyFields = [
+                    { id: 'anthropic-key', setting: 'anthropic_api_key_preview' },
+                    { id: 'openai-key', setting: 'openai_api_key_preview' },
+                    { id: 'groq-key', setting: 'groq_api_key_preview' },
+                    { id: 'ollama-api-key', setting: 'ollama_api_key_preview' },
+                ];
+                for (const field of apiKeyFields) {
+                    const input = document.getElementById(field.id);
+                    const preview = this.settings[field.setting];
+                    if (input && preview) {
+                        input.placeholder = preview;
+                        const existing = input.parentNode.querySelector('.api-key-set');
+                        if (!existing) {
+                            const indicator = document.createElement('small');
+                            indicator.className = 'api-key-set';
+                            indicator.textContent = `Key configured: ${preview}`;
+                            indicator.style.cssText = 'display:block;margin-top:4px;font-size:12px;color:var(--color-success, #4caf50);';
+                            input.parentNode.appendChild(indicator);
+                        }
+                    }
                 }
             }
             this.loadMCPAPIKeyStatus();
@@ -4688,14 +4708,15 @@ class DevManager {
         const anthropicKeyGroup = document.getElementById('anthropic-key-group');
         const aiModelGroup = document.getElementById('ai-model-group');
 
+        const isOllama = provider === 'ollama' || provider === 'ollama-sdk';
         if (ollamaSettings) {
-            ollamaSettings.style.display = provider === 'ollama' ? 'block' : 'none';
+            ollamaSettings.style.display = isOllama ? 'block' : 'none';
         }
         if (anthropicKeyGroup) {
             anthropicKeyGroup.style.display = provider === 'apikey' ? 'block' : 'none';
         }
         if (aiModelGroup) {
-            aiModelGroup.style.display = provider === 'ollama' || provider === 'apikey' ? 'none' : 'block';
+            aiModelGroup.style.display = isOllama || provider === 'apikey' ? 'none' : 'block';
         }
     }
 
@@ -4891,10 +4912,23 @@ class DevManager {
         if (resultEl) resultEl.innerHTML = '<span style="color: var(--color-text-muted);">Testing...</span>';
 
         try {
-            const resp = await fetch('/api/ai/status');
+            // Send current form values for testing without saving
+            const params = {
+                ai_provider: document.getElementById('ai-provider')?.value || '',
+                anthropic_api_key: document.getElementById('anthropic-key')?.value || '',
+                ai_model: document.getElementById('ai-model')?.value || '',
+                ollama_base_url: document.getElementById('ollama-base-url')?.value || '',
+                ollama_api_key: document.getElementById('ollama-api-key')?.value || '',
+                ollama_model: document.getElementById('ollama-model')?.value || '',
+            };
+            const resp = await fetch('/api/ai/test-connection', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(params),
+            });
             const data = await resp.json();
             if (data.configured) {
-                const providerNames = { apikey: 'API Key', gosdk: 'Agent SDK (Go)', nodesdk: 'Agent SDK (Node.js)', claudecode: 'Claude CLI', ollama: 'Ollama' };
+                const providerNames = { apikey: 'API Key', gosdk: 'Agent SDK (Go)', nodesdk: 'Agent SDK (Node.js)', claudecode: 'Claude CLI', ollama: 'Ollama (Direct)', 'ollama-sdk': 'Ollama (CLI)' };
                 const provider = providerNames[data.provider] || data.provider;
                 if (data.error) {
                     if (resultEl) resultEl.innerHTML = `<span style="color: var(--color-danger);">Error: ${data.error}</span>`;
@@ -4902,7 +4936,7 @@ class DevManager {
                     if (resultEl) resultEl.innerHTML = `<span style="color: var(--color-success);">Connected (${provider}, model: ${data.model})</span>`;
                 }
             } else {
-                if (resultEl) resultEl.innerHTML = '<span style="color: var(--color-danger);">Not configured. Select a provider and configure it in settings.</span>';
+                if (resultEl) resultEl.innerHTML = `<span style="color: var(--color-danger);">${data.error || 'Not configured. Select a provider and configure it.'}</span>`;
             }
         } catch (e) {
             if (resultEl) resultEl.innerHTML = `<span style="color: var(--color-danger);">Error: ${e.message}</span>`;
@@ -5891,9 +5925,8 @@ class DevManager {
                 });
 
                 if (activeSession) {
-                    const sessionLabel = activeSession.name || activeSession.id.substring(0, 8);
                     actions.push({
-                        label: `Ir para Sessão (${sessionLabel})`,
+                        label: 'Ir para Sessão',
                         class: 'btn btn-success',
                         onClick: () => {
                             window.docViewer.close();
@@ -6181,6 +6214,7 @@ class DevManager {
 
             // Done section at the bottom (includes done top-level and orphan done subtasks)
             const allDone = [...doneTopLevel];
+            doneTopLevel.forEach(t => renderedIds.add(t.id));
             for (const task of tasks) {
                 if (!renderedIds.has(task.id) && task.status === 'done') {
                     allDone.push(task);
@@ -6344,14 +6378,16 @@ class DevManager {
         // Top-level cards (skip done-section)
         container.querySelectorAll(':scope > .task-card').forEach(card => {
             if (card.closest('.done-section')) return;
-            items.push({ id: parseInt(card.dataset.taskId), global_sort_order: order++ });
+            items.push({ id: parseInt(card.dataset.taskId), global_sort_order: order++, parent_id: null });
         });
 
         // Subtask containers (only direct children, not inside done-section)
         container.querySelectorAll(':scope > .task-subtasks').forEach(subtaskContainer => {
             if (subtaskContainer.closest('.done-section')) return;
+            const parentCard = subtaskContainer.previousElementSibling;
+            const parentId = parentCard?.classList.contains('task-card') ? parseInt(parentCard.dataset.taskId) : null;
             subtaskContainer.querySelectorAll(':scope > .task-card').forEach(card => {
-                items.push({ id: parseInt(card.dataset.taskId), global_sort_order: order++ });
+                items.push({ id: parseInt(card.dataset.taskId), global_sort_order: order++, parent_id: parentId });
             });
         });
 
