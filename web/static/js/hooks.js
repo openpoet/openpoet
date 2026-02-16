@@ -14,6 +14,9 @@ class HookManager {
         // Execution mode tracking per session
         this.sessionModes = {}; // sessionID -> 'plan_mode' | 'executing' | 'idle'
 
+        // Persisted plan cache per session
+        this.sessionPlans = {}; // sessionID -> { content, updatedAt }
+
         this.setupUI();
     }
 
@@ -180,6 +183,11 @@ class HookManager {
             this.dismissDialog('askUser');
         });
 
+        // View Plan button
+        document.getElementById('btn-view-plan')?.addEventListener('click', () => {
+            this.showPlan();
+        });
+
         // Task Loaded dialog buttons
         document.getElementById('hook-task-loaded-start')?.addEventListener('click', () => {
             this.respondToTaskLoaded('start');
@@ -320,6 +328,9 @@ class HookManager {
                 break;
             case 'hook_task_loaded':
                 this._handleTaskLoaded(msg.data);
+                break;
+            case 'session_plan_updated':
+                if (msg.data?.session_id) this.fetchPlan(msg.data.session_id);
                 break;
         }
     }
@@ -723,10 +734,16 @@ class HookManager {
         const feedbackEl = document.getElementById('hook-plan-feedback');
         if (feedbackEl) feedbackEl.value = '';
 
+        // Cache plan content for persistent access via View Plan toolbar button
+        const planContent = toolInput.plan || '';
+        if (planContent && data.session_id) {
+            this.sessionPlans[data.session_id] = { content: planContent, updatedAt: new Date().toISOString() };
+            this._updatePlanButton();
+        }
+
         // Show View Plan button if plan content is available in the event
         const viewBtn = document.getElementById('hook-plan-view-btn');
         const viewFilename = document.getElementById('hook-plan-view-filename');
-        const planContent = toolInput.plan || '';
         if (viewBtn) {
             viewBtn.classList.add('hidden');
             if (planContent) {
@@ -1471,14 +1488,59 @@ class HookManager {
         }
     }
 
+    // ==================== PLAN PERSISTENCE ====================
+
+    async fetchPlan(sessionId) {
+        if (!sessionId) return;
+        try {
+            const resp = await fetch(`/api/sessions/${sessionId}/plan`);
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (data.plan_content) {
+                this.sessionPlans[sessionId] = {
+                    content: data.plan_content,
+                    updatedAt: data.plan_updated_at
+                };
+            } else {
+                delete this.sessionPlans[sessionId];
+            }
+            this._updatePlanButton();
+        } catch (err) {
+            console.error('[HookManager] Failed to fetch plan:', err);
+        }
+    }
+
+    showPlan() {
+        const sessionId = this._getActiveSessionId();
+        const plan = this.sessionPlans[sessionId];
+        if (plan?.content && window.fileViewer) {
+            window.fileViewer.showPlanContent(plan.content, 'Plan');
+        }
+    }
+
+    _updatePlanButton() {
+        const btn = document.getElementById('btn-view-plan');
+        if (!btn) return;
+        const sessionId = this._getActiveSessionId();
+        const hasPlan = sessionId && this.sessionPlans[sessionId]?.content;
+        btn.style.display = hasPlan ? '' : 'none';
+    }
+
     // Called when user switches session tab - refresh panel and badge for new session.
     // Auto-reopens pending dialog if the newly active session has one.
     onSessionSwitch() {
         this.renderToolPanel();
         this.updateToolBadge();
 
-        // Auto-reopen the first dismissed request for the newly active session
+        // Fetch plan for new active session if not cached
         const activeId = this._getActiveSessionId();
+        if (activeId && !this.sessionPlans[activeId]) {
+            this.fetchPlan(activeId);
+        } else {
+            this._updatePlanButton();
+        }
+
+        // Auto-reopen the first dismissed request for the newly active session
         const pendingForActive = this.dismissedRequests.find(e => e.sessionId === activeId);
         if (pendingForActive) {
             // Verify with backend before reopening
@@ -1554,7 +1616,9 @@ class HookManager {
     clearSession(sessionId) {
         delete this.toolEventsBySession[sessionId];
         delete this.sessionModes[sessionId];
+        delete this.sessionPlans[sessionId];
         this._saveToolEvents();
+        this._updatePlanButton();
 
         this.dismissedRequests = this.dismissedRequests.filter(e => e.sessionId !== sessionId);
         this._saveDismissedRequests();

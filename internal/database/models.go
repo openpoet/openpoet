@@ -44,6 +44,8 @@ type Session struct {
 	StartTime      time.Time     `db:"start_time" json:"start_time"`
 	EndTime        sql.NullTime  `db:"end_time" json:"end_time,omitempty"`
 	LastActivityAt sql.NullTime  `db:"last_activity_at" json:"last_activity_at,omitempty"`
+	PlanContent    string        `db:"plan_content" json:"plan_content"`
+	PlanUpdatedAt  sql.NullTime  `db:"plan_updated_at" json:"plan_updated_at,omitempty"`
 }
 
 type Skill struct {

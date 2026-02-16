@@ -988,6 +988,24 @@ func (a *API) GetSessionOutput(w http.ResponseWriter, r *http.Request) {
 	w.Write(output)
 }
 
+func (a *API) GetSessionPlan(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	planContent, updatedAt, err := a.db.GetSessionPlan(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Session not found")
+		return
+	}
+
+	result := map[string]interface{}{
+		"plan_content": planContent,
+	}
+	if updatedAt != nil {
+		result["plan_updated_at"] = updatedAt
+	}
+	respondJSON(w, http.StatusOK, result)
+}
+
 func (a *API) DeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 

@@ -1969,18 +1969,53 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			return fmt.Sprintf("Project '%s' has no tasks yet.", project.Name), nil
 		}
 
+		// Identify umbrella tasks and build children map
+		parentIDs := make(map[int64]bool)
+		childrenByParent := make(map[int64][]database.ProjectTask)
+		for _, t := range tasks {
+			if t.ParentID.Valid {
+				parentIDs[t.ParentID.Int64] = true
+				childrenByParent[t.ParentID.Int64] = append(childrenByParent[t.ParentID.Int64], t)
+			}
+		}
+
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("## Task Report: %s\n\n", project.Name))
 		total := 0
 		for _, c := range summary {
 			total += c
 		}
-		sb.WriteString(fmt.Sprintf("**Total:** %d tasks\n", total))
+		sb.WriteString(fmt.Sprintf("**Total:** %d tasks (excluding umbrella parents)\n", total))
 		sb.WriteString(fmt.Sprintf("- Todo: %d\n- In Progress: %d\n- Done: %d\n- Blocked: %d\n\n", summary["todo"], summary["in_progress"], summary["done"], summary["blocked"]))
 
-		// Overdue tasks
+		// Umbrella tasks with progress
+		var umbrellas []database.ProjectTask
+		for _, t := range tasks {
+			if parentIDs[t.ID] {
+				umbrellas = append(umbrellas, t)
+			}
+		}
+		if len(umbrellas) > 0 {
+			sb.WriteString("**Umbrella Tasks:**\n")
+			for _, u := range umbrellas {
+				kids := childrenByParent[u.ID]
+				doneCount := 0
+				for _, k := range kids {
+					if k.Status == "done" {
+						doneCount++
+					}
+				}
+				sb.WriteString(fmt.Sprintf("- [%d] %s (%d/%d done)\n", u.ID, u.Title, doneCount, len(kids)))
+			}
+			sb.WriteString("\n")
+		}
+
+		// Overdue tasks (exclude umbrella parents)
 		var overdue []database.ProjectTask
 		for _, t := range tasks {
+			if parentIDs[t.ID] {
+				continue
+			}
 			if t.DueDate.Valid && t.DueDate.Time.Before(time.Now()) && t.Status != "done" {
 				overdue = append(overdue, t)
 			}
@@ -1993,11 +2028,11 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			sb.WriteString("\n")
 		}
 
-		// Recommended next task: highest priority non-blocked todo/in_progress, or nearest due
+		// Recommended next task: highest priority non-blocked todo/in_progress, or nearest due (exclude umbrella parents)
 		priorityOrder := map[string]int{"urgent": 4, "high": 3, "medium": 2, "low": 1}
 		var best *database.ProjectTask
 		for i, t := range tasks {
-			if t.Status == "done" || t.Status == "blocked" || t.ParentID.Valid {
+			if t.Status == "done" || t.Status == "blocked" || t.ParentID.Valid || parentIDs[t.ID] {
 				continue
 			}
 			if best == nil {
