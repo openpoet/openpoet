@@ -6491,8 +6491,8 @@ class DevManager {
             const sessionId = docId.replace('plan:', '');
             try {
                 const data = await this.api('GET', `/sessions/${sessionId}/plan`);
-                if (data?.content) {
-                    window.docViewer.openWithContent('Plano de Sessão', data.content);
+                if (data?.plan_content) {
+                    window.docViewer.openWithContent('Plano de Sessão', data.plan_content);
                 } else {
                     this.showToast('Info', 'Plano vazio', 'info');
                 }
