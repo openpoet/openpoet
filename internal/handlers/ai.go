@@ -2718,6 +2718,75 @@ func (h *AIHandler) HandleInitiateTaskDiscussion(w http.ResponseWriter, r *http.
 	})
 }
 
+// HandleInitiateSkillCustomization creates a proactive AI conversation to help customize a global skill for a project.
+func (h *AIHandler) HandleInitiateSkillCustomization(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		ProjectID int64 `json:"project_id"`
+		SkillID   int64 `json:"skill_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	if input.ProjectID <= 0 || input.SkillID <= 0 {
+		respondError(w, http.StatusBadRequest, "project_id and skill_id are required")
+		return
+	}
+
+	ctx := r.Context()
+	project, err := h.api.db.GetProject(ctx, input.ProjectID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+	skill, err := h.api.db.GetSkill(ctx, input.SkillID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Skill not found")
+		return
+	}
+
+	ctxData := map[string]interface{}{
+		"intent":        "skill_customization",
+		"project_id":    input.ProjectID,
+		"project_name":  project.Name,
+		"project_path":  project.Path,
+		"skill_id":      skill.ID,
+		"skill_name":    skill.Name,
+		"skill_category": skill.Category,
+		"skill_content": skill.Content,
+	}
+	proactiveCtx, _ := json.Marshal(ctxData)
+
+	content := skill.Content
+	if len(content) > 2000 {
+		content = content[:2000] + "\n...(truncated)"
+	}
+
+	assistantMsg := fmt.Sprintf("Vamos customizar a skill **%s** para o projeto **%s**.\n\n", skill.Name, project.Name)
+	assistantMsg += fmt.Sprintf("**Categoria:** %s\n\n", skill.Category)
+	assistantMsg += fmt.Sprintf("**Conteúdo atual da skill global:**\n```markdown\n%s\n```\n\n", content)
+	assistantMsg += "Como posso ajudar a adaptar esta skill para este projeto? Posso:\n" +
+		"- **Adaptar** o conteúdo para as necessidades específicas do projeto\n" +
+		"- **Adicionar** regras ou instruções específicas\n" +
+		"- **Remover** seções que não se aplicam\n" +
+		"- **Reescrever** completamente com foco neste projeto\n\n" +
+		"O que você gostaria de modificar?"
+
+	title := fmt.Sprintf("Customizar: %s → %s", skill.Name, project.Name)
+	if len(title) > 80 {
+		title = title[:80]
+	}
+	conv, err := h.api.db.CreateProactiveConversation(ctx, title, "standard", "skill_customization", string(proactiveCtx), assistantMsg)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to create conversation")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"conversation_id": conv.ID,
+	})
+}
+
 // HandleListConversations lists all conversations.
 func (h *AIHandler) HandleListConversations(w http.ResponseWriter, r *http.Request) {
 	// Auto-prune: keep only the last 15 conversations
