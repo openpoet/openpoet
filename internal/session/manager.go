@@ -613,11 +613,7 @@ func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Proj
 		if err == nil {
 			mcpServers["devmanager"] = map[string]interface{}{
 				"command": execPath,
-				"args":    []string{"mcp-serve"},
-				"env": map[string]string{
-					"DEVMANAGER_API_URL":    "http://" + m.serverAddr,
-					"DEVMANAGER_SESSION_ID": sessionID,
-				},
+				"args":    []string{"mcp-serve", "--session-id", sessionID, "--api-url", "http://" + m.serverAddr},
 			}
 		}
 	}

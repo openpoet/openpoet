@@ -1673,7 +1673,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if len(tasks) == 0 {
 			return fmt.Sprintf("No tasks found for project %d.", projectID), nil
 		}
-		statusIcons := map[string]string{"todo": "[ ]", "in_progress": "[~]", "done": "[x]", "blocked": "[!]"}
+		statusIcons := map[string]string{"todo": "[ ]", "in_progress": "[~]", "done": "[x]", "blocked": "[!]", "awaiting_approval": "[?]"}
 		priorityLabels := map[string]string{"low": "LOW", "medium": "MED", "high": "HIGH", "urgent": "URG"}
 		var sb strings.Builder
 		for _, t := range tasks {
@@ -1999,7 +1999,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			total += c
 		}
 		sb.WriteString(fmt.Sprintf("**Total:** %d tasks (excluding umbrella parents)\n", total))
-		sb.WriteString(fmt.Sprintf("- Todo: %d\n- In Progress: %d\n- Done: %d\n- Blocked: %d\n\n", summary["todo"], summary["in_progress"], summary["done"], summary["blocked"]))
+		sb.WriteString(fmt.Sprintf("- Todo: %d\n- In Progress: %d\n- Awaiting Approval: %d\n- Done: %d\n- Blocked: %d\n\n", summary["todo"], summary["in_progress"], summary["awaiting_approval"], summary["done"], summary["blocked"]))
 
 		// Umbrella tasks with progress
 		var umbrellas []database.ProjectTask
@@ -2687,7 +2687,7 @@ func (h *AIHandler) HandleInitiateTaskDiscussion(w http.ResponseWriter, r *http.
 		assistantMsg += fmt.Sprintf("**Subtarefas existentes (%d):**\n", len(subtasks))
 		for _, st := range subtasks {
 			statusEmoji := map[string]string{
-				"todo": "⬜", "in_progress": "🔄", "done": "✅", "blocked": "🚫",
+				"todo": "⬜", "in_progress": "🔄", "awaiting_approval": "⏳", "done": "✅", "blocked": "🚫",
 			}[st.Status]
 			if statusEmoji == "" {
 				statusEmoji = "⬜"
@@ -3616,15 +3616,17 @@ Instructions:
 					taskID = *s.TaskID
 				}
 				oldStatus := linkedTask.Status
-				if err := h.api.db.UpdateTaskStatus(ctx, taskID, "done"); err == nil {
+				// Transition to awaiting_approval instead of done, triggering verification doc
+				if err := h.api.db.UpdateTaskStatus(ctx, taskID, "awaiting_approval"); err == nil {
 					t, _ := h.api.db.GetTask(ctx, taskID)
 					if t != nil {
 						h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": t.ProjectID, "task": t})
+						go h.GenerateVerificationDoc(context.Background(), t)
 					}
 					h.api.recordTaskHistory(ctx, taskID, linkedTask.ProjectID, "status_change", map[string]interface{}{
-						"old": oldStatus, "new": "done", "reason": "auto_update",
+						"old": oldStatus, "new": "awaiting_approval", "reason": "auto_update",
 					}, "ai", sessionID)
-					log.Printf("[AI-Session] Auto-completed task %d for session %s", taskID, sessionID[:8])
+					log.Printf("[AI-Session] Auto-moved task %d to awaiting_approval for session %s", taskID, sessionID[:8])
 				}
 			case "update_task":
 				if s.TaskID != nil {
@@ -4143,6 +4145,152 @@ func (h *AIHandler) HandleTestProactive(w http.ResponseWriter, r *http.Request) 
 		"level":           input.Level,
 		"conversation_id": conv.ID,
 	})
+}
+
+// GenerateVerificationDoc generates a verification document for a task transitioning to awaiting_approval.
+// It gathers context (project, sessions, history) and calls the LLM to generate the document.
+// If no LLM provider is available, it creates a fallback document.
+func (h *AIHandler) GenerateVerificationDoc(ctx context.Context, task *database.ProjectTask) {
+	log.Printf("[AI-Verification] Generating verification doc for task %d: %s", task.ID, task.Title)
+
+	// Get project info
+	project, err := h.api.db.GetProject(ctx, task.ProjectID)
+	projectName := "Unknown"
+	if err == nil && project != nil {
+		projectName = project.Name
+	}
+
+	// Get linked sessions
+	sessions, _ := h.api.db.GetSessionsForTask(ctx, task.ID)
+	var sessionSummaries []string
+	for _, s := range sessions {
+		name := s.Name
+		if name == "" {
+			name = s.ID[:8]
+		}
+		sessionSummaries = append(sessionSummaries, fmt.Sprintf("%s (%s)", name, s.Status))
+	}
+
+	// Get task history
+	history, _ := h.api.db.ListTaskHistory(ctx, task.ID, 50)
+	var historyEntries []string
+	for _, entry := range history {
+		historyEntries = append(historyEntries, fmt.Sprintf("[%s] %s — %s", entry.EventType, entry.Details, entry.Actor))
+	}
+
+	// Try to get LLM provider
+	h.mu.RLock()
+	p := h.provider
+	h.mu.RUnlock()
+
+	var content string
+	if p != nil {
+		prompt := llm.VerificationDocPrompt(task.Title, task.Description, projectName, sessionSummaries, historyEntries)
+		model, _ := h.api.db.GetSetting(ctx, "ai_model")
+
+		req := &llm.Request{
+			System:    "You are a technical documentation assistant. Generate clear, actionable verification documents in Portuguese (pt-BR).",
+			Messages:  []llm.Message{llm.NewTextMessage("user", prompt)},
+			MaxTokens: 4096,
+			Model:     model,
+		}
+
+		var fullText strings.Builder
+		resp, err := p.StreamMessage(ctx, req, func(event llm.StreamEvent) error {
+			if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
+				fullText.WriteString(event.Delta.Text)
+			}
+			return nil
+		})
+
+		if err != nil {
+			log.Printf("[AI-Verification] LLM call failed for task %d: %v, using fallback", task.ID, err)
+			content = h.createFallbackVerificationDoc(task, projectName, sessionSummaries)
+		} else {
+			content = strings.TrimSpace(fullText.String())
+			// Record token usage
+			if resp != nil && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
+				usageModel := model
+				if resp.Model != "" {
+					usageModel = resp.Model
+				}
+				if usageModel == "" {
+					usageModel = "unknown"
+				}
+				h.api.db.CreateTokenUsage(ctx, &database.TokenUsage{
+					Source:              "ai_assistant",
+					Subcategory:         "verification_doc",
+					Model:               usageModel,
+					InputTokens:         resp.Usage.InputTokens,
+					OutputTokens:        resp.Usage.OutputTokens,
+					CacheReadTokens:     resp.Usage.CacheReadTokens,
+					CacheCreationTokens: resp.Usage.CacheCreationTokens,
+					CostUSD:             llm.CalculateCost(usageModel, resp.Usage.InputTokens, resp.Usage.OutputTokens),
+				})
+			}
+		}
+	} else {
+		log.Printf("[AI-Verification] No LLM provider, using fallback for task %d", task.ID)
+		content = h.createFallbackVerificationDoc(task, projectName, sessionSummaries)
+	}
+
+	h.persistVerificationDoc(ctx, task, content)
+}
+
+// createFallbackVerificationDoc creates a simple verification document without AI.
+func (h *AIHandler) createFallbackVerificationDoc(task *database.ProjectTask, projectName string, sessions []string) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("## Resumo\n\nA tarefa **%s** do projeto **%s** foi marcada como aguardando aprovação.\n\n", task.Title, projectName))
+	if task.Description != "" {
+		sb.WriteString(fmt.Sprintf("**Descrição:** %s\n\n", task.Description))
+	}
+	sb.WriteString("## Como Verificar\n\n")
+	sb.WriteString("1. Verifique se as alterações foram aplicadas corretamente\n")
+	sb.WriteString("2. Teste as funcionalidades mencionadas na descrição da tarefa\n")
+	sb.WriteString("3. Confirme que o build compila sem erros\n\n")
+	if len(sessions) > 0 {
+		sb.WriteString("## Sessões Vinculadas\n\n")
+		for _, s := range sessions {
+			sb.WriteString(fmt.Sprintf("- %s\n", s))
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("## Observações\n\nDocumento gerado automaticamente (sem IA). Verifique manualmente o trabalho realizado.\n")
+	return sb.String()
+}
+
+// persistVerificationDoc saves the verification document and links it to the task.
+func (h *AIHandler) persistVerificationDoc(ctx context.Context, task *database.ProjectTask, content string) {
+	docID := uuid.New().String()[:8]
+	doc := &database.TempDocument{
+		ID:      docID,
+		Title:   fmt.Sprintf("Verificação: %s", task.Title),
+		Content: content,
+		Status:  "pending",
+		TaskID:  sql.NullInt64{Int64: task.ID, Valid: true},
+	}
+
+	if err := h.api.db.CreateTempDocument(ctx, doc); err != nil {
+		log.Printf("[AI-Verification] Failed to create document for task %d: %v", task.ID, err)
+		return
+	}
+
+	if err := h.api.db.SetTaskVerificationDoc(ctx, task.ID, docID); err != nil {
+		log.Printf("[AI-Verification] Failed to link document to task %d: %v", task.ID, err)
+		return
+	}
+
+	// Re-fetch task and broadcast update so UI shows the document link
+	updatedTask, err := h.api.db.GetTask(ctx, task.ID)
+	if err == nil {
+		h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": task.ProjectID, "task": updatedTask})
+	}
+
+	h.api.recordTaskHistory(ctx, task.ID, task.ProjectID, "verification_doc_created", map[string]interface{}{
+		"doc_id": docID,
+	}, "ai", "")
+
+	log.Printf("[AI-Verification] Created verification doc %s for task %d", docID, task.ID)
 }
 
 // sendSSE writes an SSE event to the response.

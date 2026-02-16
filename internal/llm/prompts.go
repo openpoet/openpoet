@@ -121,7 +121,7 @@ When a user message starts with "[Notificação do sistema — Feedback de propo
 - Then respond to the user's actual message that follows after the "---" separator.
 
 ## Task Management
-Tasks have: title, description, status (todo/in_progress/done/blocked), priority (low/medium/high/urgent), due dates, subtasks (via parent_id).
+Tasks have: title, description, status (todo/in_progress/awaiting_approval/done/blocked), priority (low/medium/high/urgent), due dates, subtasks (via parent_id). The "awaiting_approval" status means the task work is complete but awaits user verification before being marked as done.
 
 ### Creating a task
 1. **Investigate silently**: call get_memory_doc, list_tasks, list_directory (may also read files if needed)
@@ -220,6 +220,50 @@ Continue the conversation naturally. The user may want to discuss, modify, accep
 `
 }
 
+
+// VerificationDocPrompt builds the prompt for generating a task verification document.
+func VerificationDocPrompt(taskTitle, taskDescription, projectName string, sessionSummaries []string, historyEntries []string) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Gere um documento de verificação em Markdown para a tarefa concluída abaixo.\n\n"))
+	sb.WriteString(fmt.Sprintf("## Tarefa\n- **Título:** %s\n- **Projeto:** %s\n", taskTitle, projectName))
+	if taskDescription != "" {
+		sb.WriteString(fmt.Sprintf("- **Descrição:** %s\n", taskDescription))
+	}
+
+	if len(sessionSummaries) > 0 {
+		sb.WriteString("\n## Sessões Vinculadas\n")
+		for _, s := range sessionSummaries {
+			sb.WriteString(fmt.Sprintf("- %s\n", s))
+		}
+	}
+
+	if len(historyEntries) > 0 {
+		sb.WriteString("\n## Histórico de Eventos\n")
+		for _, h := range historyEntries {
+			sb.WriteString(fmt.Sprintf("- %s\n", h))
+		}
+	}
+
+	sb.WriteString(`
+## Instruções
+Gere o documento em Markdown com as seguintes seções:
+
+### Resumo
+Breve resumo do que foi realizado nesta tarefa (2-3 frases).
+
+### Alterações Realizadas
+Lista das principais alterações feitas (arquivos, funcionalidades, configurações).
+
+### Como Verificar
+Passos claros e numerados que o usuário pode seguir para verificar que o trabalho está funcionando corretamente. Inclua comandos, URLs, ou ações específicas.
+
+### Observações
+Quaisquer notas importantes, limitações conhecidas, ou próximos passos sugeridos.
+
+Responda APENAS com o conteúdo Markdown do documento, sem blocos de código envolvendo o documento.
+`)
+	return sb.String()
+}
 
 // SkillGenerationPrompt returns the system prompt for generating a skill from a description.
 const SkillGenerationPrompt = `You are a skill generator for DevManager / Claude Code. A "skill" is a markdown document that contains instructions for Claude Code to follow.
