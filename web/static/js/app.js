@@ -5868,17 +5868,27 @@ class DevManager {
 
     async viewTaskDetail(projectId, taskId) {
         try {
-            const [task, sessions] = await Promise.all([
+            const [task, sessions, allTasks] = await Promise.all([
                 this.api('GET', `/projects/${projectId}/tasks/${taskId}`),
-                this.api('GET', `/projects/${projectId}/tasks/${taskId}/sessions`).catch(() => [])
+                this.api('GET', `/projects/${projectId}/tasks/${taskId}/sessions`).catch(() => []),
+                this.api('GET', `/projects/${projectId}/tasks`).catch(() => [])
             ]);
+
+            // Find subtasks of this task
+            const subtasks = (allTasks || []).filter(t => t.parent_id?.Valid && t.parent_id.Int64 === taskId);
+            const isUmbrella = subtasks.length > 0;
 
             let md = '';
 
             // Status & Priority
             const statusLabel = (task.status || 'todo').replace('_', ' ');
             const priorityLabel = task.priority || 'medium';
-            md += `**Status:** ${statusLabel} &nbsp;|&nbsp; **Prioridade:** ${priorityLabel}\n\n`;
+            if (isUmbrella) {
+                const doneCount = subtasks.filter(s => s.status === 'done').length;
+                md += `**Status:** ${statusLabel} &nbsp;|&nbsp; **Prioridade:** ${priorityLabel} &nbsp;|&nbsp; **Umbrella:** ${doneCount}/${subtasks.length} concluídas\n\n`;
+            } else {
+                md += `**Status:** ${statusLabel} &nbsp;|&nbsp; **Prioridade:** ${priorityLabel}\n\n`;
+            }
 
             // Due date
             if (task.due_date?.Valid) {
@@ -5893,6 +5903,24 @@ class DevManager {
                 md += `---\n\n${task.description}\n\n`;
             } else {
                 md += `---\n\n*Sem descrição.*\n\n`;
+            }
+
+            // Subtasks section
+            if (isUmbrella) {
+                const statusIcons = { done: '[x]', in_progress: '[~]', todo: '[ ]', blocked: '[!]' };
+                md += `---\n\n### Subtarefas\n\n`;
+                for (const sub of subtasks) {
+                    const icon = statusIcons[sub.status] || '[ ]';
+                    const subStatus = sub.status.replace('_', ' ');
+                    let subDue = '';
+                    if (sub.due_date?.Valid) {
+                        const sd = new Date(sub.due_date.Time);
+                        const isSubOverdue = sd < new Date() && sub.status !== 'done';
+                        subDue = ` — prazo: ${sd.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}${isSubOverdue ? ' **(ATRASADO)**' : ''}`;
+                    }
+                    md += `- ${icon} **${this.escapeHtml(sub.title)}** *(${subStatus})*${subDue}\n`;
+                }
+                md += '\n';
             }
 
             // Session history
