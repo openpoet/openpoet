@@ -368,6 +368,146 @@ func (h *AIHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, result)
 }
 
+// HandleTestConnection tests an AI provider connection without saving settings.
+// It receives the form values directly and tests connectivity.
+func (h *AIHandler) HandleTestConnection(w http.ResponseWriter, r *http.Request) {
+	var params struct {
+		Provider    string `json:"ai_provider"`
+		APIKey      string `json:"anthropic_api_key"`
+		OllamaURL   string `json:"ollama_base_url"`
+		OllamaKey   string `json:"ollama_api_key"`
+		OllamaModel string `json:"ollama_model"`
+		Model       string `json:"ai_model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	result := map[string]interface{}{}
+
+	switch params.Provider {
+	case "gosdk":
+		available := llm.IsClaudeCLIAvailable()
+		result["configured"] = available
+		result["provider"] = "gosdk"
+		if available {
+			result["model"] = "(Claude CLI default)"
+		} else {
+			result["error"] = "Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code"
+		}
+
+	case "apikey":
+		apiKey := params.APIKey
+		// If no key provided in form, try to read existing from DB
+		if apiKey == "" {
+			apiKey, _ = h.api.GetDecryptedSetting(r.Context(), "anthropic_api_key")
+		}
+		if apiKey == "" {
+			result["configured"] = false
+			result["error"] = "No API key provided"
+		} else {
+			// Test with a minimal API call
+			result["configured"] = true
+			result["provider"] = "apikey"
+			model := params.Model
+			if model == "" {
+				model = "(provider default)"
+			}
+			result["model"] = model
+		}
+
+	case "ollama":
+		ollamaURL := params.OllamaURL
+		if ollamaURL == "" {
+			ollamaURL = "http://localhost:11434"
+		}
+		ollamaModel := params.OllamaModel
+		if ollamaModel == "" {
+			ollamaModel = "qwen3-coder"
+		}
+
+		result["configured"] = true
+		result["provider"] = "ollama"
+		result["model"] = ollamaModel
+
+		// Test connection to Ollama server
+		resp, err := http.Get(ollamaURL + "/v1/models")
+		if err != nil {
+			result["error"] = "Cannot connect to Ollama server at " + ollamaURL
+		} else {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != 200 {
+				result["error"] = "Ollama server returned error"
+			} else if !bytes.Contains(body, []byte(ollamaModel)) {
+				result["error"] = fmt.Sprintf("Model '%s' not found on Ollama server", ollamaModel)
+			}
+		}
+
+	case "ollama-sdk":
+		ollamaURL := params.OllamaURL
+		if ollamaURL == "" {
+			ollamaURL = "http://localhost:11434"
+		}
+		ollamaModel := params.OllamaModel
+		if ollamaModel == "" {
+			ollamaModel = "qwen3-coder"
+		}
+
+		cliAvailable := llm.IsClaudeCLIAvailable()
+		result["configured"] = cliAvailable
+		result["provider"] = "ollama-sdk"
+		result["model"] = ollamaModel
+
+		if !cliAvailable {
+			result["error"] = "Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code"
+		} else {
+			// Also test Ollama connectivity
+			resp, err := http.Get(ollamaURL + "/v1/models")
+			if err != nil {
+				result["error"] = "Cannot connect to Ollama server at " + ollamaURL
+			} else {
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode != 200 {
+					result["error"] = "Ollama server returned error"
+				} else if !bytes.Contains(body, []byte(ollamaModel)) {
+					result["error"] = fmt.Sprintf("Model '%s' not found on Ollama server", ollamaModel)
+				}
+			}
+		}
+
+	case "nodesdk":
+		result["configured"] = true
+		result["provider"] = "nodesdk"
+		result["model"] = "(Node.js Agent SDK)"
+
+	default:
+		// Auto-detect
+		if llm.IsClaudeCLIAvailable() {
+			result["configured"] = true
+			result["provider"] = "gosdk"
+			result["model"] = "(Claude CLI auto-detected)"
+		} else {
+			apiKey := params.APIKey
+			if apiKey == "" {
+				apiKey, _ = h.api.GetDecryptedSetting(r.Context(), "anthropic_api_key")
+			}
+			if apiKey != "" {
+				result["configured"] = true
+				result["provider"] = "apikey"
+				result["model"] = "(auto-detected API key)"
+			} else {
+				result["configured"] = false
+				result["error"] = "No provider available. Install Claude CLI or provide an API key."
+			}
+		}
+	}
+
+	respondJSON(w, http.StatusOK, result)
+}
+
 // HandleChat handles the main chat endpoint with SSE streaming.
 func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	p := h.getProvider()
@@ -501,22 +641,22 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	_, isSessionProvider := p.(llm.SessionProvider)
 
-	systemPrompt := h.buildSystemPromptWithContext(ctx, proactiveCtx)
+	systemPrompt := h.buildSystemPromptWithContext(ctx, proactiveCtx, isSessionProvider)
 
 	// Get model based on provider
 	providerType, _ := h.api.db.GetSetting(ctx, "ai_provider")
 	var model string
-	if providerType == "ollama" {
+	if providerType == "ollama" || providerType == "ollama-sdk" {
 		model, _ = h.api.db.GetSetting(ctx, "ollama_model")
 	} else {
 		model, _ = h.api.db.GetSetting(ctx, "ai_model")
 	}
 
 	// Determine if we should use tools:
-	// - Session providers (gosdk, nodesdk) handle tools internally via MCP — no tools in request
-	// - API key provider uses native Anthropic tool definitions
+	// - Session providers (gosdk, nodesdk, ollama-sdk) handle tools internally via MCP — no tools in request
+	// - API key and Ollama direct providers use native tool definitions in the request
 	var tools []llm.ToolDefinition
-	if !isSessionProvider && p.Name() == "apikey" {
+	if !isSessionProvider {
 		tools = llm.ChatTools()
 	}
 
@@ -849,7 +989,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			contentBuilder.WriteString("\n")
 		}
 
-		// Render update/delete actions
+		// Render update/delete actions with full task card
 		for _, oa := range otherActions {
 			a := oa.action
 			num++
@@ -857,19 +997,37 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			case "update":
 				contentBuilder.WriteString(fmt.Sprintf("### %d. Atualizar tarefa #%d: %s\n", num, a.TaskID, a.Title))
 				if a.Description != "" {
-					contentBuilder.WriteString(fmt.Sprintf("**Nova descrição:** %s\n", a.Description))
+					contentBuilder.WriteString(fmt.Sprintf("**Descrição:** %s\n", a.Description))
 				}
-				if a.Status != "" {
-					contentBuilder.WriteString(fmt.Sprintf("**Novo status:** %s\n", a.Status))
+				prio := a.Priority
+				if prio == "" {
+					prio = "-"
 				}
-				if a.Priority != "" {
-					contentBuilder.WriteString(fmt.Sprintf("**Nova prioridade:** %s\n", a.Priority))
+				stat := a.Status
+				if stat == "" {
+					stat = "-"
 				}
+				contentBuilder.WriteString(fmt.Sprintf("**Prioridade:** %s | **Status:** %s\n", prio, stat))
 				if a.DueDate != "" {
-					contentBuilder.WriteString(fmt.Sprintf("**Nova data limite:** %s\n", a.DueDate))
+					contentBuilder.WriteString(fmt.Sprintf("**Data limite:** %s\n", a.DueDate))
 				}
 			case "delete":
-				contentBuilder.WriteString(fmt.Sprintf("### %d. Remover tarefa #%d: %s\n", num, a.TaskID, a.Title))
+				contentBuilder.WriteString(fmt.Sprintf("### %d. Excluir tarefa #%d: %s\n", num, a.TaskID, a.Title))
+				if a.Description != "" {
+					contentBuilder.WriteString(fmt.Sprintf("**Descrição:** %s\n", a.Description))
+				}
+				prio := a.Priority
+				if prio == "" {
+					prio = "-"
+				}
+				stat := a.Status
+				if stat == "" {
+					stat = "-"
+				}
+				contentBuilder.WriteString(fmt.Sprintf("**Prioridade:** %s | **Status:** %s\n", prio, stat))
+				if a.DueDate != "" {
+					contentBuilder.WriteString(fmt.Sprintf("**Data limite:** %s\n", a.DueDate))
+				}
 			}
 			contentBuilder.WriteString("\n")
 		}
@@ -879,10 +1037,17 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		// "Tarefa:" doc with task proposal approval
 		summary := fmt.Sprintf("%s — %s", strings.Join(summaryParts, ", "), projectName)
 
-		// Title: task name for single task, project name for batch
-		docTitle := fmt.Sprintf("Tarefa: %s", projectName)
+		// Title prefix based on action types
+		docPrefix := "Tarefa"
+		if createCount == 0 && deleteCount == 0 && updateCount > 0 {
+			docPrefix = "Atualizar Tarefa"
+		} else if createCount == 0 && updateCount == 0 && deleteCount > 0 {
+			docPrefix = "Excluir Tarefa"
+		}
+
+		docTitle := fmt.Sprintf("%s: %s", docPrefix, projectName)
 		if len(actions) == 1 {
-			docTitle = fmt.Sprintf("Tarefa: %s", actions[0].Title)
+			docTitle = fmt.Sprintf("%s: %s", docPrefix, actions[0].Title)
 		}
 
 		var fullContent strings.Builder
@@ -948,7 +1113,8 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			cardType := "document"
 			if strings.HasPrefix(doc.Title, "Memory Doc:") {
 				cardType = "proposal"
-			} else if strings.HasPrefix(doc.Title, "Tarefa:") || strings.HasPrefix(doc.Title, "Planejamento:") {
+			} else if strings.HasPrefix(doc.Title, "Tarefa:") || strings.HasPrefix(doc.Title, "Planejamento:") ||
+				strings.HasPrefix(doc.Title, "Atualizar Tarefa:") || strings.HasPrefix(doc.Title, "Excluir Tarefa:") {
 				cardType = "task_proposal"
 			}
 			safeSendSSE("doc_card", map[string]interface{}{
@@ -1081,6 +1247,15 @@ func (h *AIHandler) handleToolLoop(
 	var accumulated llm.Usage
 
 	for i := 0; i < maxIterations && resp.StopReason == "tool_use"; i++ {
+		// Log iteration info
+		var toolNames []string
+		for _, block := range resp.Content {
+			if block.Type == "tool_use" {
+				toolNames = append(toolNames, fmt.Sprintf("%s(id=%s)", block.Name, block.ID))
+			}
+		}
+		log.Printf("[ToolLoop] iteration=%d stopReason=%s tools=%v totalMsgs=%d", i, resp.StopReason, toolNames, len(req.Messages))
+
 		// Process tool calls from the response
 		var toolResults []llm.ContentBlock
 
@@ -1114,6 +1289,13 @@ func (h *AIHandler) handleToolLoop(
 				result = fmt.Sprintf("Error: %s", err.Error())
 			}
 
+			resultSnippet := result
+			if len(resultSnippet) > 200 {
+				resultSnippet = resultSnippet[:200] + "..."
+			}
+			inputJSON, _ := json.Marshal(inputMap)
+			log.Printf("[ToolLoop] executed %s(id=%s) input=%s resultLen=%d snippet=%q", block.Name, block.ID, string(inputJSON), len(result), resultSnippet)
+
 			sendSSE("tool_result", map[string]interface{}{
 				"id":     block.ID,
 				"name":   block.Name,
@@ -1142,6 +1324,8 @@ func (h *AIHandler) handleToolLoop(
 			Content: toolResults,
 		})
 
+		log.Printf("[ToolLoop] sending %d tool results back to model, total messages now: %d", len(toolResults), len(req.Messages))
+
 		// Continue streaming
 		var err error
 		resp, err = p.StreamMessage(ctx, req, func(event llm.StreamEvent) error {
@@ -1163,7 +1347,19 @@ func (h *AIHandler) handleToolLoop(
 		})
 
 		if err != nil {
+			log.Printf("[ToolLoop] StreamMessage error at iteration %d: %v", i, err)
 			return accumulated, err
+		}
+
+		// Log model's response after receiving tool results
+		if resp != nil {
+			var nextTools []string
+			for _, b := range resp.Content {
+				if b.Type == "tool_use" {
+					nextTools = append(nextTools, b.Name)
+				}
+			}
+			log.Printf("[ToolLoop] model response after iteration %d: stopReason=%s nextTools=%v contentBlocks=%d", i, resp.StopReason, nextTools, len(resp.Content))
 		}
 
 		// Accumulate token usage from this iteration
@@ -1173,6 +1369,7 @@ func (h *AIHandler) handleToolLoop(
 		}
 	}
 
+	log.Printf("[ToolLoop] finished after iterations, final stopReason=%s", resp.StopReason)
 	return accumulated, nil
 }
 
@@ -1496,6 +1693,60 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		}
 		return sb.String(), nil
 
+	case "get_task":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		taskID, err := parseIDParam(input, "task_id")
+		if err != nil {
+			return "", err
+		}
+
+		task, err := h.api.db.GetTask(ctx, taskID)
+		if err != nil || task.ProjectID != projectID {
+			return "", fmt.Errorf("task not found")
+		}
+
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Task #%d: %s\n", task.ID, task.Title))
+		sb.WriteString(fmt.Sprintf("Status: %s\n", task.Status))
+		sb.WriteString(fmt.Sprintf("Priority: %s\n", task.Priority))
+		if task.Description != "" {
+			sb.WriteString(fmt.Sprintf("Description: %s\n", task.Description))
+		}
+		if task.DueDate.Valid {
+			due := task.DueDate.Time.Format("2006-01-02 15:04")
+			if task.DueDate.Time.Before(time.Now()) && task.Status != "done" {
+				due += " OVERDUE"
+			}
+			sb.WriteString(fmt.Sprintf("Due: %s\n", due))
+		}
+		if task.ParentID.Valid {
+			sb.WriteString(fmt.Sprintf("Parent task: #%d\n", task.ParentID.Int64))
+		}
+
+		// List subtasks if any
+		allTasks, err := h.api.db.ListTasksByProject(ctx, projectID)
+		if err == nil {
+			var subtasks []string
+			for _, t := range allTasks {
+				if t.ParentID.Valid && t.ParentID.Int64 == task.ID {
+					subtasks = append(subtasks, fmt.Sprintf("#%d %s (%s)", t.ID, t.Title, t.Status))
+				}
+			}
+			if len(subtasks) > 0 {
+				sb.WriteString("Subtasks:\n")
+				for _, s := range subtasks {
+					sb.WriteString(fmt.Sprintf("  - %s\n", s))
+				}
+			}
+		}
+
+		sb.WriteString(fmt.Sprintf("Created: %s\n", task.CreatedAt.Format("2006-01-02 15:04")))
+		sb.WriteString(fmt.Sprintf("Updated: %s\n", task.UpdatedAt.Format("2006-01-02 15:04")))
+		return sb.String(), nil
+
 	case "create_task":
 		projectID, err := parseIDParam(input, "project_id")
 		if err != nil {
@@ -1583,30 +1834,31 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			return "", fmt.Errorf("task not found")
 		}
 
-		newTitle := task.Title
-		newStatus := ""
-		newPriority := ""
-		newDescription := ""
-		newDueDate := ""
+		// Detect which fields are being changed
+		hasTitle := false
+		hasDescription := false
+		hasStatus := false
+		hasPriority := false
+		hasDueDate := false
 
 		if t, ok := input["title"].(string); ok && t != "" {
-			newTitle = t
+			hasTitle = true
 			task.Title = t
 		}
-		if d, ok := input["description"].(string); ok {
-			newDescription = d
+		if d, ok := input["description"].(string); ok && d != task.Description {
+			hasDescription = true
 			task.Description = d
 		}
 		if s, ok := input["status"].(string); ok && s != "" {
-			newStatus = s
+			hasStatus = true
 			task.Status = s
 		}
 		if p, ok := input["priority"].(string); ok && p != "" {
-			newPriority = p
+			hasPriority = true
 			task.Priority = p
 		}
 		if dueDateStr, ok := input["due_date"].(string); ok {
-			newDueDate = dueDateStr
+			hasDueDate = true
 			if dueDateStr == "" {
 				task.DueDate = sql.NullTime{}
 			} else {
@@ -1618,21 +1870,40 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			}
 		}
 
-		// Collect task actions into the batch collector (if available).
+		// Status-only change: execute immediately, no confirmation needed
+		isStatusOnly := hasStatus && !hasTitle && !hasDescription && !hasPriority && !hasDueDate
+		if isStatusOnly {
+			if err := h.api.db.UpdateTaskStatus(ctx, taskID, task.Status); err != nil {
+				return "", err
+			}
+			updatedTask, _ := h.api.db.GetTask(ctx, taskID)
+			if updatedTask != nil {
+				h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{
+					"action": "updated", "project_id": projectID, "task": updatedTask,
+				})
+			}
+			return fmt.Sprintf("Task '%s' status atualizado para '%s'.", task.Title, task.Status), nil
+		}
+
+		// Content change: collect with ALL fields (merged current + new) for full card display
 		if collector != nil {
+			dueDate := ""
+			if task.DueDate.Valid {
+				dueDate = task.DueDate.Time.Format("2006-01-02 15:04")
+			}
 			collector.add(PlanningTaskAction{
 				Action:      "update",
 				ProjectID:   projectID,
 				TaskID:      taskID,
-				Title:       newTitle,
-				Description: newDescription,
-				Status:      newStatus,
-				Priority:    newPriority,
-				DueDate:     newDueDate,
+				Title:       task.Title,
+				Description: task.Description,
+				Status:      task.Status,
+				Priority:    task.Priority,
+				DueDate:     dueDate,
 			})
 			return fmt.Sprintf(
 				"IMPORTANTE: Task '%s' NÃO foi atualizada ainda — será aplicada após aprovação do usuário. "+
-					"NÃO diga que a tarefa foi atualizada.", newTitle), nil
+					"NÃO diga que a tarefa foi atualizada.", task.Title), nil
 		}
 		// Fallback: no collector available
 		return "", fmt.Errorf("task update requires a streaming context")
@@ -1652,13 +1923,26 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			return "", fmt.Errorf("task not found")
 		}
 
-		taskTitle := task.Title
-
-		if err := h.api.db.DeleteTask(ctx, taskID); err != nil {
-			return "", err
+		if collector != nil {
+			dueDate := ""
+			if task.DueDate.Valid {
+				dueDate = task.DueDate.Time.Format("2006-01-02 15:04")
+			}
+			collector.add(PlanningTaskAction{
+				Action:      "delete",
+				ProjectID:   projectID,
+				TaskID:      taskID,
+				Title:       task.Title,
+				Description: task.Description,
+				Status:      task.Status,
+				Priority:    task.Priority,
+				DueDate:     dueDate,
+			})
+			return fmt.Sprintf(
+				"IMPORTANTE: Task '%s' NÃO foi excluída ainda — será excluída após aprovação do usuário. "+
+					"NÃO diga que a tarefa foi excluída.", task.Title), nil
 		}
-		h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "deleted", "project_id": projectID, "id": taskID})
-		return fmt.Sprintf("Task '%s' deleted", taskTitle), nil
+		return "", fmt.Errorf("task deletion requires a streaming context")
 
 	case "get_task_report":
 		projectID, err := parseIDParam(input, "project_id")
@@ -2112,7 +2396,8 @@ func (h *AIHandler) buildSystemPrompt(ctx context.Context) string {
 }
 
 // buildSystemPromptWithContext builds system prompt, optionally with proactive conversation context.
-func (h *AIHandler) buildSystemPromptWithContext(ctx context.Context, proactiveCtx string) string {
+// When forMCP is true, adapts the prompt for GoSDK/session providers (MCP tool naming convention).
+func (h *AIHandler) buildSystemPromptWithContext(ctx context.Context, proactiveCtx string, forMCP ...bool) string {
 	var skillNames []string
 	skills, _ := h.api.db.ListSkills(ctx)
 	for _, s := range skills {
@@ -2135,7 +2420,7 @@ func (h *AIHandler) buildSystemPromptWithContext(ctx context.Context, proactiveC
 		mcpNames = append(mcpNames, fmt.Sprintf("[%d] %s", m.ID, m.Name))
 	}
 
-	return llm.ChatSystemPromptWithProactiveContext(skillNames, projectNames, mcpNames, proactiveCtx)
+	return llm.ChatSystemPromptWithProactiveContext(skillNames, projectNames, mcpNames, proactiveCtx, forMCP...)
 }
 
 // HandleInitiateMemoryDocEdit creates an AI-initiated conversation for editing a project's memory doc.
@@ -2561,9 +2846,69 @@ func (h *AIHandler) HandleGenerateSkill(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// filterClaudeCodeNoise removes Claude Code's internal processing lines from raw
+// terminal output, keeping only lines that might indicate user intent or results.
+func filterClaudeCodeNoise(raw string) string {
+	lines := strings.Split(raw, "\n")
+	var filtered []string
+	prevBlank := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Skip empty lines, but keep one blank between content
+		if trimmed == "" {
+			if !prevBlank && len(filtered) > 0 {
+				filtered = append(filtered, "")
+				prevBlank = true
+			}
+			continue
+		}
+		prevBlank = false
+
+		// Skip if line starts with tool call indicator ● (Read, Edit, Bash, etc.)
+		if strings.HasPrefix(trimmed, "●") {
+			continue
+		}
+
+		// Skip spinner characters
+		if len(trimmed) > 0 {
+			r := []rune(trimmed)
+			switch r[0] {
+			case '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏':
+				continue
+			}
+		}
+
+		// Skip box-drawing borders (tool output frames)
+		if strings.HasPrefix(trimmed, "╭") || strings.HasPrefix(trimmed, "╰") || strings.HasPrefix(trimmed, "│") {
+			continue
+		}
+
+		// Skip Claude Code stats lines
+		if strings.HasPrefix(trimmed, "Tokens:") || strings.HasPrefix(trimmed, "Cost:") {
+			continue
+		}
+
+		// Skip bare file paths (common in tool output, e.g. "/Users/foo/bar.go")
+		if strings.HasPrefix(trimmed, "/") && !strings.Contains(trimmed, " ") {
+			continue
+		}
+
+		filtered = append(filtered, trimmed)
+	}
+
+	// Trim trailing blank lines
+	for len(filtered) > 0 && filtered[len(filtered)-1] == "" {
+		filtered = filtered[:len(filtered)-1]
+	}
+
+	return strings.Join(filtered, "\n")
+}
+
 // extractSessionContext parses cleaned terminal output to extract the most relevant
-// content for task creation: user prompts, plans, and recent output.
-// This filters out Claude Code's internal processing (tool calls, file reads, etc.)
+// content for task creation: user prompts and plans.
+// Filters out Claude Code's internal processing (tool calls, file reads, etc.)
 // and focuses on what the user actually asked and what was planned.
 func extractSessionContext(cleanOutput []byte) string {
 	var sb strings.Builder
@@ -2630,6 +2975,8 @@ func extractSessionContext(cleanOutput []byte) string {
 	}
 
 	// 3. Build structured context
+	hasStructuredData := len(userPrompts) > 0 || len(planLines) > 0
+
 	if len(userPrompts) > 0 {
 		sb.WriteString("User prompts (what the user asked Claude Code to do):\n")
 		for i, p := range userPrompts {
@@ -2644,14 +2991,34 @@ func extractSessionContext(cleanOutput []byte) string {
 		sb.WriteString("\n\n")
 	}
 
-	// 4. Always include recent output as fallback context (last 2KB)
-	outputStr := string(cleanOutput)
-	recentSize := 2000
-	if len(outputStr) < recentSize {
-		recentSize = len(outputStr)
+	// 4. Include recent output ONLY as fallback when no structured data was found
+	if !hasStructuredData {
+		outputStr := string(cleanOutput)
+		recentSize := 2000
+		if len(outputStr) < recentSize {
+			recentSize = len(outputStr)
+		}
+		rawRecent := outputStr[len(outputStr)-recentSize:]
+		filtered := filterClaudeCodeNoise(rawRecent)
+		if len(filtered) > 0 {
+			sb.WriteString("Recent session output (filtered):\n")
+			sb.WriteString(filtered)
+		}
 	}
-	sb.WriteString("Recent session output:\n")
-	sb.WriteString(outputStr[len(outputStr)-recentSize:])
+
+	// Debug logging for task suggestion diagnostics
+	log.Printf("[SuggestTask/Extract] prompts=%d planLines=%d hasStructuredData=%v contextLen=%d",
+		len(userPrompts), len(planLines), hasStructuredData, sb.Len())
+	for i, p := range userPrompts {
+		preview := p
+		if len(preview) > 200 {
+			preview = preview[:200] + "..."
+		}
+		log.Printf("[SuggestTask/Extract] prompt[%d]: %q", i, preview)
+	}
+	if !hasStructuredData {
+		log.Printf("[SuggestTask/Extract] FALLBACK: no user prompts or plan found, using filtered recent output")
+	}
 
 	return sb.String()
 }
@@ -2677,9 +3044,11 @@ func (h *AIHandler) HandleSuggestTaskData(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Truncate to last ~30KB to capture initial user prompt even after heavy processing
+	// Keep first 5KB (user's initial prompt) + last 25KB (recent activity)
 	if len(output) > 30000 {
-		output = output[len(output)-30000:]
+		head := output[:5000]
+		tail := output[len(output)-25000:]
+		output = append(head, append([]byte("\n...[truncated]...\n"), tail...)...)
 	}
 
 	// Strip ANSI escape codes and control characters from terminal output
@@ -2712,18 +3081,27 @@ func (h *AIHandler) HandleSuggestTaskData(w http.ResponseWriter, r *http.Request
 	// Extract structured context from raw terminal output
 	sessionContext := extractSessionContext(cleanOutput)
 
+	log.Printf("[SuggestTask] session=%s name=%q project=%s contextLen=%d", sessionID, sess.Name, project.Name, len(sessionContext))
+
 	prompt := fmt.Sprintf(`You are a project manager creating a task ticket based on a Claude Code session.
 
-The session context below contains:
-- User prompts: what the user asked Claude Code to do (MOST IMPORTANT — the task objective comes from here)
-- Plan: if Claude Code generated a plan, it describes the intended work
-- Recent output: raw terminal output for additional context
-
-Focus on the USER'S INTENT — what they asked to be done. Ignore Claude Code's internal processing (file reads, tool calls, investigation steps). The task should describe the OBJECTIVE, not the implementation details.
-
 Project: %s
+Session name: "%s"
+
+The session context below is ordered by reliability:
+- "User prompts" = what the user typed into Claude Code. This is the MOST RELIABLE source of intent.
+- "Plan" = Claude Code's implementation plan. Use to add detail.
+- "Recent session output" = fallback terminal output (only present if no prompts/plan were found). Treat with EXTREME CAUTION — may contain unrelated file contents or tool output.
+
 Session context:
 %s
+
+CRITICAL RULES:
+1. Base the task PRIMARILY on user prompts (if present). These are what the user actually asked for.
+2. If no user prompts are available, use the plan or session name. If only "Recent session output" is available, be VERY conservative — only use it if it clearly indicates a user goal.
+3. NEVER create tasks about: "reading files", "investigating code", "exploring codebase", "analyzing structure", "running commands", "reviewing output". These are Claude Code's internal investigation steps, NOT user goals.
+4. The task must describe WHAT the user wants to accomplish, not what Claude Code is doing internally.
+5. If the context seems incoherent or unrelated to any clear goal, create a generic task based on the session name and project name. A vague but correct task is better than a specific but wrong one.
 
 Respond with ONLY valid JSON, no markdown:
 {"title": "...", "description": "...", "priority": "..."}
@@ -2732,7 +3110,7 @@ Rules:
 - Title: imperative verb + objective, max 80 chars. Examples: "Implementar validação de formulário de login", "Corrigir erro 500 na API de pagamentos", "Refatorar módulo de autenticação"
 - Description: 2-3 sentences describing the GOAL and expected outcome. Include which area of the codebase is affected if clear from context. Write as a task assignment: what should be done and why.
 - Priority: "urgent" for hotfixes/production issues, "high" for important features/bugs, "medium" for regular work, "low" for nice-to-haves
-- Use Portuguese (pt-BR)`, project.Name, sessionContext)
+- Use Portuguese (pt-BR)`, project.Name, sess.Name, sessionContext)
 
 	req := &llm.Request{
 		System:    "You are a task management assistant. Respond ONLY with valid JSON, no markdown.",
@@ -3341,6 +3719,14 @@ func (h *AIHandler) AcceptSuggestion(w http.ResponseWriter, r *http.Request) {
 		// Link session to new task if session exists
 		if suggestion.SessionID != "" {
 			h.api.db.LinkSessionToTask(r.Context(), suggestion.SessionID, task.ID)
+			// Rename session to match new task title
+			newName := "Task: " + task.Title
+			h.api.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, suggestion.SessionID)
+			h.api.hub.BroadcastStateUpdate("session", map[string]interface{}{
+				"action":     "renamed",
+				"session_id": suggestion.SessionID,
+				"name":       newName,
+			})
 		}
 		h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{
 			"action":     "created",

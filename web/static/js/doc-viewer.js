@@ -36,7 +36,10 @@ class DocViewer {
             const doc = await resp.json();
 
             const isPendingMemoryDoc = doc.title && doc.title.startsWith('Memory Doc:');
-            const isTaskProposal = doc.title && doc.title.startsWith('Tarefa:');
+            const isTaskDelete = doc.title && doc.title.startsWith('Excluir Tarefa:');
+            const isTaskUpdate = doc.title && doc.title.startsWith('Atualizar Tarefa:');
+            const isTaskProposal = isTaskDelete || isTaskUpdate ||
+                (doc.title && doc.title.startsWith('Tarefa:'));
 
             if (isPendingMemoryDoc) {
                 this.openWithContent(doc.title, doc.content, {
@@ -77,25 +80,30 @@ class DocViewer {
                     ]
                 });
             } else if (isTaskProposal) {
+                const approveLabel = isTaskDelete ? 'Aprovar Exclusão' :
+                                     isTaskUpdate ? 'Aprovar Alteração' :
+                                     'Aprovar Tarefa';
+                const approveClass = isTaskDelete ? 'btn btn-danger' : 'btn btn-primary';
+
                 this.openWithContent(doc.title, doc.content, {
                     actions: [
                         {
-                            label: 'Rejeitar',
+                            label: 'Cancelar',
                             class: 'btn btn-secondary',
                             onClick: async () => {
                                 try {
                                     await fetch(`/api/task-proposal/reject/${docId}`, { method: 'POST' });
                                     this.close();
                                     window.aiChat?.updateDocCardStatus(docId, 'rejected');
-                                    window.app?.showToast('Proposta de tarefa rejeitada.', 'info');
+                                    window.app?.showToast('Proposta rejeitada.', 'info');
                                 } catch (e) {
                                     this.close();
                                 }
                             }
                         },
                         {
-                            label: 'Aprovar Tarefa',
-                            class: 'btn btn-primary',
+                            label: approveLabel,
+                            class: approveClass,
                             onClick: async () => {
                                 try {
                                     const r = await fetch(`/api/task-proposal/approve/${docId}`, { method: 'POST' });
@@ -103,14 +111,20 @@ class DocViewer {
                                         const data = await r.json();
                                         this.close();
                                         window.aiChat?.updateDocCardStatus(docId, 'approved');
-                                        const msg = `Tarefa aprovada! ${data.created || 0} criada(s), ${data.updated || 0} atualizada(s).`;
+                                        const parts = [];
+                                        if (data.created) parts.push(`${data.created} criada(s)`);
+                                        if (data.updated) parts.push(`${data.updated} atualizada(s)`);
+                                        if (data.deleted) parts.push(`${data.deleted} excluída(s)`);
+                                        const msg = parts.length > 0
+                                            ? `Aprovado! ${parts.join(', ')}.`
+                                            : 'Aprovado!';
                                         window.app?.showToast(msg, 'success');
                                     } else {
                                         const err = await r.json();
-                                        window.app?.showToast(err.error || 'Erro ao aprovar tarefa', 'error');
+                                        window.app?.showToast(err.error || 'Erro ao aprovar', 'error');
                                     }
                                 } catch (e) {
-                                    window.app?.showToast('Erro ao aprovar tarefa', 'error');
+                                    window.app?.showToast('Erro ao aprovar', 'error');
                                 }
                             }
                         }

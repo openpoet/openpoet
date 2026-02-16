@@ -183,19 +183,17 @@ func main() {
 		}
 		provider := voice.ProviderType(providerSetting)
 
-		// Get API key based on provider
+		// Get API key based on provider (decrypt from DB)
 		var key string
 		switch provider {
 		case voice.ProviderOpenAI:
-			if k, err := db.GetSetting(context.Background(), "openai_api_key"); err == nil && k != "" {
-				key = k
-			} else {
+			key = decryptSetting(db, encryptor, "openai_api_key")
+			if key == "" {
 				key = cfg.OpenAIKey
 			}
 		case voice.ProviderGroq:
-			if k, err := db.GetSetting(context.Background(), "groq_api_key"); err == nil && k != "" {
-				key = k
-			} else {
+			key = decryptSetting(db, encryptor, "groq_api_key")
+			if key == "" {
 				key = cfg.GroqKey
 			}
 		}
@@ -208,7 +206,7 @@ func main() {
 	configSync.SetHub(hub)
 
 	// Initialize AI provider
-	aiProvider := initAIProvider(db, fmt.Sprintf("http://localhost:%d", cfg.Port))
+	aiProvider := initAIProvider(db, encryptor, fmt.Sprintf("http://localhost:%d", cfg.Port))
 	aiHandler := handlers.NewAIHandler(api, aiProvider)
 
 	// Wire AI handler into API for AI chat functionality
@@ -217,6 +215,17 @@ func main() {
 	// Wire tool executor into SDK providers (lazy binding — provider created before handler)
 	if goSDK, ok := aiProvider.(*llm.GoSDKProvider); ok {
 		goSDK.SetToolExecutor(aiHandler)
+	}
+
+	// Wire AI provider reinitialization callback
+	apiURL := fmt.Sprintf("http://localhost:%d", cfg.Port)
+	api.ReinitAIProvider = func() {
+		newProvider := initAIProvider(db, encryptor, apiURL)
+		aiHandler.SetProvider(newProvider)
+		if goSDK, ok := newProvider.(*llm.GoSDKProvider); ok {
+			goSDK.SetToolExecutor(aiHandler)
+		}
+		log.Printf("[AI] Provider reinitialized after settings change")
 	}
 
 	// Initialize OTEL handler for Claude Code token tracking
@@ -499,6 +508,7 @@ func main() {
 
 		// AI
 		r.Get("/ai/status", aiHandler.HandleStatus)
+		r.Post("/ai/test-connection", aiHandler.HandleTestConnection)
 		r.Post("/ai/chat", aiHandler.HandleChat)
 		r.Get("/ai/conversations", aiHandler.HandleListConversations)
 		r.Delete("/ai/conversations", aiHandler.HandleDeleteAllConversations)
@@ -728,8 +738,45 @@ func newGoSDKWithBudget(db *database.DB, apiURL string) *llm.GoSDKProvider {
 	return p
 }
 
+// decryptSetting reads an encrypted setting, auto-migrating plaintext values.
+func decryptSetting(db *database.DB, enc *security.Encryptor, key string) string {
+	ctx := context.Background()
+	value, err := db.GetSetting(ctx, key)
+	if err != nil || value == "" {
+		return ""
+	}
+
+	iv, ivErr := db.GetSetting(ctx, key+"_iv")
+	if ivErr != nil || iv == "" {
+		// Legacy plaintext — migrate it
+		encrypted, newIV, encErr := enc.Encrypt(value)
+		if encErr != nil {
+			return value // degraded: return plaintext
+		}
+		_ = db.SetSetting(ctx, key, encrypted)
+		_ = db.SetSetting(ctx, key+"_iv", newIV)
+		n := 8
+		if len(value) < 6 {
+			_ = db.SetSetting(ctx, key+"_preview", "***")
+		} else {
+			if len(value) < n {
+				n = len(value) / 2
+			}
+			_ = db.SetSetting(ctx, key+"_preview", value[:n]+"...")
+		}
+		return value
+	}
+
+	plaintext, err := enc.Decrypt(value, iv)
+	if err != nil {
+		log.Printf("[Settings] Failed to decrypt %s: %v", key, err)
+		return ""
+	}
+	return plaintext
+}
+
 // initAIProvider creates the appropriate LLM provider based on settings.
-func initAIProvider(db *database.DB, apiURL string) llm.Provider {
+func initAIProvider(db *database.DB, enc *security.Encryptor, apiURL string) llm.Provider {
 	ctx := context.Background()
 
 	// Check provider setting
@@ -737,7 +784,7 @@ func initAIProvider(db *database.DB, apiURL string) llm.Provider {
 
 	switch providerType {
 	case "apikey":
-		apiKey, _ := db.GetSetting(ctx, "anthropic_api_key")
+		apiKey := decryptSetting(db, enc, "anthropic_api_key")
 		if apiKey != "" {
 			log.Printf("[AI] Using Anthropic API key provider")
 			return llm.NewAnthropicProvider(apiKey)
@@ -755,7 +802,7 @@ func initAIProvider(db *database.DB, apiURL string) llm.Provider {
 
 	case "ollama":
 		ollamaURL, _ := db.GetSetting(ctx, "ollama_base_url")
-		ollamaKey, _ := db.GetSetting(ctx, "ollama_api_key")
+		ollamaKey := decryptSetting(db, enc, "ollama_api_key")
 		ollamaModel, _ := db.GetSetting(ctx, "ollama_model")
 		if ollamaURL == "" {
 			ollamaURL = "http://localhost:11434"
@@ -765,6 +812,40 @@ func initAIProvider(db *database.DB, apiURL string) llm.Provider {
 		}
 		log.Printf("[AI] Using Ollama provider at %s with model %s", ollamaURL, ollamaModel)
 		return llm.NewOllamaProvider(ollamaURL, ollamaKey, ollamaModel)
+
+	case "ollama-sdk":
+		if llm.IsClaudeCLIAvailable() {
+			ollamaURL, _ := db.GetSetting(ctx, "ollama_base_url")
+			ollamaKey := decryptSetting(db, enc, "ollama_api_key")
+			ollamaModel, _ := db.GetSetting(ctx, "ollama_model")
+			if ollamaURL == "" {
+				ollamaURL = "http://localhost:11434"
+			}
+			if ollamaModel == "" {
+				ollamaModel = "qwen3-coder"
+			}
+
+			env := map[string]string{
+				"ANTHROPIC_BASE_URL":             ollamaURL,
+				"ANTHROPIC_DEFAULT_OPUS_MODEL":   ollamaModel,
+				"ANTHROPIC_DEFAULT_SONNET_MODEL": ollamaModel,
+				"ANTHROPIC_DEFAULT_HAIKU_MODEL":  ollamaModel,
+				"CLAUDE_CODE_SUBAGENT_MODEL":     ollamaModel,
+			}
+			if ollamaKey != "" {
+				env["ANTHROPIC_AUTH_TOKEN"] = ollamaKey
+			} else {
+				env["ANTHROPIC_AUTH_TOKEN"] = "ollama"
+			}
+
+			p := newGoSDKWithBudget(db, apiURL)
+			p.SetExtraEnv(env)
+			p.SetProviderName("ollama-sdk")
+			log.Printf("[AI] Using Ollama via Go Agent SDK at %s with model %s", ollamaURL, ollamaModel)
+			return p
+		}
+		log.Printf("[AI] Provider set to ollama-sdk but Claude CLI not available")
+		return nil
 
 	case "nodesdk":
 		log.Printf("[AI] Using Node.js Agent SDK sidecar provider")
@@ -785,7 +866,7 @@ func initAIProvider(db *database.DB, apiURL string) llm.Provider {
 			log.Printf("[AI] Auto-detected Go Agent SDK provider (streaming, session-based)")
 			return newGoSDKWithBudget(db, apiURL)
 		}
-		apiKey, _ := db.GetSetting(ctx, "anthropic_api_key")
+		apiKey := decryptSetting(db, enc, "anthropic_api_key")
 		if apiKey != "" {
 			log.Printf("[AI] Auto-detected Anthropic API key provider")
 			return llm.NewAnthropicProvider(apiKey)

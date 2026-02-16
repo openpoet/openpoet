@@ -28,6 +28,8 @@ type GoSDKProvider struct {
 	apiURL       string
 	budgetUSD    float64 // max budget per interactive query (0 = unlimited)
 	toolExecutor ToolExecutor
+	extraEnv     map[string]string // extra env vars for the Claude CLI subprocess
+	providerName string            // override Name() return value (e.g. "ollama-sdk")
 	sessions     map[int64]*goSDKSession
 	mu           sync.RWMutex
 }
@@ -64,8 +66,22 @@ func (p *GoSDKProvider) SetBudgetUSD(budget float64) {
 	p.budgetUSD = budget
 }
 
+// SetExtraEnv sets extra environment variables for the Claude CLI subprocess.
+// Used by ollama-sdk to inject ANTHROPIC_BASE_URL and model overrides.
+func (p *GoSDKProvider) SetExtraEnv(env map[string]string) {
+	p.extraEnv = env
+}
+
+// SetProviderName overrides the name returned by Name().
+func (p *GoSDKProvider) SetProviderName(name string) {
+	p.providerName = name
+}
+
 // Name returns the provider identifier.
 func (p *GoSDKProvider) Name() string {
+	if p.providerName != "" {
+		return p.providerName
+	}
 	return "gosdk"
 }
 
@@ -107,6 +123,11 @@ func (p *GoSDKProvider) buildOneShotOptions(req *Request) []claudecode.Option {
 		claudecode.WithMaxTurns(3),
 	}
 
+	// Inject extra env vars (e.g. ANTHROPIC_BASE_URL for Ollama)
+	if len(p.extraEnv) > 0 {
+		opts = append(opts, claudecode.WithEnv(p.extraEnv))
+	}
+
 	model := req.Model
 	if model == "" {
 		model = DefaultModel
@@ -136,6 +157,11 @@ func (p *GoSDKProvider) buildInteractiveOptions(req *Request, convID int64) []cl
 	opts := []claudecode.Option{
 		claudecode.WithPermissionMode(claudecode.PermissionModeBypassPermissions),
 		claudecode.WithMaxTurns(15),
+	}
+
+	// Inject extra env vars (e.g. ANTHROPIC_BASE_URL for Ollama)
+	if len(p.extraEnv) > 0 {
+		opts = append(opts, claudecode.WithEnv(p.extraEnv))
 	}
 
 	model := req.Model
@@ -434,6 +460,22 @@ func (p *GoSDKProvider) streamInteractive(ctx context.Context, prompt string, re
 						callback(StreamEvent{Type: "content_block_stop", Index: 0})
 					}
 					return nil, fmt.Errorf("assistant error: %s", errMsg)
+				}
+
+				// Log all content blocks for debugging tool duplication
+				for i, block := range m.Content {
+					switch b := block.(type) {
+					case *claudecode.TextBlock:
+						snippet := b.Text
+						if len(snippet) > 80 {
+							snippet = snippet[:80] + "..."
+						}
+						log.Printf("[GoSDK] AssistantMessage block[%d]: TextBlock len=%d snippet=%q", i, len(b.Text), snippet)
+					case *claudecode.ToolUseBlock:
+						log.Printf("[GoSDK] AssistantMessage block[%d]: ToolUseBlock id=%s name=%s", i, b.ToolUseID, b.Name)
+					default:
+						log.Printf("[GoSDK] AssistantMessage block[%d]: %T", i, block)
+					}
 				}
 
 				for _, block := range m.Content {

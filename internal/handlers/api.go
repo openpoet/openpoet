@@ -55,6 +55,36 @@ type PlanningTaskAction struct {
 	Extra       map[string]interface{} `json:"extra,omitempty"` // for update fields
 }
 
+// sensitiveSettingKeys lists setting keys that must be stored encrypted.
+var sensitiveSettingKeys = map[string]bool{
+	"anthropic_api_key": true,
+	"openai_api_key":    true,
+	"groq_api_key":      true,
+	"ollama_api_key":    true,
+}
+
+// aiProviderSettingKeys lists settings that require AI provider reinitialization when changed.
+var aiProviderSettingKeys = map[string]bool{
+	"ai_provider":       true,
+	"anthropic_api_key": true,
+	"ollama_api_key":    true,
+	"ollama_base_url":   true,
+	"ollama_model":      true,
+	"ai_model":          true,
+}
+
+// apiKeyPreview returns the first N visible characters of a key + "..."
+func apiKeyPreview(key string) string {
+	if len(key) < 6 {
+		return "***"
+	}
+	n := 8
+	if len(key) < n {
+		n = len(key) / 2
+	}
+	return key[:n] + "..."
+}
+
 // pendingTaskProposal holds a task proposal awaiting user approval.
 type pendingTaskProposal struct {
 	Actions []PlanningTaskAction
@@ -72,6 +102,9 @@ type API struct {
 	aiHandler    *AIHandler
 	otelHandler  *OTELHandler
 
+	// ReinitAIProvider is called when AI settings change to reinitialize the provider.
+	ReinitAIProvider func()
+
 	pendingMemoryDocsMu sync.Mutex
 	pendingMemoryDocs   map[string]*pendingMemoryDoc // docID -> pending edit
 
@@ -82,6 +115,34 @@ type API struct {
 // SetAIHandler sets the AI handler for AI chat functionality.
 func (a *API) SetAIHandler(h *AIHandler) {
 	a.aiHandler = h
+}
+
+// GetDecryptedSetting reads an encrypted setting and returns the plaintext.
+// If the key has no _iv companion (legacy plaintext), it encrypts in place (lazy migration).
+func (a *API) GetDecryptedSetting(ctx context.Context, key string) (string, error) {
+	value, err := a.db.GetSetting(ctx, key)
+	if err != nil || value == "" {
+		return "", err
+	}
+
+	iv, ivErr := a.db.GetSetting(ctx, key+"_iv")
+	if ivErr != nil || iv == "" {
+		// No IV — legacy plaintext value. Migrate it.
+		encrypted, newIV, encErr := a.encryptor.Encrypt(value)
+		if encErr != nil {
+			return value, nil // degraded: return plaintext
+		}
+		_ = a.db.SetSetting(ctx, key, encrypted)
+		_ = a.db.SetSetting(ctx, key+"_iv", newIV)
+		_ = a.db.SetSetting(ctx, key+"_preview", apiKeyPreview(value))
+		return value, nil
+	}
+
+	plaintext, err := a.encryptor.Decrypt(value, iv)
+	if err != nil {
+		return "", fmt.Errorf("failed to decrypt setting %s: %w", key, err)
+	}
+	return plaintext, nil
 }
 
 // SetOTELHandler sets the OTEL handler for reading live session metrics.
@@ -210,6 +271,7 @@ func (a *API) ApproveTaskProposal(w http.ResponseWriter, r *http.Request) {
 
 	created := 0
 	updated := 0
+	deleted := 0
 
 	// Map action index (1-based) -> created task ID, for resolving parent_ref
 	createdTaskIDs := make(map[int]int64)
@@ -283,6 +345,14 @@ func (a *API) ApproveTaskProposal(w http.ResponseWriter, r *http.Request) {
 			}
 			a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": action.ProjectID, "task": task})
 			updated++
+
+		case "delete":
+			if err := a.db.DeleteTask(r.Context(), action.TaskID); err != nil {
+				log.Printf("[TaskProposal] Failed to delete task %d: %v", action.TaskID, err)
+				continue
+			}
+			a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "deleted", "project_id": action.ProjectID, "id": action.TaskID})
+			deleted++
 		}
 	}
 
@@ -290,6 +360,7 @@ func (a *API) ApproveTaskProposal(w http.ResponseWriter, r *http.Request) {
 		"status":  "approved",
 		"created": created,
 		"updated": updated,
+		"deleted": deleted,
 	})
 }
 
@@ -815,7 +886,7 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		if ollamaURL == "" {
 			ollamaURL = "http://localhost:11434"
 		}
-		ollamaKey, _ := a.db.GetSetting(r.Context(), "ollama_api_key")
+		ollamaKey, _ := a.GetDecryptedSetting(r.Context(), "ollama_api_key")
 		ollamaModel, _ := a.db.GetSetting(r.Context(), "ollama_model")
 		if ollamaModel == "" {
 			ollamaModel = "qwen3-coder"
@@ -862,6 +933,11 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 	// Create session-task link if starting from a task
 	if linkedTask != nil {
 		a.db.LinkSessionToTask(r.Context(), sess.ID, linkedTask.ID)
+
+		// Rename session to match task title
+		newName := "Task: " + linkedTask.Title
+		a.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, sess.ID)
+		sess.Name = newName
 
 		// Auto-set task status to in_progress if it's currently todo
 		if linkedTask.Status == "todo" {
@@ -1411,11 +1487,15 @@ func (a *API) GetSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove sensitive settings
+	// Remove always-hidden keys
 	delete(settings, "vapid_private_key")
-	delete(settings, "openai_api_key")
-	delete(settings, "groq_api_key")
-	delete(settings, "anthropic_api_key")
+
+	// For sensitive keys: remove encrypted blob and IV, keep only preview
+	for key := range sensitiveSettingKeys {
+		delete(settings, key)
+		delete(settings, key+"_iv")
+		// _preview keys remain in the map if they exist
+	}
 
 	respondJSON(w, http.StatusOK, settings)
 }
@@ -1428,9 +1508,42 @@ func (a *API) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for key, value := range settings {
+		if sensitiveSettingKeys[key] {
+			if value == "" {
+				continue // empty means unchanged
+			}
+			encrypted, iv, err := a.encryptor.Encrypt(value)
+			if err != nil {
+				respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to encrypt %s", key))
+				return
+			}
+			if err := a.db.SetSetting(r.Context(), key, encrypted); err != nil {
+				respondError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if err := a.db.SetSetting(r.Context(), key+"_iv", iv); err != nil {
+				respondError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if err := a.db.SetSetting(r.Context(), key+"_preview", apiKeyPreview(value)); err != nil {
+				respondError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			continue
+		}
 		if err := a.db.SetSetting(r.Context(), key, value); err != nil {
 			respondError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+	}
+
+	// Reinitialize AI provider if any AI-related setting changed
+	if a.ReinitAIProvider != nil {
+		for key := range settings {
+			if aiProviderSettingKeys[key] {
+				a.ReinitAIProvider()
+				break
+			}
 		}
 	}
 
