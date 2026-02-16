@@ -6253,7 +6253,7 @@ class DevManager {
                 for (const doc of documents) {
                     const docIcon = doc.type === 'plan' ? '[P]' : (doc.title.startsWith('Verificação') || doc.title.startsWith('Verificacao') ? '[V]' : '[D]');
                     const time = this.relativeTime(doc.created_at);
-                    md += `${docIcon} **${this.escapeHtml(doc.title)}** — *${time}* <a href="#" onclick="app.openTaskDoc('${doc.id}', '${doc.type}'); return false;" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Abrir</a>\n\n`;
+                    md += `${docIcon} **${this.escapeHtml(doc.title)}** — *${time}* <a href="#" data-action="open-doc" data-doc-id="${this.escapeHtml(doc.id)}" data-doc-type="${this.escapeHtml(doc.type)}" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Abrir</a>\n\n`;
                 }
             }
 
@@ -6481,7 +6481,7 @@ class DevManager {
         let details = {};
         try { details = JSON.parse(entry.details || '{}'); } catch {}
         if (entry.event_type === 'verification_doc_created' && details.doc_id) {
-            return ` <a href="#" onclick="app.openTaskDoc('${details.doc_id}', 'document'); return false;" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Abrir</a>`;
+            return ` <a href="#" data-action="open-doc" data-doc-id="${this.escapeHtml(details.doc_id)}" data-doc-type="document" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Abrir</a>`;
         }
         return '';
     }

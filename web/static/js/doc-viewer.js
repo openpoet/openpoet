@@ -27,6 +27,19 @@ class DocViewer {
             }
         };
         document.addEventListener('keydown', this._escHandler);
+
+        // Event delegation for data-action="open-doc" links inside content
+        this.contentEl?.addEventListener('click', (e) => {
+            const link = e.target.closest('a[data-action="open-doc"]');
+            if (link) {
+                e.preventDefault();
+                const docId = link.dataset.docId;
+                const docType = link.dataset.docType || 'document';
+                if (docId && window.app) {
+                    window.app.openTaskDoc(docId, docType);
+                }
+            }
+        });
     }
 
     async open(docId) {
