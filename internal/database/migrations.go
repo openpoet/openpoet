@@ -37,6 +37,7 @@ var migrations = []Migration{
 	{Version: 19, Description: "tasks: add global_sort_order for cross-project ordering", Up: migrateV19},
 	{Version: 20, Description: "sessions: add last_activity_at for tracking last output/event", Up: migrateV20},
 	{Version: 21, Description: "ai: add feedback_ack to temp_documents and session_id to ai_conversations", Up: migrateV21},
+	{Version: 22, Description: "sessions: add plan_content and plan_updated_at for persisting plans", Up: migrateV22},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -544,6 +545,19 @@ func migrateV21(tx *sqlx.Tx) error {
 	stmts := []string{
 		`ALTER TABLE temp_documents ADD COLUMN feedback_ack INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE ai_conversations ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateV22(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE sessions ADD COLUMN plan_content TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN plan_updated_at TIMESTAMP`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {

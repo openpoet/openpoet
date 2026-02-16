@@ -292,6 +292,11 @@ class TerminalManager {
             } catch (err) {
                 console.error('Failed to fetch hook state:', err);
             }
+
+            // Fetch persisted plan for this session
+            if (window.hookManager) {
+                window.hookManager.fetchPlan(sessionId);
+            }
         };
 
         ws.onmessage = (event) => {

@@ -258,6 +258,19 @@ func main() {
 		db.TouchSessionActivity(context.Background(), sessionID)
 	}
 
+	// Wire plan persistence callback into hook handler
+	hookHandler.OnPlanUpdated = func(sessionID string, planContent string) {
+		if err := db.UpdateSessionPlan(context.Background(), sessionID, planContent); err != nil {
+			log.Printf("[hooks] Failed to save plan for session %s: %v", sessionID, err)
+			return
+		}
+		log.Printf("[hooks] Plan saved for session %s (%d bytes)", sessionID[:8], len(planContent))
+		hub.BroadcastHookEvent(sessionID, &websocket.Message{
+			Type: websocket.MsgTypeSessionPlanUpdated,
+			Data: map[string]interface{}{"session_id": sessionID},
+		})
+	}
+
 	// Wire OTEL handler into API for live session metrics
 	api.SetOTELHandler(otelHandler)
 
@@ -399,6 +412,7 @@ func main() {
 		r.Post("/sessions", api.CreateSession)
 		r.Get("/sessions/{id}", api.GetSession)
 		r.Get("/sessions/{id}/output", api.GetSessionOutput)
+		r.Get("/sessions/{id}/plan", api.GetSessionPlan)
 		r.Delete("/sessions/{id}", api.DeleteSession)
 		r.Post("/sessions/{id}/reopen", api.ReopenSession)
 

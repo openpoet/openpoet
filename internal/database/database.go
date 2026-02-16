@@ -133,6 +133,27 @@ func (d *DB) TouchSessionActivity(ctx context.Context, id string) error {
 	return err
 }
 
+func (d *DB) UpdateSessionPlan(ctx context.Context, id string, planContent string) error {
+	_, err := d.ExecContext(ctx, "UPDATE sessions SET plan_content=?, plan_updated_at=? WHERE id=?", planContent, time.Now(), id)
+	return err
+}
+
+func (d *DB) GetSessionPlan(ctx context.Context, id string) (string, *time.Time, error) {
+	var result struct {
+		PlanContent   string       `db:"plan_content"`
+		PlanUpdatedAt sql.NullTime `db:"plan_updated_at"`
+	}
+	err := d.GetContext(ctx, &result, "SELECT plan_content, plan_updated_at FROM sessions WHERE id = ?", id)
+	if err != nil {
+		return "", nil, err
+	}
+	var updatedAt *time.Time
+	if result.PlanUpdatedAt.Valid {
+		updatedAt = &result.PlanUpdatedAt.Time
+	}
+	return result.PlanContent, updatedAt, nil
+}
+
 func (d *DB) DeleteSession(ctx context.Context, id string) error {
 	_, err := d.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
 	return err
@@ -964,7 +985,7 @@ func (d *DB) GetTaskSummaryByProject(ctx context.Context, projectID int64) (map[
 		Count  int    `db:"count"`
 	}
 	var counts []statusCount
-	err := d.SelectContext(ctx, &counts, "SELECT status, COUNT(*) as count FROM project_tasks WHERE project_id = ? GROUP BY status", projectID)
+	err := d.SelectContext(ctx, &counts, "SELECT status, COUNT(*) as count FROM project_tasks WHERE project_id = ? AND id NOT IN (SELECT DISTINCT parent_id FROM project_tasks WHERE parent_id IS NOT NULL) GROUP BY status", projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -1028,7 +1049,7 @@ func (d *DB) GetAllTasksSummary(ctx context.Context) (map[string]int, error) {
 		Count  int    `db:"count"`
 	}
 	var counts []statusCount
-	err := d.SelectContext(ctx, &counts, "SELECT status, COUNT(*) as count FROM project_tasks GROUP BY status")
+	err := d.SelectContext(ctx, &counts, "SELECT status, COUNT(*) as count FROM project_tasks WHERE id NOT IN (SELECT DISTINCT parent_id FROM project_tasks WHERE parent_id IS NOT NULL) GROUP BY status")
 	if err != nil {
 		return nil, err
 	}

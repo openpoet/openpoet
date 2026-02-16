@@ -71,6 +71,9 @@ type HookHandler struct {
 	// OnActivityTouch is called (debounced) when a session has activity, to update last_activity_at.
 	OnActivityTouch func(sessionID string)
 
+	// OnPlanUpdated is called when ExitPlanMode is intercepted with plan content.
+	OnPlanUpdated func(sessionID string, planContent string)
+
 	mu                sync.Mutex
 	pending           map[string]*pendingPermission  // sessionID -> pending permission
 	alwaysAllow       map[string]map[string]bool     // sessionID -> toolName -> true
@@ -303,6 +306,17 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 			}()
 		}
 	} else if isExitPlan {
+		// Persist plan content from hook event
+		if h.OnPlanUpdated != nil {
+			if ti, ok := hookEvent["tool_input"].(map[string]interface{}); ok {
+				if p, ok := ti["plan"].(string); ok {
+					if pc := strings.TrimSpace(p); pc != "" {
+						go h.OnPlanUpdated(sessionID, pc)
+					}
+				}
+			}
+		}
+
 		// Send plan approval UI
 		h.hub.BroadcastHookEvent(sessionID, &websocket.Message{
 			Type: websocket.MsgTypeHookExitPlan,

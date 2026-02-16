@@ -509,12 +509,28 @@ func executeDashboard(client *APIClient) (string, error) {
 	for _, p := range projects {
 		tasksBody, _ := client.Get(fmt.Sprintf("/api/projects/%d/tasks", p.ID))
 		var tasks []struct {
+			ID       int64  `json:"id"`
+			ParentID *struct {
+				Int64 int64 `json:"Int64"`
+				Valid bool  `json:"Valid"`
+			} `json:"parent_id"`
 			Status string `json:"status"`
 		}
 		json.Unmarshal(tasksBody, &tasks)
 
+		// Collect IDs that are parents (umbrella tasks)
+		parentIDs := make(map[int64]bool)
+		for _, t := range tasks {
+			if t.ParentID != nil && t.ParentID.Valid {
+				parentIDs[t.ParentID.Int64] = true
+			}
+		}
+
 		taskCounts := map[string]int{"todo": 0, "in_progress": 0, "done": 0, "blocked": 0}
 		for _, t := range tasks {
+			if parentIDs[t.ID] {
+				continue // skip umbrella tasks
+			}
 			taskCounts[t.Status]++
 			totalTasks[t.Status]++
 		}
@@ -817,6 +833,16 @@ func formatTaskList(body []byte) (string, error) {
 		"urgent": "URG",
 	}
 
+	// Identify umbrella tasks (tasks that have children)
+	parentIDs := make(map[int64]bool)
+	childrenByParent := make(map[int64][]struct{ Status string })
+	for _, t := range tasks {
+		if t.ParentID != nil && t.ParentID.Valid {
+			parentIDs[t.ParentID.Int64] = true
+			childrenByParent[t.ParentID.Int64] = append(childrenByParent[t.ParentID.Int64], struct{ Status string }{t.Status})
+		}
+	}
+
 	result := ""
 	for _, t := range tasks {
 		icon := statusIcons[t.Status]
@@ -829,7 +855,18 @@ func formatTaskList(body []byte) (string, error) {
 		if t.DueDate != nil && t.DueDate.Valid {
 			due = " | due: " + t.DueDate.Time[:10]
 		}
-		result += fmt.Sprintf("%s%s [%d] %s (%s%s)\n", indent, icon, t.ID, t.Title, prio, due)
+		umbrella := ""
+		if parentIDs[t.ID] {
+			kids := childrenByParent[t.ID]
+			doneCount := 0
+			for _, k := range kids {
+				if k.Status == "done" {
+					doneCount++
+				}
+			}
+			umbrella = fmt.Sprintf(" [umbrella: %d/%d done]", doneCount, len(kids))
+		}
+		result += fmt.Sprintf("%s%s [%d] %s (%s%s)%s\n", indent, icon, t.ID, t.Title, prio, due, umbrella)
 	}
 	return result, nil
 }
