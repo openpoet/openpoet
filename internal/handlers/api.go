@@ -1804,6 +1804,13 @@ func (a *API) ListAllTasks(w http.ResponseWriter, r *http.Request) {
 		f.Search = s
 	}
 
+	// Preserve the original status filter, then clear it for the DB query
+	// so umbrella tasks are fetched regardless of their stored status.
+	statusFilter := f.Status
+	if statusFilter != "" {
+		f.Status = ""
+	}
+
 	tasks, err := a.db.ListAllTasks(r.Context(), f)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -1811,6 +1818,18 @@ func (a *API) ListAllTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	if tasks == nil {
 		tasks = []database.ProjectTask{}
+	}
+	database.ApplyUmbrellaStatus(tasks)
+
+	// Re-apply status filter after umbrella status computation
+	if statusFilter != "" {
+		filtered := tasks[:0]
+		for _, t := range tasks {
+			if t.Status == statusFilter {
+				filtered = append(filtered, t)
+			}
+		}
+		tasks = filtered
 	}
 
 	summary, _ := a.db.GetAllTasksSummary(r.Context())
@@ -1838,6 +1857,36 @@ func (a *API) ListProjectTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	database.ApplyUmbrellaStatus(tasks)
 	respondJSON(w, http.StatusOK, tasks)
+}
+
+// recordTaskHistory creates a task history entry and broadcasts it via WebSocket.
+func (a *API) recordTaskHistory(ctx context.Context, taskID, projectID int64, eventType string, details map[string]interface{}, actor string, sessionID string) {
+	detailsJSON, _ := json.Marshal(details)
+	h := &database.TaskHistory{
+		TaskID:    taskID,
+		ProjectID: projectID,
+		EventType: eventType,
+		Details:   string(detailsJSON),
+		Actor:     actor,
+	}
+	if sessionID != "" {
+		h.SessionID = sql.NullString{String: sessionID, Valid: true}
+	}
+	if err := a.db.CreateTaskHistory(ctx, h); err != nil {
+		log.Printf("[TaskHistory] Failed to record %s for task %d: %v", eventType, taskID, err)
+		return
+	}
+	a.hub.BroadcastStateUpdate("task_history", map[string]interface{}{
+		"action":     "created",
+		"task_id":    taskID,
+		"project_id": projectID,
+		"entry":      h,
+	})
+}
+
+// RecordTaskHistory is the public version of recordTaskHistory for use from external packages.
+func (a *API) RecordTaskHistory(ctx context.Context, taskID, projectID int64, eventType string, details map[string]interface{}, actor string, sessionID string) {
+	a.recordTaskHistory(ctx, taskID, projectID, eventType, details, actor, sessionID)
 }
 
 func (a *API) CreateProjectTask(w http.ResponseWriter, r *http.Request) {
@@ -1920,6 +1969,9 @@ func (a *API) CreateProjectTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "created", "project_id": projectID, "task": task})
+	a.recordTaskHistory(r.Context(), task.ID, projectID, "task_created", map[string]interface{}{
+		"title": task.Title, "status": task.Status, "priority": task.Priority,
+	}, "user", "")
 	respondJSON(w, http.StatusCreated, task)
 }
 
@@ -1975,6 +2027,12 @@ func (a *API) UpdateProjectTask(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "Task not found")
 		return
 	}
+
+	// Capture old values for history tracking
+	oldStatus := task.Status
+	oldPriority := task.Priority
+	oldTitle := task.Title
+	oldDescription := task.Description
 
 	var input struct {
 		Title       *string `json:"title"`
@@ -2042,6 +2100,27 @@ func (a *API) UpdateProjectTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
+
+	// Record history for each changed field
+	if task.Status != oldStatus {
+		a.recordTaskHistory(r.Context(), taskID, projectID, "status_change", map[string]interface{}{
+			"old": oldStatus, "new": task.Status,
+		}, "user", "")
+	}
+	if task.Priority != oldPriority {
+		a.recordTaskHistory(r.Context(), taskID, projectID, "priority_change", map[string]interface{}{
+			"old": oldPriority, "new": task.Priority,
+		}, "user", "")
+	}
+	if task.Title != oldTitle {
+		a.recordTaskHistory(r.Context(), taskID, projectID, "title_updated", map[string]interface{}{
+			"old": oldTitle, "new": task.Title,
+		}, "user", "")
+	}
+	if task.Description != oldDescription {
+		a.recordTaskHistory(r.Context(), taskID, projectID, "description_updated", map[string]interface{}{}, "user", "")
+	}
+
 	respondJSON(w, http.StatusOK, task)
 }
 
@@ -2063,6 +2142,7 @@ func (a *API) UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "Task not found")
 		return
 	}
+	oldStatus := task.Status
 
 	var input struct {
 		Status string `json:"status"`
@@ -2090,6 +2170,11 @@ func (a *API) UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
+	if input.Status != oldStatus {
+		a.recordTaskHistory(r.Context(), taskID, projectID, "status_change", map[string]interface{}{
+			"old": oldStatus, "new": input.Status,
+		}, "user", "")
+	}
 	respondJSON(w, http.StatusOK, task)
 }
 
@@ -2330,8 +2415,17 @@ func (a *API) LinkSessionTask(w http.ResponseWriter, r *http.Request) {
 		"name":       newName,
 	})
 
+	// Record session linked and task assigned history
+	a.recordTaskHistory(r.Context(), linkedTask.ID, linkedTask.ProjectID, "session_linked", map[string]interface{}{
+		"session_id": sessionID, "session_name": newName,
+	}, "user", sessionID)
+	a.recordTaskHistory(r.Context(), linkedTask.ID, linkedTask.ProjectID, "task_assigned", map[string]interface{}{
+		"session_id": sessionID, "session_name": newName,
+	}, "system", sessionID)
+
 	// Auto-set task to in_progress if currently todo
 	if linkedTask.Status == "todo" {
+		oldStatus := linkedTask.Status
 		a.db.UpdateTaskStatus(r.Context(), linkedTask.ID, "in_progress")
 		linkedTask.Status = "in_progress"
 		a.hub.BroadcastStateUpdate("task", map[string]interface{}{
@@ -2339,12 +2433,64 @@ func (a *API) LinkSessionTask(w http.ResponseWriter, r *http.Request) {
 			"project_id": linkedTask.ProjectID,
 			"task":       linkedTask,
 		})
+		a.recordTaskHistory(r.Context(), linkedTask.ID, linkedTask.ProjectID, "status_change", map[string]interface{}{
+			"old": oldStatus, "new": "in_progress", "reason": "auto_on_link",
+		}, "system", sessionID)
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"task":         linkedTask,
 		"session_name": newName,
 	})
+}
+
+// ListTaskHistory returns activity history for a task.
+func (a *API) ListTaskHistory(w http.ResponseWriter, r *http.Request) {
+	taskID, err := strconv.ParseInt(chi.URLParam(r, "taskId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid task ID")
+		return
+	}
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	history, err := a.db.ListTaskHistory(r.Context(), taskID, limit)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if history == nil {
+		history = []database.TaskHistory{}
+	}
+	respondJSON(w, http.StatusOK, history)
+}
+
+// AddTaskComment adds a user comment to a task's history.
+func (a *API) AddTaskComment(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+	taskID, err := strconv.ParseInt(chi.URLParam(r, "taskId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid task ID")
+		return
+	}
+	var input struct {
+		Comment string `json:"comment"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil || strings.TrimSpace(input.Comment) == "" {
+		respondError(w, http.StatusBadRequest, "Comment is required")
+		return
+	}
+	a.recordTaskHistory(r.Context(), taskID, projectID, "comment_added", map[string]interface{}{
+		"comment": strings.TrimSpace(input.Comment),
+	}, "user", "")
+	respondJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
 }
 
 // TriggerSessionEvaluation triggers an AI evaluation for the current session

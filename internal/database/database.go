@@ -1226,6 +1226,37 @@ func (d *DB) GetAllTaskSessionSummary(ctx context.Context) ([]struct {
 	return out, nil
 }
 
+// Task History operations
+
+func (d *DB) CreateTaskHistory(ctx context.Context, h *TaskHistory) error {
+	if h.Actor == "" {
+		h.Actor = "system"
+	}
+	if h.Details == "" {
+		h.Details = "{}"
+	}
+	query := `INSERT INTO task_history (task_id, project_id, event_type, details, actor, session_id)
+	           VALUES (?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, h.TaskID, h.ProjectID, h.EventType, h.Details, h.Actor, h.SessionID)
+	if err != nil {
+		return err
+	}
+	id, _ := result.LastInsertId()
+	h.ID = id
+	h.CreatedAt = time.Now()
+	return nil
+}
+
+func (d *DB) ListTaskHistory(ctx context.Context, taskID int64, limit int) ([]TaskHistory, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	var history []TaskHistory
+	err := d.SelectContext(ctx, &history,
+		`SELECT * FROM task_history WHERE task_id = ? ORDER BY created_at DESC LIMIT ?`, taskID, limit)
+	return history, err
+}
+
 func (d *DB) ReopenSession(ctx context.Context, id string) error {
 	_, err := d.ExecContext(ctx,
 		"UPDATE sessions SET status='starting', end_time=NULL, start_time=?, pid=NULL WHERE id=? AND status IN ('stopped', 'completed')",
