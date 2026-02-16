@@ -575,9 +575,16 @@ func (d *DB) CreateTempDocument(ctx context.Context, doc *TempDocument) error {
 	if doc.Status == "" {
 		doc.Status = "pending"
 	}
-	query := `INSERT INTO temp_documents (id, title, content, conversation_id, summary, status, message_id) VALUES (?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.ExecContext(ctx, query, doc.ID, doc.Title, doc.Content, doc.ConversationID, doc.Summary, doc.Status, doc.MessageID)
+	query := `INSERT INTO temp_documents (id, title, content, conversation_id, task_id, summary, status, message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.ExecContext(ctx, query, doc.ID, doc.Title, doc.Content, doc.ConversationID, doc.TaskID, doc.Summary, doc.Status, doc.MessageID)
 	return err
+}
+
+func (d *DB) ListDocumentsByTask(ctx context.Context, taskID int64) ([]TempDocument, error) {
+	var docs []TempDocument
+	err := d.SelectContext(ctx, &docs,
+		"SELECT id, title, status, task_id, created_at FROM temp_documents WHERE task_id = ? ORDER BY created_at DESC", taskID)
+	return docs, err
 }
 
 func (d *DB) UpdateTempDocumentStatus(ctx context.Context, id string, status string) error {
@@ -651,8 +658,8 @@ func (d *DB) CreateTask(ctx context.Context, t *ProjectTask) error {
 			t.GlobalSortOrder = 1
 		}
 	}
-	query := `INSERT INTO project_tasks (project_id, parent_id, title, description, status, priority, due_date, sort_order, global_sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, t.ProjectID, t.ParentID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.SortOrder, t.GlobalSortOrder)
+	query := `INSERT INTO project_tasks (project_id, parent_id, title, description, status, priority, due_date, sort_order, global_sort_order, verification_doc_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, t.ProjectID, t.ParentID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.SortOrder, t.GlobalSortOrder, t.VerificationDocID)
 	if err != nil {
 		return err
 	}
@@ -714,8 +721,8 @@ func (d *DB) ListTasksByProject(ctx context.Context, projectID int64) ([]Project
 }
 
 func (d *DB) UpdateTask(ctx context.Context, t *ProjectTask) error {
-	query := `UPDATE project_tasks SET title=?, description=?, status=?, priority=?, due_date=?, sort_order=?, due_notified=?, parent_id=?, updated_at=? WHERE id=?`
-	_, err := d.ExecContext(ctx, query, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.SortOrder, t.DueNotified, t.ParentID, time.Now(), t.ID)
+	query := `UPDATE project_tasks SET title=?, description=?, status=?, priority=?, due_date=?, sort_order=?, due_notified=?, parent_id=?, verification_doc_id=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.SortOrder, t.DueNotified, t.ParentID, t.VerificationDocID, time.Now(), t.ID)
 	if err != nil {
 		return err
 	}
@@ -998,16 +1005,21 @@ func (d *DB) DuplicateTask(ctx context.Context, id int64) (*ProjectTask, error) 
 	return clone, nil
 }
 
+func (d *DB) SetTaskVerificationDoc(ctx context.Context, taskID int64, docID string) error {
+	_, err := d.ExecContext(ctx, "UPDATE project_tasks SET verification_doc_id = ?, updated_at = ? WHERE id = ?", docID, time.Now(), taskID)
+	return err
+}
+
 func (d *DB) ListOverdueTasks(ctx context.Context) ([]ProjectTask, error) {
 	var tasks []ProjectTask
-	err := d.SelectContext(ctx, &tasks, "SELECT * FROM project_tasks WHERE due_date < CURRENT_TIMESTAMP AND status != 'done' AND due_notified = 0 ORDER BY due_date")
+	err := d.SelectContext(ctx, &tasks, "SELECT * FROM project_tasks WHERE due_date < CURRENT_TIMESTAMP AND status NOT IN ('done','awaiting_approval') AND due_notified = 0 ORDER BY due_date")
 	return tasks, err
 }
 
 func (d *DB) ListUpcomingTasks(ctx context.Context, within time.Duration) ([]ProjectTask, error) {
 	var tasks []ProjectTask
 	deadline := time.Now().Add(within)
-	err := d.SelectContext(ctx, &tasks, "SELECT * FROM project_tasks WHERE due_date > CURRENT_TIMESTAMP AND due_date <= ? AND status != 'done' AND due_notified = 0 ORDER BY due_date", deadline)
+	err := d.SelectContext(ctx, &tasks, "SELECT * FROM project_tasks WHERE due_date > CURRENT_TIMESTAMP AND due_date <= ? AND status NOT IN ('done','awaiting_approval') AND due_notified = 0 ORDER BY due_date", deadline)
 	return tasks, err
 }
 

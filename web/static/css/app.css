@@ -4589,6 +4589,7 @@ body {
 .badge-in_progress { background: var(--color-badge-progress-bg); color: var(--color-badge-progress-text); }
 .badge-done { background: var(--color-badge-done-bg); color: var(--color-badge-done-text); }
 .badge-blocked { background: var(--color-badge-blocked-bg); color: var(--color-badge-blocked-text); }
+.badge-awaiting_approval { background: rgba(234, 179, 8, 0.2); color: #eab308; }
 
 .task-card-meta {
     display: flex;
@@ -5142,6 +5143,7 @@ body {
 .stat-card.stat-progress .stat-number { color: #f59e0b; }
 .stat-card.stat-done .stat-number { color: #22c55e; }
 .stat-card.stat-blocked .stat-number { color: #ef4444; }
+.stat-card.stat-approval .stat-number { color: #eab308; }
 
 .stat-card.active.stat-total {
     border-color: var(--color-primary);
@@ -5167,6 +5169,11 @@ body {
     border-color: #ef4444;
     background: rgba(239, 68, 68, 0.08);
     box-shadow: 0 0 0 1px #ef4444;
+}
+.stat-card.active.stat-approval {
+    border-color: #eab308;
+    background: rgba(234, 179, 8, 0.08);
+    box-shadow: 0 0 0 1px #eab308;
 }
 
 .all-tasks-filter-bar {
