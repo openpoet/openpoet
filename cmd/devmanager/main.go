@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"devmanager/internal/benchmark"
 	"devmanager/internal/config"
 	"devmanager/internal/database"
 	"devmanager/internal/handlers"
@@ -80,6 +81,12 @@ func main() {
 			apiURL = "http://localhost:8080"
 		}
 		mcp.Serve(apiURL)
+		return
+	}
+
+	// Handle benchmark subcommand before flag parsing
+	if len(os.Args) > 1 && os.Args[1] == "benchmark" {
+		benchmark.RunCLI(os.Args[2:])
 		return
 	}
 
