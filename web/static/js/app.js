@@ -277,6 +277,11 @@ class DevManager {
             case 'ping':
                 this.ws.send(JSON.stringify({ type: 'pong' }));
                 break;
+            case 'session_plan_updated':
+                if (window.hookManager && msg.data?.session_id) {
+                    window.hookManager.fetchPlan(msg.data.session_id);
+                }
+                break;
             default:
                 // Route hook messages to HookManager
                 if (msg.type && msg.type.startsWith('hook_') && window.hookManager) {
@@ -5077,10 +5082,12 @@ class DevManager {
             this._taskSessionSummary = {};
             (sessionSummaryRaw || []).forEach(s => { this._taskSessionSummary[s.task_id] = s; });
 
-            // Build summary
+            // Build summary (exclude umbrella tasks — only count leaf tasks)
             if (summaryEl) {
+                const parentIds = new Set();
+                tasks.filter(t => t.parent_id?.Valid).forEach(t => parentIds.add(t.parent_id.Int64));
                 const counts = { todo: 0, in_progress: 0, done: 0, blocked: 0 };
-                tasks.forEach(t => { if (counts[t.status] !== undefined) counts[t.status]++; });
+                tasks.filter(t => !parentIds.has(t.id)).forEach(t => { if (counts[t.status] !== undefined) counts[t.status]++; });
                 summaryEl.innerHTML = `
                     <span class="summary-item"><span class="badge-todo task-status-badge" style="cursor:default">${counts.todo}</span> todo</span>
                     <span class="summary-item"><span class="badge-in_progress task-status-badge" style="cursor:default">${counts.in_progress}</span> prog</span>
@@ -5109,8 +5116,9 @@ class DevManager {
 
             let html = '';
             for (const task of activeTasks) {
-                const hasChildren = children[task.id] && children[task.id].length > 0;
-                html += this.renderTaskCard(task, projectId, hasChildren);
+                const kids = children[task.id] || [];
+                const hasChildren = kids.length > 0;
+                html += this.renderTaskCard(task, projectId, hasChildren, 0, 0, kids);
                 if (hasChildren) {
                     const collapsed = this._collapsedTasks?.has(task.id) ? ' collapsed' : '';
                     html += `<div class="task-subtasks${collapsed}" data-parent-id="${task.id}">`;
@@ -5136,8 +5144,9 @@ class DevManager {
                         </div>
                         <div class="done-section-body${doneCollapsed}">`;
                 for (const task of doneTasks) {
-                    const hasChildren = children[task.id] && children[task.id].length > 0;
-                    html += this.renderTaskCard(task, projectId, hasChildren);
+                    const kids = children[task.id] || [];
+                    const hasChildren = kids.length > 0;
+                    html += this.renderTaskCard(task, projectId, hasChildren, 0, 0, kids);
                     if (hasChildren) {
                         const collapsed = this._collapsedTasks?.has(task.id) ? ' collapsed' : '';
                         html += `<div class="task-subtasks${collapsed}" data-parent-id="${task.id}">`;
@@ -5160,7 +5169,7 @@ class DevManager {
         }
     }
 
-    renderTaskCard(task, projectId, hasChildren = false, subIndex = 0, parentOrder = 0) {
+    renderTaskCard(task, projectId, hasChildren = false, subIndex = 0, parentOrder = 0, childrenList = []) {
         const now = new Date();
         const isOverdue = task.due_date?.Valid && new Date(task.due_date.Time) < now && task.status !== 'done';
         const isDone = task.status === 'done';
@@ -5214,6 +5223,17 @@ class DevManager {
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
             </button>` : '';
 
+        // Umbrella task badge and progress
+        let umbrellaHtml = '';
+        if (hasChildren && childrenList.length > 0) {
+            const total = childrenList.length;
+            const done = childrenList.filter(c => c.status === 'done').length;
+            const inProg = childrenList.filter(c => c.status === 'in_progress').length;
+            const pct = Math.round((done / total) * 100);
+            umbrellaHtml = `<span class="task-umbrella-badge" title="${done}/${total} concluídas, ${inProg} em andamento">${done}/${total}</span>
+                <span class="task-umbrella-progress"><span class="task-umbrella-progress-bar" style="width:${pct}%"></span></span>`;
+        }
+
         // Drag handle (desktop) - hidden for done tasks
         const dragHandle = isDone ? '' : `
             <div class="task-drag-handle" title="Drag to reorder">
@@ -5224,8 +5244,10 @@ class DevManager {
                 </svg>
             </div>`;
 
+        const umbrellaClass = hasChildren ? ' task-umbrella' : '';
+
         return `
-            <div class="task-card${overdueClass}${doneClass}" data-task-id="${task.id}" data-sort-order="${task.sort_order || 0}" data-project-id="${projectId}">
+            <div class="task-card${overdueClass}${doneClass}${umbrellaClass}" data-task-id="${task.id}" data-sort-order="${task.sort_order || 0}" data-project-id="${projectId}">
                 ${dragHandle}
                 <div class="task-priority-indicator ${priorityClass}"></div>
                 <div class="task-card-body">
@@ -5234,6 +5256,7 @@ class DevManager {
                         ${orderNum}
                         ${collapseBtn}
                         <span class="task-title" onclick="app.viewTaskDetail(${projectId}, ${task.id})" style="cursor:pointer;">${this.escapeHtml(task.title)}</span>
+                        ${umbrellaHtml}
                         ${sessionIndicatorHtml}
                         <span class="task-status-badge badge-${task.status}" onclick="app.cycleTaskStatus(${projectId}, ${task.id}, '${task.status}')">${task.status.replace('_', ' ')}</span>
                     </div>
@@ -6185,9 +6208,10 @@ class DevManager {
             let globalOrder = 1;
             for (const task of activeTopLevel) {
                 const projectName = projectMap[task.project_id] || `Project #${task.project_id}`;
-                const hasKids = children[task.id] && children[task.id].length > 0;
+                const kids = children[task.id] || [];
+                const hasKids = kids.length > 0;
                 const currentOrder = globalOrder++;
-                html += this.renderAllTaskCard(task, projectName, hasKids, 0, 0, currentOrder);
+                html += this.renderAllTaskCard(task, projectName, hasKids, 0, 0, currentOrder, kids);
                 renderedIds.add(task.id);
                 if (hasKids) {
                     const collapsed = this._collapsedTasks?.has(task.id) ? ' collapsed' : '';
@@ -6232,8 +6256,9 @@ class DevManager {
                         <div class="done-section-body${doneCollapsed}">`;
                 for (const task of allDone) {
                     const projectName = projectMap[task.project_id] || `Project #${task.project_id}`;
-                    const hasKids = children[task.id] && children[task.id].length > 0;
-                    html += this.renderAllTaskCard(task, projectName, hasKids);
+                    const kids = children[task.id] || [];
+                    const hasKids = kids.length > 0;
+                    html += this.renderAllTaskCard(task, projectName, hasKids, 0, 0, 0, kids);
                     renderedIds.add(task.id);
                     if (hasKids) {
                         const collapsed = this._collapsedTasks?.has(task.id) ? ' collapsed' : '';
@@ -6259,7 +6284,7 @@ class DevManager {
         }
     }
 
-    renderAllTaskCard(task, projectName, hasChildren = false, subIndex = 0, parentOrder = 0, overrideOrder = 0) {
+    renderAllTaskCard(task, projectName, hasChildren = false, subIndex = 0, parentOrder = 0, overrideOrder = 0, childrenList = []) {
         const now = new Date();
         const hasDue = task.due_date?.Valid;
         const isOverdue = hasDue && new Date(task.due_date.Time) < now && task.status !== 'done';
@@ -6314,8 +6339,16 @@ class DevManager {
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
             </button>` : '';
 
-        // Children count badge (shown when collapsed)
-        const childCountBadge = hasChildren ? `<span class="task-children-count">${this._collapsedTasks?.has(task.id) ? '' : ''}</span>` : '';
+        // Umbrella task badge and progress
+        let umbrellaHtml = '';
+        if (hasChildren && childrenList.length > 0) {
+            const total = childrenList.length;
+            const done = childrenList.filter(c => c.status === 'done').length;
+            const inProg = childrenList.filter(c => c.status === 'in_progress').length;
+            const pct = Math.round((done / total) * 100);
+            umbrellaHtml = `<span class="task-umbrella-badge" title="${done}/${total} concluídas, ${inProg} em andamento">${done}/${total}</span>
+                <span class="task-umbrella-progress"><span class="task-umbrella-progress-bar" style="width:${pct}%"></span></span>`;
+        }
 
         // Drag handle (desktop) - hidden for done tasks
         const dragHandle = isDone ? '' : `
@@ -6327,8 +6360,10 @@ class DevManager {
                 </svg>
             </div>`;
 
+        const umbrellaClass = hasChildren ? ' task-umbrella' : '';
+
         return `
-            <div class="task-card${overdueClass}${doneClass}" data-task-id="${task.id}" data-project-id="${task.project_id}">
+            <div class="task-card${overdueClass}${doneClass}${umbrellaClass}" data-task-id="${task.id}" data-project-id="${task.project_id}">
                 ${dragHandle}
                 <div class="task-priority-indicator ${priorityClass}"></div>
                 <div class="task-card-body">
@@ -6337,6 +6372,7 @@ class DevManager {
                         ${orderNum}
                         ${collapseBtn}
                         <span class="task-title" onclick="app.viewTaskDetail(${task.project_id}, ${task.id})" style="cursor:pointer;">${this.escapeHtml(task.title)}</span>
+                        ${umbrellaHtml}
                         ${sessionIndicatorHtml}
                         <span class="task-status-badge badge-${task.status}" onclick="app.cycleTaskStatus(${task.project_id}, ${task.id}, '${task.status}')">${task.status.replace('_', ' ')}</span>
                     </div>

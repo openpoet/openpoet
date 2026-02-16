@@ -4725,6 +4725,42 @@ body {
     transform: rotate(-90deg);
 }
 
+/* Umbrella task styling */
+.task-card.task-umbrella {
+    border-left: 3px solid var(--color-primary);
+}
+
+.task-umbrella-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: rgba(var(--color-primary-rgb), 0.12);
+    color: var(--color-primary);
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.task-umbrella-progress {
+    display: inline-flex;
+    width: 40px;
+    height: 4px;
+    background: var(--color-border);
+    border-radius: 2px;
+    overflow: hidden;
+    flex-shrink: 0;
+    align-self: center;
+}
+
+.task-umbrella-progress-bar {
+    height: 100%;
+    background: var(--color-success, #22c55e);
+    border-radius: 2px;
+    transition: width 0.3s;
+}
+
 /* Drag handle */
 .task-drag-handle {
     display: flex;
