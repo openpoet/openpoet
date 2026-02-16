@@ -582,6 +582,7 @@ func main() {
 		r.Post("/ai/initiate-memory-doc-edit", aiHandler.HandleInitiateMemoryDocEdit)
 		r.Post("/ai/initiate-task-creation", aiHandler.HandleInitiateTaskCreation)
 		r.Post("/ai/initiate-task-discussion", aiHandler.HandleInitiateTaskDiscussion)
+		r.Post("/ai/initiate-skill-customization", aiHandler.HandleInitiateSkillCustomization)
 		r.Post("/ai/generate-skill", aiHandler.HandleGenerateSkill)
 		r.Post("/ai/validate-skill", aiHandler.HandleValidateSkill)
 		r.Post("/ai/execute-tool", aiHandler.HandleExecuteTool)

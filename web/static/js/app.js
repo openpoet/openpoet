@@ -1567,10 +1567,10 @@ class DevManager {
                                 const customizeBtn = hasOverride
                                     ? `<span style="font-size:10px;color:var(--color-success);white-space:nowrap;" title="Using project-specific version">Customized</span>`
                                     : `<button class="btn btn-sm btn-secondary" style="font-size:10px;padding:1px 6px;white-space:nowrap;" onclick="event.preventDefault();app.customizeGlobalSkill(${projectId}, ${s.id})" title="Create project-specific version">Customize</button>`;
-                                return `<label class="tp-tool-item" title="${this.escapeHtml(s.name)}">
+                                return `<label class="tp-tool-item" title="${this.escapeHtml(s.name)}" style="flex-wrap:wrap;">
                                     <input type="checkbox" data-skill-id="${s.id}" ${s.project_enabled ? 'checked' : ''} onchange="app._projectSkillChanged(${projectId})">
-                                    <span class="tp-tool-name">${this.escapeHtml(s.name)}</span>
-                                    <span class="tp-tool-desc">${this.escapeHtml(shortDesc)}</span>
+                                    <span class="tp-tool-name" style="min-width:auto;">${this.escapeHtml(s.name)}</span>
+                                    <span class="tp-tool-desc" style="flex:1;">${this.escapeHtml(shortDesc)}</span>
                                     ${customizeBtn}
                                 </label>`;
                             }).join('')}
@@ -1703,7 +1703,7 @@ class DevManager {
                         <label>Content (Markdown)</label>
                         <textarea id="ps-modal-content" class="form-input" rows="12" style="font-family: monospace; font-size: 12px;">${this.escapeHtml(contentVal)}</textarea>
                     </div>
-                    ${isCustomize ? `<button class="btn btn-sm btn-secondary" style="width:100%;" onclick="app.discussSkillWithAI(${projectId}, '${this.escapeHtml(prefill.name)}')">
+                    ${isCustomize ? `<button class="btn btn-sm btn-secondary" style="width:100%;" onclick="app.discussSkillWithAI(${projectId}, ${prefill.id})">
                         Discuss customization with AI
                     </button>` : ''}
                 </div>
@@ -1769,6 +1769,7 @@ class DevManager {
                 return;
             }
             this.showProjectSkillModal(projectId, null, {
+                id: globalSkillId,
                 name: globalSkill.name,
                 content: globalSkill.content,
                 category: globalSkill.category
@@ -1789,18 +1790,24 @@ class DevManager {
         }
     }
 
-    discussSkillWithAI(projectId, skillName) {
-        if (!window.aiChat) return;
+    async discussSkillWithAI(projectId, skillId) {
+        if (!window.aiChat) {
+            this.showToast('Error', 'AI Chat not available', 'error');
+            return;
+        }
         // Close the modal
         document.querySelector('.modal-overlay.active')?.remove();
-        // Open AI chat with pre-filled message
-        window.aiChat.open();
-        const project = this.projects.find(p => p.id === projectId) || this._detailProject;
-        const projectName = project?.name || `Project #${projectId}`;
-        const prompt = `I want to customize the global skill "${skillName}" for the project "${projectName}". Help me adapt its content for this specific project. What changes would you suggest? Please show me the current skill content first.`;
-        if (window.aiChat.input) {
-            window.aiChat.input.value = prompt;
-            window.aiChat.input.focus();
+        try {
+            const result = await this.api('POST', '/ai/initiate-skill-customization', {
+                project_id: projectId,
+                skill_id: skillId,
+            });
+            if (result?.conversation_id) {
+                window.aiChat.open();
+                window.aiChat.loadConversation(result.conversation_id);
+            }
+        } catch (e) {
+            this.showToast('Error', 'Failed to start AI discussion', 'error');
         }
     }
 
