@@ -1536,6 +1536,12 @@ class DevManager {
                 }
             }
 
+            // Build map of project skills by name to detect overrides
+            const psMap = {};
+            (project_skills || []).forEach(ps => { psMap[ps.name] = ps; });
+            // Build set of global skill names for reverse lookup
+            const globalNameSet = new Set(global_skills.map(s => s.name));
+
             const inheritChecked = isInheriting ? 'checked' : '';
             container.innerHTML = `
                 <div style="margin-bottom: 8px; padding: 6px 8px; background: var(--color-bg-tertiary); border-radius: 6px;">
@@ -1557,10 +1563,15 @@ class DevManager {
                         <div class="project-tools-grid">
                             ${global_skills.map(s => {
                                 const shortDesc = (s.category || 'No category');
+                                const hasOverride = psMap[s.name];
+                                const customizeBtn = hasOverride
+                                    ? `<span style="font-size:10px;color:var(--color-success);white-space:nowrap;" title="Using project-specific version">Customized</span>`
+                                    : `<button class="btn btn-sm btn-secondary" style="font-size:10px;padding:1px 6px;white-space:nowrap;" onclick="event.preventDefault();app.customizeGlobalSkill(${projectId}, ${s.id})" title="Create project-specific version">Customize</button>`;
                                 return `<label class="tp-tool-item" title="${this.escapeHtml(s.name)}">
                                     <input type="checkbox" data-skill-id="${s.id}" ${s.project_enabled ? 'checked' : ''} onchange="app._projectSkillChanged(${projectId})">
                                     <span class="tp-tool-name">${this.escapeHtml(s.name)}</span>
                                     <span class="tp-tool-desc">${this.escapeHtml(shortDesc)}</span>
+                                    ${customizeBtn}
                                 </label>`;
                             }).join('')}
                         </div>
@@ -1577,19 +1588,27 @@ class DevManager {
                         <button class="btn btn-sm btn-secondary" onclick="app.showProjectSkillModal(${projectId})">+ Add</button>
                     </div>
                     <div id="project-skills-local-list">
-                        ${(project_skills || []).length ? (project_skills || []).map(ps => `
+                        ${(project_skills || []).length ? (project_skills || []).map(ps => {
+                            const matchesGlobal = globalNameSet.has(ps.name);
+                            const overrideBadge = matchesGlobal
+                                ? `<span style="font-size:9px;background:var(--color-primary);color:white;padding:0 4px;border-radius:3px;margin-left:4px;">override</span>`
+                                : '';
+                            const deleteBtn = matchesGlobal
+                                ? `<button class="btn btn-sm btn-secondary" onclick="app.resetProjectSkill(${projectId}, ${ps.id}, '${this.escapeHtml(ps.name)}')" title="Reset to global version">Reset</button>`
+                                : `<button class="btn btn-sm btn-danger" onclick="app.deleteProjectSkill(${projectId}, ${ps.id}, '${this.escapeHtml(ps.name)}')" title="Delete">Del</button>`;
+                            return `
                             <div class="tp-tool-item" style="justify-content: space-between;">
                                 <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0;">
                                     <input type="checkbox" ${ps.enabled ? 'checked' : ''} onchange="app.toggleProjectSkill(${projectId}, ${ps.id}, this.checked)">
-                                    <span class="tp-tool-name" style="cursor:pointer;" onclick="app.showProjectSkillModal(${projectId}, ${ps.id})">${this.escapeHtml(ps.name)}</span>
+                                    <span class="tp-tool-name" style="cursor:pointer;" onclick="app.showProjectSkillModal(${projectId}, ${ps.id})">${this.escapeHtml(ps.name)}</span>${overrideBadge}
                                     <span class="tp-tool-desc">${this.escapeHtml(ps.category || '')}</span>
                                 </div>
                                 <div style="display:flex;gap:4px;flex-shrink:0;">
                                     <button class="btn btn-sm btn-secondary" onclick="app.showProjectSkillModal(${projectId}, ${ps.id})" title="Edit">Edit</button>
-                                    <button class="btn btn-sm btn-danger" onclick="app.deleteProjectSkill(${projectId}, ${ps.id}, '${this.escapeHtml(ps.name)}')" title="Delete">Del</button>
+                                    ${deleteBtn}
                                 </div>
-                            </div>
-                        `).join('') : '<div class="meta-empty">No project-specific skills.</div>'}
+                            </div>`;
+                        }).join('') : '<div class="meta-empty">No project-specific skills.</div>'}
                     </div>
                 </div>
             `;
@@ -1644,7 +1663,7 @@ class DevManager {
         }
     }
 
-    async showProjectSkillModal(projectId, skillId) {
+    async showProjectSkillModal(projectId, skillId, prefill) {
         let skill = null;
         if (skillId) {
             const data = await this.api('GET', `/projects/${projectId}/skills`);
@@ -1652,7 +1671,12 @@ class DevManager {
         }
 
         const isEdit = !!skill;
-        const title = isEdit ? 'Edit Project Skill' : 'New Project Skill';
+        const isCustomize = !!prefill;
+        const title = isEdit ? 'Edit Project Skill' : (isCustomize ? 'Customize Skill for Project' : 'New Project Skill');
+
+        const nameVal = skill?.name || prefill?.name || '';
+        const contentVal = skill?.content || prefill?.content || '';
+        const categoryVal = skill?.category || prefill?.category || '';
 
         const modal = document.createElement('div');
         modal.className = 'modal-overlay active';
@@ -1663,17 +1687,20 @@ class DevManager {
                     <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">&times;</button>
                 </div>
                 <div class="modal-body">
+                    ${isCustomize ? `<div style="background: var(--color-bg-tertiary); padding: 8px; border-radius: 4px; margin-bottom: 12px; font-size: 11px; color: var(--color-text-secondary);">
+                        Creating a project-specific version of <strong>${this.escapeHtml(prefill.name)}</strong>. Edit the content below — the global version will be overridden for this project.
+                    </div>` : ''}
                     <div class="form-group">
                         <label>Name</label>
-                        <input type="text" id="ps-modal-name" class="form-input" value="${this.escapeHtml(skill?.name || '')}" placeholder="skill-name (lowercase, hyphens)">
+                        <input type="text" id="ps-modal-name" class="form-input" value="${this.escapeHtml(nameVal)}" placeholder="skill-name (lowercase, hyphens)" ${isCustomize ? 'readonly style="opacity:0.6;"' : ''}>
                     </div>
                     <div class="form-group">
                         <label>Category</label>
-                        <input type="text" id="ps-modal-category" class="form-input" value="${this.escapeHtml(skill?.category || '')}" placeholder="e.g. coding, testing">
+                        <input type="text" id="ps-modal-category" class="form-input" value="${this.escapeHtml(categoryVal)}" placeholder="e.g. coding, testing">
                     </div>
                     <div class="form-group">
                         <label>Content (Markdown)</label>
-                        <textarea id="ps-modal-content" class="form-input" rows="12" style="font-family: monospace; font-size: 12px;">${this.escapeHtml(skill?.content || '')}</textarea>
+                        <textarea id="ps-modal-content" class="form-input" rows="12" style="font-family: monospace; font-size: 12px;">${this.escapeHtml(contentVal)}</textarea>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -1723,6 +1750,35 @@ class DevManager {
         try {
             await this.api('DELETE', `/projects/${projectId}/skills/${skillId}`);
             this.showToast('Success', 'Skill deleted', 'success');
+            this.loadProjectSkills(projectId);
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    async customizeGlobalSkill(projectId, globalSkillId) {
+        try {
+            const data = await this.api('GET', `/projects/${projectId}/skills`);
+            const globalSkill = data.global_skills.find(s => s.id === globalSkillId);
+            if (!globalSkill) {
+                this.showToast('Error', 'Global skill not found', 'error');
+                return;
+            }
+            this.showProjectSkillModal(projectId, null, {
+                name: globalSkill.name,
+                content: globalSkill.content,
+                category: globalSkill.category
+            });
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    async resetProjectSkill(projectId, skillId, name) {
+        if (!confirm(`Reset "${name}" to the global version? The project-specific customization will be removed.`)) return;
+        try {
+            await this.api('DELETE', `/projects/${projectId}/skills/${skillId}`);
+            this.showToast('Success', `"${name}" reset to global version`, 'success');
             this.loadProjectSkills(projectId);
         } catch (e) {
             this.showToast('Error', e.message, 'error');
