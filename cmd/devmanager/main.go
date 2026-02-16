@@ -241,6 +241,12 @@ func main() {
 	// Wire AI evaluation callbacks into session manager
 	sessionMgr.OnSessionStart = func(sessionID string) {
 		log.Printf("[AI-Session] >>> OnSessionStart callback fired for session %s", sessionID[:8])
+		// Record task history if session is linked to a task
+		if task, err := db.GetTaskForSession(context.Background(), sessionID); err == nil && task != nil {
+			api.RecordTaskHistory(context.Background(), task.ID, task.ProjectID, "session_started", map[string]interface{}{
+				"session_id": sessionID,
+			}, "system", sessionID)
+		}
 		aiHandler.EvaluateSession(context.Background(), sessionID, "session_start", nil)
 	}
 	sessionMgr.OnSessionFlush = func(sessionID string) {
@@ -252,6 +258,12 @@ func main() {
 	}
 	sessionMgr.OnSessionEnd = func(sessionID string, output []byte) {
 		log.Printf("[AI-Session] >>> OnSessionEnd callback fired for session %s (outputLen=%d)", sessionID[:8], len(output))
+		// Record basic session_ended history (AI may enrich with summary later)
+		if task, err := db.GetTaskForSession(context.Background(), sessionID); err == nil && task != nil {
+			api.RecordTaskHistory(context.Background(), task.ID, task.ProjectID, "session_ended", map[string]interface{}{
+				"session_id": sessionID,
+			}, "system", sessionID)
+		}
 		aiHandler.EvaluateSession(context.Background(), sessionID, "session_end", output)
 	}
 
@@ -404,6 +416,8 @@ func main() {
 		r.Delete("/projects/{id}/tasks/{taskId}", api.DeleteProjectTask)
 		r.Post("/projects/{id}/tasks/{taskId}/duplicate", api.DuplicateProjectTask)
 		r.Get("/projects/{id}/tasks/{taskId}/sessions", api.ListTaskSessions)
+		r.Get("/projects/{id}/tasks/{taskId}/history", api.ListTaskHistory)
+		r.Post("/projects/{id}/tasks/{taskId}/history", api.AddTaskComment)
 
 		// Global Tasks (cross-project)
 		r.Get("/tasks/session-summary", api.GetAllTaskSessionSummary)

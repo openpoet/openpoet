@@ -38,6 +38,7 @@ var migrations = []Migration{
 	{Version: 20, Description: "sessions: add last_activity_at for tracking last output/event", Up: migrateV20},
 	{Version: 21, Description: "ai: add feedback_ack to temp_documents and session_id to ai_conversations", Up: migrateV21},
 	{Version: 22, Description: "sessions: add plan_content and plan_updated_at for persisting plans", Up: migrateV22},
+	{Version: 23, Description: "tasks: add task_history table for activity tracking", Up: migrateV23},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -558,6 +559,29 @@ func migrateV22(tx *sqlx.Tx) error {
 	stmts := []string{
 		`ALTER TABLE sessions ADD COLUMN plan_content TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN plan_updated_at TIMESTAMP`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateV23(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS task_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id INTEGER NOT NULL REFERENCES project_tasks(id) ON DELETE CASCADE,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			event_type TEXT NOT NULL,
+			details TEXT NOT NULL DEFAULT '{}',
+			actor TEXT NOT NULL DEFAULT 'system',
+			session_id TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX idx_task_history_task ON task_history(task_id)`,
+		`CREATE INDEX idx_task_history_created ON task_history(created_at)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {
