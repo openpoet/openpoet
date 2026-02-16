@@ -2955,9 +2955,8 @@ func filterClaudeCodeNoise(raw string) string {
 }
 
 // extractSessionContext parses cleaned terminal output to extract the most relevant
-// content for task creation: user prompts and plans.
-// Filters out Claude Code's internal processing (tool calls, file reads, etc.)
-// and focuses on what the user actually asked and what was planned.
+// content for task creation: user prompts, plans, and raw terminal output for cross-reference.
+// Uses a hybrid approach: heuristic extraction for structured data + raw output as LLM fallback.
 func extractSessionContext(cleanOutput []byte) string {
 	var sb strings.Builder
 	lines := strings.Split(string(cleanOutput), "\n")
@@ -2978,7 +2977,10 @@ func extractSessionContext(cleanOutput []byte) string {
 				}
 				prompt += " " + next
 			}
-			if len(prompt) > 3 {
+			// Skip ghost text hints (Claude Code shows "Try ..." as placeholder)
+			lowerPrompt := strings.ToLower(prompt)
+			isGhostText := strings.HasPrefix(lowerPrompt, "try ") || strings.HasPrefix(lowerPrompt, "try\"") || strings.HasPrefix(lowerPrompt, "try\u00a0")
+			if len(prompt) > 3 && !isGhostText {
 				userPrompts = append(userPrompts, prompt)
 			}
 		}
@@ -3000,7 +3002,6 @@ func extractSessionContext(cleanOutput []byte) string {
 			continue
 		}
 		if inPlan {
-			// End plan on 2+ consecutive blank lines after substantial content
 			if trimmed == "" && len(planLines) > 3 {
 				emptyCount := 0
 				for k := len(planLines) - 1; k >= 0; k-- {
@@ -3023,8 +3024,6 @@ func extractSessionContext(cleanOutput []byte) string {
 	}
 
 	// 3. Build structured context
-	hasStructuredData := len(userPrompts) > 0 || len(planLines) > 0
-
 	if len(userPrompts) > 0 {
 		sb.WriteString("User prompts (what the user asked Claude Code to do):\n")
 		for i, p := range userPrompts {
@@ -3039,36 +3038,43 @@ func extractSessionContext(cleanOutput []byte) string {
 		sb.WriteString("\n\n")
 	}
 
-	// 4. Include recent output ONLY as fallback when no structured data was found
-	if !hasStructuredData {
-		outputStr := string(cleanOutput)
-		recentSize := 2000
-		if len(outputStr) < recentSize {
-			recentSize = len(outputStr)
-		}
-		rawRecent := outputStr[len(outputStr)-recentSize:]
-		filtered := filterClaudeCodeNoise(rawRecent)
-		if len(filtered) > 0 {
-			sb.WriteString("Recent session output (filtered):\n")
-			sb.WriteString(filtered)
-		}
+	// 4. Always include raw terminal output as fallback context for the LLM
+	// This allows the LLM to cross-reference and correct heuristic extraction errors
+	outputStr := string(cleanOutput)
+	rawSize := 3000
+	if len(outputStr) < rawSize {
+		rawSize = len(outputStr)
 	}
-
-	// Debug logging for task suggestion diagnostics
-	log.Printf("[SuggestTask/Extract] prompts=%d planLines=%d hasStructuredData=%v contextLen=%d",
-		len(userPrompts), len(planLines), hasStructuredData, sb.Len())
-	for i, p := range userPrompts {
-		preview := p
-		if len(preview) > 200 {
-			preview = preview[:200] + "..."
-		}
-		log.Printf("[SuggestTask/Extract] prompt[%d]: %q", i, preview)
-	}
-	if !hasStructuredData {
-		log.Printf("[SuggestTask/Extract] FALLBACK: no user prompts or plan found, using filtered recent output")
+	rawRecent := outputStr[len(outputStr)-rawSize:]
+	filtered := filterClaudeCodeNoise(rawRecent)
+	if len(filtered) > 0 {
+		sb.WriteString("Raw terminal output (for cross-reference):\n")
+		sb.WriteString(filtered)
 	}
 
 	return sb.String()
+}
+
+// processCR splits carriage-return-separated segments into separate lines.
+// Terminal output often uses \r to overwrite lines (e.g., ghost text replaced by real input).
+// This ensures the real user input appears as its own line for extraction.
+func processCR(data []byte) []byte {
+	lines := bytes.Split(data, []byte("\n"))
+	var result [][]byte
+	for _, line := range lines {
+		if !bytes.Contains(line, []byte("\r")) {
+			result = append(result, line)
+			continue
+		}
+		segments := bytes.Split(line, []byte("\r"))
+		for _, seg := range segments {
+			trimmed := bytes.TrimSpace(seg)
+			if len(trimmed) > 0 {
+				result = append(result, trimmed)
+			}
+		}
+	}
+	return bytes.Join(result, []byte("\n"))
 }
 
 // HandleSuggestTaskData analyzes session output and suggests task title/description/priority.
@@ -3099,13 +3105,37 @@ func (h *AIHandler) HandleSuggestTaskData(w http.ResponseWriter, r *http.Request
 		output = append(head, append([]byte("\n...[truncated]...\n"), tail...)...)
 	}
 
-	// Strip ANSI escape codes and control characters from terminal output
-	// These break the Claude CLI when passed as --print argument
-	ansiRe := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x1b]*\x1b\\|\x1b[^[\]].?`)
+	// Replace cursor-forward sequences with spaces before stripping other ANSI codes.
+	// \x1b[<N>C means "move cursor forward N columns" and represents visual spacing.
+	// Without this, words get concatenated (e.g. "fix type check errors" → "fixtypecheckerrors").
+	cursorFwdRe := regexp.MustCompile(`\x1b\[(\d*)C`)
+	output = cursorFwdRe.ReplaceAllFunc(output, func(match []byte) []byte {
+		// Extract N from \x1b[NC, default to 1
+		sub := cursorFwdRe.FindSubmatch(match)
+		n := 1
+		if len(sub) > 1 && len(sub[1]) > 0 {
+			if v, err := strconv.Atoi(string(sub[1])); err == nil && v > 0 && v <= 20 {
+				n = v
+			}
+		}
+		return bytes.Repeat([]byte(" "), n)
+	})
+
+	// Strip remaining ANSI escape codes and control characters from terminal output
+	ansiRe := regexp.MustCompile(
+		`\x1b\[\?[0-9;]*[a-zA-Z]|` + // DEC private mode (e.g. ?2004h)
+			`\x1b\[[0-9;]*[a-zA-Z]|` + // Standard CSI sequences
+			`\x1b\][^\x07]*\x07|` + // OSC with BEL terminator
+			`\x1b\][^\x1b]*\x1b\\|` + // OSC with ST terminator
+			`\x1b[^[\]].?`) // Other escape sequences
 	cleanOutput := ansiRe.ReplaceAll(output, nil)
-	// Also remove other control characters except newline, tab, carriage return
+	// Remove other control characters except newline, tab, carriage return
 	controlRe := regexp.MustCompile(`[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]`)
 	cleanOutput = controlRe.ReplaceAll(cleanOutput, nil)
+
+	// Process carriage returns: split CR-separated segments into separate lines
+	// so that ghost text overwrites are separated from real user input
+	cleanOutput = processCR(cleanOutput)
 
 	if len(cleanOutput) == 0 {
 		respondError(w, http.StatusNotFound, "Session has no readable output")
@@ -3126,10 +3156,8 @@ func (h *AIHandler) HandleSuggestTaskData(w http.ResponseWriter, r *http.Request
 
 	model, _ := h.api.db.GetSetting(r.Context(), "ai_model")
 
-	// Extract structured context from raw terminal output
+	// Extract structured context from terminal output (heuristics + raw fallback)
 	sessionContext := extractSessionContext(cleanOutput)
-
-	log.Printf("[SuggestTask] session=%s name=%q project=%s contextLen=%d", sessionID, sess.Name, project.Name, len(sessionContext))
 
 	prompt := fmt.Sprintf(`You are a project manager creating a task ticket based on a Claude Code session.
 
@@ -3139,17 +3167,18 @@ Session name: "%s"
 The session context below is ordered by reliability:
 - "User prompts" = what the user typed into Claude Code. This is the MOST RELIABLE source of intent.
 - "Plan" = Claude Code's implementation plan. Use to add detail.
-- "Recent session output" = fallback terminal output (only present if no prompts/plan were found). Treat with EXTREME CAUTION — may contain unrelated file contents or tool output.
+- "Raw terminal output" = cleaned terminal output for cross-reference. Use this to verify or correct the extracted prompts above. If user prompts seem wrong or unrelated, look here for the actual user input.
 
 Session context:
 %s
 
 CRITICAL RULES:
 1. Base the task PRIMARILY on user prompts (if present). These are what the user actually asked for.
-2. If no user prompts are available, use the plan or session name. If only "Recent session output" is available, be VERY conservative — only use it if it clearly indicates a user goal.
-3. NEVER create tasks about: "reading files", "investigating code", "exploring codebase", "analyzing structure", "running commands", "reviewing output". These are Claude Code's internal investigation steps, NOT user goals.
-4. The task must describe WHAT the user wants to accomplish, not what Claude Code is doing internally.
-5. If the context seems incoherent or unrelated to any clear goal, create a generic task based on the session name and project name. A vague but correct task is better than a specific but wrong one.
+2. CROSS-REFERENCE user prompts with the raw terminal output. If extracted prompts look like ghost text or placeholder suggestions (e.g. "Try edit app.js to..."), ignore them and use the raw output to find the real user intent.
+3. If no user prompts are available, use the plan or session name.
+4. NEVER create tasks about: "reading files", "investigating code", "exploring codebase", "analyzing structure", "running commands", "reviewing output". These are Claude Code's internal investigation steps, NOT user goals.
+5. The task must describe WHAT the user wants to accomplish, not what Claude Code is doing internally.
+6. If the context seems incoherent or unrelated to any clear goal, create a generic task based on the session name and project name. A vague but correct task is better than a specific but wrong one.
 
 Respond with ONLY valid JSON, no markdown:
 {"title": "...", "description": "...", "priority": "..."}
@@ -3203,6 +3232,7 @@ Rules:
 
 	// Parse JSON response
 	responseText := strings.TrimSpace(fullText.String())
+
 	// Strip markdown code blocks if present
 	if strings.HasPrefix(responseText, "```") {
 		lines := strings.Split(responseText, "\n")
