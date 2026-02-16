@@ -1680,8 +1680,9 @@ class DevManager {
 
         const modal = document.createElement('div');
         modal.className = 'modal-overlay active';
+        modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
         modal.innerHTML = `
-            <div class="modal" style="max-width: 600px;">
+            <div class="modal-container" style="max-width: 600px;">
                 <div class="modal-header">
                     <div class="modal-title">${title}</div>
                     <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">&times;</button>
@@ -1702,6 +1703,9 @@ class DevManager {
                         <label>Content (Markdown)</label>
                         <textarea id="ps-modal-content" class="form-input" rows="12" style="font-family: monospace; font-size: 12px;">${this.escapeHtml(contentVal)}</textarea>
                     </div>
+                    ${isCustomize ? `<button class="btn btn-sm btn-secondary" style="width:100%;" onclick="app.discussSkillWithAI(${projectId}, '${this.escapeHtml(prefill.name)}')">
+                        Discuss customization with AI
+                    </button>` : ''}
                 </div>
                 <div class="modal-footer">
                     <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
@@ -1782,6 +1786,21 @@ class DevManager {
             this.loadProjectSkills(projectId);
         } catch (e) {
             this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    discussSkillWithAI(projectId, skillName) {
+        if (!window.aiChat) return;
+        // Close the modal
+        document.querySelector('.modal-overlay.active')?.remove();
+        // Open AI chat with pre-filled message
+        window.aiChat.open();
+        const project = this.projects.find(p => p.id === projectId) || this._detailProject;
+        const projectName = project?.name || `Project #${projectId}`;
+        const prompt = `I want to customize the global skill "${skillName}" for the project "${projectName}". Help me adapt its content for this specific project. What changes would you suggest? Please show me the current skill content first.`;
+        if (window.aiChat.input) {
+            window.aiChat.input.value = prompt;
+            window.aiChat.input.focus();
         }
     }
 
