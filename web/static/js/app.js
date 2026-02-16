@@ -348,6 +348,12 @@ class DevManager {
                     this.loadAllTasks();
                 }
                 break;
+            case 'task_history':
+                // Refresh task detail view if currently viewing the affected task
+                if (this._viewingTaskDetail && data.data?.task_id === this._viewingTaskDetail.taskId) {
+                    this.viewTaskDetail(this._viewingTaskDetail.projectId, this._viewingTaskDetail.taskId);
+                }
+                break;
             case 'skill':
             case 'mcp':
             case 'settings':
@@ -3528,6 +3534,20 @@ class DevManager {
                     </label>
                 </div>
             </div>
+            <div class="card" style="margin-bottom: 16px;">
+                <div class="card-header">
+                    <div class="card-title">Task Auto-Update</div>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: 12px; color: var(--text-secondary, #999); font-size: 13px;">
+                        When enabled, automatically applies task status changes detected from session output (e.g., marks task as done when session completes successfully). Requires Auto-Evaluation to be enabled.
+                    </p>
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" id="task-auto-update" onchange="app.saveTaskAutoUpdate(this.checked)">
+                        <span style="font-size: 13px;">Enable automatic task updates</span>
+                    </label>
+                </div>
+            </div>
             <div class="card">
                 <div class="card-header">
                     <div class="card-title">Voice Transcription</div>
@@ -3650,6 +3670,10 @@ class DevManager {
                 const autoEvalCheckbox = document.getElementById('task-auto-eval');
                 if (autoEvalCheckbox) {
                     autoEvalCheckbox.checked = this.settings.task_auto_eval_enabled === 'true';
+                }
+                const autoUpdateCheckbox = document.getElementById('task-auto-update');
+                if (autoUpdateCheckbox) {
+                    autoUpdateCheckbox.checked = this.settings.task_auto_update_enabled === 'true';
                 }
                 const providerSelect = document.getElementById('whisper-provider');
                 if (providerSelect && this.settings.whisper_provider) {
@@ -4644,6 +4668,17 @@ class DevManager {
             },
             'Excluir'
         );
+    }
+
+    async saveTaskAutoUpdate(enabled) {
+        try {
+            await this.api('PUT', '/config/settings', {
+                task_auto_update_enabled: enabled ? 'true' : 'false'
+            });
+            this.showToast('Success', `Task auto-update ${enabled ? 'enabled' : 'disabled'}`, 'success');
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
     }
 
     async toggleMCP(mcpId, enabled) {
@@ -5867,11 +5902,15 @@ class DevManager {
     }
 
     async viewTaskDetail(projectId, taskId) {
+        // Track which task detail is being viewed for WebSocket updates
+        this._viewingTaskDetail = { projectId, taskId };
+
         try {
-            const [task, sessions, allTasks] = await Promise.all([
+            const [task, sessions, allTasks, history] = await Promise.all([
                 this.api('GET', `/projects/${projectId}/tasks/${taskId}`),
                 this.api('GET', `/projects/${projectId}/tasks/${taskId}/sessions`).catch(() => []),
-                this.api('GET', `/projects/${projectId}/tasks`).catch(() => [])
+                this.api('GET', `/projects/${projectId}/tasks`).catch(() => []),
+                this.api('GET', `/projects/${projectId}/tasks/${taskId}/history?limit=50`).catch(() => [])
             ]);
 
             // Find subtasks of this task
@@ -5937,6 +5976,17 @@ class DevManager {
                 }
             }
 
+            // History timeline
+            if (history && history.length > 0) {
+                md += `---\n\n### Historico\n\n`;
+                for (const entry of history) {
+                    const icon = this.taskHistoryIcon(entry.event_type);
+                    const label = this.taskHistoryLabel(entry);
+                    const time = this.relativeTime(entry.created_at);
+                    md += `${icon} ${label} — *${time}*\n\n`;
+                }
+            }
+
             // Project name
             const project = (this.projects || []).find(p => p.id === projectId);
             if (project) {
@@ -5996,6 +6046,23 @@ class DevManager {
                 }
             }
 
+            // "Add Note" button
+            actions.push({
+                label: 'Adicionar Nota',
+                class: 'btn btn-secondary',
+                onClick: async () => {
+                    const comment = prompt('Adicionar nota:');
+                    if (comment && comment.trim()) {
+                        try {
+                            await this.api('POST', `/projects/${projectId}/tasks/${taskId}/history`, { comment: comment.trim() });
+                            this.viewTaskDetail(projectId, taskId);
+                        } catch (e) {
+                            this.showToast('Erro', e.message, 'error');
+                        }
+                    }
+                }
+            });
+
             // "Discuss with AI" button — always visible regardless of status
             actions.push({
                 label: '💬 Discutir com IA',
@@ -6006,10 +6073,79 @@ class DevManager {
                 }
             });
 
-            window.docViewer.openWithContent(task.title, md, { actions });
+            window.docViewer.openWithContent(task.title, md, {
+                actions,
+                onClose: () => { this._viewingTaskDetail = null; }
+            });
         } catch (e) {
             this.showToast('Erro', 'Falha ao carregar detalhes da tarefa', 'error');
         }
+    }
+
+    relativeTime(dateStr) {
+        const now = new Date();
+        const date = new Date(dateStr);
+        const diffMs = now - date;
+        const diffSec = Math.floor(diffMs / 1000);
+        const diffMin = Math.floor(diffSec / 60);
+        const diffHour = Math.floor(diffMin / 60);
+        const diffDay = Math.floor(diffHour / 24);
+
+        if (diffSec < 60) return 'agora';
+        if (diffMin < 60) return `${diffMin}m atras`;
+        if (diffHour < 24) return `${diffHour}h atras`;
+        if (diffDay < 7) return `${diffDay}d atras`;
+        return date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    }
+
+    taskHistoryIcon(eventType) {
+        const icons = {
+            task_created: '**[+]**',
+            status_change: '**[~]**',
+            priority_change: '**[!]**',
+            title_updated: '**[T]**',
+            description_updated: '**[D]**',
+            due_date_changed: '**[C]**',
+            session_linked: '**[L]**',
+            session_started: '**[>]**',
+            session_ended: '**[x]**',
+            suggestion_accepted: '**[A]**',
+            suggestion_dismissed: '**[-]**',
+            comment_added: '**[N]**',
+            task_assigned: '**[=]**',
+            parent_changed: '**[P]**',
+        };
+        return icons[eventType] || '**[?]**';
+    }
+
+    taskHistoryLabel(entry) {
+        let details = {};
+        try { details = JSON.parse(entry.details || '{}'); } catch {}
+
+        const labels = {
+            task_created: () => `Tarefa criada (${details.status || 'todo'}, ${details.priority || 'medium'})`,
+            status_change: () => {
+                let label = `Status: ${details.old} → ${details.new}`;
+                if (details.reason === 'auto_on_link') label += ' (auto)';
+                if (details.reason === 'auto_update') label += ' (auto-update)';
+                return label;
+            },
+            priority_change: () => `Prioridade: ${details.old} → ${details.new}`,
+            title_updated: () => `Titulo atualizado`,
+            description_updated: () => `Descricao atualizada`,
+            due_date_changed: () => `Prazo alterado`,
+            session_linked: () => `Sessao vinculada: ${details.session_name || details.session_id || ''}`,
+            session_started: () => `Sessao iniciada`,
+            session_ended: () => details.summary ? `Sessao encerrada — ${details.summary}` : `Sessao encerrada`,
+            suggestion_accepted: () => `Sugestao aceita: ${details.title || details.suggestion_type || ''}`,
+            suggestion_dismissed: () => `Sugestao ignorada: ${details.title || details.suggestion_type || ''}`,
+            comment_added: () => details.comment || 'Nota adicionada',
+            task_assigned: () => `Tarefa atribuida a sessao`,
+            parent_changed: () => `Tarefa pai alterada`,
+        };
+
+        const fn = labels[entry.event_type];
+        return fn ? fn() : entry.event_type;
     }
 
     async discussTaskWithAI(projectId, taskId) {

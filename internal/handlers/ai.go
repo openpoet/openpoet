@@ -3492,7 +3492,8 @@ Current tasks for this project:
 %s
 Instructions:
 %s
-- Respond with JSON only: {"suggestions": [{"type": "<type>", "title": "<title>", "description": "<why>", "task_id": <id_or_null>, "task_data": {"title": "...", "description": "...", "priority": "..."}}]}
+- Respond with JSON only: {"suggestions": [{"type": "<type>", "title": "<title>", "description": "<why>", "task_id": <id_or_null>, "task_data": {"title": "...", "description": "...", "priority": "..."}}], "summary": "<1-2 sentence summary of what was accomplished in this session, or empty string>"}
+- The "summary" field should describe what was accomplished. Only include it for session_end triggers. Use empty string for other triggers.
 - Be judicious - only suggest when it truly makes sense.
 - Use Portuguese (pt-BR) for title and description fields.`, tasksList, instructions)
 
@@ -3550,6 +3551,7 @@ Instructions:
 			TaskID      *int64                 `json:"task_id"`
 			TaskData    map[string]interface{} `json:"task_data"`
 		} `json:"suggestions"`
+		Summary string `json:"summary"`
 	}
 
 	responseText := strings.TrimSpace(fullText.String())
@@ -3589,12 +3591,71 @@ Instructions:
 	}
 	result.Suggestions = filtered
 
+	// Record AI summary in task history (for session_end with linked task)
+	if trigger == "session_end" && hasLinkedTask && result.Summary != "" {
+		h.api.recordTaskHistory(ctx, linkedTask.ID, linkedTask.ProjectID, "session_ended", map[string]interface{}{
+			"session_id": sessionID, "summary": result.Summary,
+		}, "ai", sessionID)
+	}
+
 	if len(result.Suggestions) == 0 {
 		log.Printf("[AI-Session] All suggestions filtered out for session %s (%s)", sessionID[:8], trigger)
 		return
 	}
 
 	log.Printf("[AI-Session] Got %d suggestions for session %s (after filter)", len(result.Suggestions), sessionID[:8])
+
+	// Auto-update: if enabled and trigger is session_end with linked task, apply changes directly
+	autoUpdateVal, _ := h.api.db.GetSetting(ctx, "task_auto_update_enabled")
+	if autoUpdateVal == "true" && trigger == "session_end" && hasLinkedTask {
+		for _, s := range result.Suggestions {
+			switch s.Type {
+			case "complete_task":
+				taskID := linkedTask.ID
+				if s.TaskID != nil {
+					taskID = *s.TaskID
+				}
+				oldStatus := linkedTask.Status
+				if err := h.api.db.UpdateTaskStatus(ctx, taskID, "done"); err == nil {
+					t, _ := h.api.db.GetTask(ctx, taskID)
+					if t != nil {
+						h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": t.ProjectID, "task": t})
+					}
+					h.api.recordTaskHistory(ctx, taskID, linkedTask.ProjectID, "status_change", map[string]interface{}{
+						"old": oldStatus, "new": "done", "reason": "auto_update",
+					}, "ai", sessionID)
+					log.Printf("[AI-Session] Auto-completed task %d for session %s", taskID, sessionID[:8])
+				}
+			case "update_task":
+				if s.TaskID != nil {
+					if t, err := h.api.db.GetTask(ctx, *s.TaskID); err == nil && t != nil {
+						oldStatus := t.Status
+						changed := false
+						if status, ok := s.TaskData["status"].(string); ok && status != "" && status != t.Status {
+							t.Status = status
+							changed = true
+						}
+						if desc, ok := s.TaskData["description"].(string); ok && desc != "" {
+							t.Description = desc
+							changed = true
+						}
+						if changed {
+							h.api.db.UpdateTask(ctx, t)
+							h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": t.ProjectID, "task": t})
+							if t.Status != oldStatus {
+								h.api.recordTaskHistory(ctx, t.ID, t.ProjectID, "status_change", map[string]interface{}{
+									"old": oldStatus, "new": t.Status, "reason": "auto_update",
+								}, "ai", sessionID)
+							}
+							log.Printf("[AI-Session] Auto-updated task %d for session %s", t.ID, sessionID[:8])
+						}
+					}
+				}
+			}
+		}
+		log.Printf("[AI-Session] Auto-update applied for session %s, skipping suggestion creation", sessionID[:8])
+		return
+	}
 
 	// Create and broadcast each suggestion with proactive conversation
 	typeLabels := map[string]string{
@@ -3837,6 +3898,17 @@ func (h *AIHandler) AcceptSuggestion(w http.ResponseWriter, r *http.Request) {
 	// Mark suggestion as accepted
 	h.api.db.UpdateAISuggestionStatus(r.Context(), id, "accepted")
 
+	// Record suggestion_accepted in task history
+	var historyTaskID int64
+	if ctx.TaskID != nil {
+		historyTaskID = *ctx.TaskID
+	}
+	if historyTaskID > 0 {
+		h.api.recordTaskHistory(r.Context(), historyTaskID, suggestion.ProjectID, "suggestion_accepted", map[string]interface{}{
+			"suggestion_type": suggestion.Type, "title": suggestion.Title,
+		}, "user", suggestion.SessionID)
+	}
+
 	respondJSON(w, http.StatusOK, map[string]string{
 		"status":  "accepted",
 		"message": resultMsg,
@@ -3852,9 +3924,25 @@ func (h *AIHandler) DismissSuggestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get suggestion details before dismissing for history
+	suggestion, _ := h.api.db.GetAISuggestion(r.Context(), id)
+
 	if err := h.api.db.UpdateAISuggestionStatus(r.Context(), id, "dismissed"); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// Record suggestion_dismissed in task history if linked to a task
+	if suggestion != nil {
+		var ctx struct {
+			TaskID *int64 `json:"task_id"`
+		}
+		json.Unmarshal([]byte(suggestion.ContextJSON), &ctx)
+		if ctx.TaskID != nil && *ctx.TaskID > 0 {
+			h.api.recordTaskHistory(r.Context(), *ctx.TaskID, suggestion.ProjectID, "suggestion_dismissed", map[string]interface{}{
+				"suggestion_type": suggestion.Type, "title": suggestion.Title,
+			}, "user", suggestion.SessionID)
+		}
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "dismissed"})

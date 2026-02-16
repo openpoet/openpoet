@@ -163,6 +163,17 @@ type ProjectTask struct {
 	UpdatedAt   time.Time    `db:"updated_at" json:"updated_at"`
 }
 
+type TaskHistory struct {
+	ID        int64          `db:"id" json:"id"`
+	TaskID    int64          `db:"task_id" json:"task_id"`
+	ProjectID int64          `db:"project_id" json:"project_id"`
+	EventType string         `db:"event_type" json:"event_type"`
+	Details   string         `db:"details" json:"details"`
+	Actor     string         `db:"actor" json:"actor"`
+	SessionID sql.NullString `db:"session_id" json:"session_id,omitempty"`
+	CreatedAt time.Time      `db:"created_at" json:"created_at"`
+}
+
 type AISuggestion struct {
 	ID             int64         `db:"id" json:"id"`
 	SessionID      string        `db:"session_id" json:"session_id"`
