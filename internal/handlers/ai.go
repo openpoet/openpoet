@@ -1669,6 +1669,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if err != nil {
 			return "", err
 		}
+		database.ApplyUmbrellaStatus(tasks)
 		if len(tasks) == 0 {
 			return fmt.Sprintf("No tasks found for project %d.", projectID), nil
 		}
@@ -1708,6 +1709,18 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			return "", fmt.Errorf("task not found")
 		}
 
+		// Fetch all tasks to compute umbrella status and list subtasks
+		allTasks, err := h.api.db.ListTasksByProject(ctx, projectID)
+		if err == nil {
+			database.ApplyUmbrellaStatus(allTasks)
+			for _, t := range allTasks {
+				if t.ID == task.ID {
+					task.Status = t.Status
+					break
+				}
+			}
+		}
+
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("Task #%d: %s\n", task.ID, task.Title))
 		sb.WriteString(fmt.Sprintf("Status: %s\n", task.Status))
@@ -1727,8 +1740,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		}
 
 		// List subtasks if any
-		allTasks, err := h.api.db.ListTasksByProject(ctx, projectID)
-		if err == nil {
+		if allTasks != nil {
 			var subtasks []string
 			for _, t := range allTasks {
 				if t.ParentID.Valid && t.ParentID.Int64 == task.ID {
@@ -1964,6 +1976,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if err != nil {
 			return "", err
 		}
+		database.ApplyUmbrellaStatus(tasks)
 
 		if len(tasks) == 0 {
 			return fmt.Sprintf("Project '%s' has no tasks yet.", project.Name), nil
