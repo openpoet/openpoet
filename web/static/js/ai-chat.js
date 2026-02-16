@@ -587,7 +587,16 @@ class AIChatManager {
         } else if (status === 'rejected') {
             actionHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-rejected">Rejeitado</span>';
         } else {
-            const btnLabel = isTaskProposal ? 'Revisar Tarefa' : (isProposal ? 'Revisar Proposta' : 'Ver Documento');
+            let btnLabel;
+            if (isTaskProposal) {
+                if (data.title && data.title.startsWith('Excluir Tarefa:')) btnLabel = 'Revisar Exclusão';
+                else if (data.title && data.title.startsWith('Atualizar Tarefa:')) btnLabel = 'Revisar Alteração';
+                else btnLabel = 'Revisar Tarefa';
+            } else if (isProposal) {
+                btnLabel = 'Revisar Proposta';
+            } else {
+                btnLabel = 'Ver Documento';
+            }
             actionHtml = `<button class="ai-chat-doc-card-btn">${btnLabel}</button>`;
         }
 
@@ -848,7 +857,9 @@ class AIChatManager {
                 for (const doc of data.doc_cards) {
                     let type = 'document';
                     if (doc.title && doc.title.startsWith('Memory Doc:')) type = 'proposal';
-                    else if (doc.title && doc.title.startsWith('Tarefa:')) type = 'task_proposal';
+                    else if (doc.title && (doc.title.startsWith('Tarefa:') ||
+                        doc.title.startsWith('Atualizar Tarefa:') ||
+                        doc.title.startsWith('Excluir Tarefa:'))) type = 'task_proposal';
 
                     // Find the specific assistant message this doc card belongs to
                     let targetContent = null;

@@ -4398,6 +4398,13 @@ body {
     background-color: var(--color-bg-secondary);
     justify-content: flex-end;
     flex-shrink: 0;
+    flex-wrap: wrap;
+}
+.doc-review-footer .btn {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 160px;
 }
 .doc-review-footer.hidden {
     display: none;
