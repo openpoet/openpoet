@@ -16,6 +16,7 @@ class DocViewer {
         this.closeBtn = document.getElementById('doc-review-close');
 
         if (!this.overlay) return;
+        this._history = [];
 
         this.closeBtn?.addEventListener('click', () => this.close());
         this.overlay.addEventListener('click', (e) => {
@@ -154,6 +155,23 @@ class DocViewer {
     openWithContent(title, content, opts = {}) {
         if (!this.overlay) return;
 
+        // If overlay is already visible, push current state to history stack
+        if (!this.overlay.classList.contains('hidden')) {
+            // Move footer children to a fragment to preserve event listeners
+            const footerFragment = document.createDocumentFragment();
+            while (this.footerEl.firstChild) {
+                footerFragment.appendChild(this.footerEl.firstChild);
+            }
+            this._history.push({
+                title: this.nameEl.textContent,
+                html: this.contentEl.innerHTML,
+                footerFragment,
+                footerHidden: this.footerEl.classList.contains('hidden'),
+                onClose: this._onClose || null
+            });
+        }
+
+        this._onClose = opts.onClose || null;
         this.nameEl.textContent = title || 'Documento';
         this.contentEl.innerHTML = this._renderMarkdown(content || '');
         // Defer mermaid rendering to ensure DOM is stable
@@ -180,9 +198,30 @@ class DocViewer {
     }
 
     close() {
-        if (this.overlay) {
-            this.overlay.classList.add('hidden');
+        if (!this.overlay) return;
+
+        // If there's a previous state, restore it instead of closing
+        if (this._history.length > 0) {
+            const prev = this._history.pop();
+            this.nameEl.textContent = prev.title;
+            this.contentEl.innerHTML = prev.html;
+            this.footerEl.innerHTML = '';
+            this.footerEl.appendChild(prev.footerFragment);
+            if (prev.footerHidden) {
+                this.footerEl.classList.add('hidden');
+            } else {
+                this.footerEl.classList.remove('hidden');
+            }
+            this._onClose = prev.onClose;
+            return;
         }
+
+        if (this._onClose) {
+            this._onClose();
+            this._onClose = null;
+        }
+        this.overlay.classList.add('hidden');
+        this._history = [];
     }
 
     _renderMarkdown(text) {
