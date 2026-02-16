@@ -16,7 +16,8 @@ type Project struct {
 	SSHAuthType            sql.NullString `db:"ssh_auth_type" json:"ssh_auth_type,omitempty"` // 'password', 'key', 'key_passphrase'
 	SSHCredentialEncrypted sql.NullString `db:"ssh_credential_encrypted" json:"-"`
 	SSHCredentialIV        sql.NullString `db:"ssh_credential_iv" json:"-"`
-	ToolPolicy             string         `db:"tool_policy" json:"tool_policy,omitempty"` // JSON ToolPolicy
+	ToolPolicy             string         `db:"tool_policy" json:"tool_policy,omitempty"`  // JSON ToolPolicy
+	SkillPolicy            string         `db:"skill_policy" json:"skill_policy,omitempty"` // '' = inherit global, 'custom' = per-project
 	ConfigSyncedAt         sql.NullTime   `db:"config_synced_at" json:"config_synced_at,omitempty"`
 	CreatedAt              time.Time      `db:"created_at" json:"created_at"`
 	UpdatedAt              time.Time      `db:"updated_at" json:"updated_at"`
@@ -32,6 +33,7 @@ type ProjectInput struct {
 	SSHAuthType   string `json:"ssh_auth_type,omitempty"`
 	SSHCredential string `json:"ssh_credential,omitempty"`
 	ToolPolicy    string `json:"tool_policy,omitempty"`
+	SkillPolicy   string `json:"skill_policy,omitempty"`
 }
 
 type Session struct {
@@ -75,6 +77,26 @@ type SkillVersion struct {
 	Content   string    `db:"content" json:"content"`
 	Version   int       `db:"version" json:"version"`
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
+}
+
+type ProjectSkillConfig struct {
+	ID        int64 `db:"id" json:"id"`
+	ProjectID int64 `db:"project_id" json:"project_id"`
+	SkillID   int64 `db:"skill_id" json:"skill_id"`
+	Enabled   bool  `db:"enabled" json:"enabled"`
+}
+
+type ProjectSkill struct {
+	ID        int64     `db:"id" json:"id"`
+	ProjectID int64     `db:"project_id" json:"project_id"`
+	Name      string    `db:"name" json:"name"`
+	Content   string    `db:"content" json:"content"`
+	Enabled   bool      `db:"enabled" json:"enabled"`
+	Category  string    `db:"category" json:"category"`
+	SortOrder int       `db:"sort_order" json:"sort_order"`
+	SyncCount int       `db:"sync_count" json:"sync_count"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
 }
 
 type MCPServer struct {

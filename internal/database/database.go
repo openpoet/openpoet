@@ -38,9 +38,9 @@ func (d *DB) migrate() error {
 
 // Project operations
 func (d *DB) CreateProject(ctx context.Context, p *Project) error {
-	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv, tool_policy)
-			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy)
+	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv, tool_policy, skill_policy)
+			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy)
 	if err != nil {
 		return err
 	}
@@ -67,8 +67,8 @@ func (d *DB) ListProjects(ctx context.Context) ([]Project, error) {
 }
 
 func (d *DB) UpdateProject(ctx context.Context, p *Project) error {
-	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, tool_policy=?, updated_at=? WHERE id=?`
-	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, time.Now(), p.ID)
+	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, tool_policy=?, skill_policy=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, time.Now(), p.ID)
 	return err
 }
 
@@ -281,6 +281,93 @@ func (d *DB) GetSkillVersion(ctx context.Context, id int64) (*SkillVersion, erro
 	var v SkillVersion
 	err := d.GetContext(ctx, &v, "SELECT * FROM skill_versions WHERE id = ?", id)
 	return &v, err
+}
+
+// ProjectSkillConfig operations (per-project overrides for global skills)
+func (d *DB) ListProjectSkillConfigs(ctx context.Context, projectID int64) ([]ProjectSkillConfig, error) {
+	var configs []ProjectSkillConfig
+	err := d.SelectContext(ctx, &configs, "SELECT * FROM project_skill_config WHERE project_id = ?", projectID)
+	return configs, err
+}
+
+func (d *DB) UpsertProjectSkillConfig(ctx context.Context, projectID, skillID int64, enabled bool) error {
+	query := `INSERT INTO project_skill_config (project_id, skill_id, enabled) VALUES (?, ?, ?)
+			  ON CONFLICT(project_id, skill_id) DO UPDATE SET enabled = excluded.enabled`
+	_, err := d.ExecContext(ctx, query, projectID, skillID, enabled)
+	return err
+}
+
+func (d *DB) DeleteProjectSkillConfigs(ctx context.Context, projectID int64) error {
+	_, err := d.ExecContext(ctx, "DELETE FROM project_skill_config WHERE project_id = ?", projectID)
+	return err
+}
+
+// ListEnabledSkillsForProject returns global skills that are enabled for a specific project (custom policy).
+// Uses project_skill_config overrides: if a config row exists, use its enabled value; otherwise the skill is excluded.
+func (d *DB) ListEnabledSkillsForProject(ctx context.Context, projectID int64) ([]Skill, error) {
+	var skills []Skill
+	query := `SELECT s.* FROM skills s
+			  INNER JOIN project_skill_config psc ON psc.skill_id = s.id AND psc.project_id = ?
+			  WHERE psc.enabled = 1
+			  ORDER BY s.sort_order, s.name`
+	err := d.SelectContext(ctx, &skills, query, projectID)
+	return skills, err
+}
+
+// ProjectSkill operations (project-specific skills)
+func (d *DB) CreateProjectSkill(ctx context.Context, ps *ProjectSkill) error {
+	query := `INSERT INTO project_skills (project_id, name, content, enabled, category, sort_order) VALUES (?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, ps.ProjectID, ps.Name, ps.Content, ps.Enabled, ps.Category, ps.SortOrder)
+	if err != nil {
+		return err
+	}
+	ps.ID, _ = result.LastInsertId()
+	fresh, err := d.GetProjectSkill(ctx, ps.ID)
+	if err == nil {
+		*ps = *fresh
+	}
+	return nil
+}
+
+func (d *DB) GetProjectSkill(ctx context.Context, id int64) (*ProjectSkill, error) {
+	var ps ProjectSkill
+	err := d.GetContext(ctx, &ps, "SELECT * FROM project_skills WHERE id = ?", id)
+	return &ps, err
+}
+
+func (d *DB) ListProjectSkills(ctx context.Context, projectID int64) ([]ProjectSkill, error) {
+	var skills []ProjectSkill
+	err := d.SelectContext(ctx, &skills, "SELECT * FROM project_skills WHERE project_id = ? ORDER BY sort_order, name", projectID)
+	return skills, err
+}
+
+func (d *DB) ListEnabledProjectSkills(ctx context.Context, projectID int64) ([]ProjectSkill, error) {
+	var skills []ProjectSkill
+	err := d.SelectContext(ctx, &skills, "SELECT * FROM project_skills WHERE project_id = ? AND enabled = 1 ORDER BY sort_order, name", projectID)
+	return skills, err
+}
+
+func (d *DB) UpdateProjectSkill(ctx context.Context, ps *ProjectSkill) error {
+	query := `UPDATE project_skills SET name=?, content=?, enabled=?, category=?, sort_order=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, ps.Name, ps.Content, ps.Enabled, ps.Category, ps.SortOrder, time.Now(), ps.ID)
+	if err != nil {
+		return err
+	}
+	fresh, err := d.GetProjectSkill(ctx, ps.ID)
+	if err == nil {
+		*ps = *fresh
+	}
+	return nil
+}
+
+func (d *DB) DeleteProjectSkill(ctx context.Context, id int64) error {
+	_, err := d.ExecContext(ctx, "DELETE FROM project_skills WHERE id = ?", id)
+	return err
+}
+
+func (d *DB) IncrementProjectSkillSyncCount(ctx context.Context, id int64) error {
+	_, err := d.ExecContext(ctx, "UPDATE project_skills SET sync_count = sync_count + 1 WHERE id = ?", id)
+	return err
 }
 
 // MCP Server operations

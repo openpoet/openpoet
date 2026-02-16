@@ -2886,6 +2886,294 @@ func (a *API) UpdateProjectToolPolicy(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
+// --- Project Skills ---
+
+// GetProjectSkills returns global skills with per-project config + project-specific skills.
+func (a *API) GetProjectSkills(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	ctx := r.Context()
+	project, err := a.db.GetProject(ctx, projectID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	// Get all global skills
+	allSkills, err := a.db.ListSkills(ctx)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Get per-project overrides
+	configs, err := a.db.ListProjectSkillConfigs(ctx, projectID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	configMap := make(map[int64]bool) // skillID -> enabled
+	for _, c := range configs {
+		configMap[c.SkillID] = c.Enabled
+	}
+
+	// Build global skills with project-specific enabled state
+	type globalSkillInfo struct {
+		database.Skill
+		ProjectEnabled bool `json:"project_enabled"` // effective enabled state for this project
+	}
+	globalSkills := make([]globalSkillInfo, 0, len(allSkills))
+	for _, s := range allSkills {
+		projectEnabled := s.Enabled // default: inherit global
+		if project.SkillPolicy == "custom" {
+			if override, ok := configMap[s.ID]; ok {
+				projectEnabled = override
+			} else {
+				projectEnabled = false // custom mode: not configured = disabled
+			}
+		}
+		globalSkills = append(globalSkills, globalSkillInfo{
+			Skill:          s,
+			ProjectEnabled: projectEnabled,
+		})
+	}
+
+	// Get project-specific skills
+	projectSkills, err := a.db.ListProjectSkills(ctx, projectID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"skill_policy":   project.SkillPolicy,
+		"global_skills":  globalSkills,
+		"project_skills": projectSkills,
+	})
+}
+
+// SaveProjectSkillConfig saves per-project skill overrides (inherit or custom).
+func (a *API) SaveProjectSkillConfig(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	ctx := r.Context()
+	project, err := a.db.GetProject(ctx, projectID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	var input struct {
+		Inherit   bool `json:"inherit"`
+		Overrides []struct {
+			SkillID int64 `json:"skill_id"`
+			Enabled bool  `json:"enabled"`
+		} `json:"overrides"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if input.Inherit {
+		project.SkillPolicy = ""
+	} else {
+		project.SkillPolicy = "custom"
+		// Upsert all overrides
+		for _, o := range input.Overrides {
+			if err := a.db.UpsertProjectSkillConfig(ctx, projectID, o.SkillID, o.Enabled); err != nil {
+				respondError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+	}
+
+	if err := a.db.UpdateProject(ctx, project); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("project", map[string]interface{}{
+		"action":  "updated",
+		"project": project,
+	})
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// CreateProjectSkillHandler creates a project-specific skill.
+func (a *API) CreateProjectSkillHandler(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	ctx := r.Context()
+	if _, err := a.db.GetProject(ctx, projectID); err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	var input struct {
+		Name     string `json:"name"`
+		Content  string `json:"content"`
+		Category string `json:"category"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if msg := validateSkillName(input.Name); msg != "" {
+		respondError(w, http.StatusBadRequest, msg)
+		return
+	}
+
+	ps := &database.ProjectSkill{
+		ProjectID: projectID,
+		Name:      input.Name,
+		Content:   input.Content,
+		Enabled:   true,
+		Category:  input.Category,
+	}
+
+	if err := a.db.CreateProjectSkill(ctx, ps); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			respondError(w, http.StatusConflict, "A project skill with this name already exists")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("project_skill", map[string]interface{}{
+		"action":     "created",
+		"project_id": projectID,
+		"skill":      ps,
+	})
+
+	respondJSON(w, http.StatusCreated, ps)
+}
+
+// UpdateProjectSkillHandler updates a project-specific skill.
+func (a *API) UpdateProjectSkillHandler(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	skillID, err := strconv.ParseInt(chi.URLParam(r, "skillId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid skill ID")
+		return
+	}
+
+	ctx := r.Context()
+	ps, err := a.db.GetProjectSkill(ctx, skillID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project skill not found")
+		return
+	}
+	if ps.ProjectID != projectID {
+		respondError(w, http.StatusNotFound, "Project skill not found")
+		return
+	}
+
+	var input struct {
+		Name     *string `json:"name"`
+		Content  *string `json:"content"`
+		Enabled  *bool   `json:"enabled"`
+		Category *string `json:"category"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if input.Name != nil {
+		if msg := validateSkillName(*input.Name); msg != "" {
+			respondError(w, http.StatusBadRequest, msg)
+			return
+		}
+		ps.Name = *input.Name
+	}
+	if input.Content != nil {
+		ps.Content = *input.Content
+	}
+	if input.Enabled != nil {
+		ps.Enabled = *input.Enabled
+	}
+	if input.Category != nil {
+		ps.Category = *input.Category
+	}
+
+	if err := a.db.UpdateProjectSkill(ctx, ps); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			respondError(w, http.StatusConflict, "A project skill with this name already exists")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("project_skill", map[string]interface{}{
+		"action":     "updated",
+		"project_id": projectID,
+		"skill":      ps,
+	})
+
+	respondJSON(w, http.StatusOK, ps)
+}
+
+// DeleteProjectSkillHandler deletes a project-specific skill.
+func (a *API) DeleteProjectSkillHandler(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	skillID, err := strconv.ParseInt(chi.URLParam(r, "skillId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid skill ID")
+		return
+	}
+
+	ctx := r.Context()
+	ps, err := a.db.GetProjectSkill(ctx, skillID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project skill not found")
+		return
+	}
+	if ps.ProjectID != projectID {
+		respondError(w, http.StatusNotFound, "Project skill not found")
+		return
+	}
+
+	if err := a.db.DeleteProjectSkill(ctx, skillID); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("project_skill", map[string]interface{}{
+		"action":     "deleted",
+		"project_id": projectID,
+		"id":         skillID,
+	})
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 // GetResolvedTools returns the effective list of tools available for a given context.
 // For sessions: GET /api/sessions/{id}/tools
 // For projects: GET /api/projects/{id}/tools

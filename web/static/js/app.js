@@ -333,10 +333,9 @@ class DevManager {
                             nameContainer.dataset.fullName = newName;
                         }
                     }
-                    // Hide link-task button if this is the active session (task was just linked)
+                    // Update link/view task buttons if this is the active session (task was just linked)
                     if (window.terminalManager?.activeSessionId === sessionId) {
-                        const linkBtn = document.getElementById('btn-link-task');
-                        if (linkBtn) linkBtn.style.display = 'none';
+                        this._updateLinkTaskButton(sessionId);
                     }
                 }
                 break;
@@ -358,6 +357,11 @@ class DevManager {
             case 'mcp':
             case 'settings':
                 this.loadConfig();
+                break;
+            case 'project_skill':
+                if (this.currentView === 'project-detail' && this._detailProject && data.data?.project_id === this._detailProject.id) {
+                    this.loadProjectSkills(this._detailProject.id);
+                }
                 break;
         }
     }
@@ -793,19 +797,28 @@ class DevManager {
     }
 
     async _updateLinkTaskButton(sessionId) {
-        const btn = document.getElementById('btn-link-task');
-        if (!btn) return;
+        const linkBtn = document.getElementById('btn-link-task');
+        const viewBtn = document.getElementById('btn-view-task');
 
         if (!sessionId) {
-            btn.style.display = 'none';
+            if (linkBtn) linkBtn.style.display = 'none';
+            if (viewBtn) viewBtn.style.display = 'none';
             return;
         }
 
         try {
-            await this.api('GET', `/sessions/${sessionId}/task`);
-            btn.style.display = 'none';
+            const task = await this.api('GET', `/sessions/${sessionId}/task`);
+            if (linkBtn) linkBtn.style.display = 'none';
+            if (viewBtn) {
+                viewBtn.style.display = '';
+                viewBtn.dataset.projectId = task.project_id;
+                viewBtn.dataset.taskId = task.id;
+                const label = document.getElementById('btn-view-task-label');
+                if (label) label.textContent = task.title;
+            }
         } catch {
-            btn.style.display = '';
+            if (linkBtn) linkBtn.style.display = '';
+            if (viewBtn) viewBtn.style.display = 'none';
         }
     }
 
@@ -1246,6 +1259,18 @@ class DevManager {
             <div class="project-detail-card">
                 <div class="project-detail-section">
                     <div class="project-detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                        <span>Skills</span>
+                        <span id="project-skills-summary" style="font-size: 11px; color: var(--color-text-muted);"></span>
+                    </div>
+                    <div id="project-skills-list" class="project-tools-list">
+                        <div class="meta-empty">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="project-detail-card">
+                <div class="project-detail-section">
+                    <div class="project-detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
                         <span>Memory Doc</span>
                         <button class="meta-ai-btn" onclick="app.editMemoryDocWithAI(${project.id})" title="Edit with AI">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1292,9 +1317,10 @@ class DevManager {
 
         container.innerHTML = html;
 
-        // Load memory doc, tasks, tools, and token usage
+        // Load memory doc, tasks, tools, skills, and token usage
         this.loadMemoryDoc(project.id);
         this.loadProjectTools(project.id);
+        this.loadProjectSkills(project.id);
         this.loadProjectTasks(project.id);
         this.loadProjectTokenUsage(project.id, 30);
 
@@ -1485,6 +1511,225 @@ class DevManager {
             this.showToast('Error', e.message, 'error');
         }
     }
+
+    // --- Project Skills ---
+
+    async loadProjectSkills(projectId) {
+        const container = document.getElementById('project-skills-list');
+        const summaryEl = document.getElementById('project-skills-summary');
+        if (!container) return;
+
+        try {
+            const data = await this.api('GET', `/projects/${projectId}/skills`);
+            const { skill_policy, global_skills, project_skills } = data;
+            const isInheriting = skill_policy !== 'custom';
+
+            // Summary
+            if (summaryEl) {
+                const enabledGlobal = global_skills.filter(s => s.project_enabled).length;
+                const enabledProject = (project_skills || []).filter(s => s.enabled).length;
+                const total = enabledGlobal + enabledProject;
+                if (isInheriting) {
+                    summaryEl.textContent = `Inheriting global (${enabledGlobal} global${enabledProject ? ` + ${enabledProject} project` : ''})`;
+                } else {
+                    summaryEl.textContent = `${total} active (${enabledGlobal} global + ${enabledProject} project)`;
+                }
+            }
+
+            const inheritChecked = isInheriting ? 'checked' : '';
+            container.innerHTML = `
+                <div style="margin-bottom: 8px; padding: 6px 8px; background: var(--color-bg-tertiary); border-radius: 6px;">
+                    <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px;">
+                        <input type="checkbox" id="project-skills-inherit" ${inheritChecked} onchange="app._projectSkillInheritChanged(${projectId})">
+                        <span>Inherit from global config</span>
+                    </label>
+                </div>
+                <div id="project-skills-global" style="${isInheriting ? 'opacity:0.5;pointer-events:none;' : ''}">
+                    ${global_skills.length ? `
+                        <div style="margin-bottom: 6px;">
+                            <label class="tp-tool-item" style="font-weight:500; cursor:pointer;">
+                                <input type="checkbox" id="project-skills-toggle-all"
+                                    ${global_skills.every(s => s.project_enabled) ? 'checked' : ''}
+                                    onchange="app._projectSkillToggleAll(${projectId}, this.checked)">
+                                <span class="tp-tool-name" style="min-width:auto;">Toggle all</span>
+                            </label>
+                        </div>
+                        <div class="project-tools-grid">
+                            ${global_skills.map(s => {
+                                const shortDesc = (s.category || 'No category');
+                                return `<label class="tp-tool-item" title="${this.escapeHtml(s.name)}">
+                                    <input type="checkbox" data-skill-id="${s.id}" ${s.project_enabled ? 'checked' : ''} onchange="app._projectSkillChanged(${projectId})">
+                                    <span class="tp-tool-name">${this.escapeHtml(s.name)}</span>
+                                    <span class="tp-tool-desc">${this.escapeHtml(shortDesc)}</span>
+                                </label>`;
+                            }).join('')}
+                        </div>
+                    ` : '<div class="meta-empty" style="margin: 4px 0;">No global skills configured.</div>'}
+                </div>
+                <div class="project-tools-actions" id="project-skills-actions" style="display:none;">
+                    <button class="btn btn-sm btn-primary" onclick="app.saveProjectSkillConfig(${projectId})">Save</button>
+                    <button class="btn btn-sm btn-secondary" onclick="app.loadProjectSkills(${projectId})">Cancel</button>
+                    <span style="font-size: 11px; color: var(--color-text-muted);">Unsaved changes</span>
+                </div>
+                <div style="margin-top: 12px; border-top: 1px solid var(--color-border); padding-top: 10px;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom: 8px;">
+                        <span style="font-size: 12px; font-weight: 500;">Project Skills</span>
+                        <button class="btn btn-sm btn-secondary" onclick="app.showProjectSkillModal(${projectId})">+ Add</button>
+                    </div>
+                    <div id="project-skills-local-list">
+                        ${(project_skills || []).length ? (project_skills || []).map(ps => `
+                            <div class="tp-tool-item" style="justify-content: space-between;">
+                                <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0;">
+                                    <input type="checkbox" ${ps.enabled ? 'checked' : ''} onchange="app.toggleProjectSkill(${projectId}, ${ps.id}, this.checked)">
+                                    <span class="tp-tool-name" style="cursor:pointer;" onclick="app.showProjectSkillModal(${projectId}, ${ps.id})">${this.escapeHtml(ps.name)}</span>
+                                    <span class="tp-tool-desc">${this.escapeHtml(ps.category || '')}</span>
+                                </div>
+                                <div style="display:flex;gap:4px;flex-shrink:0;">
+                                    <button class="btn btn-sm btn-secondary" onclick="app.showProjectSkillModal(${projectId}, ${ps.id})" title="Edit">Edit</button>
+                                    <button class="btn btn-sm btn-danger" onclick="app.deleteProjectSkill(${projectId}, ${ps.id}, '${this.escapeHtml(ps.name)}')" title="Delete">Del</button>
+                                </div>
+                            </div>
+                        `).join('') : '<div class="meta-empty">No project-specific skills.</div>'}
+                    </div>
+                </div>
+            `;
+            // Hide actions bar initially
+            const actions = document.getElementById('project-skills-actions');
+            if (actions) actions.style.display = 'none';
+        } catch (e) {
+            container.innerHTML = '<div class="meta-empty">Failed to load skills.</div>';
+        }
+    }
+
+    _projectSkillInheritChanged(projectId) {
+        const inherit = document.getElementById('project-skills-inherit')?.checked;
+        const globalDiv = document.getElementById('project-skills-global');
+        if (globalDiv) {
+            globalDiv.style.opacity = inherit ? '0.5' : '1';
+            globalDiv.style.pointerEvents = inherit ? 'none' : '';
+        }
+        this._projectSkillChanged(projectId);
+    }
+
+    _projectSkillToggleAll(projectId, checked) {
+        document.querySelectorAll('#project-skills-list input[data-skill-id]').forEach(cb => cb.checked = checked);
+        this._projectSkillChanged(projectId);
+    }
+
+    _projectSkillChanged(projectId) {
+        const actions = document.getElementById('project-skills-actions');
+        if (actions) actions.style.display = 'flex';
+    }
+
+    async saveProjectSkillConfig(projectId) {
+        const inherit = document.getElementById('project-skills-inherit')?.checked;
+
+        const overrides = [];
+        if (!inherit) {
+            document.querySelectorAll('#project-skills-list input[data-skill-id]').forEach(cb => {
+                overrides.push({
+                    skill_id: parseInt(cb.dataset.skillId),
+                    enabled: cb.checked
+                });
+            });
+        }
+
+        try {
+            await this.api('PUT', `/projects/${projectId}/skill-config`, { inherit, overrides });
+            await this.loadProjects();
+            this.showToast('Success', 'Skill config updated', 'success');
+            this.loadProjectSkills(projectId);
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    async showProjectSkillModal(projectId, skillId) {
+        let skill = null;
+        if (skillId) {
+            const data = await this.api('GET', `/projects/${projectId}/skills`);
+            skill = (data.project_skills || []).find(s => s.id === skillId);
+        }
+
+        const isEdit = !!skill;
+        const title = isEdit ? 'Edit Project Skill' : 'New Project Skill';
+
+        const modal = document.createElement('div');
+        modal.className = 'modal-overlay active';
+        modal.innerHTML = `
+            <div class="modal" style="max-width: 600px;">
+                <div class="modal-header">
+                    <div class="modal-title">${title}</div>
+                    <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label>Name</label>
+                        <input type="text" id="ps-modal-name" class="form-input" value="${this.escapeHtml(skill?.name || '')}" placeholder="skill-name (lowercase, hyphens)">
+                    </div>
+                    <div class="form-group">
+                        <label>Category</label>
+                        <input type="text" id="ps-modal-category" class="form-input" value="${this.escapeHtml(skill?.category || '')}" placeholder="e.g. coding, testing">
+                    </div>
+                    <div class="form-group">
+                        <label>Content (Markdown)</label>
+                        <textarea id="ps-modal-content" class="form-input" rows="12" style="font-family: monospace; font-size: 12px;">${this.escapeHtml(skill?.content || '')}</textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+                    <button class="btn btn-primary" onclick="app.saveProjectSkill(${projectId}, ${skillId || 'null'})">${isEdit ? 'Save' : 'Create'}</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+    }
+
+    async saveProjectSkill(projectId, skillId) {
+        const name = document.getElementById('ps-modal-name')?.value?.trim();
+        const content = document.getElementById('ps-modal-content')?.value || '';
+        const category = document.getElementById('ps-modal-category')?.value?.trim() || '';
+
+        if (!name) {
+            this.showToast('Error', 'Name is required', 'error');
+            return;
+        }
+
+        try {
+            if (skillId) {
+                await this.api('PUT', `/projects/${projectId}/skills/${skillId}`, { name, content, category });
+            } else {
+                await this.api('POST', `/projects/${projectId}/skills`, { name, content, category });
+            }
+            document.querySelector('.modal-overlay.active')?.remove();
+            this.showToast('Success', skillId ? 'Skill updated' : 'Skill created', 'success');
+            this.loadProjectSkills(projectId);
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    async toggleProjectSkill(projectId, skillId, enabled) {
+        try {
+            await this.api('PUT', `/projects/${projectId}/skills/${skillId}`, { enabled });
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+            this.loadProjectSkills(projectId);
+        }
+    }
+
+    async deleteProjectSkill(projectId, skillId, name) {
+        if (!confirm(`Delete project skill "${name}"?`)) return;
+        try {
+            await this.api('DELETE', `/projects/${projectId}/skills/${skillId}`);
+            this.showToast('Success', 'Skill deleted', 'success');
+            this.loadProjectSkills(projectId);
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    // --- End Project Skills ---
 
     async loadProjectTokenUsage(projectId, days = 30) {
         const container = document.getElementById('project-token-usage');
@@ -4270,6 +4515,14 @@ class DevManager {
         document.getElementById('btn-link-task')?.addEventListener('click', () => {
             const sessionId = window.terminalManager?.activeSessionId || this.currentSession;
             if (sessionId) this.showLinkTaskModal(sessionId);
+        });
+
+        // View Task button (navigate from session to linked task)
+        document.getElementById('btn-view-task')?.addEventListener('click', () => {
+            const btn = document.getElementById('btn-view-task');
+            const projectId = parseInt(btn.dataset.projectId, 10);
+            const taskId = parseInt(btn.dataset.taskId, 10);
+            if (projectId && taskId) this.viewTaskDetail(projectId, taskId);
         });
 
         // Stop session button
