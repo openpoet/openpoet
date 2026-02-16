@@ -76,6 +76,23 @@ func main() {
 
 	// Handle mcp-serve subcommand before flag parsing
 	if len(os.Args) > 1 && os.Args[1] == "mcp-serve" {
+		// Parse CLI args for session-id and api-url.
+		// CLI args are more reliable than env vars because not all MCP clients
+		// pass the "env" field from the MCP config to subprocesses.
+		for i := 2; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "--session-id":
+				if i+1 < len(os.Args) {
+					os.Setenv("DEVMANAGER_SESSION_ID", os.Args[i+1])
+					i++
+				}
+			case "--api-url":
+				if i+1 < len(os.Args) {
+					os.Setenv("DEVMANAGER_API_URL", os.Args[i+1])
+					i++
+				}
+			}
+		}
 		apiURL := os.Getenv("DEVMANAGER_API_URL")
 		if apiURL == "" {
 			apiURL = "http://localhost:8080"
@@ -418,6 +435,9 @@ func main() {
 		r.Get("/projects/{id}/tasks/{taskId}/sessions", api.ListTaskSessions)
 		r.Get("/projects/{id}/tasks/{taskId}/history", api.ListTaskHistory)
 		r.Post("/projects/{id}/tasks/{taskId}/history", api.AddTaskComment)
+		r.Post("/projects/{id}/tasks/{taskId}/approve", api.ApproveTaskVerification)
+		r.Post("/projects/{id}/tasks/{taskId}/reject", api.RejectTaskVerification)
+		r.Get("/projects/{id}/tasks/{taskId}/documents", api.ListTaskDocuments)
 
 		// Global Tasks (cross-project)
 		r.Get("/tasks/session-summary", api.GetAllTaskSessionSummary)

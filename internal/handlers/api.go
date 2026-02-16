@@ -1723,6 +1723,7 @@ func (a *API) CreateTempDocument(w http.ResponseWriter, r *http.Request) {
 		Title          string `json:"title"`
 		Content        string `json:"content"`
 		ConversationID string `json:"conversation_id"`
+		TaskID         string `json:"task_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
@@ -1739,11 +1740,13 @@ func (a *API) CreateTempDocument(w http.ResponseWriter, r *http.Request) {
 	}
 
 	convID, _ := strconv.ParseInt(input.ConversationID, 10, 64)
+	taskID, _ := strconv.ParseInt(input.TaskID, 10, 64)
 	doc := &database.TempDocument{
 		ID:             uuid.New().String()[:8],
 		Title:          title,
 		Content:        input.Content,
 		ConversationID: sql.NullInt64{Int64: convID, Valid: convID > 0},
+		TaskID:         sql.NullInt64{Int64: taskID, Valid: taskID > 0},
 	}
 	if err := a.db.CreateTempDocument(r.Context(), doc); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -1925,9 +1928,9 @@ func (a *API) CreateProjectTask(w http.ResponseWriter, r *http.Request) {
 	if input.Status == "" {
 		input.Status = "todo"
 	}
-	validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "blocked": true}
+	validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "blocked": true, "awaiting_approval": true}
 	if !validStatuses[input.Status] {
-		respondError(w, http.StatusBadRequest, "Invalid status. Must be: todo, in_progress, done, blocked")
+		respondError(w, http.StatusBadRequest, "Invalid status. Must be: todo, in_progress, awaiting_approval, done, blocked")
 		return
 	}
 
@@ -2059,7 +2062,7 @@ func (a *API) UpdateProjectTask(w http.ResponseWriter, r *http.Request) {
 		task.Description = *input.Description
 	}
 	if input.Status != nil {
-		validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "blocked": true}
+		validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "blocked": true, "awaiting_approval": true}
 		if !validStatuses[*input.Status] {
 			respondError(w, http.StatusBadRequest, "Invalid status")
 			return
@@ -2152,7 +2155,7 @@ func (a *API) UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "blocked": true}
+	validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "blocked": true, "awaiting_approval": true}
 	if !validStatuses[input.Status] {
 		respondError(w, http.StatusBadRequest, "Invalid status")
 		return
@@ -2175,6 +2178,101 @@ func (a *API) UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 			"old": oldStatus, "new": input.Status,
 		}, "user", "")
 	}
+
+	// Trigger async verification document generation when transitioning to awaiting_approval
+	if input.Status == "awaiting_approval" && a.aiHandler != nil {
+		go a.aiHandler.GenerateVerificationDoc(context.Background(), task)
+	}
+
+	respondJSON(w, http.StatusOK, task)
+}
+
+// ApproveTaskVerification approves an awaiting_approval task, transitioning it to done.
+func (a *API) ApproveTaskVerification(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+	taskID, err := strconv.ParseInt(chi.URLParam(r, "taskId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid task ID")
+		return
+	}
+
+	task, err := a.db.GetTask(r.Context(), taskID)
+	if err != nil || task.ProjectID != projectID {
+		respondError(w, http.StatusNotFound, "Task not found")
+		return
+	}
+	if task.Status != "awaiting_approval" {
+		respondError(w, http.StatusBadRequest, "Task is not awaiting approval")
+		return
+	}
+
+	// Update verification document status if present
+	if task.VerificationDocID != "" {
+		a.db.UpdateTempDocumentStatus(r.Context(), task.VerificationDocID, "approved")
+	}
+
+	// Transition task to done
+	if err := a.db.UpdateTaskStatus(r.Context(), taskID, "done"); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	task, _ = a.db.GetTask(r.Context(), taskID)
+	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
+	a.recordTaskHistory(r.Context(), taskID, projectID, "verification_approved", map[string]interface{}{
+		"old": "awaiting_approval", "new": "done",
+	}, "user", "")
+
+	respondJSON(w, http.StatusOK, task)
+}
+
+// RejectTaskVerification rejects an awaiting_approval task, returning it to in_progress.
+func (a *API) RejectTaskVerification(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+	taskID, err := strconv.ParseInt(chi.URLParam(r, "taskId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid task ID")
+		return
+	}
+
+	task, err := a.db.GetTask(r.Context(), taskID)
+	if err != nil || task.ProjectID != projectID {
+		respondError(w, http.StatusNotFound, "Task not found")
+		return
+	}
+	if task.Status != "awaiting_approval" {
+		respondError(w, http.StatusBadRequest, "Task is not awaiting approval")
+		return
+	}
+
+	// Update verification document status if present
+	if task.VerificationDocID != "" {
+		a.db.UpdateTempDocumentStatus(r.Context(), task.VerificationDocID, "rejected")
+	}
+
+	// Clear verification doc and return to in_progress
+	task.VerificationDocID = ""
+	a.db.SetTaskVerificationDoc(r.Context(), taskID, "")
+
+	if err := a.db.UpdateTaskStatus(r.Context(), taskID, "in_progress"); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	task, _ = a.db.GetTask(r.Context(), taskID)
+	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
+	a.recordTaskHistory(r.Context(), taskID, projectID, "verification_rejected", map[string]interface{}{
+		"old": "awaiting_approval", "new": "in_progress",
+	}, "user", "")
+
 	respondJSON(w, http.StatusOK, task)
 }
 
@@ -2491,6 +2589,66 @@ func (a *API) AddTaskComment(w http.ResponseWriter, r *http.Request) {
 		"comment": strings.TrimSpace(input.Comment),
 	}, "user", "")
 	respondJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
+}
+
+// ListTaskDocuments returns all documents associated with a task (temp_documents + session plans).
+func (a *API) ListTaskDocuments(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+	taskID, err := strconv.ParseInt(chi.URLParam(r, "taskId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid task ID")
+		return
+	}
+	task, err := a.db.GetTask(r.Context(), taskID)
+	if err != nil || task.ProjectID != projectID {
+		respondError(w, http.StatusNotFound, "Task not found")
+		return
+	}
+
+	type docEntry struct {
+		ID        string    `json:"id"`
+		Title     string    `json:"title"`
+		Type      string    `json:"type"`   // "document" or "plan"
+		Status    string    `json:"status"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+
+	var results []docEntry
+
+	// 1. Temp documents linked to this task
+	docs, _ := a.db.ListDocumentsByTask(r.Context(), taskID)
+	for _, d := range docs {
+		results = append(results, docEntry{
+			ID:        d.ID,
+			Title:     d.Title,
+			Type:      "document",
+			Status:    d.Status,
+			CreatedAt: d.CreatedAt,
+		})
+	}
+
+	// 2. Session plans from linked sessions
+	sessions, _ := a.db.GetSessionsForTask(r.Context(), taskID)
+	for _, s := range sessions {
+		if s.PlanContent != "" {
+			results = append(results, docEntry{
+				ID:        "plan:" + s.ID,
+				Title:     "Plano: " + s.Name,
+				Type:      "plan",
+				Status:    s.Status,
+				CreatedAt: s.StartTime,
+			})
+		}
+	}
+
+	if results == nil {
+		results = []docEntry{}
+	}
+	respondJSON(w, http.StatusOK, results)
 }
 
 // TriggerSessionEvaluation triggers an AI evaluation for the current session

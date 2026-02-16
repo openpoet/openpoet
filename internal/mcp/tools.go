@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"devmanager/internal/llm"
 )
@@ -255,6 +256,56 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return fmt.Sprintf("Task %d deleted", taskID), nil
 
+	case "devmanager_get_task":
+		projectID := getProjectID(params)
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		taskID, ok := getTaskID(params)
+		if !ok {
+			return "", fmt.Errorf("task_id is required")
+		}
+		body, err := client.Get(fmt.Sprintf("/api/projects/%d/tasks/%d", projectID, taskID))
+		if err != nil {
+			return "", err
+		}
+		return formatTaskDetail(client, projectID, taskID, body)
+
+	case "devmanager_read_document":
+		docID, _ := params["document_id"].(string)
+		if docID == "" {
+			return "", fmt.Errorf("document_id is required")
+		}
+		if strings.HasPrefix(docID, "plan:") {
+			sessionID := strings.TrimPrefix(docID, "plan:")
+			body, err := client.Get(fmt.Sprintf("/api/sessions/%s/plan", sessionID))
+			if err != nil {
+				return "", err
+			}
+			var plan struct {
+				Content   string `json:"content"`
+				UpdatedAt string `json:"updated_at"`
+			}
+			if json.Unmarshal(body, &plan) == nil && plan.Content != "" {
+				return fmt.Sprintf("## Session Plan\n\n%s", plan.Content), nil
+			}
+			return string(body), nil
+		}
+		body, err := client.Get(fmt.Sprintf("/api/documents/%s", docID))
+		if err != nil {
+			return "", err
+		}
+		var doc struct {
+			ID      string `json:"id"`
+			Title   string `json:"title"`
+			Content string `json:"content"`
+			Status  string `json:"status"`
+		}
+		if json.Unmarshal(body, &doc) == nil {
+			return fmt.Sprintf("## %s\n\nStatus: %s | ID: %s\n\n%s", doc.Title, doc.Status, doc.ID, doc.Content), nil
+		}
+		return string(body), nil
+
 	case "devmanager_update_memory_doc":
 		projectID, ok := getID(params)
 		if !ok {
@@ -433,11 +484,15 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		if content == "" {
 			return "", fmt.Errorf("content is required")
 		}
-		payload, _ := json.Marshal(map[string]interface{}{
+		docPayload := map[string]interface{}{
 			"title":           title,
 			"content":         content,
 			"conversation_id": convID,
-		})
+		}
+		if taskID, ok := params["task_id"].(string); ok && taskID != "" {
+			docPayload["task_id"] = taskID
+		}
+		payload, _ := json.Marshal(docPayload)
 		body, err := client.Post("/api/documents", string(payload))
 		if err != nil {
 			return "", err
@@ -504,7 +559,7 @@ func executeDashboard(client *APIClient) (string, error) {
 	}
 
 	// Build project summaries with task counts
-	totalTasks := map[string]int{"todo": 0, "in_progress": 0, "done": 0, "blocked": 0}
+	totalTasks := map[string]int{"todo": 0, "in_progress": 0, "done": 0, "blocked": 0, "awaiting_approval": 0}
 	var projectSummaries []projectSummary
 	for _, p := range projects {
 		tasksBody, _ := client.Get(fmt.Sprintf("/api/projects/%d/tasks", p.ID))
@@ -526,7 +581,7 @@ func executeDashboard(client *APIClient) (string, error) {
 			}
 		}
 
-		taskCounts := map[string]int{"todo": 0, "in_progress": 0, "done": 0, "blocked": 0}
+		taskCounts := map[string]int{"todo": 0, "in_progress": 0, "done": 0, "blocked": 0, "awaiting_approval": 0}
 		for _, t := range tasks {
 			if parentIDs[t.ID] {
 				continue // skip umbrella tasks
@@ -821,10 +876,11 @@ func formatTaskList(body []byte) (string, error) {
 	}
 
 	statusIcons := map[string]string{
-		"todo":        "[ ]",
-		"in_progress": "[~]",
-		"done":        "[x]",
-		"blocked":     "[!]",
+		"todo":              "[ ]",
+		"in_progress":       "[~]",
+		"done":              "[x]",
+		"blocked":           "[!]",
+		"awaiting_approval": "[?]",
 	}
 	priorityLabels := map[string]string{
 		"low":    "LOW",
@@ -869,6 +925,141 @@ func formatTaskList(body []byte) (string, error) {
 		result += fmt.Sprintf("%s%s [%d] %s (%s%s)%s\n", indent, icon, t.ID, t.Title, prio, due, umbrella)
 	}
 	return result, nil
+}
+
+// formatTaskDetail fetches task details, history, documents, and sessions,
+// returning a rich text summary with document metadata (no content).
+func formatTaskDetail(client *APIClient, projectID int64, taskID int64, taskBody []byte) (string, error) {
+	var task struct {
+		ID          int64  `json:"id"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Status      string `json:"status"`
+		Priority    string `json:"priority"`
+		DueDate     *struct {
+			Time  string `json:"Time"`
+			Valid bool   `json:"Valid"`
+		} `json:"due_date"`
+		ParentID *struct {
+			Int64 int64 `json:"Int64"`
+			Valid bool  `json:"Valid"`
+		} `json:"parent_id"`
+	}
+	if err := json.Unmarshal(taskBody, &task); err != nil {
+		return string(taskBody), nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("## Task #%d: %s\n", task.ID, task.Title))
+	sb.WriteString(fmt.Sprintf("Status: %s | Priority: %s", task.Status, task.Priority))
+	if task.DueDate != nil && task.DueDate.Valid {
+		sb.WriteString(fmt.Sprintf(" | Due: %s", task.DueDate.Time[:10]))
+	}
+	if task.ParentID != nil && task.ParentID.Valid {
+		sb.WriteString(fmt.Sprintf(" | Parent: #%d", task.ParentID.Int64))
+	}
+	sb.WriteString("\n")
+
+	if task.Description != "" {
+		sb.WriteString(fmt.Sprintf("\n### Description\n%s\n", task.Description))
+	}
+
+	// Fetch documents
+	docsBody, err := client.Get(fmt.Sprintf("/api/projects/%d/tasks/%d/documents", projectID, taskID))
+	if err == nil {
+		var docs []struct {
+			ID        string `json:"id"`
+			Title     string `json:"title"`
+			Type      string `json:"type"`
+			Status    string `json:"status"`
+			CreatedAt string `json:"created_at"`
+		}
+		if json.Unmarshal(docsBody, &docs) == nil && len(docs) > 0 {
+			sb.WriteString(fmt.Sprintf("\n### Documents (%d)\n", len(docs)))
+			for _, d := range docs {
+				icon := "[D]"
+				if d.Type == "plan" {
+					icon = "[P]"
+				} else if strings.HasPrefix(d.Title, "Verificação") || strings.HasPrefix(d.Title, "Verificacao") {
+					icon = "[V]"
+				}
+				sb.WriteString(fmt.Sprintf("- %s %s (id: %s, status: %s)\n", icon, d.Title, d.ID, d.Status))
+			}
+			sb.WriteString("\nUse devmanager_read_document to read a document's content.\n")
+		}
+	}
+
+	// Fetch history (recent 20)
+	historyBody, err := client.Get(fmt.Sprintf("/api/projects/%d/tasks/%d/history?limit=20", projectID, taskID))
+	if err == nil {
+		var entries []struct {
+			EventType string          `json:"event_type"`
+			Details   json.RawMessage `json:"details"`
+			Actor     string          `json:"actor"`
+			CreatedAt string          `json:"created_at"`
+		}
+		if json.Unmarshal(historyBody, &entries) == nil && len(entries) > 0 {
+			sb.WriteString(fmt.Sprintf("\n### History (recent %d)\n", len(entries)))
+			eventIcons := map[string]string{
+				"task_created":             "[+]",
+				"status_change":            "[~]",
+				"priority_change":          "[~]",
+				"comment_added":            "[C]",
+				"session_linked":           "[S]",
+				"session_started":          "[>]",
+				"session_ended":            "[.]",
+				"verification_doc_created": "[V]",
+				"verification_approved":    "[A]",
+				"verification_rejected":    "[R]",
+				"task_assigned":            "[@]",
+			}
+			for _, e := range entries {
+				icon := eventIcons[e.EventType]
+				if icon == "" {
+					icon = "[-]"
+				}
+				// Parse details for extra context
+				detail := ""
+				var detailMap map[string]interface{}
+				if json.Unmarshal(e.Details, &detailMap) == nil {
+					if from, ok := detailMap["from"].(string); ok {
+						if to, ok := detailMap["to"].(string); ok {
+							detail = fmt.Sprintf(": %s → %s", from, to)
+						}
+					}
+					if comment, ok := detailMap["comment"].(string); ok {
+						if len(comment) > 80 {
+							comment = comment[:80] + "..."
+						}
+						detail = fmt.Sprintf(": %s", comment)
+					}
+				}
+				ts := e.CreatedAt
+				if len(ts) > 16 {
+					ts = ts[:16]
+				}
+				sb.WriteString(fmt.Sprintf("%s %s%s — %s\n", icon, e.EventType, detail, ts))
+			}
+		}
+	}
+
+	// Fetch sessions
+	sessionsBody, err := client.Get(fmt.Sprintf("/api/projects/%d/tasks/%d/sessions", projectID, taskID))
+	if err == nil {
+		var sessions []struct {
+			ID     string `json:"id"`
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(sessionsBody, &sessions) == nil && len(sessions) > 0 {
+			sb.WriteString(fmt.Sprintf("\n### Sessions (%d)\n", len(sessions)))
+			for _, s := range sessions {
+				sb.WriteString(fmt.Sprintf("- %s (%s) — %s\n", s.Name, s.Status, s.ID[:8]))
+			}
+		}
+	}
+
+	return sb.String(), nil
 }
 
 // normalizeMCPParams converts args and env fields to JSON strings if they were

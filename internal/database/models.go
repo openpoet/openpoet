@@ -140,6 +140,7 @@ type TempDocument struct {
 	Title          string        `db:"title" json:"title"`
 	Content        string        `db:"content" json:"content"`
 	ConversationID sql.NullInt64 `db:"conversation_id" json:"conversation_id,omitempty"`
+	TaskID         sql.NullInt64 `db:"task_id" json:"task_id,omitempty"`
 	Summary        string        `db:"summary" json:"summary"`
 	Status         string        `db:"status" json:"status"`
 	MessageID      int64         `db:"message_id" json:"message_id"`
@@ -153,12 +154,13 @@ type ProjectTask struct {
 	ParentID    sql.NullInt64 `db:"parent_id" json:"parent_id,omitempty"`
 	Title       string       `db:"title" json:"title"`
 	Description string       `db:"description" json:"description"`
-	Status      string       `db:"status" json:"status"`       // 'todo', 'in_progress', 'done', 'blocked'
+	Status      string       `db:"status" json:"status"`       // 'todo', 'in_progress', 'awaiting_approval', 'done', 'blocked'
 	Priority    string       `db:"priority" json:"priority"`   // 'low', 'medium', 'high', 'urgent'
 	DueDate     sql.NullTime `db:"due_date" json:"due_date,omitempty"`
 	SortOrder       int          `db:"sort_order" json:"sort_order"`
 	GlobalSortOrder int          `db:"global_sort_order" json:"global_sort_order"`
-	DueNotified     bool         `db:"due_notified" json:"due_notified"`
+	DueNotified        bool         `db:"due_notified" json:"due_notified"`
+	VerificationDocID  string       `db:"verification_doc_id" json:"verification_doc_id"`
 	CreatedAt   time.Time    `db:"created_at" json:"created_at"`
 	UpdatedAt   time.Time    `db:"updated_at" json:"updated_at"`
 }

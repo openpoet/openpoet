@@ -698,7 +698,7 @@ class DevManager {
                 // Render task items
                 listEl.innerHTML = pendingTasks.map(task => {
                     const priorityClass = `priority-${task.priority || 'medium'}`;
-                    const statusLabel = (task.status || 'todo').replace('_', ' ');
+                    const statusLabel = (task.status || 'todo').replace(/_/g, ' ');
                     const descSnippet = task.description
                         ? this.escapeHtml(task.description.substring(0, 60)) + (task.description.length > 60 ? '...' : '')
                         : '';
@@ -911,7 +911,7 @@ class DevManager {
             } else {
                 listEl.innerHTML = pendingTasks.map(task => {
                     const priorityClass = `priority-${task.priority || 'medium'}`;
-                    const statusLabel = (task.status || 'todo').replace('_', ' ');
+                    const statusLabel = (task.status || 'todo').replace(/_/g, ' ');
                     return `
                         <div class="task-select-item link-task-item" data-task-id="${task.id}">
                             <div class="task-priority-indicator ${priorityClass}"></div>
@@ -5121,11 +5121,12 @@ class DevManager {
             if (summaryEl) {
                 const parentIds = new Set();
                 tasks.filter(t => t.parent_id?.Valid).forEach(t => parentIds.add(t.parent_id.Int64));
-                const counts = { todo: 0, in_progress: 0, done: 0, blocked: 0 };
+                const counts = { todo: 0, in_progress: 0, awaiting_approval: 0, done: 0, blocked: 0 };
                 tasks.filter(t => !parentIds.has(t.id)).forEach(t => { if (counts[t.status] !== undefined) counts[t.status]++; });
                 summaryEl.innerHTML = `
                     <span class="summary-item"><span class="badge-todo task-status-badge" style="cursor:default">${counts.todo}</span> todo</span>
                     <span class="summary-item"><span class="badge-in_progress task-status-badge" style="cursor:default">${counts.in_progress}</span> prog</span>
+                    ${counts.awaiting_approval > 0 ? `<span class="summary-item"><span class="badge-awaiting_approval task-status-badge" style="cursor:default">${counts.awaiting_approval}</span> approval</span>` : ''}
                     <span class="summary-item"><span class="badge-done task-status-badge" style="cursor:default">${counts.done}</span> done</span>
                     ${counts.blocked > 0 ? `<span class="summary-item"><span class="badge-blocked task-status-badge" style="cursor:default">${counts.blocked}</span> block</span>` : ''}
                 `;
@@ -5364,7 +5365,12 @@ class DevManager {
     }
 
     async cycleTaskStatus(projectId, taskId, currentStatus) {
-        const cycle = { 'todo': 'in_progress', 'in_progress': 'done', 'done': 'todo', 'blocked': 'todo' };
+        // awaiting_approval should open detail view for approve/reject, not cycle
+        if (currentStatus === 'awaiting_approval') {
+            this.viewTaskDetail(projectId, taskId);
+            return;
+        }
+        const cycle = { 'todo': 'in_progress', 'in_progress': 'awaiting_approval', 'done': 'todo', 'blocked': 'todo' };
         const newStatus = cycle[currentStatus] || 'todo';
         try {
             await this.api('PATCH', `/projects/${projectId}/tasks/${taskId}/status`, { status: newStatus });
@@ -5842,6 +5848,7 @@ class DevManager {
                             <select class="form-input" name="status">
                                 <option value="todo" ${task?.status === 'todo' ? 'selected' : ''}>Todo</option>
                                 <option value="in_progress" ${task?.status === 'in_progress' ? 'selected' : ''}>In Progress</option>
+                                <option value="awaiting_approval" ${task?.status === 'awaiting_approval' ? 'selected' : ''}>Awaiting Approval</option>
                                 <option value="done" ${task?.status === 'done' ? 'selected' : ''}>Done</option>
                                 <option value="blocked" ${task?.status === 'blocked' ? 'selected' : ''}>Blocked</option>
                             </select>
@@ -5906,11 +5913,12 @@ class DevManager {
         this._viewingTaskDetail = { projectId, taskId };
 
         try {
-            const [task, sessions, allTasks, history] = await Promise.all([
+            const [task, sessions, allTasks, history, documents] = await Promise.all([
                 this.api('GET', `/projects/${projectId}/tasks/${taskId}`),
                 this.api('GET', `/projects/${projectId}/tasks/${taskId}/sessions`).catch(() => []),
                 this.api('GET', `/projects/${projectId}/tasks`).catch(() => []),
-                this.api('GET', `/projects/${projectId}/tasks/${taskId}/history?limit=50`).catch(() => [])
+                this.api('GET', `/projects/${projectId}/tasks/${taskId}/history?limit=50`).catch(() => []),
+                this.api('GET', `/projects/${projectId}/tasks/${taskId}/documents`).catch(() => [])
             ]);
 
             // Find subtasks of this task
@@ -5918,15 +5926,25 @@ class DevManager {
             const isUmbrella = subtasks.length > 0;
 
             let md = '';
+            const isAwaitingApproval = task.status === 'awaiting_approval';
 
             // Status & Priority
-            const statusLabel = (task.status || 'todo').replace('_', ' ');
+            const statusLabel = (task.status || 'todo').replace(/_/g, ' ');
             const priorityLabel = task.priority || 'medium';
             if (isUmbrella) {
                 const doneCount = subtasks.filter(s => s.status === 'done').length;
                 md += `**Status:** ${statusLabel} &nbsp;|&nbsp; **Prioridade:** ${priorityLabel} &nbsp;|&nbsp; **Umbrella:** ${doneCount}/${subtasks.length} concluídas\n\n`;
             } else {
                 md += `**Status:** ${statusLabel} &nbsp;|&nbsp; **Prioridade:** ${priorityLabel}\n\n`;
+            }
+
+            // Awaiting approval notice
+            if (isAwaitingApproval) {
+                if (task.verification_doc_id) {
+                    md += `> **Aguardando Aprovação** — Documento de verificação disponível. Use os botões abaixo para aprovar ou rejeitar.\n\n`;
+                } else {
+                    md += `> **Aguardando Aprovação** — Gerando documento de verificação...\n\n`;
+                }
             }
 
             // Due date
@@ -5946,7 +5964,7 @@ class DevManager {
 
             // Subtasks section
             if (isUmbrella) {
-                const statusIcons = { done: '[x]', in_progress: '[~]', todo: '[ ]', blocked: '[!]' };
+                const statusIcons = { done: '[x]', in_progress: '[~]', todo: '[ ]', blocked: '[!]', awaiting_approval: '[?]' };
                 md += `---\n\n### Subtarefas\n\n`;
                 for (const sub of subtasks) {
                     const icon = statusIcons[sub.status] || '[ ]';
@@ -5976,6 +5994,16 @@ class DevManager {
                 }
             }
 
+            // Documents section
+            if (documents && documents.length > 0) {
+                md += `---\n\n### Documentos\n\n`;
+                for (const doc of documents) {
+                    const docIcon = doc.type === 'plan' ? '[P]' : (doc.title.startsWith('Verificação') || doc.title.startsWith('Verificacao') ? '[V]' : '[D]');
+                    const time = this.relativeTime(doc.created_at);
+                    md += `${docIcon} **${this.escapeHtml(doc.title)}** — *${time}* <a href="#" onclick="app.openTaskDoc('${doc.id}', '${doc.type}'); return false;" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Abrir</a>\n\n`;
+                }
+            }
+
             // History timeline
             if (history && history.length > 0) {
                 md += `---\n\n### Historico\n\n`;
@@ -5983,7 +6011,8 @@ class DevManager {
                     const icon = this.taskHistoryIcon(entry.event_type);
                     const label = this.taskHistoryLabel(entry);
                     const time = this.relativeTime(entry.created_at);
-                    md += `${icon} ${label} — *${time}*\n\n`;
+                    const docLink = this.taskHistoryDocLink(entry);
+                    md += `${icon} ${label}${docLink} — *${time}*\n\n`;
                 }
             }
 
@@ -6006,10 +6035,51 @@ class DevManager {
                 }
             ];
 
-            if (!isDone) {
-                const cycle = { 'todo': 'in_progress', 'in_progress': 'done', 'blocked': 'todo' };
+            if (isAwaitingApproval) {
+                // Show verification document button if available
+                if (task.verification_doc_id) {
+                    actions.push({
+                        label: 'Ver Documento',
+                        class: 'btn btn-secondary',
+                        onClick: () => {
+                            window.docViewer.open(task.verification_doc_id);
+                        }
+                    });
+                }
+                // Approve button
+                actions.push({
+                    label: 'Aprovar',
+                    class: 'btn btn-success',
+                    onClick: async () => {
+                        try {
+                            await this.api('POST', `/projects/${projectId}/tasks/${taskId}/approve`);
+                            window.docViewer.close();
+                            this.showToast('Sucesso', 'Tarefa aprovada e marcada como done', 'success');
+                            this.loadAllTasks();
+                        } catch (e) {
+                            this.showToast('Erro', e.message, 'error');
+                        }
+                    }
+                });
+                // Reject button
+                actions.push({
+                    label: 'Rejeitar',
+                    class: 'btn btn-danger',
+                    onClick: async () => {
+                        try {
+                            await this.api('POST', `/projects/${projectId}/tasks/${taskId}/reject`);
+                            window.docViewer.close();
+                            this.showToast('Info', 'Tarefa retornada para in_progress', 'info');
+                            this.loadAllTasks();
+                        } catch (e) {
+                            this.showToast('Erro', e.message, 'error');
+                        }
+                    }
+                });
+            } else if (!isDone) {
+                const cycle = { 'todo': 'in_progress', 'in_progress': 'awaiting_approval', 'blocked': 'todo' };
                 const next = cycle[task.status] || 'in_progress';
-                const nextLabel = next.replace('_', ' ');
+                const nextLabel = next.replace(/_/g, ' ');
                 actions.push({
                     label: `Marcar ${nextLabel}`,
                     class: 'btn btn-primary',
@@ -6114,6 +6184,9 @@ class DevManager {
             comment_added: '**[N]**',
             task_assigned: '**[=]**',
             parent_changed: '**[P]**',
+            verification_doc_created: '**[V]**',
+            verification_approved: '**[OK]**',
+            verification_rejected: '**[X]**',
         };
         return icons[eventType] || '**[?]**';
     }
@@ -6142,10 +6215,40 @@ class DevManager {
             comment_added: () => details.comment || 'Nota adicionada',
             task_assigned: () => `Tarefa atribuida a sessao`,
             parent_changed: () => `Tarefa pai alterada`,
+            verification_doc_created: () => `Documento de verificacao gerado`,
+            verification_approved: () => `Verificacao aprovada — tarefa concluida`,
+            verification_rejected: () => `Verificacao rejeitada — retornada para in_progress`,
         };
 
         const fn = labels[entry.event_type];
         return fn ? fn() : entry.event_type;
+    }
+
+    taskHistoryDocLink(entry) {
+        let details = {};
+        try { details = JSON.parse(entry.details || '{}'); } catch {}
+        if (entry.event_type === 'verification_doc_created' && details.doc_id) {
+            return ` <a href="#" onclick="app.openTaskDoc('${details.doc_id}', 'document'); return false;" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Abrir</a>`;
+        }
+        return '';
+    }
+
+    async openTaskDoc(docId, type) {
+        if (type === 'plan') {
+            const sessionId = docId.replace('plan:', '');
+            try {
+                const data = await this.api('GET', `/sessions/${sessionId}/plan`);
+                if (data?.content) {
+                    window.docViewer.openWithContent('Plano de Sessão', data.content);
+                } else {
+                    this.showToast('Info', 'Plano vazio', 'info');
+                }
+            } catch (e) {
+                this.showToast('Erro', 'Falha ao carregar plano', 'error');
+            }
+        } else {
+            window.docViewer.open(docId);
+        }
     }
 
     async discussTaskWithAI(projectId, taskId) {
@@ -6337,6 +6440,7 @@ class DevManager {
                         <div class="stat-card stat-total${activeStatus === '' ? ' active' : ''}" data-filter="" onclick="app.filterByStatus('')"><span class="stat-number">${total}</span><span class="stat-label">Total</span></div>
                         <div class="stat-card stat-todo${activeStatus === 'todo' ? ' active' : ''}" data-filter="todo" onclick="app.filterByStatus('todo')"><span class="stat-number">${summary.todo || 0}</span><span class="stat-label">Todo</span></div>
                         <div class="stat-card stat-progress${activeStatus === 'in_progress' ? ' active' : ''}" data-filter="in_progress" onclick="app.filterByStatus('in_progress')"><span class="stat-number">${summary.in_progress || 0}</span><span class="stat-label">In Progress</span></div>
+                        <div class="stat-card stat-approval${activeStatus === 'awaiting_approval' ? ' active' : ''}" data-filter="awaiting_approval" onclick="app.filterByStatus('awaiting_approval')"><span class="stat-number">${summary.awaiting_approval || 0}</span><span class="stat-label">Approval</span></div>
                         <div class="stat-card stat-done${activeStatus === 'done' ? ' active' : ''}" data-filter="done" onclick="app.filterByStatus('done')"><span class="stat-number">${summary.done || 0}</span><span class="stat-label">Done</span></div>
                         <div class="stat-card stat-blocked${activeStatus === 'blocked' ? ' active' : ''}" data-filter="blocked" onclick="app.filterByStatus('blocked')"><span class="stat-number">${summary.blocked || 0}</span><span class="stat-label">Blocked</span></div>
                     </div>

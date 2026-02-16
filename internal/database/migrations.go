@@ -39,6 +39,8 @@ var migrations = []Migration{
 	{Version: 21, Description: "ai: add feedback_ack to temp_documents and session_id to ai_conversations", Up: migrateV21},
 	{Version: 22, Description: "sessions: add plan_content and plan_updated_at for persisting plans", Up: migrateV22},
 	{Version: 23, Description: "tasks: add task_history table for activity tracking", Up: migrateV23},
+	{Version: 24, Description: "tasks: add awaiting_approval status and verification_doc_id column", Up: migrateV24},
+	{Version: 25, Description: "docs: add task_id to temp_documents for task-document linking", Up: migrateV25},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -586,6 +588,70 @@ func migrateV23(tx *sqlx.Tx) error {
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// migrateV24 adds awaiting_approval status and verification_doc_id column to project_tasks.
+func migrateV24(tx *sqlx.Tx) error {
+	// First, add the verification_doc_id column
+	_, err := tx.Exec(`ALTER TABLE project_tasks ADD COLUMN verification_doc_id TEXT NOT NULL DEFAULT ''`)
+	if err != nil {
+		// Column may already exist
+		log.Printf("migrateV24: ALTER TABLE (add column) note: %v", err)
+	}
+
+	// Check if constraint already supports 'awaiting_approval' by trying a test insert
+	_, err = tx.Exec("INSERT INTO project_tasks (project_id, title, status) VALUES (0, '__test_v24__', 'awaiting_approval')")
+	if err != nil {
+		// Constraint doesn't allow 'awaiting_approval' - need to recreate table
+		stmts := []string{
+			`CREATE TABLE project_tasks_new (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+				parent_id INTEGER REFERENCES project_tasks_new(id) ON DELETE CASCADE,
+				title TEXT NOT NULL,
+				description TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo', 'in_progress', 'done', 'blocked', 'awaiting_approval')),
+				priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('low', 'medium', 'high', 'urgent')),
+				due_date TIMESTAMP,
+				sort_order INTEGER NOT NULL DEFAULT 0,
+				global_sort_order INTEGER NOT NULL DEFAULT 0,
+				due_notified BOOLEAN NOT NULL DEFAULT 0,
+				verification_doc_id TEXT NOT NULL DEFAULT '',
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			)`,
+			`INSERT INTO project_tasks_new SELECT id, project_id, parent_id, title, description, status, priority, due_date, sort_order, global_sort_order, due_notified, verification_doc_id, created_at, updated_at FROM project_tasks`,
+			`DROP TABLE project_tasks`,
+			`ALTER TABLE project_tasks_new RENAME TO project_tasks`,
+			`CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks(project_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_project_tasks_parent ON project_tasks(parent_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_project_tasks_status ON project_tasks(status)`,
+			`CREATE INDEX IF NOT EXISTS idx_project_tasks_due_date ON project_tasks(due_date)`,
+		}
+		for _, s := range stmts {
+			if _, err := tx.Exec(s); err != nil {
+				return fmt.Errorf("migrateV24 statement failed: %w\nSQL: %s", err, s)
+			}
+		}
+	} else {
+		// Constraint already allows 'awaiting_approval' - clean up test row
+		tx.Exec("DELETE FROM project_tasks WHERE project_id = 0 AND title = '__test_v24__'")
+	}
+	return nil
+}
+
+// migrateV25 adds task_id column to temp_documents for linking documents to tasks.
+func migrateV25(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE temp_documents ADD COLUMN task_id INTEGER`,
+		`CREATE INDEX IF NOT EXISTS idx_temp_documents_task ON temp_documents(task_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			log.Printf("migrateV25: %v (may already exist)", err)
 		}
 	}
 	return nil
