@@ -22,6 +22,9 @@ class DevManager {
         this.pendingSessionOpen = null; // { sessionId, timestamp }
         this.recentlyCreatedSessions = new Set(); // Track sessions created in last 5 seconds
 
+        // View state preservation (scroll, filters, tabs)
+        this._viewState = {};
+
         this.init();
     }
 
@@ -116,6 +119,11 @@ class DevManager {
     }
 
     showView(viewName) {
+        // Capture state of current view before leaving
+        if (this.currentView) {
+            this._captureViewState(this.currentView);
+        }
+
         // Hide all views
         document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
 
@@ -137,6 +145,9 @@ class DevManager {
         // Dismiss any active session name tooltip/popup
         this._hideSessionTooltip();
         this._hideSessionPopup();
+
+        // Restore state of target view (filters/tabs BEFORE data refresh)
+        this._restoreViewState(viewName);
 
         // Refresh view data
         this.refreshViewData(viewName);
@@ -225,6 +236,80 @@ class DevManager {
                 this.loadConfig();
                 break;
         }
+    }
+
+    // View state preservation
+    _captureViewState(viewName) {
+        const state = {};
+        switch (viewName) {
+            case 'projects':
+                state.scrollTop = document.getElementById('projects-list')?.scrollTop || 0;
+                break;
+            case 'sessions':
+                state.scrollTop = document.getElementById('sessions-list')?.scrollTop || 0;
+                break;
+            case 'tasks':
+                state.scrollTop = document.getElementById('all-tasks-list')?.scrollTop || 0;
+                state.filterStatus = document.getElementById('filter-status')?.value || '';
+                state.filterPriority = document.getElementById('filter-priority')?.value || '';
+                state.filterProject = document.getElementById('filter-project')?.value || '';
+                state.filterSearch = document.getElementById('filter-search')?.value || '';
+                break;
+            case 'config':
+                state.scrollTop = document.getElementById('config-content')?.scrollTop || 0;
+                state.activeTab = document.querySelector('.tab-btn.active')?.dataset.tab || 'skills';
+                state.skillSearch = this._skillSearch || '';
+                state.skillFilterCategory = this._skillFilterCategory || '';
+                state.skillFilterStatus = this._skillFilterStatus || '';
+                break;
+            case 'project-detail':
+                state.scrollTop = document.getElementById('project-detail-content')?.scrollTop || 0;
+                state.projectId = this._detailProject?.id;
+                break;
+        }
+        this._viewState[viewName] = state;
+    }
+
+    _restoreViewState(viewName) {
+        const state = this._viewState[viewName];
+        if (!state) return;
+        switch (viewName) {
+            case 'tasks': {
+                const statusEl = document.getElementById('filter-status');
+                if (statusEl) statusEl.value = state.filterStatus || '';
+                const priorityEl = document.getElementById('filter-priority');
+                if (priorityEl) priorityEl.value = state.filterPriority || '';
+                const searchEl = document.getElementById('filter-search');
+                if (searchEl) searchEl.value = state.filterSearch || '';
+                const projectEl = document.getElementById('filter-project');
+                if (projectEl) projectEl.value = state.filterProject || '';
+                this._pendingFilterProject = state.filterProject || '';
+                break;
+            }
+            case 'config':
+                if (state.activeTab) {
+                    document.querySelectorAll('.tab-btn').forEach(b => {
+                        b.classList.toggle('active', b.dataset.tab === state.activeTab);
+                    });
+                }
+                this._skillSearch = state.skillSearch || '';
+                this._skillFilterCategory = state.skillFilterCategory || '';
+                this._skillFilterStatus = state.skillFilterStatus || '';
+                break;
+            case 'project-detail':
+                if (state.projectId && (!this._detailProject || this._detailProject.id !== state.projectId)) {
+                    this.showProjectDetail(state.projectId);
+                }
+                break;
+        }
+    }
+
+    _restoreScrollTop(elementId, scrollTop) {
+        if (!scrollTop) return;
+        requestAnimationFrame(() => {
+            const el = document.getElementById(elementId);
+            if (el) el.scrollTop = scrollTop;
+        });
     }
 
     // WebSocket
@@ -411,6 +496,7 @@ class DevManager {
         try {
             this.projects = await this.api('GET', '/projects');
             this.renderProjects();
+            this._restoreScrollTop('projects-list', this._viewState['projects']?.scrollTop);
         } catch (error) {
             this.showToast('Error', error.message, 'error');
         }
@@ -2215,6 +2301,7 @@ class DevManager {
             this.sessions = sessions;
             this.activeSessionDetails = activeDetails || [];
             this.renderSessions();
+            this._restoreScrollTop('sessions-list', this._viewState['sessions']?.scrollTop);
         } catch (error) {
             this.showToast('Error', error.message, 'error');
         }
@@ -3662,6 +3749,7 @@ class DevManager {
         if (activeTab === 'tokens') {
             this.loadGlobalTokenUsage(30);
         }
+        this._restoreScrollTop('config-content', this._viewState['config']?.scrollTop);
     }
 
     renderSkillsConfig() {
@@ -6919,6 +7007,7 @@ class DevManager {
 
             container.innerHTML = html;
             this.setupAllTasksDragAndDrop(container);
+            this._restoreScrollTop('all-tasks-list', this._viewState['tasks']?.scrollTop);
         } catch (e) {
             container.innerHTML = '<div class="empty-state">Failed to load tasks.</div>';
         }
@@ -7079,13 +7168,20 @@ class DevManager {
 
     _populateProjectFilter() {
         const select = document.getElementById('filter-project');
-        if (!select || select.options.length > 1) return;
-        (this.projects || []).forEach(p => {
-            const opt = document.createElement('option');
-            opt.value = p.id;
-            opt.textContent = p.name;
-            select.appendChild(opt);
-        });
+        if (!select) return;
+        if (select.options.length <= 1) {
+            (this.projects || []).forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p.id;
+                opt.textContent = p.name;
+                select.appendChild(opt);
+            });
+        }
+        // Apply pending project filter from view state restoration
+        if (this._pendingFilterProject) {
+            select.value = this._pendingFilterProject;
+            this._pendingFilterProject = '';
+        }
     }
 
     setupAllTasksFilters() {
