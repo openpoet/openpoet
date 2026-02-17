@@ -248,19 +248,24 @@ class VoiceInput {
             }
         } else if (window.terminalManager) {
             // Desktop: send directly to terminal
+            // Capture target session ID NOW to prevent input going to a different
+            // session if the active session changes during async delays.
+            const targetSessionId = window.terminalManager.activeSessionId;
+            if (!targetSessionId) return;
+
             if (submit) {
-                window.terminalManager.sendInput(text);
+                window.terminalManager.sendInputToSession(targetSessionId, text);
                 setTimeout(() => {
-                    window.terminalManager.sendInput('\r');
+                    window.terminalManager.sendInputToSession(targetSessionId, '\r');
                 }, 50);
             } else {
                 // Move to end of line, add space if line has text, paste
-                window.terminalManager.sendInput('\x05'); // Ctrl+E
+                window.terminalManager.sendInputToSession(targetSessionId, '\x05'); // Ctrl+E
                 const lineContent = window.terminalManager.getActiveLineContent();
                 if (lineContent.trim().length > 0) {
-                    window.terminalManager.sendInput(' ');
+                    window.terminalManager.sendInputToSession(targetSessionId, ' ');
                 }
-                window.terminalManager.sendInput(text);
+                window.terminalManager.sendInputToSession(targetSessionId, text);
             }
         }
     }

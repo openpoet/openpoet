@@ -515,13 +515,24 @@ class TerminalManager {
         }
     }
 
-    // Send input to active terminal
+    // Send input to active terminal.
+    // Blocks input if a session transition is in progress (pendingSessionOpen)
+    // to prevent stray input from reaching the wrong session.
     sendInput(data) {
+        if (window.app && window.app.pendingSessionOpen) {
+            console.warn('[sendInput] Blocked: session transition in progress for', window.app.pendingSessionOpen.sessionId);
+            return;
+        }
         if (this.activeSessionId) {
-            const termData = this.terminals.get(this.activeSessionId);
-            if (termData && termData.ws && termData.ws.readyState === WebSocket.OPEN) {
-                termData.ws.send(JSON.stringify({ type: 'input', data: data }));
-            }
+            this.sendInputToSession(this.activeSessionId, data);
+        }
+    }
+
+    // Send input to a specific session by ID (safe against session switches)
+    sendInputToSession(sessionId, data) {
+        const termData = this.terminals.get(sessionId);
+        if (termData && termData.ws && termData.ws.readyState === WebSocket.OPEN) {
+            termData.ws.send(JSON.stringify({ type: 'input', data: data }));
         }
     }
 

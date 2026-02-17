@@ -376,12 +376,16 @@ class FileBrowser {
             }
 
             // Send to terminal using canonical sequence: \x15 separate, text, \r after 700ms
+            // Capture target session ID NOW to prevent input going to a different session.
             if (window.terminalManager) {
-                window.terminalManager.sendInput('\x15');
-                window.terminalManager.sendInput(message);
-                setTimeout(() => {
-                    window.terminalManager.sendInput('\r');
-                }, 700);
+                const targetSessionId = window.terminalManager.activeSessionId;
+                if (targetSessionId) {
+                    window.terminalManager.sendInputToSession(targetSessionId, '\x15');
+                    window.terminalManager.sendInputToSession(targetSessionId, message);
+                    setTimeout(() => {
+                        window.terminalManager.sendInputToSession(targetSessionId, '\r');
+                    }, 700);
+                }
             }
 
         } catch (error) {

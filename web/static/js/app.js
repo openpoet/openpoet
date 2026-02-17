@@ -17,6 +17,7 @@ class DevManager {
         // Session creation tracking (prevent race conditions)
         this.pendingSessionOpen = null; // { sessionId, timestamp }
         this.recentlyCreatedSessions = new Set(); // Track sessions created in last 5 seconds
+        this._loadSessionsPromise = null; // Re-entrancy guard for loadSessions()
 
         // View state preservation (scroll, filters, tabs)
         this._viewState = {};
@@ -445,6 +446,10 @@ class DevManager {
                 }
                 if (this.currentView === 'tasks') {
                     this.loadAllTasks();
+                }
+                // Refresh task detail view if currently viewing the updated task
+                if (this._viewingTaskDetail && data.data?.task?.id === this._viewingTaskDetail.taskId) {
+                    this.viewTaskDetail(this._viewingTaskDetail.projectId, this._viewingTaskDetail.taskId);
                 }
                 break;
             case 'task_history':
@@ -2350,6 +2355,21 @@ class DevManager {
 
     // Sessions
     async loadSessions() {
+        // Re-entrancy guard: if a loadSessions call is already in flight,
+        // wait for it to finish instead of firing a concurrent one.
+        // This prevents interleaved syncSessionTabs calls from corrupting tab state.
+        if (this._loadSessionsPromise) {
+            return this._loadSessionsPromise;
+        }
+        this._loadSessionsPromise = this._doLoadSessions();
+        try {
+            return await this._loadSessionsPromise;
+        } finally {
+            this._loadSessionsPromise = null;
+        }
+    }
+
+    async _doLoadSessions() {
         try {
             const [sessions, activeDetails] = await Promise.all([
                 this.api('GET', '/sessions'),
@@ -3428,11 +3448,16 @@ class DevManager {
     sendQuickCommand(command) {
         if (!window.terminalManager) return;
 
+        // Capture target session ID NOW to prevent input going to a different
+        // session if the active session changes during the 700ms delay.
+        const targetSessionId = window.terminalManager.activeSessionId;
+        if (!targetSessionId) return;
+
         // Use the canonical three-step mobile terminal input sequence
-        window.terminalManager.sendInput('\x15'); // Ctrl+U - clear current line
-        window.terminalManager.sendInput(command);
+        window.terminalManager.sendInputToSession(targetSessionId, '\x15'); // Ctrl+U - clear current line
+        window.terminalManager.sendInputToSession(targetSessionId, command);
         setTimeout(() => {
-            window.terminalManager.sendInput('\r'); // Enter after 700ms
+            window.terminalManager.sendInputToSession(targetSessionId, '\r'); // Enter after 700ms
         }, 700);
     }
 
@@ -3443,12 +3468,17 @@ class DevManager {
         const text = input.value.trim();
         if (text) {
             if (window.terminalManager) {
+                // Capture target session ID NOW to prevent input going to a different
+                // session if the active session changes during the 700ms delay.
+                const targetSessionId = window.terminalManager.activeSessionId;
+                if (!targetSessionId) return;
+
                 // Clear current line, send text, then Enter after delay.
                 // This is the exact sequence that works with voice Enviar.
-                window.terminalManager.sendInput('\x15'); // Ctrl+U
-                window.terminalManager.sendInput(text);
+                window.terminalManager.sendInputToSession(targetSessionId, '\x15'); // Ctrl+U
+                window.terminalManager.sendInputToSession(targetSessionId, text);
                 setTimeout(() => {
-                    window.terminalManager.sendInput('\r');
+                    window.terminalManager.sendInputToSession(targetSessionId, '\r');
                 }, 700);
             }
             input.value = '';
@@ -5577,6 +5607,14 @@ class DevManager {
             // Separate active and done top-level tasks
             const activeTasks = topLevel.filter(t => t.status !== 'done');
             const doneTasks = topLevel.filter(t => t.status === 'done');
+            // Sort done tasks by most recent updated_at (considering subtasks)
+            doneTasks.sort((a, b) => {
+                const aKids = children[a.id] || [];
+                const bKids = children[b.id] || [];
+                const aMax = Math.max(new Date(a.updated_at), ...aKids.map(k => new Date(k.updated_at)));
+                const bMax = Math.max(new Date(b.updated_at), ...bKids.map(k => new Date(k.updated_at)));
+                return bMax - aMax;
+            });
 
             let html = '';
             for (const task of activeTasks) {
@@ -6997,12 +7035,24 @@ class DevManager {
 
             // Done section at the bottom (includes done top-level and orphan done subtasks)
             const allDone = [...doneTopLevel];
-            doneTopLevel.forEach(t => renderedIds.add(t.id));
+            doneTopLevel.forEach(t => {
+                renderedIds.add(t.id);
+                // Mark children of done parents so they don't appear as standalone items
+                (children[t.id] || []).forEach(c => renderedIds.add(c.id));
+            });
             for (const task of tasks) {
                 if (!renderedIds.has(task.id) && task.status === 'done') {
                     allDone.push(task);
                 }
             }
+            // Sort done tasks by most recent updated_at (considering subtasks)
+            allDone.sort((a, b) => {
+                const aKids = children[a.id] || [];
+                const bKids = children[b.id] || [];
+                const aMax = Math.max(new Date(a.updated_at), ...aKids.map(k => new Date(k.updated_at)));
+                const bMax = Math.max(new Date(b.updated_at), ...bKids.map(k => new Date(k.updated_at)));
+                return bMax - aMax;
+            });
             if (allDone.length > 0) {
                 const doneCollapsed = this._doneCollapsed ? ' collapsed' : '';
                 const doneCount = allDone.filter(t => !children[t.id]?.length).length;
