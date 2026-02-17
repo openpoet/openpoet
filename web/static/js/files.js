@@ -375,6 +375,17 @@ class FileBrowser {
                 }
             }
 
+            // Send image prompt hint to backend for evaluation context
+            // (fire-and-forget, don't block the terminal submission)
+            fetch(`/api/sessions/${sessionId}/image-prompt-hint`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user_prompt: userPrompt || '(image analysis requested)',
+                    image_count: uploadedPaths.length
+                })
+            }).catch(err => console.warn('Image prompt hint failed:', err));
+
             // Send to terminal using canonical sequence: \x15 separate, text, \r after 700ms
             // Capture target session ID NOW to prevent input going to a different session.
             if (window.terminalManager) {
