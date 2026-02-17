@@ -2041,9 +2041,9 @@ func (a *API) CreateProjectTask(w http.ResponseWriter, r *http.Request) {
 	if input.Status == "" {
 		input.Status = "todo"
 	}
-	validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "blocked": true, "awaiting_approval": true}
+	validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "awaiting_approval": true}
 	if !validStatuses[input.Status] {
-		respondError(w, http.StatusBadRequest, "Invalid status. Must be: todo, in_progress, awaiting_approval, done, blocked")
+		respondError(w, http.StatusBadRequest, "Invalid status. Must be: todo, in_progress, awaiting_approval, done")
 		return
 	}
 
@@ -2175,7 +2175,7 @@ func (a *API) UpdateProjectTask(w http.ResponseWriter, r *http.Request) {
 		task.Description = *input.Description
 	}
 	if input.Status != nil {
-		validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "blocked": true, "awaiting_approval": true}
+		validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "awaiting_approval": true}
 		if !validStatuses[*input.Status] {
 			respondError(w, http.StatusBadRequest, "Invalid status")
 			return
@@ -2268,7 +2268,7 @@ func (a *API) UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "blocked": true, "awaiting_approval": true}
+	validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "awaiting_approval": true}
 	if !validStatuses[input.Status] {
 		respondError(w, http.StatusBadRequest, "Invalid status")
 		return

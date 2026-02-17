@@ -559,7 +559,7 @@ func executeDashboard(client *APIClient) (string, error) {
 	}
 
 	// Build project summaries with task counts
-	totalTasks := map[string]int{"todo": 0, "in_progress": 0, "done": 0, "blocked": 0, "awaiting_approval": 0}
+	totalTasks := map[string]int{"todo": 0, "in_progress": 0, "done": 0, "awaiting_approval": 0}
 	var projectSummaries []projectSummary
 	for _, p := range projects {
 		tasksBody, _ := client.Get(fmt.Sprintf("/api/projects/%d/tasks", p.ID))
@@ -581,7 +581,7 @@ func executeDashboard(client *APIClient) (string, error) {
 			}
 		}
 
-		taskCounts := map[string]int{"todo": 0, "in_progress": 0, "done": 0, "blocked": 0, "awaiting_approval": 0}
+		taskCounts := map[string]int{"todo": 0, "in_progress": 0, "done": 0, "awaiting_approval": 0}
 		for _, t := range tasks {
 			if parentIDs[t.ID] {
 				continue // skip umbrella tasks
@@ -879,7 +879,6 @@ func formatTaskList(body []byte) (string, error) {
 		"todo":              "[ ]",
 		"in_progress":       "[~]",
 		"done":              "[x]",
-		"blocked":           "[!]",
 		"awaiting_approval": "[?]",
 	}
 	priorityLabels := map[string]string{

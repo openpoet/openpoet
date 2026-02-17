@@ -189,11 +189,6 @@
         height: 18px;
     }
 
-    /* Hide split-screen button on mobile (not useful) */
-    #split-screen-toggle {
-        display: none;
-    }
-
     /* Hide image/voice buttons from header on mobile (already in mobile input bar) */
     #btn-image-picker,
     #btn-voice-input {

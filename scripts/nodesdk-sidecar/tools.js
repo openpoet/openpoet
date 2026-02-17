@@ -124,7 +124,7 @@ export function buildDevManagerTools(apiURL, conversationID = 0) {
                 project_id: z.string().describe('Project ID'),
                 title: z.string().describe('Task title'),
                 description: z.string().optional().describe('Task description'),
-                status: z.string().optional().describe('Status: todo, in_progress, done, blocked'),
+                status: z.string().optional().describe('Status: todo, in_progress, awaiting_approval, done'),
                 priority: z.string().optional().describe('Priority: low, medium, high, urgent'),
                 due_date: z.string().optional().describe('Due date ISO 8601'),
                 parent_id: z.string().optional().describe('Parent task ID for subtasks'),
