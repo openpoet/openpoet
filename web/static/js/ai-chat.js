@@ -566,6 +566,7 @@ class AIChatManager {
 
         const isProposal = data.type === 'proposal';
         const isTaskProposal = data.type === 'task_proposal';
+        const isSkillProposal = data.type === 'skill_proposal';
         const status = data.status || 'pending';
 
         let icon;
@@ -573,6 +574,8 @@ class AIChatManager {
             icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
         } else if (isTaskProposal) {
             icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+        } else if (isSkillProposal) {
+            icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>';
         } else {
             icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="11" x2="15" y2="11"/></svg>';
         }
@@ -592,6 +595,8 @@ class AIChatManager {
                 if (data.title && data.title.startsWith('Excluir Tarefa:')) btnLabel = 'Revisar Exclusão';
                 else if (data.title && data.title.startsWith('Atualizar Tarefa:')) btnLabel = 'Revisar Alteração';
                 else btnLabel = 'Revisar Tarefa';
+            } else if (isSkillProposal) {
+                btnLabel = 'Revisar Skill';
             } else if (isProposal) {
                 btnLabel = 'Revisar Proposta';
             } else {
