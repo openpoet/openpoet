@@ -71,6 +71,9 @@ class DevManager {
         // Load any pending AI suggestions
         setTimeout(() => this._loadPendingSuggestions(), 2000);
 
+        // Listen for hash changes (from notification clicks via service worker)
+        window.addEventListener('hashchange', () => this._handleHashNavigation());
+
         // Listen for service worker messages
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.addEventListener('message', (event) => {
@@ -484,6 +487,39 @@ class DevManager {
         // Now that sessions are loaded, clean up stale dismissed requests and auto-reopen valid ones
         if (window.hookManager) {
             window.hookManager._autoReopenDismissed();
+        }
+
+        // Handle hash-based navigation from push notification clicks
+        this._handleHashNavigation();
+    }
+
+    // Handle hash-based navigation (from push notification clicks via service worker)
+    _handleHashNavigation() {
+        const hash = location.hash;
+        if (!hash) return;
+
+        // #session={id} — open terminal for session
+        const sessionMatch = hash.match(/^#session=(.+)$/);
+        if (sessionMatch) {
+            const sessionId = sessionMatch[1];
+            history.replaceState(null, '', location.pathname);
+            if (window.hookManager) {
+                window.hookManager.openSessionWithPendingDialog(sessionId);
+            } else {
+                this.openTerminal(sessionId);
+            }
+            return;
+        }
+
+        // #link={encoded_link} — navigate to link (session, project, or doc)
+        const linkMatch = hash.match(/^#link=(.+)$/);
+        if (linkMatch) {
+            const link = decodeURIComponent(linkMatch[1]);
+            history.replaceState(null, '', location.pathname);
+            if (window.notifBadge) {
+                window.notifBadge._navigateToLink(link);
+            }
+            return;
         }
     }
 
@@ -2472,7 +2508,7 @@ class DevManager {
             console.error(`[openTerminal] Session ${sessionId} died before terminal could connect`);
             this.showToast('Session ended unexpectedly. Check server logs for details.', 'error');
             // Navigate back to sessions view
-            this.navigateTo('sessions');
+            this.showView('sessions');
             return;
         }
 
@@ -3487,16 +3523,17 @@ class DevManager {
                 if (session && session.status === 'running') {
                     await this.openTerminal(tabData.sessionId);
 
-                    // Restore custom name if different
-                    if (tabData.sessionName) {
-                        window.terminalManager.renameSession(tabData.sessionId, tabData.sessionName);
+                    // Always use the backend session name (not cached localStorage name)
+                    const currentName = session.name;
+                    if (currentName) {
+                        window.terminalManager.renameSession(tabData.sessionId, currentName);
                         const tab = document.querySelector(`.terminal-tab[data-session-id="${tabData.sessionId}"]`);
                         if (tab) {
                             const nameContainer = tab.querySelector('.terminal-tab-name');
                             if (nameContainer) {
                                 const nameText = nameContainer.querySelector('.terminal-tab-name-text');
-                                if (nameText) nameText.textContent = tabData.sessionName;
-                                else nameContainer.textContent = tabData.sessionName;
+                                if (nameText) nameText.textContent = currentName;
+                                else nameContainer.textContent = currentName;
                             }
                         }
                     }
