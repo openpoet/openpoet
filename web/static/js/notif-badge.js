@@ -147,7 +147,7 @@ class NotifBadge {
             const time = this._relativeTime(n.created_at);
             const typeIcon = this._typeIcon(n.type);
             return `
-                <div class="notification-item unread" data-id="${n.id}" data-session="${n.session_id || ''}">
+                <div class="notification-item unread" data-id="${n.id}" data-session="${n.session_id || ''}" data-link="${this._escapeHtml(n.link || '')}">
                     <div class="notification-item-title">${typeIcon} ${this._escapeHtml(n.title)}</div>
                     <div class="notification-item-body">${this._escapeHtml(n.body)}</div>
                     <div class="notification-item-time">${time}</div>
@@ -158,6 +158,7 @@ class NotifBadge {
         list.querySelectorAll('.notification-item').forEach(el => {
             el.addEventListener('click', () => {
                 const id = el.dataset.id;
+                const link = el.dataset.link;
                 const sessionId = el.dataset.session;
 
                 // Mark as read (dismiss this notification)
@@ -172,8 +173,10 @@ class NotifBadge {
 
                 this.hide();
 
-                // Open session and its pending dialog (permission/question/plan)
-                if (sessionId && window.hookManager) {
+                // Navigate using link if available
+                if (link) {
+                    this._navigateToLink(link);
+                } else if (sessionId && window.hookManager) {
                     window.hookManager.openSessionWithPendingDialog(sessionId);
                 } else if (sessionId && window.app) {
                     window.app.openTerminal(sessionId);
@@ -199,6 +202,34 @@ class NotifBadge {
             this.renderPanel();
         } catch (err) {
             console.warn('[NotifBadge] Failed to mark all read:', err);
+        }
+    }
+
+    _navigateToLink(link) {
+        // /app/session/{id} → open terminal
+        const sessionMatch = link.match(/^\/app\/session\/(.+)$/);
+        if (sessionMatch) {
+            const sessionId = sessionMatch[1];
+            if (window.hookManager) {
+                window.hookManager.openSessionWithPendingDialog(sessionId);
+            } else if (window.app) {
+                window.app.openTerminal(sessionId);
+            }
+            return;
+        }
+
+        // /app/project/{id} → open project detail
+        const projectMatch = link.match(/^\/app\/project\/(\d+)$/);
+        if (projectMatch) {
+            if (window.app) window.app.showProjectDetail(parseInt(projectMatch[1]));
+            return;
+        }
+
+        // /app/doc/{id} → open document viewer
+        const docMatch = link.match(/^\/app\/doc\/([a-zA-Z0-9-]+)$/);
+        if (docMatch) {
+            if (window.docViewer) window.docViewer.open(docMatch[1]);
+            return;
         }
     }
 

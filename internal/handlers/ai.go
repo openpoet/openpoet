@@ -3708,8 +3708,8 @@ func (h *AIHandler) EvaluateSession(ctx context.Context, sessionID string, trigg
 		log.Printf("[AI-Session] Skipping session_end: no linked task (no point creating task for finished work)")
 		return
 	}
-	if (trigger == "user_prompt" || trigger == "plan_accepted") && hasLinkedTask {
-		log.Printf("[AI-Session] Skipping %s: task already linked [%d] %s", trigger, linkedTask.ID, linkedTask.Title)
+	if trigger == "user_prompt" && hasLinkedTask {
+		log.Printf("[AI-Session] Skipping user_prompt: task already linked [%d] %s", linkedTask.ID, linkedTask.Title)
 		return
 	}
 
@@ -3779,13 +3779,41 @@ func (h *AIHandler) EvaluateSession(ctx context.Context, sessionID string, trigg
 		allowedTypes["link_task"] = true
 
 	case "plan_accepted":
-		triggerDesc = "is currently running (a plan was just approved)"
-		instructions = `- This session has NO linked task yet. A plan was approved, which gives clear indication of what will be done.
+		if hasLinkedTask {
+			// Drift detection: session already has a task, but a new plan was approved
+			triggerDesc = "is currently running (a NEW plan was just approved, but the session is ALREADY linked to a task)"
+			// Fetch plan content for drift comparison
+			planContent, _, _ := h.api.db.GetSessionPlan(ctx, sessionID)
+			if len(planContent) > 5000 {
+				planContent = planContent[:5000] + "\n... (truncated)"
+			}
+			taskDesc := linkedTask.Description
+			if len(taskDesc) > 2000 {
+				taskDesc = taskDesc[:2000] + "\n... (truncated)"
+			}
+			instructions = fmt.Sprintf(`- This session is ALREADY linked to task [%d] "%s".
+- Task description: %s
+- A NEW plan was just approved in this session. Here is the plan content:
+
+%s
+
+- Compare the plan content against the linked task's title and description.
+- If the plan describes work that is DIFFERENT from the linked task (scope drift), suggest "unlink_task" with task_data describing the NEW work from the plan.
+- If the plan is a continuation, refinement, or sub-task of the linked task, return empty suggestions (no drift).
+- If the task description should be updated to reflect what the plan describes, suggest "update_task".
+- Valid types for this trigger: "unlink_task" (needs task_data with title+description+priority for the new task), "update_task" (needs task_id and task_data)
+- Be conservative: only suggest "unlink_task" when the plan is clearly about different work, not just a different approach to the same task.`, linkedTask.ID, linkedTask.Title, taskDesc, planContent)
+			allowedTypes["unlink_task"] = true
+			allowedTypes["update_task"] = true
+		} else {
+			triggerDesc = "is currently running (a plan was just approved)"
+			instructions = `- This session has NO linked task yet. A plan was approved, which gives clear indication of what will be done.
 - Suggest creating a task that describes the planned work.
 - Valid types for this trigger: "create_task" (needs task_data), "link_task" (needs task_id)
 - Return empty suggestions array only if the plan is trivial.`
-		allowedTypes["create_task"] = true
-		allowedTypes["link_task"] = true
+			allowedTypes["create_task"] = true
+			allowedTypes["link_task"] = true
+		}
 
 	default: // session_request
 		triggerDesc = "is currently running (evaluation requested by the session)"
@@ -4215,6 +4243,78 @@ func (h *AIHandler) AcceptSuggestion(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		resultMsg = fmt.Sprintf("Task [%d] marked as done", *ctx.TaskID)
+
+	case "unlink_task":
+		if suggestion.SessionID == "" {
+			respondError(w, http.StatusBadRequest, "Missing session_id for unlink_task")
+			return
+		}
+		// 1. Unlink from current task
+		oldTaskID, err := h.api.db.UnlinkSessionFromTask(r.Context(), suggestion.SessionID)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to unlink: "+err.Error())
+			return
+		}
+
+		// 2. Record session_unlinked on old task
+		if oldTaskID > 0 {
+			sess, _ := h.api.db.GetSession(r.Context(), suggestion.SessionID)
+			sessName := ""
+			if sess != nil {
+				sessName = sess.Name
+			}
+			h.api.recordTaskHistory(r.Context(), oldTaskID, suggestion.ProjectID, "session_unlinked", map[string]interface{}{
+				"session_id": suggestion.SessionID, "session_name": sessName, "reason": "scope_drift",
+			}, "system", suggestion.SessionID)
+		}
+
+		// 3. Create new task from task_data
+		title, _ := ctx.TaskData["title"].(string)
+		if title == "" {
+			title = suggestion.Title
+		}
+		desc, _ := ctx.TaskData["description"].(string)
+		priority, _ := ctx.TaskData["priority"].(string)
+		if priority == "" {
+			priority = "medium"
+		}
+		newTask := &database.ProjectTask{
+			ProjectID:   suggestion.ProjectID,
+			Title:       title,
+			Description: desc,
+			Status:      "in_progress",
+			Priority:    priority,
+		}
+		if err := h.api.db.CreateTask(r.Context(), newTask); err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to create task: "+err.Error())
+			return
+		}
+
+		// 4. Link session to new task
+		h.api.db.LinkSessionToTask(r.Context(), suggestion.SessionID, newTask.ID)
+		newName := "Task: " + newTask.Title
+		h.api.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, suggestion.SessionID)
+		h.api.hub.BroadcastStateUpdate("session", map[string]interface{}{
+			"action":     "renamed",
+			"session_id": suggestion.SessionID,
+			"name":       newName,
+		})
+
+		// 5. Record session_linked on new task
+		h.api.recordTaskHistory(r.Context(), newTask.ID, newTask.ProjectID, "session_linked", map[string]interface{}{
+			"session_id": suggestion.SessionID, "session_name": newName,
+		}, "system", suggestion.SessionID)
+
+		h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{
+			"action":     "created",
+			"project_id": suggestion.ProjectID,
+			"task":       newTask,
+		})
+
+		// Set ctx.TaskID to new task for history recording below
+		newID := newTask.ID
+		ctx.TaskID = &newID
+		resultMsg = fmt.Sprintf("Unlinked from task %d, created and linked to new task [%d] %s", oldTaskID, newTask.ID, title)
 
 	default:
 		respondError(w, http.StatusBadRequest, "Unknown suggestion type: "+suggestion.Type)

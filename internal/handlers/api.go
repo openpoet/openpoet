@@ -2551,11 +2551,16 @@ func (a *API) LinkSessionTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check session does not already have a linked task
+	// If session already has a linked task, unlink it first (allows re-linking)
 	existingTask, _ := a.db.GetTaskForSession(r.Context(), sessionID)
 	if existingTask != nil {
-		respondError(w, http.StatusConflict, "Session already linked to a task")
-		return
+		if _, err := a.db.UnlinkSessionFromTask(r.Context(), sessionID); err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to unlink existing task")
+			return
+		}
+		a.recordTaskHistory(r.Context(), existingTask.ID, existingTask.ProjectID, "session_unlinked", map[string]interface{}{
+			"session_id": sessionID, "session_name": sess.Name,
+		}, "user", sessionID)
 	}
 
 	var input struct {
@@ -2652,6 +2657,50 @@ func (a *API) LinkSessionTask(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"task":         linkedTask,
 		"session_name": newName,
+	})
+}
+
+// UnlinkSessionTask removes the task link from a session.
+func (a *API) UnlinkSessionTask(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+
+	sess, err := a.db.GetSession(r.Context(), sessionID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Session not found")
+		return
+	}
+
+	task, _ := a.db.GetTaskForSession(r.Context(), sessionID)
+	if task == nil {
+		respondError(w, http.StatusConflict, "Session has no linked task")
+		return
+	}
+
+	if _, err := a.db.UnlinkSessionFromTask(r.Context(), sessionID); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Reset session name (remove "Task: " prefix)
+	newName := sess.Name
+	if strings.HasPrefix(newName, "Task: ") {
+		newName = "Session " + sessionID[:8]
+	}
+	a.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, sessionID)
+
+	a.hub.BroadcastStateUpdate("session", map[string]interface{}{
+		"action":     "renamed",
+		"session_id": sessionID,
+		"name":       newName,
+	})
+
+	a.recordTaskHistory(r.Context(), task.ID, task.ProjectID, "session_unlinked", map[string]interface{}{
+		"session_id": sessionID, "session_name": sess.Name,
+	}, "user", sessionID)
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"unlinked_task_id": task.ID,
+		"session_name":     newName,
 	})
 }
 

@@ -164,10 +164,13 @@ self.addEventListener('notificationclick', (event) => {
         return;
     }
 
-    // Build target URL - if it's a permission notification, include session_id
     const data = event.notification.data || {};
+
+    // Build target URL from link or fallback to session hash
     let targetUrl = '/';
-    if (data.session_id) {
+    if (data.link) {
+        targetUrl = '/#link=' + encodeURIComponent(data.link);
+    } else if (data.session_id) {
         targetUrl = '/#session=' + data.session_id;
     }
 
@@ -178,8 +181,13 @@ self.addEventListener('notificationclick', (event) => {
                 // Focus existing window if found
                 for (const client of clientList) {
                     if (client.url.includes(self.location.origin) && 'focus' in client) {
-                        // Post message to the client to navigate to the session
-                        if (data.session_id) {
+                        // Post message to navigate using link or session
+                        if (data.link) {
+                            client.postMessage({
+                                type: 'navigate_to_link',
+                                link: data.link
+                            });
+                        } else if (data.session_id) {
                             client.postMessage({
                                 type: 'navigate_to_session',
                                 session_id: data.session_id
