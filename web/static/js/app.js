@@ -2692,6 +2692,7 @@ class DevManager {
             }
             this.currentSession = sessionId;
             this.updateTabActiveState(sessionId);
+            this._updateLinkTaskButton(sessionId);
         });
 
         // Name span doesn't need special handlers anymore - clicking the tab switches sessions
@@ -3137,6 +3138,7 @@ class DevManager {
             }
 
             this.updateTabActiveState(sessionId);
+            this._updateLinkTaskButton(sessionId);
             this.updateMobileSessionTrigger(sessionId);
             this.closeMobileSessionMenu();
         });
@@ -3510,6 +3512,7 @@ class DevManager {
                     window.terminalManager.switchToSession(state.activeSessionId);
                     this.currentSession = state.activeSessionId;
                     this.updateTabActiveState(state.activeSessionId);
+                    this._updateLinkTaskButton(state.activeSessionId);
                 }
             }
 
@@ -3593,6 +3596,7 @@ class DevManager {
         window.terminalManager.switchToSession(sessionIds[nextIndex]);
         this.currentSession = sessionIds[nextIndex];
         this.updateTabActiveState(sessionIds[nextIndex]);
+        this._updateLinkTaskButton(sessionIds[nextIndex]);
     }
 
     switchToPreviousTab() {
@@ -3605,6 +3609,7 @@ class DevManager {
         window.terminalManager.switchToSession(sessionIds[prevIndex]);
         this.currentSession = sessionIds[prevIndex];
         this.updateTabActiveState(sessionIds[prevIndex]);
+        this._updateLinkTaskButton(sessionIds[prevIndex]);
     }
 
     switchToTabByIndex(index) {
@@ -3613,6 +3618,7 @@ class DevManager {
             window.terminalManager.switchToSession(sessionIds[index]);
             this.currentSession = sessionIds[index];
             this.updateTabActiveState(sessionIds[index]);
+            this._updateLinkTaskButton(sessionIds[index]);
         }
     }
 
