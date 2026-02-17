@@ -146,6 +146,11 @@ type AIHandler struct {
 	// Used by ExecuteTool (GoSDK path) so planning-mode tool calls can collect task actions.
 	streamCollectorsMu sync.Mutex
 	streamCollectors   map[int64]*planningCollector
+
+	// streamProactiveTypes maps conversationID → proactiveType during streaming.
+	// Used to detect skill_customization context for intercepting skill tools.
+	streamProactiveTypesMu sync.Mutex
+	streamProactiveTypes   map[int64]string
 }
 
 // NewAIHandler creates a new AI handler.
@@ -765,6 +770,14 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	h.streamCollectors[conv.ID] = collector
 	h.streamCollectorsMu.Unlock()
 
+	// Store proactive type for this conversation (used to detect skill_customization context)
+	h.streamProactiveTypesMu.Lock()
+	if h.streamProactiveTypes == nil {
+		h.streamProactiveTypes = make(map[int64]string)
+	}
+	h.streamProactiveTypes[conv.ID] = conv.ProactiveType
+	h.streamProactiveTypesMu.Unlock()
+
 	safeSendSSE("message_id", map[string]interface{}{
 		"id": assistantMsg.ID,
 	})
@@ -806,6 +819,11 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		h.streamCollectorsMu.Lock()
 		delete(h.streamCollectors, conv.ID)
 		h.streamCollectorsMu.Unlock()
+
+		// Clear the proactive type mapping
+		h.streamProactiveTypesMu.Lock()
+		delete(h.streamProactiveTypes, conv.ID)
+		h.streamProactiveTypesMu.Unlock()
 
 		textMu.Lock()
 		finalContent := assistantText.String()
@@ -888,7 +906,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		totalUsage.CacheCreationTokens += loopUsage.CacheCreationTokens
 	}
 
-	// Create a single batch proposal document if task actions were collected.
+	// Process collected actions (tasks and skills) from the planning collector.
 	// Use a background-derived context because the HTTP request context (ctx) may
 	// already be canceled if the user navigated away during streaming.  The LLM
 	// streaming itself is resilient (uses streamCtx), but the post-processing code
@@ -897,221 +915,308 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		proposalCtx, proposalCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer proposalCancel()
 
-		actions := collector.getActions()
-		projectID := actions[0].ProjectID
+		allActions := collector.getActions()
 
-		// Auto-assign sequential sort_order for create actions that have sort_order=0
-		createIdx := 0
-		for i := range actions {
-			if actions[i].Action == "create" && actions[i].SortOrder == 0 {
-				createIdx++
-				actions[i].SortOrder = createIdx
+		// Separate task actions from skill actions
+		var taskActions []PlanningTaskAction
+		var skillActions []PlanningTaskAction
+		for _, a := range allActions {
+			if a.Action == "create_project_skill" || a.Action == "update_project_skill" {
+				skillActions = append(skillActions, a)
+			} else {
+				taskActions = append(taskActions, a)
 			}
 		}
 
-		project, err := h.api.db.GetProject(proposalCtx, projectID)
-		projectName := "Projeto"
-		if err == nil {
-			projectName = project.Name
-		}
+		// Process task actions (existing logic)
+		if len(taskActions) > 0 {
+			actions := taskActions
+			projectID := actions[0].ProjectID
 
-		// Build summary
-		var summaryParts []string
-		createCount, updateCount, deleteCount := 0, 0, 0
-		for _, a := range actions {
-			switch a.Action {
-			case "create":
-				createCount++
-			case "update":
-				updateCount++
-			case "delete":
-				deleteCount++
+			// Auto-assign sequential sort_order for create actions that have sort_order=0
+			createIdx := 0
+			for i := range actions {
+				if actions[i].Action == "create" && actions[i].SortOrder == 0 {
+					createIdx++
+					actions[i].SortOrder = createIdx
+				}
 			}
-		}
-		if createCount > 0 {
-			summaryParts = append(summaryParts, fmt.Sprintf("criar %d tarefa(s)", createCount))
-		}
-		if updateCount > 0 {
-			summaryParts = append(summaryParts, fmt.Sprintf("atualizar %d tarefa(s)", updateCount))
-		}
-		if deleteCount > 0 {
-			summaryParts = append(summaryParts, fmt.Sprintf("remover %d tarefa(s)", deleteCount))
-		}
 
-		// Build markdown content for preview — group subtasks under parents
-		var contentBuilder strings.Builder
+			project, err := h.api.db.GetProject(proposalCtx, projectID)
+			projectName := "Projeto"
+			if err == nil {
+				projectName = project.Name
+			}
 
-		// Identify parent (no parent_id) vs subtask actions for create
-		type indexedAction struct {
-			idx    int
-			action PlanningTaskAction
-		}
-		var parentActions []indexedAction
-		childActions := map[int][]indexedAction{} // parent sort_order -> children
-		var otherActions []indexedAction           // update, delete actions
+			// Build summary
+			var summaryParts []string
+			createCount, updateCount, deleteCount := 0, 0, 0
+			for _, a := range actions {
+				switch a.Action {
+				case "create":
+					createCount++
+				case "update":
+					updateCount++
+				case "delete":
+					deleteCount++
+				}
+			}
+			if createCount > 0 {
+				summaryParts = append(summaryParts, fmt.Sprintf("criar %d tarefa(s)", createCount))
+			}
+			if updateCount > 0 {
+				summaryParts = append(summaryParts, fmt.Sprintf("atualizar %d tarefa(s)", updateCount))
+			}
+			if deleteCount > 0 {
+				summaryParts = append(summaryParts, fmt.Sprintf("remover %d tarefa(s)", deleteCount))
+			}
 
-		for i, a := range actions {
-			switch a.Action {
-			case "create":
-				if a.ParentRef > 0 {
-					// Group by parent_ref (1-based index into the batch)
-					parentIdx := a.ParentRef - 1 // convert to 0-based
-					childActions[parentIdx] = append(childActions[parentIdx], indexedAction{i, a})
-				} else if a.ParentID > 0 {
-					// Legacy: group by parent_id (find matching parent in batch)
-					parentIdx := -1
-					for j, p := range actions {
-						if p.Action == "create" && j < i {
-							parentIdx = j
-						}
-					}
-					if parentIdx >= 0 {
+			// Build markdown content for preview — group subtasks under parents
+			var contentBuilder strings.Builder
+
+			// Identify parent (no parent_id) vs subtask actions for create
+			type indexedAction struct {
+				idx    int
+				action PlanningTaskAction
+			}
+			var parentActions []indexedAction
+			childActions := map[int][]indexedAction{} // parent sort_order -> children
+			var otherActions []indexedAction           // update, delete actions
+
+			for i, a := range actions {
+				switch a.Action {
+				case "create":
+					if a.ParentRef > 0 {
+						parentIdx := a.ParentRef - 1
 						childActions[parentIdx] = append(childActions[parentIdx], indexedAction{i, a})
+					} else if a.ParentID > 0 {
+						parentIdx := -1
+						for j, p := range actions {
+							if p.Action == "create" && j < i {
+								parentIdx = j
+							}
+						}
+						if parentIdx >= 0 {
+							childActions[parentIdx] = append(childActions[parentIdx], indexedAction{i, a})
+						} else {
+							parentActions = append(parentActions, indexedAction{i, a})
+						}
 					} else {
 						parentActions = append(parentActions, indexedAction{i, a})
 					}
-				} else {
-					parentActions = append(parentActions, indexedAction{i, a})
+				default:
+					otherActions = append(otherActions, indexedAction{i, a})
 				}
-			default:
-				otherActions = append(otherActions, indexedAction{i, a})
-			}
-		}
-
-		num := 0
-		for _, pa := range parentActions {
-			a := pa.action
-			num++
-			orderLabel := ""
-			if a.SortOrder > 0 {
-				orderLabel = fmt.Sprintf(" (Ordem: %d)", a.SortOrder)
-			}
-			contentBuilder.WriteString(fmt.Sprintf("### %d. Criar tarefa: %s%s\n", num, a.Title, orderLabel))
-			if a.Description != "" {
-				contentBuilder.WriteString(fmt.Sprintf("**Descrição:** %s\n", a.Description))
-			}
-			contentBuilder.WriteString(fmt.Sprintf("**Prioridade:** %s | **Status:** %s\n", a.Priority, a.Status))
-			if a.DueDate != "" {
-				contentBuilder.WriteString(fmt.Sprintf("**Data limite:** %s\n", a.DueDate))
 			}
 
-			// Render subtasks indented
-			if children, ok := childActions[pa.idx]; ok {
-				contentBuilder.WriteString("\n**Subtarefas:**\n")
-				for subNum, ca := range children {
-					contentBuilder.WriteString(fmt.Sprintf("- **%d.%d** %s", num, subNum+1, ca.action.Title))
-					if ca.action.Description != "" {
-						contentBuilder.WriteString(fmt.Sprintf(" — %s", ca.action.Description))
+			num := 0
+			for _, pa := range parentActions {
+				a := pa.action
+				num++
+				orderLabel := ""
+				if a.SortOrder > 0 {
+					orderLabel = fmt.Sprintf(" (Ordem: %d)", a.SortOrder)
+				}
+				contentBuilder.WriteString(fmt.Sprintf("### %d. Criar tarefa: %s%s\n", num, a.Title, orderLabel))
+				if a.Description != "" {
+					contentBuilder.WriteString(fmt.Sprintf("**Descrição:** %s\n", a.Description))
+				}
+				contentBuilder.WriteString(fmt.Sprintf("**Prioridade:** %s | **Status:** %s\n", a.Priority, a.Status))
+				if a.DueDate != "" {
+					contentBuilder.WriteString(fmt.Sprintf("**Data limite:** %s\n", a.DueDate))
+				}
+
+				if children, ok := childActions[pa.idx]; ok {
+					contentBuilder.WriteString("\n**Subtarefas:**\n")
+					for subNum, ca := range children {
+						contentBuilder.WriteString(fmt.Sprintf("- **%d.%d** %s", num, subNum+1, ca.action.Title))
+						if ca.action.Description != "" {
+							contentBuilder.WriteString(fmt.Sprintf(" — %s", ca.action.Description))
+						}
+						contentBuilder.WriteString("\n")
 					}
-					contentBuilder.WriteString("\n")
+				}
+				contentBuilder.WriteString("\n")
+			}
+
+			for _, oa := range otherActions {
+				a := oa.action
+				num++
+				switch a.Action {
+				case "update":
+					contentBuilder.WriteString(fmt.Sprintf("### %d. Atualizar tarefa #%d: %s\n", num, a.TaskID, a.Title))
+					if a.Description != "" {
+						contentBuilder.WriteString(fmt.Sprintf("**Descrição:** %s\n", a.Description))
+					}
+					prio := a.Priority
+					if prio == "" {
+						prio = "-"
+					}
+					stat := a.Status
+					if stat == "" {
+						stat = "-"
+					}
+					contentBuilder.WriteString(fmt.Sprintf("**Prioridade:** %s | **Status:** %s\n", prio, stat))
+					if a.DueDate != "" {
+						contentBuilder.WriteString(fmt.Sprintf("**Data limite:** %s\n", a.DueDate))
+					}
+				case "delete":
+					contentBuilder.WriteString(fmt.Sprintf("### %d. Excluir tarefa #%d: %s\n", num, a.TaskID, a.Title))
+					if a.Description != "" {
+						contentBuilder.WriteString(fmt.Sprintf("**Descrição:** %s\n", a.Description))
+					}
+					prio := a.Priority
+					if prio == "" {
+						prio = "-"
+					}
+					stat := a.Status
+					if stat == "" {
+						stat = "-"
+					}
+					contentBuilder.WriteString(fmt.Sprintf("**Prioridade:** %s | **Status:** %s\n", prio, stat))
+					if a.DueDate != "" {
+						contentBuilder.WriteString(fmt.Sprintf("**Data limite:** %s\n", a.DueDate))
+					}
+				}
+				contentBuilder.WriteString("\n")
+			}
+
+			docID := uuid.New().String()[:8]
+			summary := fmt.Sprintf("%s — %s", strings.Join(summaryParts, ", "), projectName)
+
+			docPrefix := "Tarefa"
+			if createCount == 0 && deleteCount == 0 && updateCount > 0 {
+				docPrefix = "Atualizar Tarefa"
+			} else if createCount == 0 && updateCount == 0 && deleteCount > 0 {
+				docPrefix = "Excluir Tarefa"
+			}
+
+			docTitle := fmt.Sprintf("%s: %s", docPrefix, projectName)
+			if len(actions) == 1 {
+				docTitle = fmt.Sprintf("%s: %s", docPrefix, actions[0].Title)
+			}
+
+			var fullContent strings.Builder
+			fullContent.WriteString(fmt.Sprintf("# Proposta de Tarefas — %s\n\n", projectName))
+			fullContent.WriteString(fmt.Sprintf("**Resumo:** %s\n\n", summary))
+			fullContent.WriteString(contentBuilder.String())
+
+			tempDoc := &database.TempDocument{
+				ID:             docID,
+				Title:          docTitle,
+				Content:        fullContent.String(),
+				ConversationID: sql.NullInt64{Int64: conv.ID, Valid: conv.ID > 0},
+				Summary:        summary,
+				MessageID:      assistantMsg.ID,
+			}
+			if err := h.api.db.CreateTempDocument(proposalCtx, tempDoc); err != nil {
+				log.Printf("[TaskProposal] Failed to create temp document: %v", err)
+			} else {
+				h.api.storePendingTaskProposal(docID, actions, summary)
+
+				if !isSessionProvider {
+					safeSendSSE("doc_card", map[string]interface{}{
+						"doc_id":     docID,
+						"type":       "task_proposal",
+						"title":      docTitle,
+						"summary":    summary,
+						"task_count": len(actions),
+					})
+				}
+
+				sseMu.Lock()
+				disconnected := sseDisconnected
+				sseMu.Unlock()
+				if disconnected {
+					h.api.hub.BroadcastChatDocCard(map[string]interface{}{
+						"doc_id":          docID,
+						"type":            "task_proposal",
+						"title":           docTitle,
+						"summary":         summary,
+						"task_count":      len(actions),
+						"conversation_id": conv.ID,
+					})
 				}
 			}
-			contentBuilder.WriteString("\n")
 		}
 
-		// Render update/delete actions with full task card
-		for _, oa := range otherActions {
-			a := oa.action
-			num++
-			switch a.Action {
-			case "update":
-				contentBuilder.WriteString(fmt.Sprintf("### %d. Atualizar tarefa #%d: %s\n", num, a.TaskID, a.Title))
-				if a.Description != "" {
-					contentBuilder.WriteString(fmt.Sprintf("**Descrição:** %s\n", a.Description))
-				}
-				prio := a.Priority
-				if prio == "" {
-					prio = "-"
-				}
-				stat := a.Status
-				if stat == "" {
-					stat = "-"
-				}
-				contentBuilder.WriteString(fmt.Sprintf("**Prioridade:** %s | **Status:** %s\n", prio, stat))
-				if a.DueDate != "" {
-					contentBuilder.WriteString(fmt.Sprintf("**Data limite:** %s\n", a.DueDate))
-				}
-			case "delete":
-				contentBuilder.WriteString(fmt.Sprintf("### %d. Excluir tarefa #%d: %s\n", num, a.TaskID, a.Title))
-				if a.Description != "" {
-					contentBuilder.WriteString(fmt.Sprintf("**Descrição:** %s\n", a.Description))
-				}
-				prio := a.Priority
-				if prio == "" {
-					prio = "-"
-				}
-				stat := a.Status
-				if stat == "" {
-					stat = "-"
-				}
-				contentBuilder.WriteString(fmt.Sprintf("**Prioridade:** %s | **Status:** %s\n", prio, stat))
-				if a.DueDate != "" {
-					contentBuilder.WriteString(fmt.Sprintf("**Data limite:** %s\n", a.DueDate))
-				}
+		// Process skill actions (create/update project skills via approval)
+		for _, sa := range skillActions {
+			projectID := sa.ProjectID
+			project, err := h.api.db.GetProject(proposalCtx, projectID)
+			projectName := "Projeto"
+			if err == nil {
+				projectName = project.Name
 			}
-			contentBuilder.WriteString("\n")
-		}
 
-		docID := uuid.New().String()[:8]
+			skillName := sa.Title
+			skillContent, _ := sa.Extra["content"].(string)
+			skillCategory, _ := sa.Extra["category"].(string)
 
-		// "Tarefa:" doc with task proposal approval
-		summary := fmt.Sprintf("%s — %s", strings.Join(summaryParts, ", "), projectName)
+			actionLabel := "Criar"
+			if sa.Action == "update_project_skill" {
+				actionLabel = "Atualizar"
+			}
 
-		// Title prefix based on action types
-		docPrefix := "Tarefa"
-		if createCount == 0 && deleteCount == 0 && updateCount > 0 {
-			docPrefix = "Atualizar Tarefa"
-		} else if createCount == 0 && updateCount == 0 && deleteCount > 0 {
-			docPrefix = "Excluir Tarefa"
-		}
+			// Build preview content
+			var contentBuilder strings.Builder
+			contentBuilder.WriteString(fmt.Sprintf("# Proposta de Skill — %s\n\n", projectName))
+			contentBuilder.WriteString(fmt.Sprintf("**Ação:** %s skill do projeto\n", actionLabel))
+			contentBuilder.WriteString(fmt.Sprintf("**Nome:** %s\n", skillName))
+			if skillCategory != "" {
+				contentBuilder.WriteString(fmt.Sprintf("**Categoria:** %s\n", skillCategory))
+			}
+			contentBuilder.WriteString(fmt.Sprintf("\n---\n\n### Conteúdo da Skill\n\n%s\n", skillContent))
 
-		docTitle := fmt.Sprintf("%s: %s", docPrefix, projectName)
-		if len(actions) == 1 {
-			docTitle = fmt.Sprintf("%s: %s", docPrefix, actions[0].Title)
-		}
+			docID := uuid.New().String()[:8]
+			summary := fmt.Sprintf("%s skill '%s' — %s", actionLabel, skillName, projectName)
+			docTitle := fmt.Sprintf("Skill: %s", skillName)
 
-		var fullContent strings.Builder
-		fullContent.WriteString(fmt.Sprintf("# Proposta de Tarefas — %s\n\n", projectName))
-		fullContent.WriteString(fmt.Sprintf("**Resumo:** %s\n\n", summary))
-		fullContent.WriteString(contentBuilder.String())
+			tempDoc := &database.TempDocument{
+				ID:             docID,
+				Title:          docTitle,
+				Content:        contentBuilder.String(),
+				ConversationID: sql.NullInt64{Int64: conv.ID, Valid: conv.ID > 0},
+				Summary:        summary,
+				MessageID:      assistantMsg.ID,
+			}
+			if err := h.api.db.CreateTempDocument(proposalCtx, tempDoc); err != nil {
+				log.Printf("[SkillProposal] Failed to create temp document: %v", err)
+				continue
+			}
 
-		tempDoc := &database.TempDocument{
-			ID:             docID,
-			Title:          docTitle,
-			Content:        fullContent.String(),
-			ConversationID: sql.NullInt64{Int64: conv.ID, Valid: conv.ID > 0},
-			Summary:        summary,
-			MessageID:      assistantMsg.ID,
-		}
-		if err := h.api.db.CreateTempDocument(proposalCtx, tempDoc); err != nil {
-			log.Printf("[TaskProposal] Failed to create temp document: %v", err)
-		} else {
-			h.api.storePendingTaskProposal(docID, actions, summary)
+			proposal := &pendingSkillProposal{
+				ProjectID: projectID,
+				SkillName: skillName,
+				Content:   skillContent,
+				Category:  skillCategory,
+			}
+			if sa.Action == "create_project_skill" {
+				proposal.Action = "create"
+			} else {
+				proposal.Action = "update"
+				proposal.SkillID = sa.TaskID // TaskID reused for skill ID
+			}
+			h.api.storePendingSkillProposal(docID, proposal)
 
-			// Emit doc_card only for non-session providers
 			if !isSessionProvider {
 				safeSendSSE("doc_card", map[string]interface{}{
-					"doc_id":     docID,
-					"type":       "task_proposal",
-					"title":      docTitle,
-					"summary":    summary,
-					"task_count": len(actions),
+					"doc_id":  docID,
+					"type":    "skill_proposal",
+					"title":   docTitle,
+					"summary": summary,
 				})
 			}
 
-			// Broadcast via WebSocket only when the SSE connection is closed
-			// (user navigated away). This avoids duplicate cards when both
-			// SSE and WebSocket are active simultaneously.
 			sseMu.Lock()
 			disconnected := sseDisconnected
 			sseMu.Unlock()
 			if disconnected {
 				h.api.hub.BroadcastChatDocCard(map[string]interface{}{
 					"doc_id":          docID,
-					"type":            "task_proposal",
+					"type":            "skill_proposal",
 					"title":           docTitle,
 					"summary":         summary,
-					"task_count":      len(actions),
 					"conversation_id": conv.ID,
 				})
 			}
@@ -1303,7 +1408,7 @@ func (h *AIHandler) handleToolLoop(
 			})
 
 			toolCtx, toolCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			result, err := h.executeTool(toolCtx, block.Name, inputMap, conv.ID, messageID, collector)
+			result, err := h.executeTool(toolCtx, block.Name, inputMap, conv.ID, messageID, collector, conv.ProactiveType)
 			toolCancel()
 			if err != nil {
 				result = fmt.Sprintf("Error: %s", err.Error())
@@ -1406,11 +1511,16 @@ func (h *AIHandler) ExecuteTool(ctx context.Context, name string, input map[stri
 	collector := h.streamCollectors[conversationID]
 	h.streamCollectorsMu.Unlock()
 
-	return h.executeTool(ctx, name, input, conversationID, msgID, collector)
+	// Look up proactive type for this conversation
+	h.streamProactiveTypesMu.Lock()
+	proactiveType := h.streamProactiveTypes[conversationID]
+	h.streamProactiveTypesMu.Unlock()
+
+	return h.executeTool(ctx, name, input, conversationID, msgID, collector, proactiveType)
 }
 
 // executeTool runs a tool and returns the result as a string.
-func (h *AIHandler) executeTool(ctx context.Context, name string, input map[string]interface{}, conversationID int64, messageID int64, collector *planningCollector) (string, error) {
+func (h *AIHandler) executeTool(ctx context.Context, name string, input map[string]interface{}, conversationID int64, messageID int64, collector *planningCollector, proactiveType string) (string, error) {
 	switch name {
 	case "create_skill":
 		skillName, _ := input["name"].(string)
@@ -1419,6 +1529,25 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 
 		if skillName == "" || content == "" {
 			return "", fmt.Errorf("name and content are required")
+		}
+
+		// In skill_customization context, intercept and collect for approval
+		if proactiveType == "skill_customization" && collector != nil {
+			projectID := h.getProjectIDFromConversation(ctx, conversationID)
+			if projectID > 0 {
+				collector.add(PlanningTaskAction{
+					Action:    "create_project_skill",
+					ProjectID: projectID,
+					Title:     skillName,
+					Extra: map[string]interface{}{
+						"content":  content,
+						"category": category,
+					},
+				})
+				return fmt.Sprintf(
+					"IMPORTANTE: Skill '%s' NÃO foi criada ainda — será aplicada após aprovação do usuário. "+
+						"NÃO diga que a skill foi criada. Informe ao usuário que a proposta foi registrada e ele pode revisá-la no card abaixo.", skillName), nil
+			}
 		}
 
 		skill := &database.Skill{
@@ -1443,6 +1572,33 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 				id = int64(idF)
 			} else {
 				return "", fmt.Errorf("invalid skill ID")
+			}
+		}
+
+		// In skill_customization context, intercept and collect for approval
+		if proactiveType == "skill_customization" && collector != nil {
+			skillName, _ := input["name"].(string)
+			content, _ := input["content"].(string)
+			category, _ := input["category"].(string)
+			projectID := h.getProjectIDFromConversation(ctx, conversationID)
+			if projectID > 0 {
+				collector.add(PlanningTaskAction{
+					Action:    "update_project_skill",
+					ProjectID: projectID,
+					TaskID:    id, // reuse TaskID field for skill ID
+					Title:     skillName,
+					Extra: map[string]interface{}{
+						"content":  content,
+						"category": category,
+					},
+				})
+				displayName := skillName
+				if displayName == "" {
+					displayName = fmt.Sprintf("#%d", id)
+				}
+				return fmt.Sprintf(
+					"IMPORTANTE: Skill '%s' NÃO foi atualizada ainda — será aplicada após aprovação do usuário. "+
+						"NÃO diga que a skill foi atualizada. Informe ao usuário que a proposta foi registrada e ele pode revisá-la no card abaixo.", displayName), nil
 			}
 		}
 
@@ -2352,7 +2508,7 @@ func (h *AIHandler) HandleExecuteTool(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	result, err := h.executeTool(ctx, input.Name, input.Args, input.ConversationID, 0, nil)
+	result, err := h.executeTool(ctx, input.Name, input.Args, input.ConversationID, 0, nil, "")
 	if err != nil {
 		respondJSON(w, http.StatusOK, map[string]interface{}{
 			"result": "",
@@ -2738,6 +2894,25 @@ func (h *AIHandler) HandleInitiateTaskDiscussion(w http.ResponseWriter, r *http.
 	})
 }
 
+// getProjectIDFromConversation extracts the project_id from a conversation's proactive context JSON.
+func (h *AIHandler) getProjectIDFromConversation(ctx context.Context, conversationID int64) int64 {
+	conv, err := h.api.db.GetAIConversation(ctx, conversationID)
+	if err != nil {
+		return 0
+	}
+	if conv.ProactiveContext == "" {
+		return 0
+	}
+	var ctxData map[string]interface{}
+	if err := json.Unmarshal([]byte(conv.ProactiveContext), &ctxData); err != nil {
+		return 0
+	}
+	if pidF, ok := ctxData["project_id"].(float64); ok {
+		return int64(pidF)
+	}
+	return 0
+}
+
 // HandleInitiateSkillCustomization creates a proactive AI conversation to help customize a global skill for a project.
 func (h *AIHandler) HandleInitiateSkillCustomization(w http.ResponseWriter, r *http.Request) {
 	var input struct {
@@ -2780,9 +2955,11 @@ func (h *AIHandler) HandleInitiateSkillCustomization(w http.ResponseWriter, r *h
 - Your goal is to help the user customize the skill content for their specific project.
 - You already have all the context you need: the skill content and the project memory doc are provided below.
 - DO NOT use tools like devmanager_list_project_files or devmanager_read_project_file to explore the project. You already have the project context.
-- When proposing changes, ALWAYS show the complete adapted skill content in a markdown code block so the user can copy it.
+- When the user asks you to adapt/customize/create the skill, use the devmanager_create_skill tool to propose the adapted skill content.
+- The skill will NOT be created immediately — it requires user approval via a review card.
+- Call devmanager_create_skill with the adapted name, content, and category.
 - Keep the same markdown structure as the original skill but adapt the content for the specific project.
-- Be concise and direct. Show the adapted content immediately when asked.
+- Be concise and direct. Propose the adapted content immediately when asked.
 - Respond in the same language the user uses (Portuguese or English).`
 
 	ctxData := map[string]interface{}{
