@@ -6974,12 +6974,13 @@ class DevManager {
             }
             if (allDone.length > 0) {
                 const doneCollapsed = this._doneCollapsed ? ' collapsed' : '';
+                const doneCount = allDone.filter(t => !children[t.id]?.length).length;
                 html += `
                     <div class="done-section">
                         <div class="done-section-header" onclick="app.toggleDoneSection()">
                             <svg class="done-section-chevron${this._doneCollapsed ? ' collapsed' : ''}" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
                             <span class="done-section-title">Concluídas</span>
-                            <span class="done-section-count">${allDone.length}</span>
+                            <span class="done-section-count">${doneCount}</span>
                         </div>
                         <div class="done-section-body${doneCollapsed}">`;
                 for (const task of allDone) {
