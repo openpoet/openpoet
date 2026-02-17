@@ -44,6 +44,7 @@ var migrations = []Migration{
 	{Version: 26, Description: "skills: per-project skill config and project-specific skills", Up: migrateV26},
 	{Version: 27, Description: "notifications: add link column for context-aware navigation", Up: migrateV27},
 	{Version: 28, Description: "ai_suggestions: add unlink_task type to CHECK constraint", Up: migrateV28},
+	{Version: 29, Description: "tasks: remove blocked status from CHECK constraint", Up: migrateV29},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -733,6 +734,44 @@ func migrateV28(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV28 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV29(tx *sqlx.Tx) error {
+	// Convert any existing blocked tasks to todo
+	if _, err := tx.Exec(`UPDATE project_tasks SET status = 'todo' WHERE status = 'blocked'`); err != nil {
+		return fmt.Errorf("migrateV29 update blocked→todo failed: %w", err)
+	}
+	stmts := []string{
+		`CREATE TABLE project_tasks_new (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			parent_id INTEGER REFERENCES project_tasks_new(id) ON DELETE CASCADE,
+			title TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo', 'in_progress', 'done', 'awaiting_approval')),
+			priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('low', 'medium', 'high', 'urgent')),
+			due_date TIMESTAMP,
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			global_sort_order INTEGER NOT NULL DEFAULT 0,
+			due_notified BOOLEAN NOT NULL DEFAULT 0,
+			verification_doc_id TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`INSERT INTO project_tasks_new SELECT id, project_id, parent_id, title, description, status, priority, due_date, sort_order, global_sort_order, due_notified, verification_doc_id, created_at, updated_at FROM project_tasks`,
+		`DROP TABLE project_tasks`,
+		`ALTER TABLE project_tasks_new RENAME TO project_tasks`,
+		`CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks(project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_tasks_parent ON project_tasks(parent_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_tasks_status ON project_tasks(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_tasks_due_date ON project_tasks(due_date)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV29 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

@@ -75,7 +75,7 @@ func (m *MockToolExecutor) ExecuteTool(_ context.Context, name string, input map
 	case "update_setting":
 		return `{"status": "updated"}`, nil
 	case "get_task_report":
-		return `{"total": 5, "todo": 3, "in_progress": 1, "done": 1, "blocked": 0, "urgent": 1, "overdue": 0, "next_recommended": {"id": 4, "title": "Corrigir validação de email"}}`, nil
+		return `{"total": 5, "todo": 3, "in_progress": 1, "done": 1, "urgent": 1, "overdue": 0, "next_recommended": {"id": 4, "title": "Corrigir validação de email"}}`, nil
 	default:
 		return fmt.Sprintf(`{"status": "ok", "tool": "%s"}`, name), nil
 	}

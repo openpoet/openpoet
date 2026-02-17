@@ -67,7 +67,7 @@
     --color-badge-todo-text: #64748b;
     --color-badge-progress-text: #2563eb;
     --color-badge-done-text: #16a34a;
-    --color-badge-blocked-text: #dc2626;
+    --color-badge-error-text: #dc2626;
 
     /* Priority */
     --color-priority-high: #d97706;
@@ -136,7 +136,7 @@
     --color-badge-todo-text: #81a1c1;
     --color-badge-progress-text: #88c0d0;
     --color-badge-done-text: #a3be8c;
-    --color-badge-blocked-text: #bf616a;
+    --color-badge-error-text: #bf616a;
 
     /* Priority */
     --color-priority-high: #ebcb8b;
@@ -205,7 +205,7 @@
     --color-badge-todo-text: #6272a4;
     --color-badge-progress-text: #8be9fd;
     --color-badge-done-text: #50fa7b;
-    --color-badge-blocked-text: #ff5555;
+    --color-badge-error-text: #ff5555;
 
     /* Priority */
     --color-priority-high: #f1fa8c;
@@ -274,7 +274,7 @@
     --color-badge-todo-text: #657b83;
     --color-badge-progress-text: #268bd2;
     --color-badge-done-text: #859900;
-    --color-badge-blocked-text: #dc322f;
+    --color-badge-error-text: #dc322f;
 
     /* Priority */
     --color-priority-high: #b58900;
@@ -343,7 +343,7 @@
     --color-badge-todo-text: #75715e;
     --color-badge-progress-text: #66d9ef;
     --color-badge-done-text: #a6e22e;
-    --color-badge-blocked-text: #f92672;
+    --color-badge-error-text: #f92672;
 
     /* Priority */
     --color-priority-high: #e6db74;
@@ -412,7 +412,7 @@
     --color-badge-todo-text: #928374;
     --color-badge-progress-text: #83a598;
     --color-badge-done-text: #b8bb26;
-    --color-badge-blocked-text: #fb4934;
+    --color-badge-error-text: #fb4934;
 
     /* Priority */
     --color-priority-high: #fabd2f;
@@ -481,7 +481,7 @@
     --color-badge-todo-text: #565f89;
     --color-badge-progress-text: #7dcfff;
     --color-badge-done-text: #9ece6a;
-    --color-badge-blocked-text: #f7768e;
+    --color-badge-error-text: #f7768e;
 
     /* Priority */
     --color-priority-high: #e0af68;
@@ -550,7 +550,7 @@
     --color-badge-todo-text: #8d6e63;
     --color-badge-progress-text: #6a1b9a;
     --color-badge-done-text: #2e7d32;
-    --color-badge-blocked-text: #c62828;
+    --color-badge-error-text: #c62828;
 
     /* Priority */
     --color-priority-high: #ef6c00;
@@ -619,7 +619,7 @@
     --color-badge-todo-text: #8d6e63;
     --color-badge-progress-text: #4e6e58;
     --color-badge-done-text: #558b2f;
-    --color-badge-blocked-text: #bf360c;
+    --color-badge-error-text: #bf360c;
 
     /* Priority */
     --color-priority-high: #f57f17;
@@ -688,7 +688,7 @@
     --color-badge-todo-text: #5c7a99;
     --color-badge-progress-text: #0288d1;
     --color-badge-done-text: #00897b;
-    --color-badge-blocked-text: #e53935;
+    --color-badge-error-text: #e53935;
 
     /* Priority */
     --color-priority-high: #f57c00;
@@ -757,7 +757,7 @@
     --color-badge-todo-text: #808080;
     --color-badge-progress-text: #3a6ea5;
     --color-badge-done-text: #2d6a4f;
-    --color-badge-blocked-text: #991b1b;
+    --color-badge-error-text: #991b1b;
 
     /* Priority */
     --color-priority-high: #b45309;
@@ -826,7 +826,7 @@
     --color-badge-todo-text: #4a80a0;
     --color-badge-progress-text: #4090d8;
     --color-badge-done-text: #30cc50;
-    --color-badge-blocked-text: #e84040;
+    --color-badge-error-text: #e84040;
 
     /* Priority */
     --color-priority-high: #ffdf00;
