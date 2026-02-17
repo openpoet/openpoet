@@ -1058,6 +1058,29 @@
         font-size: 13px;
     }
 
+    /* Task detail: split footer mobile */
+    .doc-review-footer[data-version="A"] {
+        padding: 10px 12px;
+    }
+    .doc-review-footer[data-version="A"] .footer-primary {
+        flex: 1;
+        width: 100%;
+    }
+    .doc-review-footer[data-version="A"] .footer-primary .btn {
+        flex: 1;
+        max-width: none;
+    }
+    .doc-review-footer[data-version="A"] .footer-secondary {
+        width: 100%;
+        justify-content: center;
+        gap: 10px;
+        padding-top: 8px;
+    }
+    .btn-icon-round {
+        width: 40px;
+        height: 40px;
+    }
+
     /* File Viewer - full-screen on mobile */
     .file-viewer-overlay {
         padding: 0;

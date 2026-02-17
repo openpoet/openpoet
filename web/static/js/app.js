@@ -4683,16 +4683,23 @@ class DevManager {
         });
 
         // Unlink Task button
-        document.getElementById('btn-unlink-task')?.addEventListener('click', async () => {
+        document.getElementById('btn-unlink-task')?.addEventListener('click', () => {
             const sessionId = window.terminalManager?.activeSessionId || this.currentSession;
             if (!sessionId) return;
-            try {
-                await this.api('POST', `/sessions/${sessionId}/unlink-task`);
-                this._updateLinkTaskButton(sessionId);
-                this.showToast('OK', 'Tarefa desvinculada', 'info');
-            } catch (err) {
-                this.showToast('Erro', err.message || 'Falha ao desvincular', 'error');
-            }
+            showConfirmModal(
+                'Desvincular Tarefa?',
+                'A tarefa será desvinculada desta sessão.',
+                async () => {
+                    try {
+                        await this.api('POST', `/sessions/${sessionId}/unlink-task`);
+                        this._updateLinkTaskButton(sessionId);
+                        this.showToast('OK', 'Tarefa desvinculada', 'info');
+                    } catch (err) {
+                        this.showToast('Erro', err.message || 'Falha ao desvincular', 'error');
+                    }
+                },
+                'Desvincular'
+            );
         });
 
         // Stop session button
@@ -6337,235 +6344,292 @@ class DevManager {
                 this.api('GET', `/projects/${projectId}/tasks/${taskId}/documents`).catch(() => [])
             ]);
 
-            // Find subtasks of this task
-            const subtasks = (allTasks || []).filter(t => t.parent_id?.Valid && t.parent_id.Int64 === taskId);
-            const isUmbrella = subtasks.length > 0;
+            const ctx = { task, sessions, allTasks, history, documents, projectId, taskId };
 
-            let md = '';
-            const isAwaitingApproval = task.status === 'awaiting_approval';
+            // Build shared markdown content
+            const md = this._buildTaskDetailMarkdown(ctx);
 
-            // Status & Priority
-            const statusLabel = (task.status || 'todo').replace(/_/g, ' ');
-            const priorityLabel = task.priority || 'medium';
-            if (isUmbrella) {
-                const doneCount = subtasks.filter(s => s.status === 'done').length;
-                md += `**Status:** ${statusLabel} &nbsp;|&nbsp; **Prioridade:** ${priorityLabel} &nbsp;|&nbsp; **Umbrella:** ${doneCount}/${subtasks.length} concluídas\n\n`;
-            } else {
-                md += `**Status:** ${statusLabel} &nbsp;|&nbsp; **Prioridade:** ${priorityLabel}\n\n`;
-            }
+            // Build actions and open
+            this._openTaskDetail(ctx, md);
 
-            // Awaiting approval notice
-            if (isAwaitingApproval) {
-                if (task.verification_doc_id) {
-                    md += `> **Aguardando Aprovação** — Documento de verificação disponível. Use os botões abaixo para aprovar ou rejeitar.\n\n`;
-                } else {
-                    md += `> **Aguardando Aprovação** — Gerando documento de verificação...\n\n`;
-                }
-            }
-
-            // Due date
-            if (task.due_date?.Valid) {
-                const d = new Date(task.due_date.Time);
-                const dateStr = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-                const isOverdue = d < new Date() && task.status !== 'done';
-                md += `**Prazo:** ${dateStr}${isOverdue ? ' **(ATRASADO)**' : ''}\n\n`;
-            }
-
-            // Description
-            if (task.description) {
-                md += `---\n\n${task.description}\n\n`;
-            } else {
-                md += `---\n\n*Sem descrição.*\n\n`;
-            }
-
-            // Subtasks section
-            if (isUmbrella) {
-                const statusIcons = { done: '[x]', in_progress: '[~]', todo: '[ ]', awaiting_approval: '[?]' };
-                md += `---\n\n### Subtarefas\n\n`;
-                for (const sub of subtasks) {
-                    const icon = statusIcons[sub.status] || '[ ]';
-                    const subStatus = sub.status.replace('_', ' ');
-                    let subDue = '';
-                    if (sub.due_date?.Valid) {
-                        const sd = new Date(sub.due_date.Time);
-                        const isSubOverdue = sd < new Date() && sub.status !== 'done';
-                        subDue = ` — prazo: ${sd.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}${isSubOverdue ? ' **(ATRASADO)**' : ''}`;
-                    }
-                    md += `- ${icon} **${this.escapeHtml(sub.title)}** *(${subStatus})*${subDue}\n`;
-                }
-                md += '\n';
-            }
-
-            // Session history
-            const activeSession = sessions?.find(s => s.status === 'running' || s.status === 'starting');
-            if (sessions && sessions.length > 0) {
-                md += `---\n\n### Sessões\n\n`;
-                for (const s of sessions) {
-                    const date = new Date(s.start_time).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
-                    const name = s.name || s.id.substring(0, 8);
-                    const isActive = s.status === 'running' || s.status === 'starting';
-                    const badge = isActive ? '🟢 running' : s.status;
-                    const sessionId = s.id.substring(0, 8);
-                    md += `- **${this.escapeHtml(name)}** \`${sessionId}\` — ${badge} — ${date}\n`;
-                }
-            }
-
-            // Documents section
-            if (documents && documents.length > 0) {
-                md += `---\n\n### Documentos\n\n`;
-                for (const doc of documents) {
-                    const docIcon = doc.type === 'plan' ? '[P]' : (doc.title.startsWith('Verificação') || doc.title.startsWith('Verificacao') ? '[V]' : '[D]');
-                    const time = this.relativeTime(doc.created_at);
-                    md += `${docIcon} **${this.escapeHtml(doc.title)}** — *${time}* <a href="#" data-action="open-doc" data-doc-id="${this.escapeHtml(doc.id)}" data-doc-type="${this.escapeHtml(doc.type)}" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Abrir</a>\n\n`;
-                }
-            }
-
-            // History timeline
-            if (history && history.length > 0) {
-                md += `---\n\n### Historico\n\n`;
-                for (const entry of history) {
-                    const icon = this.taskHistoryIcon(entry.event_type);
-                    const label = this.taskHistoryLabel(entry);
-                    const time = this.relativeTime(entry.created_at);
-                    const docLink = this.taskHistoryDocLink(entry);
-                    md += `${icon} ${label}${docLink} — *${time}*\n\n`;
-                }
-            }
-
-            // Project name
-            const project = (this.projects || []).find(p => p.id === projectId);
-            if (project) {
-                md += `\n---\n\n*Projeto: ${this.escapeHtml(project.name)}*\n`;
-            }
-
-            // Action buttons
-            const isDone = task.status === 'done';
-            const actions = [
-                {
-                    label: 'Editar',
-                    class: 'btn btn-secondary',
-                    onClick: () => {
-                        window.docViewer.close();
-                        this.showTaskModal(projectId, taskId);
-                    }
-                }
-            ];
-
-            if (isAwaitingApproval) {
-                // Show verification document button if available
-                if (task.verification_doc_id) {
-                    actions.push({
-                        label: 'Ver Documento',
-                        class: 'btn btn-secondary',
-                        onClick: () => {
-                            window.docViewer.open(task.verification_doc_id);
-                        }
-                    });
-                }
-                // Approve button
-                actions.push({
-                    label: 'Aprovar',
-                    class: 'btn btn-success',
-                    onClick: async () => {
-                        try {
-                            await this.api('POST', `/projects/${projectId}/tasks/${taskId}/approve`);
-                            window.docViewer.close();
-                            this.showToast('Sucesso', 'Tarefa aprovada e marcada como done', 'success');
-                            this.loadAllTasks();
-                        } catch (e) {
-                            this.showToast('Erro', e.message, 'error');
-                        }
-                    }
-                });
-                // Reject button
-                actions.push({
-                    label: 'Rejeitar',
-                    class: 'btn btn-danger',
-                    onClick: async () => {
-                        try {
-                            await this.api('POST', `/projects/${projectId}/tasks/${taskId}/reject`);
-                            window.docViewer.close();
-                            this.showToast('Info', 'Tarefa retornada para in_progress', 'info');
-                            this.loadAllTasks();
-                        } catch (e) {
-                            this.showToast('Erro', e.message, 'error');
-                        }
-                    }
-                });
-            } else if (!isDone) {
-                const cycle = { 'todo': 'in_progress', 'in_progress': 'awaiting_approval' };
-                const next = cycle[task.status] || 'in_progress';
-                const nextLabel = next.replace(/_/g, ' ');
-                actions.push({
-                    label: `Marcar ${nextLabel}`,
-                    class: 'btn btn-primary',
-                    onClick: async () => {
-                        try {
-                            await this.api('PATCH', `/projects/${projectId}/tasks/${taskId}/status`, { status: next });
-                            window.docViewer.close();
-                            this.showToast('Sucesso', `Tarefa marcada como ${nextLabel}`, 'success');
-                            this.loadAllTasks();
-                        } catch (e) {
-                            this.showToast('Erro', e.message, 'error');
-                        }
-                    }
-                });
-
-                if (activeSession) {
-                    actions.push({
-                        label: 'Ir para Sessão',
-                        class: 'btn btn-success',
-                        onClick: () => {
-                            window.docViewer.close();
-                            this.openTerminal(activeSession.id);
-                        }
-                    });
-                } else {
-                    actions.push({
-                        label: 'Iniciar Sessão',
-                        class: 'btn btn-success',
-                        onClick: () => {
-                            window.docViewer.close();
-                            this.startSessionFromTask(projectId, taskId);
-                        }
-                    });
-                }
-            }
-
-            // "Add Note" button
-            actions.push({
-                label: 'Adicionar Nota',
-                class: 'btn btn-secondary',
-                onClick: async () => {
-                    const comment = prompt('Adicionar nota:');
-                    if (comment && comment.trim()) {
-                        try {
-                            await this.api('POST', `/projects/${projectId}/tasks/${taskId}/history`, { comment: comment.trim() });
-                            this.viewTaskDetail(projectId, taskId);
-                        } catch (e) {
-                            this.showToast('Erro', e.message, 'error');
-                        }
-                    }
-                }
-            });
-
-            // "Discuss with AI" button — always visible regardless of status
-            actions.push({
-                label: '💬 Discutir com IA',
-                class: 'btn btn-primary',
-                onClick: async () => {
-                    window.docViewer.close();
-                    await this.discussTaskWithAI(projectId, taskId);
-                }
-            });
-
-            window.docViewer.openWithContent(task.title, md, {
-                actions,
-                onClose: () => { this._viewingTaskDetail = null; }
-            });
         } catch (e) {
             this.showToast('Erro', 'Falha ao carregar detalhes da tarefa', 'error');
         }
+    }
+
+    // Shared SVG icons for task detail actions
+    _taskDetailIcons = {
+        edit: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
+        fileText: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>',
+        note: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+        ai: '<span style="font-weight:700;font-size:12px;line-height:1;letter-spacing:-0.5px">AI</span>',
+        play: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>',
+        check: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>',
+        session: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
+    };
+
+    _buildTaskDetailMarkdown(ctx) {
+        const { task, sessions, allTasks, history, documents, projectId } = ctx;
+        const subtasks = (allTasks || []).filter(t => t.parent_id?.Valid && t.parent_id.Int64 === ctx.taskId);
+        const isUmbrella = subtasks.length > 0;
+        const isAwaitingApproval = task.status === 'awaiting_approval';
+
+        let md = '';
+
+        // Status & Priority
+        const statusLabel = (task.status || 'todo').replace(/_/g, ' ');
+        const priorityLabel = task.priority || 'medium';
+        if (isUmbrella) {
+            const doneCount = subtasks.filter(s => s.status === 'done').length;
+            md += `**Status:** ${statusLabel} &nbsp;|&nbsp; **Prioridade:** ${priorityLabel} &nbsp;|&nbsp; **Umbrella:** ${doneCount}/${subtasks.length} concluídas\n\n`;
+        } else {
+            md += `**Status:** ${statusLabel} &nbsp;|&nbsp; **Prioridade:** ${priorityLabel}\n\n`;
+        }
+
+        // Awaiting approval notice — spinner DOM element is prepended when generating
+        if (isAwaitingApproval) {
+            if (task.verification_doc_id) {
+                md += `> **Aguardando Aprovação** — Documento de verificação disponível. Use os botões abaixo para aprovar ou rejeitar.\n\n`;
+            }
+        }
+
+        // Due date
+        if (task.due_date?.Valid) {
+            const d = new Date(task.due_date.Time);
+            const dateStr = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+            const isOverdue = d < new Date() && task.status !== 'done';
+            md += `**Prazo:** ${dateStr}${isOverdue ? ' **(ATRASADO)**' : ''}\n\n`;
+        }
+
+        // Description
+        if (task.description) {
+            md += `---\n\n${task.description}\n\n`;
+        } else {
+            md += `---\n\n*Sem descrição.*\n\n`;
+        }
+
+        // Subtasks section
+        if (isUmbrella) {
+            const statusIcons = { done: '[x]', in_progress: '[~]', todo: '[ ]', awaiting_approval: '[?]' };
+            md += `---\n\n### Subtarefas\n\n`;
+            for (const sub of subtasks) {
+                const icon = statusIcons[sub.status] || '[ ]';
+                const subStatus = sub.status.replace('_', ' ');
+                let subDue = '';
+                if (sub.due_date?.Valid) {
+                    const sd = new Date(sub.due_date.Time);
+                    const isSubOverdue = sd < new Date() && sub.status !== 'done';
+                    subDue = ` — prazo: ${sd.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}${isSubOverdue ? ' **(ATRASADO)**' : ''}`;
+                }
+                md += `- ${icon} **${this.escapeHtml(sub.title)}** *(${subStatus})*${subDue}\n`;
+            }
+            md += '\n';
+        }
+
+        // Session history
+        if (sessions && sessions.length > 0) {
+            md += `---\n\n### Sessões\n\n`;
+            for (const s of sessions) {
+                const date = new Date(s.start_time).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+                const name = s.name || s.id.substring(0, 8);
+                const isActive = s.status === 'running' || s.status === 'starting';
+                const badge = isActive ? '🟢 running' : s.status;
+                const sessionId = s.id.substring(0, 8);
+                md += `- **${this.escapeHtml(name)}** \`${sessionId}\` — ${badge} — ${date}\n`;
+            }
+        }
+
+        // Documents section
+        if (documents && documents.length > 0) {
+            md += `---\n\n### Documentos\n\n`;
+            for (const doc of documents) {
+                const docIcon = doc.type === 'plan' ? '[P]' : (doc.title.startsWith('Verificação') || doc.title.startsWith('Verificacao') ? '[V]' : '[D]');
+                const time = this.relativeTime(doc.created_at);
+                md += `${docIcon} **${this.escapeHtml(doc.title)}** — *${time}* <a href="#" data-action="open-doc" data-doc-id="${this.escapeHtml(doc.id)}" data-doc-type="${this.escapeHtml(doc.type)}" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Abrir</a>\n\n`;
+            }
+        }
+
+        // History timeline
+        if (history && history.length > 0) {
+            md += `---\n\n### Historico\n\n`;
+            for (const entry of history) {
+                const icon = this.taskHistoryIcon(entry.event_type);
+                const label = this.taskHistoryLabel(entry);
+                const time = this.relativeTime(entry.created_at);
+                const docLink = this.taskHistoryDocLink(entry);
+                md += `${icon} ${label}${docLink} — *${time}*\n\n`;
+            }
+        }
+
+        // Project name
+        const project = (this.projects || []).find(p => p.id === projectId);
+        if (project) {
+            md += `\n---\n\n*Projeto: ${this.escapeHtml(project.name)}*\n`;
+        }
+
+        return md;
+    }
+
+    // Build the verification spinner card DOM element
+    _buildVerificationSpinner(projectId, taskId) {
+        const card = document.createElement('div');
+        card.className = 'task-verification-spinner';
+        card.innerHTML = `
+            <div class="spinner"></div>
+            <div class="spinner-text">Gerando documento de verificação...</div>
+            <div class="spinner-subtext">Isso pode levar alguns segundos</div>
+            <button class="btn-skip" data-action="skip-verification">Pular verificação</button>
+        `;
+        return card;
+    }
+
+    // Shared action builders
+    _buildEditAction(projectId, taskId) {
+        return {
+            label: 'Editar',
+            role: 'secondary',
+            icon: this._taskDetailIcons.edit,
+            class: 'btn btn-secondary',
+            onClick: () => { window.docViewer.close(); this.showTaskModal(projectId, taskId); }
+        };
+    }
+    _buildApproveAction(projectId, taskId) {
+        return {
+            label: 'Aprovar',
+            role: 'primary',
+            class: 'btn btn-success',
+            onClick: async () => {
+                try {
+                    await this.api('POST', `/projects/${projectId}/tasks/${taskId}/approve`);
+                    window.docViewer.close();
+                    this.showToast('Sucesso', 'Tarefa aprovada e marcada como done', 'success');
+                    this.loadAllTasks();
+                } catch (e) { this.showToast('Erro', e.message, 'error'); }
+            }
+        };
+    }
+    _buildRejectAction(projectId, taskId) {
+        return {
+            label: 'Rejeitar',
+            role: 'primary',
+            class: 'btn btn-danger',
+            onClick: async () => {
+                try {
+                    await this.api('POST', `/projects/${projectId}/tasks/${taskId}/reject`);
+                    window.docViewer.close();
+                    this.showToast('Info', 'Tarefa retornada para in_progress', 'info');
+                    this.loadAllTasks();
+                } catch (e) { this.showToast('Erro', e.message, 'error'); }
+            }
+        };
+    }
+    _buildViewDocAction(task) {
+        return {
+            label: 'Ver Documento',
+            role: 'secondary',
+            icon: this._taskDetailIcons.fileText,
+            class: 'btn btn-secondary',
+            onClick: () => { window.docViewer.open(task.verification_doc_id); }
+        };
+    }
+    _buildStatusAction(projectId, taskId, task) {
+        const cycle = { 'todo': 'in_progress', 'in_progress': 'awaiting_approval' };
+        const next = cycle[task.status] || 'in_progress';
+        const nextLabel = next.replace(/_/g, ' ');
+        return {
+            label: `Marcar ${nextLabel}`,
+            role: 'primary',
+            icon: this._taskDetailIcons.check,
+            class: 'btn btn-primary',
+            onClick: async () => {
+                try {
+                    await this.api('PATCH', `/projects/${projectId}/tasks/${taskId}/status`, { status: next });
+                    window.docViewer.close();
+                    this.showToast('Sucesso', `Tarefa marcada como ${nextLabel}`, 'success');
+                    this.loadAllTasks();
+                } catch (e) { this.showToast('Erro', e.message, 'error'); }
+            }
+        };
+    }
+    _buildSessionAction(projectId, taskId, activeSession) {
+        if (activeSession) {
+            return {
+                label: 'Ir para Sessão',
+                role: 'primary',
+                icon: this._taskDetailIcons.session,
+                class: 'btn btn-success',
+                onClick: () => { window.docViewer.close(); this.openTerminal(activeSession.id); }
+            };
+        }
+        return {
+            label: 'Iniciar Sessão',
+            role: 'primary',
+            icon: this._taskDetailIcons.play,
+            class: 'btn btn-success',
+            onClick: () => { window.docViewer.close(); this.startSessionFromTask(projectId, taskId); }
+        };
+    }
+    _buildNoteAction(projectId, taskId) {
+        return {
+            label: 'Adicionar Nota',
+            role: 'secondary',
+            icon: this._taskDetailIcons.note,
+            class: 'btn btn-secondary',
+            onClick: async () => {
+                const comment = prompt('Adicionar nota:');
+                if (comment && comment.trim()) {
+                    try {
+                        await this.api('POST', `/projects/${projectId}/tasks/${taskId}/history`, { comment: comment.trim() });
+                        this.viewTaskDetail(projectId, taskId);
+                    } catch (e) { this.showToast('Erro', e.message, 'error'); }
+                }
+            }
+        };
+    }
+    _buildAIAction(projectId, taskId) {
+        return {
+            label: 'Discutir com IA',
+            role: 'secondary',
+            icon: this._taskDetailIcons.ai,
+            aiAction: true,
+            class: 'btn btn-primary',
+            onClick: async () => { window.docViewer.close(); await this.discussTaskWithAI(projectId, taskId); }
+        };
+    }
+
+    _openTaskDetail(ctx, md) {
+        const { task, sessions, projectId, taskId } = ctx;
+        const isAwaitingApproval = task.status === 'awaiting_approval';
+        const isDone = task.status === 'done';
+        const activeSession = sessions?.find(s => s.status === 'running' || s.status === 'starting');
+
+        const actions = [];
+        let prependElement = null;
+
+        if (isAwaitingApproval) {
+            if (!task.verification_doc_id) {
+                prependElement = this._buildVerificationSpinner(projectId, taskId);
+            }
+            if (task.verification_doc_id) {
+                actions.push(this._buildViewDocAction(task));
+            }
+            actions.push(this._buildApproveAction(projectId, taskId));
+            actions.push(this._buildRejectAction(projectId, taskId));
+        } else if (!isDone) {
+            actions.push(this._buildStatusAction(projectId, taskId, task));
+            actions.push(this._buildSessionAction(projectId, taskId, activeSession));
+        }
+
+        actions.push(this._buildEditAction(projectId, taskId));
+        actions.push(this._buildNoteAction(projectId, taskId));
+        actions.push(this._buildAIAction(projectId, taskId));
+
+        window.docViewer.openWithContent(task.title, md, {
+            actions,
+            footerMode: 'split',
+            prependElement,
+            onClose: () => { this._viewingTaskDetail = null; }
+        });
     }
 
     relativeTime(dateStr) {

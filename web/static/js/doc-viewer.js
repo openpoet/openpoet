@@ -40,7 +40,67 @@ class DocViewer {
                     window.app.openTaskDoc(docId, docType);
                 }
             }
+            // Event delegation for skip-verification button
+            const skipBtn = e.target.closest('[data-action="skip-verification"]');
+            if (skipBtn) {
+                const card = skipBtn.closest('.task-verification-spinner');
+                if (card) {
+                    card.remove();
+                }
+            }
         });
+
+        // Long-press tooltip for icon buttons on mobile
+        this._setupLongPressTooltip();
+    }
+
+    _setupLongPressTooltip() {
+        let pressTimer = null;
+        let tooltip = null;
+        const LONG_PRESS_MS = 400;
+
+        const showTooltip = (btn) => {
+            const text = btn.dataset.tooltip || btn.title;
+            if (!text) return;
+            removeTooltip();
+            tooltip = document.createElement('div');
+            tooltip.className = 'icon-tooltip';
+            tooltip.textContent = text;
+            document.body.appendChild(tooltip);
+            const rect = btn.getBoundingClientRect();
+            tooltip.style.left = rect.left + rect.width / 2 + 'px';
+            tooltip.style.top = rect.top - 8 + 'px';
+            requestAnimationFrame(() => tooltip?.classList.add('visible'));
+        };
+
+        const removeTooltip = () => {
+            if (tooltip) {
+                tooltip.remove();
+                tooltip = null;
+            }
+        };
+
+        const onTouchStart = (e) => {
+            const btn = e.target.closest('.btn-icon-round[data-tooltip]');
+            if (!btn) return;
+            pressTimer = setTimeout(() => {
+                showTooltip(btn);
+                // Prevent the click from firing after long-press
+                btn.addEventListener('click', preventClick, { once: true, capture: true });
+            }, LONG_PRESS_MS);
+        };
+
+        const preventClick = (e) => { e.stopImmediatePropagation(); e.preventDefault(); };
+
+        const onTouchEnd = () => {
+            clearTimeout(pressTimer);
+            pressTimer = null;
+            setTimeout(removeTooltip, 1200);
+        };
+
+        this.overlay?.addEventListener('touchstart', onTouchStart, { passive: true });
+        this.overlay?.addEventListener('touchend', onTouchEnd, { passive: true });
+        this.overlay?.addEventListener('touchcancel', onTouchEnd, { passive: true });
     }
 
     async open(docId) {
@@ -206,6 +266,7 @@ class DocViewer {
                 html: this.contentEl.innerHTML,
                 footerFragment,
                 footerHidden: this.footerEl.classList.contains('hidden'),
+                footerVersion: this.footerEl.dataset.version || '',
                 onClose: this._onClose || null
             });
         }
@@ -218,9 +279,51 @@ class DocViewer {
             if (typeof FileViewer !== 'undefined') FileViewer.renderMermaid(this.contentEl);
         });
 
-        // Build footer actions
+        // Prepend/append custom DOM elements into content
+        if (opts.prependElement) {
+            this.contentEl.insertBefore(opts.prependElement, this.contentEl.firstChild);
+        }
+        if (opts.appendElement) {
+            this.contentEl.appendChild(opts.appendElement);
+        }
+
+        // Build footer based on mode
         this.footerEl.innerHTML = '';
-        if (opts.actions && opts.actions.length > 0) {
+        delete this.footerEl.dataset.version;
+        const footerMode = opts.footerMode || 'default';
+
+        if (footerMode === 'hidden') {
+            this.footerEl.classList.add('hidden');
+        } else if (footerMode === 'split' && opts.actions) {
+            this.footerEl.dataset.version = 'A';
+            const primary = opts.actions.filter(a => a.role === 'primary');
+            const secondary = opts.actions.filter(a => a.role !== 'primary');
+
+            const primaryDiv = document.createElement('div');
+            primaryDiv.className = 'footer-primary';
+            for (const action of primary) {
+                const btn = document.createElement('button');
+                btn.className = action.class || 'btn btn-secondary';
+                btn.textContent = action.label;
+                btn.addEventListener('click', action.onClick);
+                primaryDiv.appendChild(btn);
+            }
+            const secondaryDiv = document.createElement('div');
+            secondaryDiv.className = 'footer-secondary';
+            for (const action of secondary) {
+                const btn = document.createElement('button');
+                btn.className = 'btn-icon-round' + (action.aiAction ? ' ai-action' : '');
+                btn.title = action.label;
+                btn.dataset.tooltip = action.label;
+                btn.innerHTML = (action.icon || '') + `<span class="icon-label">${this._escapeHtml(action.label)}</span>`;
+                btn.addEventListener('click', action.onClick);
+                secondaryDiv.appendChild(btn);
+            }
+            this.footerEl.appendChild(primaryDiv);
+            this.footerEl.appendChild(secondaryDiv);
+            this.footerEl.classList.remove('hidden');
+        } else if (opts.actions && opts.actions.length > 0) {
+            // Default mode: flat button list
             for (const action of opts.actions) {
                 const btn = document.createElement('button');
                 btn.className = action.class || 'btn btn-secondary';
@@ -246,6 +349,11 @@ class DocViewer {
             this.contentEl.innerHTML = prev.html;
             this.footerEl.innerHTML = '';
             this.footerEl.appendChild(prev.footerFragment);
+            if (prev.footerVersion) {
+                this.footerEl.dataset.version = prev.footerVersion;
+            } else {
+                delete this.footerEl.dataset.version;
+            }
             if (prev.footerHidden) {
                 this.footerEl.classList.add('hidden');
             } else {
