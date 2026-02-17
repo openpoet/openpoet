@@ -95,15 +95,23 @@ func (a *activeStreamInfo) subscribe() (<-chan sseEvent, func()) {
 	a.mu.Unlock()
 	unsub := func() {
 		a.mu.Lock()
-		defer a.mu.Unlock()
 		for i, s := range a.subs {
 			if s == ch {
 				a.subs = append(a.subs[:i], a.subs[i+1:]...)
 				break
 			}
 		}
-		// drain channel
-		for range ch {
+		a.mu.Unlock()
+		// Non-blocking drain of remaining buffered events.
+		// Do NOT use blocking "for range ch" here — it deadlocks if the
+		// channel hasn't been closed yet (e.g. client disconnects before
+		// stream ends), because broadcast() also needs a.mu.
+		for {
+			select {
+			case <-ch:
+			default:
+				return
+			}
 		}
 	}
 	return ch, unsub
@@ -152,31 +160,38 @@ func NewAIHandler(api *API, provider llm.Provider) *AIHandler {
 
 func (h *AIHandler) registerStream(convID int64, cancel context.CancelFunc) {
 	h.activeStreamsMu.Lock()
-	defer h.activeStreamsMu.Unlock()
-	// Cancel any existing stream for this conversation
-	if existing, ok := h.activeStreams[convID]; ok {
+	existing, hadExisting := h.activeStreams[convID]
+	h.activeStreams[convID] = &activeStreamInfo{cancel: cancel}
+	h.activeStreamsMu.Unlock()
+	// Cancel any existing stream for this conversation (outside lock)
+	if hadExisting {
 		existing.cancel()
 		existing.closeAll()
 	}
-	h.activeStreams[convID] = &activeStreamInfo{cancel: cancel}
 }
 
 func (h *AIHandler) unregisterStream(convID int64) {
 	h.activeStreamsMu.Lock()
-	defer h.activeStreamsMu.Unlock()
-	if info, ok := h.activeStreams[convID]; ok {
-		info.closeAll()
+	info, ok := h.activeStreams[convID]
+	if ok {
 		delete(h.activeStreams, convID)
+	}
+	h.activeStreamsMu.Unlock()
+	if ok {
+		info.closeAll()
 	}
 }
 
 func (h *AIHandler) stopStream(convID int64) {
 	h.activeStreamsMu.Lock()
-	defer h.activeStreamsMu.Unlock()
-	if info, ok := h.activeStreams[convID]; ok {
+	info, ok := h.activeStreams[convID]
+	if ok {
+		delete(h.activeStreams, convID)
+	}
+	h.activeStreamsMu.Unlock()
+	if ok {
 		info.cancel()
 		info.closeAll()
-		delete(h.activeStreams, convID)
 	}
 }
 
@@ -193,11 +208,16 @@ func (h *AIHandler) broadcastToStream(convID int64, eventType string, data inter
 // HandleActiveStream returns the conversation ID if there's an active LLM stream.
 func (h *AIHandler) HandleActiveStream(w http.ResponseWriter, r *http.Request) {
 	h.activeStreamsMu.Lock()
-	defer h.activeStreamsMu.Unlock()
+	var activeConvID int64
 	for convID := range h.activeStreams {
+		activeConvID = convID
+		break
+	}
+	h.activeStreamsMu.Unlock()
+	if activeConvID > 0 {
 		respondJSON(w, http.StatusOK, map[string]interface{}{
 			"active":          true,
-			"conversation_id": convID,
+			"conversation_id": activeConvID,
 		})
 		return
 	}
