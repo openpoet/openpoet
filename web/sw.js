@@ -178,20 +178,13 @@ self.addEventListener('notificationclick', (event) => {
     event.waitUntil(
         clients.matchAll({ type: 'window', includeUncontrolled: true })
             .then((clientList) => {
-                // Focus existing window if found
+                // Focus existing window and navigate via hash (triggers hashchange listener)
                 for (const client of clientList) {
                     if (client.url.includes(self.location.origin) && 'focus' in client) {
-                        // Post message to navigate using link or session
-                        if (data.link) {
-                            client.postMessage({
-                                type: 'navigate_to_link',
-                                link: data.link
-                            });
-                        } else if (data.session_id) {
-                            client.postMessage({
-                                type: 'navigate_to_session',
-                                session_id: data.session_id
-                            });
+                        if ('navigate' in client) {
+                            return client.navigate(targetUrl)
+                                .then(c => c ? c.focus() : null)
+                                .catch(() => client.focus());
                         }
                         return client.focus();
                     }

@@ -1262,7 +1262,8 @@ class HookManager {
             window.terminalManager.switchToSession(sessionId);
             if (window.app) {
                 window.app.updateTabActiveState(sessionId);
-                window.app._updateNavForTerminal();
+                // Ensure terminal view is visible (user may be on a different view)
+                window.app.showTerminalView();
             }
         } else if (window.app) {
             window.app.openTerminal(sessionId);
