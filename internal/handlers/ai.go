@@ -3708,10 +3708,6 @@ func (h *AIHandler) EvaluateSession(ctx context.Context, sessionID string, trigg
 		log.Printf("[AI-Session] Skipping session_end: no linked task (no point creating task for finished work)")
 		return
 	}
-	if trigger == "user_prompt" && hasLinkedTask {
-		log.Printf("[AI-Session] Skipping user_prompt: task already linked [%d] %s", linkedTask.ID, linkedTask.Title)
-		return
-	}
 
 	// Format tasks list
 	var tasksList string
@@ -3753,11 +3749,11 @@ func (h *AIHandler) EvaluateSession(ctx context.Context, sessionID string, trigg
 
 	switch trigger {
 	case "session_start":
-		triggerDesc = "started"
-		instructions = `- Suggest linking to an existing task if the session's work seems related.
-- Valid types for this trigger: "link_task" (needs task_id)
-- Return empty suggestions array if no task seems related.`
-		allowedTypes["link_task"] = true
+		// Skip: no terminal output yet, so no context to evaluate.
+		// Task linking is handled by user_prompt trigger (with actual context)
+		// and by the UI modal shown before session start.
+		log.Printf("[AI-Session] Skipping session_start: no context to evaluate (task suggestions deferred to user_prompt)")
+		return
 
 	case "session_end":
 		triggerDesc = "ended"
@@ -3772,11 +3768,18 @@ func (h *AIHandler) EvaluateSession(ctx context.Context, sessionID string, trigg
 
 	case "user_prompt":
 		triggerDesc = "is currently running (user submitted a prompt)"
-		instructions = `- This session has NO linked task yet. Based on the session output, suggest creating a new task or linking to an existing one.
+		allowedTypes["create_task"] = true
+		if hasLinkedTask {
+			instructions = fmt.Sprintf(`- This session is linked to task [%d] "%s". Based on the session output, suggest creating a NEW separate task if the work reveals something that should be tracked independently.
+- Do NOT suggest "link_task" — the session already has a linked task.
+- Valid types for this trigger: "create_task" (needs task_data)
+- Return empty suggestions array if no new task is warranted.`, linkedTask.ID, linkedTask.Title)
+		} else {
+			instructions = `- This session has NO linked task yet. Based on the session output, suggest creating a new task or linking to an existing one.
 - Valid types for this trigger: "create_task" (needs task_data), "link_task" (needs task_id)
 - Return empty suggestions array if it's too early to determine the session's purpose.`
-		allowedTypes["create_task"] = true
-		allowedTypes["link_task"] = true
+			allowedTypes["link_task"] = true
+		}
 
 	case "plan_accepted":
 		if hasLinkedTask {
@@ -3935,11 +3938,16 @@ Instructions:
 		TaskData    map[string]interface{} `json:"task_data"`
 	}
 	for _, s := range result.Suggestions {
-		if allowedTypes[s.Type] {
-			filtered = append(filtered, s)
-		} else {
+		if !allowedTypes[s.Type] {
 			log.Printf("[AI-Session] Filtered out invalid type '%s' for trigger '%s' (session %s)", s.Type, trigger, sessionID[:8])
+			continue
 		}
+		// Discard link_task if it suggests linking to the already-linked task
+		if s.Type == "link_task" && hasLinkedTask && s.TaskID != nil && *s.TaskID == linkedTask.ID {
+			log.Printf("[AI-Session] Filtered out link_task: session already linked to task [%d] %s", linkedTask.ID, linkedTask.Title)
+			continue
+		}
+		filtered = append(filtered, s)
 	}
 	result.Suggestions = filtered
 
@@ -4149,12 +4157,15 @@ func (h *AIHandler) AcceptSuggestion(w http.ResponseWriter, r *http.Request) {
 		// Rename session to task title
 		if linkedTask, err := h.api.db.GetTask(r.Context(), *ctx.TaskID); err == nil && linkedTask != nil {
 			newName := "Task: " + linkedTask.Title
-			h.api.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, suggestion.SessionID)
-			h.api.hub.BroadcastStateUpdate("session", map[string]interface{}{
-				"action":     "renamed",
-				"session_id": suggestion.SessionID,
-				"name":       newName,
-			})
+			if _, err := h.api.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, suggestion.SessionID); err != nil {
+				log.Printf("[AI-Session] Failed to rename session %s: %v", suggestion.SessionID, err)
+			} else {
+				h.api.hub.BroadcastStateUpdate("session", map[string]interface{}{
+					"action":     "renamed",
+					"session_id": suggestion.SessionID,
+					"name":       newName,
+				})
+			}
 		}
 		resultMsg = fmt.Sprintf("Session linked to task %d", *ctx.TaskID)
 
@@ -4172,7 +4183,7 @@ func (h *AIHandler) AcceptSuggestion(w http.ResponseWriter, r *http.Request) {
 			ProjectID:   suggestion.ProjectID,
 			Title:       title,
 			Description: desc,
-			Status:      "todo",
+			Status:      "in_progress",
 			Priority:    priority,
 		}
 		if err := h.api.db.CreateTask(r.Context(), task); err != nil {
@@ -4184,12 +4195,15 @@ func (h *AIHandler) AcceptSuggestion(w http.ResponseWriter, r *http.Request) {
 			h.api.db.LinkSessionToTask(r.Context(), suggestion.SessionID, task.ID)
 			// Rename session to match new task title
 			newName := "Task: " + task.Title
-			h.api.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, suggestion.SessionID)
-			h.api.hub.BroadcastStateUpdate("session", map[string]interface{}{
-				"action":     "renamed",
-				"session_id": suggestion.SessionID,
-				"name":       newName,
-			})
+			if _, err := h.api.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, suggestion.SessionID); err != nil {
+				log.Printf("[AI-Session] Failed to rename session %s: %v", suggestion.SessionID, err)
+			} else {
+				h.api.hub.BroadcastStateUpdate("session", map[string]interface{}{
+					"action":     "renamed",
+					"session_id": suggestion.SessionID,
+					"name":       newName,
+				})
+			}
 		}
 		h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{
 			"action":     "created",
@@ -4293,7 +4307,9 @@ func (h *AIHandler) AcceptSuggestion(w http.ResponseWriter, r *http.Request) {
 		// 4. Link session to new task
 		h.api.db.LinkSessionToTask(r.Context(), suggestion.SessionID, newTask.ID)
 		newName := "Task: " + newTask.Title
-		h.api.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, suggestion.SessionID)
+		if _, err := h.api.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, suggestion.SessionID); err != nil {
+			log.Printf("[AI-Session] Failed to rename session %s: %v", suggestion.SessionID, err)
+		}
 		h.api.hub.BroadcastStateUpdate("session", map[string]interface{}{
 			"action":     "renamed",
 			"session_id": suggestion.SessionID,
@@ -4323,6 +4339,17 @@ func (h *AIHandler) AcceptSuggestion(w http.ResponseWriter, r *http.Request) {
 
 	// Mark suggestion as accepted
 	h.api.db.UpdateAISuggestionStatus(r.Context(), id, "accepted")
+
+	// Record user's response in conversation history
+	if suggestion.ConversationID.Valid {
+		h.api.db.CreateAIMessage(r.Context(), &database.AIMessage{
+			ConversationID: suggestion.ConversationID.Int64,
+			Role:           "user",
+			Content:        fmt.Sprintf("Aceito. %s", resultMsg),
+			Status:         "completed",
+		})
+		h.api.db.MarkConversationRead(r.Context(), suggestion.ConversationID.Int64)
+	}
 
 	// Record suggestion_accepted in task history
 	var historyTaskID int64
@@ -4356,6 +4383,17 @@ func (h *AIHandler) DismissSuggestion(w http.ResponseWriter, r *http.Request) {
 	if err := h.api.db.UpdateAISuggestionStatus(r.Context(), id, "dismissed"); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// Record user's response in conversation history
+	if suggestion != nil && suggestion.ConversationID.Valid {
+		h.api.db.CreateAIMessage(r.Context(), &database.AIMessage{
+			ConversationID: suggestion.ConversationID.Int64,
+			Role:           "user",
+			Content:        "Ignorado.",
+			Status:         "completed",
+		})
+		h.api.db.MarkConversationRead(r.Context(), suggestion.ConversationID.Int64)
 	}
 
 	// Record suggestion_dismissed in task history if linked to a task
