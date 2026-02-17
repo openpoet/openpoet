@@ -121,7 +121,7 @@ When a user message starts with "[Notificação do sistema — Feedback de propo
 - Then respond to the user's actual message that follows after the "---" separator.
 
 ## Task Management
-Tasks have: title, description, status (todo/in_progress/awaiting_approval/done/blocked), priority (low/medium/high/urgent), due dates, subtasks (via parent_id). The "awaiting_approval" status means the task work is complete but awaits user verification before being marked as done.
+Tasks have: title, description, status (todo/in_progress/awaiting_approval/done), priority (low/medium/high/urgent), due dates, subtasks (via parent_id). The "awaiting_approval" status means the task work is complete but awaits user verification before being marked as done.
 
 ### Creating a task
 1. **Investigate silently**: call get_memory_doc, list_tasks, list_directory (may also read files if needed)

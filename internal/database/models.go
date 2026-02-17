@@ -177,7 +177,7 @@ type ProjectTask struct {
 	ParentID    sql.NullInt64 `db:"parent_id" json:"parent_id,omitempty"`
 	Title       string       `db:"title" json:"title"`
 	Description string       `db:"description" json:"description"`
-	Status      string       `db:"status" json:"status"`       // 'todo', 'in_progress', 'awaiting_approval', 'done', 'blocked'
+	Status      string       `db:"status" json:"status"`       // 'todo', 'in_progress', 'awaiting_approval', 'done'
 	Priority    string       `db:"priority" json:"priority"`   // 'low', 'medium', 'high', 'urgent'
 	DueDate     sql.NullTime `db:"due_date" json:"due_date,omitempty"`
 	SortOrder       int          `db:"sort_order" json:"sort_order"`

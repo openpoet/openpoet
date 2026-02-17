@@ -1849,7 +1849,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if len(tasks) == 0 {
 			return fmt.Sprintf("No tasks found for project %d.", projectID), nil
 		}
-		statusIcons := map[string]string{"todo": "[ ]", "in_progress": "[~]", "done": "[x]", "blocked": "[!]", "awaiting_approval": "[?]"}
+		statusIcons := map[string]string{"todo": "[ ]", "in_progress": "[~]", "done": "[x]", "awaiting_approval": "[?]"}
 		priorityLabels := map[string]string{"low": "LOW", "medium": "MED", "high": "HIGH", "urgent": "URG"}
 		var sb strings.Builder
 		for _, t := range tasks {
@@ -2175,7 +2175,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			total += c
 		}
 		sb.WriteString(fmt.Sprintf("**Total:** %d tasks (excluding umbrella parents)\n", total))
-		sb.WriteString(fmt.Sprintf("- Todo: %d\n- In Progress: %d\n- Awaiting Approval: %d\n- Done: %d\n- Blocked: %d\n\n", summary["todo"], summary["in_progress"], summary["awaiting_approval"], summary["done"], summary["blocked"]))
+		sb.WriteString(fmt.Sprintf("- Todo: %d\n- In Progress: %d\n- Awaiting Approval: %d\n- Done: %d\n\n", summary["todo"], summary["in_progress"], summary["awaiting_approval"], summary["done"]))
 
 		// Umbrella tasks with progress
 		var umbrellas []database.ProjectTask
@@ -2217,11 +2217,11 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			sb.WriteString("\n")
 		}
 
-		// Recommended next task: highest priority non-blocked todo/in_progress, or nearest due (exclude umbrella parents)
+		// Recommended next task: highest priority todo/in_progress, or nearest due (exclude umbrella parents)
 		priorityOrder := map[string]int{"urgent": 4, "high": 3, "medium": 2, "low": 1}
 		var best *database.ProjectTask
 		for i, t := range tasks {
-			if t.Status == "done" || t.Status == "blocked" || t.ParentID.Valid || parentIDs[t.ID] {
+			if t.Status == "done" || t.ParentID.Valid || parentIDs[t.ID] {
 				continue
 			}
 			if best == nil {
@@ -2863,7 +2863,7 @@ func (h *AIHandler) HandleInitiateTaskDiscussion(w http.ResponseWriter, r *http.
 		assistantMsg += fmt.Sprintf("**Subtarefas existentes (%d):**\n", len(subtasks))
 		for _, st := range subtasks {
 			statusEmoji := map[string]string{
-				"todo": "⬜", "in_progress": "🔄", "awaiting_approval": "⏳", "done": "✅", "blocked": "🚫",
+				"todo": "⬜", "in_progress": "🔄", "awaiting_approval": "⏳", "done": "✅",
 			}[st.Status]
 			if statusEmoji == "" {
 				statusEmoji = "⬜"

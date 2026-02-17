@@ -14,10 +14,6 @@ class DevManager {
         this.tabGroups = new Map(); // projectId -> group element
         this.groupingEnabled = true; // Toggle for flat vs grouped view
 
-        // Split-screen mode
-        this.splitScreenMode = false;
-        this.splitScreenSessions = []; // Max 2 sessions in split view
-
         // Session creation tracking (prevent race conditions)
         this.pendingSessionOpen = null; // { sessionId, timestamp }
         this.recentlyCreatedSessions = new Set(); // Track sessions created in last 5 seconds
@@ -2691,18 +2687,8 @@ class DevManager {
                 }
             }
 
-            if (this.splitScreenMode) {
-                // In split mode, clicking a tab replaces the second pane
-                if (this.splitScreenSessions.length >= 2) {
-                    this.splitScreenSessions[1] = sessionId;
-                } else {
-                    this.splitScreenSessions.push(sessionId);
-                }
-                this.refreshSplitScreen();
-            } else {
-                if (window.terminalManager.hasSession(sessionId)) {
-                    window.terminalManager.switchToSession(sessionId);
-                }
+            if (window.terminalManager.hasSession(sessionId)) {
+                window.terminalManager.switchToSession(sessionId);
             }
             this.currentSession = sessionId;
             this.updateTabActiveState(sessionId);
@@ -3416,74 +3402,6 @@ class DevManager {
         }
     }
 
-    // ==================== SPLIT-SCREEN MODE ====================
-
-    toggleSplitScreen() {
-        this.splitScreenMode = !this.splitScreenMode;
-        const wrapper = document.getElementById('terminal-containers-wrapper');
-
-        if (this.splitScreenMode) {
-            wrapper.classList.add('split-mode');
-
-            // Show two most recent tabs side-by-side
-            const openSessions = Array.from(this.openTabs.keys());
-            this.splitScreenSessions = openSessions.slice(0, 2);
-
-            this.refreshSplitScreen();
-        } else {
-            wrapper.classList.remove('split-mode');
-            this.splitScreenSessions = [];
-
-            // Restore single active terminal
-            const containers = wrapper.querySelectorAll('.terminal-container');
-            containers.forEach(container => {
-                container.classList.remove('split-visible', 'split-0', 'split-1');
-
-                if (container.id === `terminal-container-${window.terminalManager.activeSessionId}`) {
-                    container.classList.add('active');
-                }
-            });
-
-            // Re-fit active terminal
-            setTimeout(() => {
-                const activeSessionId = window.terminalManager.activeSessionId;
-                if (activeSessionId) {
-                    const termData = window.terminalManager.terminals.get(activeSessionId);
-                    if (termData) {
-                        termData.fitAddon.fit();
-                    }
-                }
-            }, 0);
-        }
-    }
-
-    refreshSplitScreen() {
-        const wrapper = document.getElementById('terminal-containers-wrapper');
-        const containers = wrapper.querySelectorAll('.terminal-container');
-
-        containers.forEach(container => {
-            const sessionId = container.id.replace('terminal-container-', '');
-
-            if (this.splitScreenSessions.includes(sessionId)) {
-                const index = this.splitScreenSessions.indexOf(sessionId);
-                container.classList.add('split-visible', `split-${index}`);
-                container.classList.remove('active');
-            } else {
-                container.classList.remove('split-visible', 'split-0', 'split-1', 'active');
-            }
-        });
-
-        // Re-fit all visible terminals
-        setTimeout(() => {
-            this.splitScreenSessions.forEach(sessionId => {
-                const termData = window.terminalManager.terminals.get(sessionId);
-                if (termData) {
-                    termData.fitAddon.fit();
-                }
-            });
-        }, 0);
-    }
-
     // ==================== LOCALSTORAGE PERSISTENCE ====================
 
     saveTabOrder() {
@@ -3649,12 +3567,6 @@ class DevManager {
                 e.preventDefault();
                 const tabIndex = parseInt(e.key) - 1;
                 this.switchToTabByIndex(tabIndex);
-            }
-
-            // Ctrl/Cmd + Shift + F - Toggle split screen
-            if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'F') {
-                e.preventDefault();
-                this.toggleSplitScreen();
             }
 
             // Ctrl/Cmd + Shift + L - Link Task to session
@@ -4732,11 +4644,6 @@ class DevManager {
             }
         });
 
-        // Split-screen toggle button
-        document.getElementById('split-screen-toggle')?.addEventListener('click', () => {
-            this.toggleSplitScreen();
-        });
-
         // Modal overlay click to close
         document.getElementById('modal-overlay')?.addEventListener('click', (e) => {
             if (e.target.id === 'modal-overlay') {
@@ -5573,14 +5480,13 @@ class DevManager {
             if (summaryEl) {
                 const parentIds = new Set();
                 tasks.filter(t => t.parent_id?.Valid).forEach(t => parentIds.add(t.parent_id.Int64));
-                const counts = { todo: 0, in_progress: 0, awaiting_approval: 0, done: 0, blocked: 0 };
+                const counts = { todo: 0, in_progress: 0, awaiting_approval: 0, done: 0 };
                 tasks.filter(t => !parentIds.has(t.id)).forEach(t => { if (counts[t.status] !== undefined) counts[t.status]++; });
                 summaryEl.innerHTML = `
                     <span class="summary-item"><span class="badge-todo task-status-badge" style="cursor:default">${counts.todo}</span> todo</span>
                     <span class="summary-item"><span class="badge-in_progress task-status-badge" style="cursor:default">${counts.in_progress}</span> prog</span>
                     ${counts.awaiting_approval > 0 ? `<span class="summary-item"><span class="badge-awaiting_approval task-status-badge" style="cursor:default">${counts.awaiting_approval}</span> approval</span>` : ''}
                     <span class="summary-item"><span class="badge-done task-status-badge" style="cursor:default">${counts.done}</span> done</span>
-                    ${counts.blocked > 0 ? `<span class="summary-item"><span class="badge-blocked task-status-badge" style="cursor:default">${counts.blocked}</span> block</span>` : ''}
                 `;
             }
 
@@ -5822,7 +5728,7 @@ class DevManager {
             this.viewTaskDetail(projectId, taskId);
             return;
         }
-        const cycle = { 'todo': 'in_progress', 'in_progress': 'awaiting_approval', 'done': 'todo', 'blocked': 'todo' };
+        const cycle = { 'todo': 'in_progress', 'in_progress': 'awaiting_approval', 'done': 'todo' };
         const newStatus = cycle[currentStatus] || 'todo';
         try {
             await this.api('PATCH', `/projects/${projectId}/tasks/${taskId}/status`, { status: newStatus });
@@ -6302,7 +6208,6 @@ class DevManager {
                                 <option value="in_progress" ${task?.status === 'in_progress' ? 'selected' : ''}>In Progress</option>
                                 <option value="awaiting_approval" ${task?.status === 'awaiting_approval' ? 'selected' : ''}>Awaiting Approval</option>
                                 <option value="done" ${task?.status === 'done' ? 'selected' : ''}>Done</option>
-                                <option value="blocked" ${task?.status === 'blocked' ? 'selected' : ''}>Blocked</option>
                             </select>
                         </div>
                         <div class="form-group">
@@ -6416,7 +6321,7 @@ class DevManager {
 
             // Subtasks section
             if (isUmbrella) {
-                const statusIcons = { done: '[x]', in_progress: '[~]', todo: '[ ]', blocked: '[!]', awaiting_approval: '[?]' };
+                const statusIcons = { done: '[x]', in_progress: '[~]', todo: '[ ]', awaiting_approval: '[?]' };
                 md += `---\n\n### Subtarefas\n\n`;
                 for (const sub of subtasks) {
                     const icon = statusIcons[sub.status] || '[ ]';
@@ -6529,7 +6434,7 @@ class DevManager {
                     }
                 });
             } else if (!isDone) {
-                const cycle = { 'todo': 'in_progress', 'in_progress': 'awaiting_approval', 'blocked': 'todo' };
+                const cycle = { 'todo': 'in_progress', 'in_progress': 'awaiting_approval' };
                 const next = cycle[task.status] || 'in_progress';
                 const nextLabel = next.replace(/_/g, ' ');
                 actions.push({
@@ -6902,7 +6807,6 @@ class DevManager {
                         <div class="stat-card stat-progress${activeStatus === 'in_progress' ? ' active' : ''}" data-filter="in_progress" onclick="app.filterByStatus('in_progress')"><span class="stat-number">${summary.in_progress || 0}</span><span class="stat-label">In Progress</span></div>
                         <div class="stat-card stat-approval${activeStatus === 'awaiting_approval' ? ' active' : ''}" data-filter="awaiting_approval" onclick="app.filterByStatus('awaiting_approval')"><span class="stat-number">${summary.awaiting_approval || 0}</span><span class="stat-label">Approval</span></div>
                         <div class="stat-card stat-done${activeStatus === 'done' ? ' active' : ''}" data-filter="done" onclick="app.filterByStatus('done')"><span class="stat-number">${summary.done || 0}</span><span class="stat-label">Done</span></div>
-                        <div class="stat-card stat-blocked${activeStatus === 'blocked' ? ' active' : ''}" data-filter="blocked" onclick="app.filterByStatus('blocked')"><span class="stat-number">${summary.blocked || 0}</span><span class="stat-label">Blocked</span></div>
                     </div>
                 `;
             }
