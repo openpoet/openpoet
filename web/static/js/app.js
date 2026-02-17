@@ -6374,6 +6374,9 @@ class DevManager {
     }
 
     async viewTaskDetail(projectId, taskId) {
+        // Detect if this is a refresh of the same task (e.g. from WebSocket update)
+        const isRefresh = this._viewingTaskDetail?.projectId === projectId && this._viewingTaskDetail?.taskId === taskId;
+        const prevHadDoc = this._viewingTaskDetail?.hasVerificationDoc;
         // Track which task detail is being viewed for WebSocket updates
         this._viewingTaskDetail = { projectId, taskId };
 
@@ -6386,6 +6389,7 @@ class DevManager {
                 this.api('GET', `/projects/${projectId}/tasks/${taskId}/documents`).catch(() => [])
             ]);
 
+            this._viewingTaskDetail.hasVerificationDoc = !!task.verification_doc_id;
             const ctx = { task, sessions, allTasks, history, documents, projectId, taskId };
 
             // Build shared markdown content
@@ -6393,6 +6397,19 @@ class DevManager {
 
             // Build actions and open
             this._openTaskDetail(ctx, md);
+
+            // On refresh, clear docViewer history to prevent stale states from accumulating.
+            // openWithContent pushes old content to history when overlay is already open,
+            // which would cause close() to show stale content instead of actually closing.
+            if (isRefresh && window.docViewer) {
+                window.docViewer._history = [];
+            }
+
+            // Auto-open verification doc when transitioning from spinner to doc-ready.
+            // This gives the user immediate access to the document with approve/reject buttons.
+            if (isRefresh && !prevHadDoc && task.verification_doc_id && task.status === 'awaiting_approval') {
+                this._autoOpenVerificationDoc(projectId, taskId, task.verification_doc_id);
+            }
 
         } catch (e) {
             this.showToast('Erro', 'Falha ao carregar detalhes da tarefa', 'error');
@@ -6542,8 +6559,11 @@ class DevManager {
             class: 'btn btn-success',
             onClick: async () => {
                 try {
-                    await this.api('POST', `/projects/${projectId}/tasks/${taskId}/approve`);
+                    // Clear state BEFORE the API call so WebSocket events don't trigger stale viewTaskDetail
+                    this._viewingTaskDetail = null;
+                    if (window.docViewer) window.docViewer._history = [];
                     window.docViewer.close();
+                    await this.api('POST', `/projects/${projectId}/tasks/${taskId}/approve`);
                     this.showToast('Sucesso', 'Tarefa aprovada e marcada como done', 'success');
                     this.loadAllTasks();
                 } catch (e) { this.showToast('Erro', e.message, 'error'); }
@@ -6557,8 +6577,11 @@ class DevManager {
             class: 'btn btn-danger',
             onClick: async () => {
                 try {
-                    await this.api('POST', `/projects/${projectId}/tasks/${taskId}/reject`);
+                    // Clear state BEFORE the API call so WebSocket events don't trigger stale viewTaskDetail
+                    this._viewingTaskDetail = null;
+                    if (window.docViewer) window.docViewer._history = [];
                     window.docViewer.close();
+                    await this.api('POST', `/projects/${projectId}/tasks/${taskId}/reject`);
                     this.showToast('Info', 'Tarefa retornada para in_progress', 'info');
                     this.loadAllTasks();
                 } catch (e) { this.showToast('Erro', e.message, 'error'); }
@@ -6574,6 +6597,16 @@ class DevManager {
             onClick: () => { window.docViewer.open(task.verification_doc_id); }
         };
     }
+    async _autoOpenVerificationDoc(projectId, taskId, docId) {
+        try {
+            const resp = await fetch(`/api/documents/${docId}`);
+            if (!resp.ok) return;
+            const doc = await resp.json();
+            window.docViewer.openWithContent(doc.title || 'Verificação', doc.content);
+        } catch (e) {
+            console.error('Failed to auto-open verification doc:', e);
+        }
+    }
     _buildStatusAction(projectId, taskId, task) {
         const cycle = { 'todo': 'in_progress', 'in_progress': 'awaiting_approval' };
         const next = cycle[task.status] || 'in_progress';
@@ -6586,7 +6619,13 @@ class DevManager {
             onClick: async () => {
                 try {
                     await this.api('PATCH', `/projects/${projectId}/tasks/${taskId}/status`, { status: next });
-                    window.docViewer.close();
+                    if (next === 'awaiting_approval') {
+                        // Don't close — refresh detail to show verification spinner.
+                        // WebSocket events will update it when the doc is ready.
+                        this.viewTaskDetail(projectId, taskId);
+                    } else {
+                        window.docViewer.close();
+                    }
                     this.showToast('Sucesso', `Tarefa marcada como ${nextLabel}`, 'success');
                     this.loadAllTasks();
                 } catch (e) { this.showToast('Erro', e.message, 'error'); }
@@ -6655,8 +6694,8 @@ class DevManager {
             if (task.verification_doc_id) {
                 actions.push(this._buildViewDocAction(task));
             }
-            actions.push(this._buildApproveAction(projectId, taskId));
             actions.push(this._buildRejectAction(projectId, taskId));
+            actions.push(this._buildApproveAction(projectId, taskId));
         } else if (!isDone) {
             actions.push(this._buildStatusAction(projectId, taskId, task));
             actions.push(this._buildSessionAction(projectId, taskId, activeSession));

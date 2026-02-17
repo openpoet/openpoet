@@ -324,9 +324,11 @@ body {
     transition: all var(--transition);
 }
 
-.btn-icon:hover {
-    color: var(--color-text);
-    background-color: var(--color-surface);
+@media (hover: hover) {
+    .btn-icon:hover {
+        color: var(--color-text);
+        background-color: var(--color-surface);
+    }
 }
 
 .btn-icon.recording {
@@ -2564,9 +2566,11 @@ body {
     height: 36px;
     color: var(--color-text-secondary);
 }
-.file-viewer-actions .btn-icon:hover {
-    color: var(--color-text);
-    background-color: var(--color-surface);
+@media (hover: hover) {
+    .file-viewer-actions .btn-icon:hover {
+        color: var(--color-text);
+        background-color: var(--color-surface);
+    }
 }
 .file-viewer-content {
     flex: 1;
@@ -4493,20 +4497,24 @@ body {
     padding: 0;
     flex-shrink: 0;
 }
-.btn-icon-round:hover {
-    background: var(--color-bg-tertiary);
-    color: var(--color-text);
-    border-color: var(--color-primary);
+@media (hover: hover) {
+    .btn-icon-round:hover {
+        background: var(--color-bg-tertiary);
+        color: var(--color-text);
+        border-color: var(--color-primary);
+    }
 }
 .btn-icon-round.ai-action {
     background: var(--color-primary);
     color: white;
     border-color: var(--color-primary);
 }
-.btn-icon-round.ai-action:hover {
-    background: var(--color-primary-hover);
-    color: white;
-    border-color: var(--color-primary-hover);
+@media (hover: hover) {
+    .btn-icon-round.ai-action:hover {
+        background: var(--color-primary-hover);
+        color: white;
+        border-color: var(--color-primary-hover);
+    }
 }
 .btn-icon-round svg {
     width: 16px;
