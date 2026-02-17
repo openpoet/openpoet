@@ -217,6 +217,16 @@ class DevManager {
         });
     }
 
+    // Ensure the terminal view is visible (switch from any other view)
+    showTerminalView() {
+        if (!document.querySelector('.terminal-view.active')) {
+            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+            document.getElementById('view-terminal').classList.add('active');
+            this.currentView = 'terminal';
+        }
+        this._updateNavForTerminal();
+    }
+
     refreshViewData(viewName) {
         switch (viewName) {
             case 'projects':
@@ -516,8 +526,19 @@ class DevManager {
         if (linkMatch) {
             const link = decodeURIComponent(linkMatch[1]);
             history.replaceState(null, '', location.pathname);
+            // Try notifBadge navigator, fallback to direct session open
             if (window.notifBadge) {
                 window.notifBadge._navigateToLink(link);
+            } else {
+                // Direct fallback for session links
+                const sessMatch = link.match(/^\/app\/session\/(.+)$/);
+                if (sessMatch) {
+                    if (window.hookManager) {
+                        window.hookManager.openSessionWithPendingDialog(sessMatch[1]);
+                    } else {
+                        this.openTerminal(sessMatch[1]);
+                    }
+                }
             }
             return;
         }
@@ -2442,12 +2463,7 @@ class DevManager {
         }
 
         // Show terminal view if not already visible
-        if (!document.querySelector('.terminal-view.active')) {
-            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-            document.getElementById('view-terminal').classList.add('active');
-            this.currentView = 'terminal';
-            this._updateNavForTerminal();
-        }
+        this.showTerminalView();
 
         // Refresh sessions to sync tabs (this will create tab if needed)
         await this.loadSessions();
