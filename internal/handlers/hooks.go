@@ -300,7 +300,7 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[hooks] Sending push for AskUserQuestion on session %s", sessionID)
 			go func() {
 				if err := h.notifService.Send(context.Background(), sessionID, "question",
-					"Question from Claude", "Claude needs your input"); err != nil {
+					"Question from Claude", "Claude needs your input", ""); err != nil {
 					log.Printf("[hooks] Push failed for AskUserQuestion: %v", err)
 				}
 			}()
@@ -331,7 +331,7 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[hooks] Sending push for ExitPlanMode on session %s", sessionID)
 			go func() {
 				if err := h.notifService.Send(context.Background(), sessionID, "permission",
-					"Plan Ready", "Claude's plan needs your approval"); err != nil {
+					"Plan Ready", "Claude's plan needs your approval", ""); err != nil {
 					log.Printf("[hooks] Push failed for ExitPlanMode: %v", err)
 				}
 			}()
@@ -355,7 +355,7 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[hooks] Sending push for PermissionRequest (%s) on session %s", notifToolName, sessionID)
 			go func() {
 				if err := h.notifService.Send(context.Background(), sessionID, "permission",
-					"Permission Request", notifToolName+" needs approval"); err != nil {
+					"Permission Request", notifToolName+" needs approval", ""); err != nil {
 					log.Printf("[hooks] Push failed for PermissionRequest: %v", err)
 				}
 			}()
@@ -706,7 +706,7 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[hooks] Sending push for Stop event on session %s", sessionID)
 		go func() {
 			if err := h.notifService.Send(context.Background(), sessionID, "info",
-				"Claude Stopped", "Claude Code finished execution"); err != nil {
+				"Claude Stopped", "Claude Code finished execution", ""); err != nil {
 				log.Printf("[hooks] Push failed for Stop: %v", err)
 			}
 		}()
@@ -723,7 +723,7 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("[hooks] Sending push for Notification event on session %s: %s", sessionID, body)
 		go func() {
-			if err := h.notifService.Send(context.Background(), sessionID, "hook_notification", title, body); err != nil {
+			if err := h.notifService.Send(context.Background(), sessionID, "hook_notification", title, body, ""); err != nil {
 				log.Printf("[hooks] Push failed for Notification: %v", err)
 			}
 		}()
@@ -779,10 +779,16 @@ func (h *HookHandler) triggerSessionEvaluation(sessionID, trigger string) bool {
 		return false
 	}
 
+	// Shorter cooldown for plan_accepted (strong signal of scope change)
+	cooldown := 3 * time.Minute
+	if trigger == "plan_accepted" {
+		cooldown = 30 * time.Second
+	}
+
 	h.mu.Lock()
-	if last, ok := h.lastEvaluation[sessionID]; ok && time.Since(last) < 3*time.Minute {
+	if last, ok := h.lastEvaluation[sessionID]; ok && time.Since(last) < cooldown {
 		h.mu.Unlock()
-		log.Printf("[hooks] Session evaluation rate-limited for %s (trigger=%s, last=%v ago)", sessionID, trigger, time.Since(last).Round(time.Second))
+		log.Printf("[hooks] Session evaluation rate-limited for %s (trigger=%s, last=%v ago, cooldown=%v)", sessionID, trigger, time.Since(last).Round(time.Second), cooldown)
 		return false
 	}
 	h.lastEvaluation[sessionID] = time.Now()

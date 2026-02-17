@@ -42,6 +42,8 @@ var migrations = []Migration{
 	{Version: 24, Description: "tasks: add awaiting_approval status and verification_doc_id column", Up: migrateV24},
 	{Version: 25, Description: "docs: add task_id to temp_documents for task-document linking", Up: migrateV25},
 	{Version: 26, Description: "skills: per-project skill config and project-specific skills", Up: migrateV26},
+	{Version: 27, Description: "notifications: add link column for context-aware navigation", Up: migrateV27},
+	{Version: 28, Description: "ai_suggestions: add unlink_task type to CHECK constraint", Up: migrateV28},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -691,6 +693,46 @@ func migrateV26(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			log.Printf("migrateV26: %v (may already exist)", err)
+		}
+	}
+	return nil
+}
+
+// migrateV27 adds a link column to notifications for context-aware navigation.
+func migrateV27(tx *sqlx.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE notifications ADD COLUMN link TEXT NOT NULL DEFAULT ''`)
+	if err != nil {
+		log.Printf("migrateV27: %v (column may already exist)", err)
+	}
+	return nil
+}
+
+// migrateV28 adds unlink_task to ai_suggestions type CHECK constraint.
+// SQLite requires table recreation to modify CHECK constraints.
+func migrateV28(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE ai_suggestions_new (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+			project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+			type TEXT NOT NULL CHECK(type IN ('link_task', 'create_task', 'update_task', 'complete_task', 'unlink_task')),
+			title TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			context_json TEXT NOT NULL DEFAULT '{}',
+			status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'accepted', 'dismissed')),
+			level TEXT NOT NULL DEFAULT 'standard',
+			conversation_id INTEGER REFERENCES ai_conversations(id) ON DELETE SET NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`INSERT INTO ai_suggestions_new SELECT id, session_id, project_id, type, title, description, context_json, status, level, conversation_id, created_at FROM ai_suggestions`,
+		`DROP TABLE ai_suggestions`,
+		`ALTER TABLE ai_suggestions_new RENAME TO ai_suggestions`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_suggestions_session ON ai_suggestions(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_suggestions_conversation ON ai_suggestions(conversation_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV28 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil
