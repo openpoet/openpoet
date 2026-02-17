@@ -803,7 +803,7 @@ func ApplyUmbrellaStatus(tasks []ProjectTask) {
 
 func (d *DB) ListTasksByProject(ctx context.Context, projectID int64) ([]ProjectTask, error) {
 	var tasks []ProjectTask
-	err := d.SelectContext(ctx, &tasks, "SELECT * FROM project_tasks WHERE project_id = ? ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END, sort_order, created_at", projectID)
+	err := d.SelectContext(ctx, &tasks, "SELECT * FROM project_tasks WHERE project_id = ? ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END, CASE WHEN status = 'done' THEN NULL ELSE sort_order END, CASE WHEN status = 'done' THEN updated_at END DESC, created_at", projectID)
 	return tasks, err
 }
 
