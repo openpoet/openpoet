@@ -192,7 +192,7 @@
                 <div class="terminal-main-area">
                     <header class="terminal-header">
                         <div class="terminal-info">
-                            <button id="btn-back-sessions" class="btn-icon">
+                            <button id="btn-back-sessions" class="btn-icon" title="Back">
                                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <line x1="19" y1="12" x2="5" y2="12"></line>
                                     <polyline points="12 19 5 12 12 5"></polyline>
@@ -213,7 +213,7 @@
                                 <div id="mobile-session-menu" class="mobile-session-menu hidden">
                                     <div class="mobile-session-menu-header">
                                         <span>Active Sessions</span>
-                                        <button class="btn-icon btn-sm" id="mobile-session-close">
+                                        <button class="btn-icon btn-sm" id="mobile-session-close" title="Close">
                                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                                 <line x1="18" y1="6" x2="6" y2="18"></line>
                                                 <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -298,7 +298,7 @@
                         <div class="session-tools-panel-header">
                             <strong>Session Tools</strong>
                             <span id="session-tools-panel-summary" style="font-size: 11px; color: var(--color-text-muted);"></span>
-                            <button class="btn-icon btn-sm" onclick="app.toggleSessionToolsPanel()" style="margin-left:auto;">
+                            <button class="btn-icon btn-sm" onclick="app.toggleSessionToolsPanel()" style="margin-left:auto;" title="Close">
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <line x1="18" y1="6" x2="6" y2="18"></line>
                                     <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -352,7 +352,7 @@
                     <div id="quick-commands-popup" class="quick-commands-popup hidden">
                         <div class="quick-commands-header">
                             <span>Quick Commands</span>
-                            <button id="quick-commands-close" class="quick-commands-close-btn">&times;</button>
+                            <button id="quick-commands-close" class="quick-commands-close-btn" title="Close">&times;</button>
                         </div>
                         <div class="quick-commands-list">
                             <button class="quick-cmd-item" data-cmd="/resume">
@@ -429,7 +429,7 @@
                                 <line x1="8" y1="23" x2="16" y2="23"></line>
                             </svg>
                         </button>
-                        <button id="mobile-terminal-send" class="mobile-terminal-send">
+                        <button id="mobile-terminal-send" class="mobile-terminal-send" title="Send">
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <line x1="22" y1="2" x2="11" y2="13"></line>
                                 <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
@@ -465,7 +465,7 @@
                     <div id="tool-activity-panel" class="tool-activity-panel hidden">
                         <div class="tool-activity-header">
                             <span>Tool Activity</span>
-                            <button id="btn-close-tool-panel" class="btn-icon btn-sm">
+                            <button id="btn-close-tool-panel" class="btn-icon btn-sm" title="Close">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <line x1="18" y1="6" x2="6" y2="18"></line>
                                     <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -480,7 +480,7 @@
                     <div id="file-browser-panel" class="file-browser-panel hidden">
                         <div class="file-browser-header">
                             <span>Files</span>
-                            <button id="btn-close-files" class="btn-icon btn-sm">
+                            <button id="btn-close-files" class="btn-icon btn-sm" title="Close">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <line x1="18" y1="6" x2="6" y2="18"></line>
                                     <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -1190,6 +1190,7 @@
     <script src="/static/vendor/xterm-addon-fit.js"></script>
     <script src="/static/vendor/xterm-addon-web-links.js"></script>
     <script src="/static/js/theme.js?v=__BUILD_VERSION__"></script>
+    <script src="/static/js/longpress-tooltip.js?v=__BUILD_VERSION__"></script>
     <script src="/static/js/app.js?v=__BUILD_VERSION__"></script>
     <script src="/static/js/terminal.js?v=__BUILD_VERSION__"></script>
     <script src="/static/js/hooks.js?v=__BUILD_VERSION__"></script>

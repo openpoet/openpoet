@@ -78,6 +78,19 @@ class AIChatManager {
             if (e.target === this.panel) this.close();
         });
 
+        // Click outside to close history and tools panels
+        document.addEventListener('click', (e) => {
+            // Close history panel if click is outside it and the history button
+            const historyPanel = this.panel?.querySelector('.ai-chat-history-panel');
+            if (historyPanel && !historyPanel.contains(e.target) && !this.historyBtn?.contains(e.target)) {
+                this.hideHistory();
+            }
+            // Close tools panel if click is outside it and the tools button
+            if (this._toolsPanelOpen && this.toolsPanel && !this.toolsPanel.contains(e.target) && !this.toolsBtn?.contains(e.target)) {
+                this.toggleToolsPanel();
+            }
+        });
+
         // Expand to full-screen editor
         this.expandBtn?.addEventListener('click', () => this.openEditor());
 

@@ -419,6 +419,9 @@ class DevManager {
                     const sessionId = data.data.session_id;
                     const newName = data.data.name;
                     window.terminalManager?.renameSession(sessionId, newName);
+                    // Update openTabs map so dropdown reads correct name
+                    const tabData = this.openTabs.get(sessionId);
+                    if (tabData) tabData.sessionName = newName;
                     const tab = document.querySelector(`.terminal-tab[data-session-id="${sessionId}"]`);
                     if (tab) {
                         const nameContainer = tab.querySelector('.terminal-tab-name');
@@ -429,8 +432,9 @@ class DevManager {
                             nameContainer.dataset.fullName = newName;
                         }
                     }
-                    // Update link/view task buttons if this is the active session (task was just linked)
+                    // Update mobile session dropdown trigger and task buttons if this is the active session
                     if (window.terminalManager?.activeSessionId === sessionId) {
+                        this.updateMobileSessionTrigger(sessionId);
                         this._updateLinkTaskButton(sessionId);
                     }
                 }
