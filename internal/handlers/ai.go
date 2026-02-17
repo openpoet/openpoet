@@ -662,6 +662,13 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	var proactiveCtx string
 	if conv.Source == "ai" && conv.ProactiveContext != "" && conv.ProactiveContext != "{}" {
 		proactiveCtx = conv.ProactiveContext
+		// Enrich with suggestion status so the AI knows if it was already handled
+		var suggestionStatus string
+		h.api.db.GetContext(ctx, &suggestionStatus,
+			"SELECT status FROM ai_suggestions WHERE conversation_id = ? LIMIT 1", conv.ID)
+		if suggestionStatus == "accepted" || suggestionStatus == "dismissed" {
+			proactiveCtx += fmt.Sprintf("\n\n**IMPORTANT: This suggestion has already been %s by the user. Do NOT repeat or re-offer it. Continue the conversation acknowledging this.**", suggestionStatus)
+		}
 	}
 
 	_, isSessionProvider := p.(llm.SessionProvider)
