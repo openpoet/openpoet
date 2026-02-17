@@ -50,57 +50,6 @@ class DocViewer {
             }
         });
 
-        // Long-press tooltip for icon buttons on mobile
-        this._setupLongPressTooltip();
-    }
-
-    _setupLongPressTooltip() {
-        let pressTimer = null;
-        let tooltip = null;
-        const LONG_PRESS_MS = 400;
-
-        const showTooltip = (btn) => {
-            const text = btn.dataset.tooltip || btn.title;
-            if (!text) return;
-            removeTooltip();
-            tooltip = document.createElement('div');
-            tooltip.className = 'icon-tooltip';
-            tooltip.textContent = text;
-            document.body.appendChild(tooltip);
-            const rect = btn.getBoundingClientRect();
-            tooltip.style.left = rect.left + rect.width / 2 + 'px';
-            tooltip.style.top = rect.top - 8 + 'px';
-            requestAnimationFrame(() => tooltip?.classList.add('visible'));
-        };
-
-        const removeTooltip = () => {
-            if (tooltip) {
-                tooltip.remove();
-                tooltip = null;
-            }
-        };
-
-        const onTouchStart = (e) => {
-            const btn = e.target.closest('.btn-icon-round[data-tooltip]');
-            if (!btn) return;
-            pressTimer = setTimeout(() => {
-                showTooltip(btn);
-                // Prevent the click from firing after long-press
-                btn.addEventListener('click', preventClick, { once: true, capture: true });
-            }, LONG_PRESS_MS);
-        };
-
-        const preventClick = (e) => { e.stopImmediatePropagation(); e.preventDefault(); };
-
-        const onTouchEnd = () => {
-            clearTimeout(pressTimer);
-            pressTimer = null;
-            setTimeout(removeTooltip, 1200);
-        };
-
-        this.overlay?.addEventListener('touchstart', onTouchStart, { passive: true });
-        this.overlay?.addEventListener('touchend', onTouchEnd, { passive: true });
-        this.overlay?.addEventListener('touchcancel', onTouchEnd, { passive: true });
     }
 
     async open(docId) {
