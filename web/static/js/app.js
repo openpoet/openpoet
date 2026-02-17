@@ -75,7 +75,9 @@ class DevManager {
         // Listen for service worker messages
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.addEventListener('message', (event) => {
-                if (event.data && event.data.type === 'navigate_to_session') {
+                if (event.data && event.data.type === 'navigate_to_link') {
+                    window.notifBadge?._navigateToLink(event.data.link);
+                } else if (event.data && event.data.type === 'navigate_to_session') {
                     this.openTerminal(event.data.session_id);
                 } else if (event.data && event.data.type === 'sw_updated') {
                     this.showUpdateBanner();
@@ -256,7 +258,7 @@ class DevManager {
                 this.handleStateUpdate(msg.data);
                 break;
             case 'notification':
-                this.showToast(msg.data.title, msg.data.body, msg.data.type);
+                this.showToast(msg.data.title, msg.data.body, msg.data.type, msg.data.link);
                 window.notifBadge?.handleNewNotification(msg.data);
                 break;
             case 'notification_count':
@@ -799,10 +801,12 @@ class DevManager {
     async _updateLinkTaskButton(sessionId) {
         const linkBtn = document.getElementById('btn-link-task');
         const viewBtn = document.getElementById('btn-view-task');
+        const unlinkBtn = document.getElementById('btn-unlink-task');
 
         if (!sessionId) {
             if (linkBtn) linkBtn.style.display = 'none';
             if (viewBtn) viewBtn.style.display = 'none';
+            if (unlinkBtn) unlinkBtn.style.display = 'none';
             return;
         }
 
@@ -816,9 +820,14 @@ class DevManager {
                 const label = document.getElementById('btn-view-task-label');
                 if (label) label.textContent = task.title;
             }
+            if (unlinkBtn) {
+                unlinkBtn.style.display = '';
+                unlinkBtn.dataset.sessionId = sessionId;
+            }
         } catch {
             if (linkBtn) linkBtn.style.display = '';
             if (viewBtn) viewBtn.style.display = 'none';
+            if (unlinkBtn) unlinkBtn.style.display = 'none';
         }
     }
 
@@ -4382,22 +4391,29 @@ class DevManager {
     }
 
     // Toast notifications
-    showToast(title, message, type = 'info') {
+    showToast(title, message, type = 'info', link = '') {
         // Only show toasts for errors and warnings
         if (type !== 'error' && type !== 'warning') return;
 
         const container = document.getElementById('toast-container');
         const toast = document.createElement('div');
         toast.className = `toast toast-${type}`;
+        if (link) toast.style.cursor = 'pointer';
         toast.innerHTML = `
             <span class="toast-message"><strong>${title}</strong> ${message}</span>
-            <button class="toast-close" onclick="this.parentElement.remove()">
+            <button class="toast-close" onclick="event.stopPropagation(); this.parentElement.remove()">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <line x1="18" y1="6" x2="6" y2="18"></line>
                     <line x1="6" y1="6" x2="18" y2="18"></line>
                 </svg>
             </button>
         `;
+        if (link) {
+            toast.addEventListener('click', () => {
+                toast.remove();
+                window.notifBadge?._navigateToLink(link);
+            });
+        }
         container.appendChild(toast);
 
         setTimeout(() => toast.remove(), 5000);
@@ -4605,6 +4621,19 @@ class DevManager {
             const projectId = parseInt(btn.dataset.projectId, 10);
             const taskId = parseInt(btn.dataset.taskId, 10);
             if (projectId && taskId) this.viewTaskDetail(projectId, taskId);
+        });
+
+        // Unlink Task button
+        document.getElementById('btn-unlink-task')?.addEventListener('click', async () => {
+            const sessionId = window.terminalManager?.activeSessionId || this.currentSession;
+            if (!sessionId) return;
+            try {
+                await this.api('POST', `/sessions/${sessionId}/unlink-task`);
+                this._updateLinkTaskButton(sessionId);
+                this.showToast('OK', 'Tarefa desvinculada', 'info');
+            } catch (err) {
+                this.showToast('Erro', err.message || 'Falha ao desvincular', 'error');
+            }
         });
 
         // Stop session button
@@ -6522,6 +6551,8 @@ class DevManager {
             verification_doc_created: '**[V]**',
             verification_approved: '**[OK]**',
             verification_rejected: '**[X]**',
+            plan_updated: '**[P]**',
+            session_unlinked: '**[U]**',
         };
         return icons[eventType] || '**[?]**';
     }
@@ -6553,6 +6584,8 @@ class DevManager {
             verification_doc_created: () => `Documento de verificacao gerado`,
             verification_approved: () => `Verificacao aprovada — tarefa concluida`,
             verification_rejected: () => `Verificacao rejeitada — retornada para in_progress`,
+            plan_updated: () => details.is_rewrite ? 'Plano reescrito' : 'Plano criado',
+            session_unlinked: () => `Sessao desvinculada: ${details.session_name || ''}`,
         };
 
         const fn = labels[entry.event_type];
@@ -6564,6 +6597,10 @@ class DevManager {
         try { details = JSON.parse(entry.details || '{}'); } catch {}
         if (entry.event_type === 'verification_doc_created' && details.doc_id) {
             return ` <a href="#" data-action="open-doc" data-doc-id="${this.escapeHtml(details.doc_id)}" data-doc-type="document" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Abrir</a>`;
+        }
+        if (entry.event_type === 'plan_updated' && entry.session_id) {
+            const sid = entry.session_id;
+            return ` <a href="#" data-action="open-doc" data-doc-id="plan:${this.escapeHtml(sid)}" data-doc-type="plan" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Ver plano</a>`;
         }
         return '';
     }

@@ -30,8 +30,14 @@ func NewService(db *database.DB, hub *websocket.Hub, webpush *WebPushService) *S
 
 // Send creates and broadcasts a notification.
 // For session-scoped notifications, marks previous unread ones as read first (one-active-per-session).
-func (s *Service) Send(ctx context.Context, sessionID, notifType, title, body string) error {
-	log.Printf("[NotifService] Send called: type=%s title=%q body=%q session=%s", notifType, title, body, sessionID)
+// If link is empty and sessionID is provided, auto-generates a session link.
+func (s *Service) Send(ctx context.Context, sessionID, notifType, title, body, link string) error {
+	log.Printf("[NotifService] Send called: type=%s title=%q body=%q session=%s link=%q", notifType, title, body, sessionID, link)
+
+	// Auto-generate link from sessionID if not provided
+	if link == "" && sessionID != "" {
+		link = "/app/session/" + sessionID
+	}
 
 	// Expire previous unread notifications for this session
 	if sessionID != "" {
@@ -47,6 +53,7 @@ func (s *Service) Send(ctx context.Context, sessionID, notifType, title, body st
 		Type:      notifType,
 		Title:     title,
 		Body:      body,
+		Link:      link,
 	}
 
 	// Save to database
@@ -65,6 +72,7 @@ func (s *Service) Send(ctx context.Context, sessionID, notifType, title, body st
 			if err := s.webpush.SendToAll(context.Background(), title, body, map[string]string{
 				"session_id": sessionID,
 				"type":       notifType,
+				"link":       link,
 			}); err != nil {
 				log.Printf("[NotifService] Push failed: %v", err)
 			}
@@ -183,7 +191,7 @@ func (s *Service) BroadcastUnreadCount(ctx context.Context) {
 
 // SendSessionStarted sends a notification when a session starts
 func (s *Service) SendSessionStarted(ctx context.Context, sessionID string, projectName string) error {
-	return s.Send(ctx, sessionID, "info", "Session Started", "Claude Code session started for "+projectName)
+	return s.Send(ctx, sessionID, "info", "Session Started", "Claude Code session started for "+projectName, "")
 }
 
 // SendSessionEnded sends a notification when a session ends
@@ -194,20 +202,20 @@ func (s *Service) SendSessionEnded(ctx context.Context, sessionID string, status
 		title = "Session Error"
 		notifType = "error"
 	}
-	return s.Send(ctx, sessionID, notifType, title, "Session ended with status: "+status)
+	return s.Send(ctx, sessionID, notifType, title, "Session ended with status: "+status, "")
 }
 
 // SendQuestionWaiting sends a notification when Claude is waiting for input
 func (s *Service) SendQuestionWaiting(ctx context.Context, sessionID string, question string) error {
-	return s.Send(ctx, sessionID, "question", "Input Required", question)
+	return s.Send(ctx, sessionID, "question", "Input Required", question, "")
 }
 
 // SendError sends an error notification
 func (s *Service) SendError(ctx context.Context, sessionID string, errorMsg string) error {
-	return s.Send(ctx, sessionID, "error", "Error", errorMsg)
+	return s.Send(ctx, sessionID, "error", "Error", errorMsg, "")
 }
 
 // SendWarning sends a warning notification
 func (s *Service) SendWarning(ctx context.Context, sessionID string, warning string) error {
-	return s.Send(ctx, sessionID, "warning", "Warning", warning)
+	return s.Send(ctx, sessionID, "warning", "Warning", warning, "")
 }

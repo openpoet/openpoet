@@ -129,6 +129,7 @@ type Notification struct {
 	Type      string    `db:"type" json:"type"` // 'info', 'warning', 'error', 'question'
 	Title     string    `db:"title" json:"title"`
 	Body      string    `db:"body" json:"body"`
+	Link      string    `db:"link" json:"link"`
 	Read      bool      `db:"read" json:"read"`
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 }
@@ -202,7 +203,7 @@ type AISuggestion struct {
 	ID             int64         `db:"id" json:"id"`
 	SessionID      string        `db:"session_id" json:"session_id"`
 	ProjectID      int64         `db:"project_id" json:"project_id"`
-	Type           string        `db:"type" json:"type"` // 'link_task', 'create_task', 'update_task', 'complete_task'
+	Type           string        `db:"type" json:"type"` // 'link_task', 'create_task', 'update_task', 'complete_task', 'unlink_task'
 	Title          string        `db:"title" json:"title"`
 	Description    string        `db:"description" json:"description"`
 	ContextJSON    string        `db:"context_json" json:"context"`

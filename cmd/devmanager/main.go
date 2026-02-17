@@ -296,7 +296,13 @@ func main() {
 
 	// Wire plan persistence callback into hook handler
 	hookHandler.OnPlanUpdated = func(sessionID string, planContent string) {
-		if err := db.UpdateSessionPlan(context.Background(), sessionID, planContent); err != nil {
+		ctx := context.Background()
+
+		// Read old plan before overwriting (for history tracking)
+		oldPlan, _, _ := db.GetSessionPlan(ctx, sessionID)
+		oldPlanLen := len(oldPlan)
+
+		if err := db.UpdateSessionPlan(ctx, sessionID, planContent); err != nil {
 			log.Printf("[hooks] Failed to save plan for session %s: %v", sessionID, err)
 			return
 		}
@@ -305,6 +311,15 @@ func main() {
 			Type: websocket.MsgTypeSessionPlanUpdated,
 			Data: map[string]interface{}{"session_id": sessionID},
 		})
+
+		// Record plan_updated event in task history if session is linked to a task
+		if task, err := db.GetTaskForSession(ctx, sessionID); err == nil && task != nil {
+			api.RecordTaskHistory(ctx, task.ID, task.ProjectID, "plan_updated", map[string]interface{}{
+				"plan_length":     len(planContent),
+				"old_plan_length": oldPlanLen,
+				"is_rewrite":     oldPlanLen > 0,
+			}, "system", sessionID)
+		}
 	}
 
 	// Wire OTEL handler into API for live session metrics
@@ -467,6 +482,7 @@ func main() {
 		// Session-Task integration
 		r.Get("/sessions/{id}/task", api.GetSessionLinkedTask)
 		r.Post("/sessions/{id}/link-task", api.LinkSessionTask)
+		r.Post("/sessions/{id}/unlink-task", api.UnlinkSessionTask)
 		r.Post("/sessions/{id}/evaluate", api.TriggerSessionEvaluation)
 		r.Post("/sessions/{id}/suggest-task-data", aiHandler.HandleSuggestTaskData)
 
@@ -993,7 +1009,7 @@ func runTaskDueChecker(db *database.DB, notifService *notifications.Service, hub
 
 			title := fmt.Sprintf("Task Overdue: %s", task.Title)
 			body := fmt.Sprintf("Task in %s is past due", projectName)
-			notifService.Send(ctx, "", "warning", title, body)
+			notifService.Send(ctx, "", "warning", title, body, fmt.Sprintf("/app/project/%d", task.ProjectID))
 			db.MarkTaskDueNotified(ctx, task.ID)
 		}
 
@@ -1011,7 +1027,7 @@ func runTaskDueChecker(db *database.DB, notifService *notifications.Service, hub
 
 			title := fmt.Sprintf("Task Due Soon: %s", task.Title)
 			body := fmt.Sprintf("Task in %s is due within 30 minutes", projectName)
-			notifService.Send(ctx, "", "info", title, body)
+			notifService.Send(ctx, "", "info", title, body, fmt.Sprintf("/app/project/%d", task.ProjectID))
 			db.MarkTaskDueNotified(ctx, task.ID)
 		}
 	}

@@ -464,8 +464,8 @@ func (d *DB) DeletePushSubscription(ctx context.Context, endpoint string) error 
 
 // Notification operations
 func (d *DB) CreateNotification(ctx context.Context, n *Notification) error {
-	query := `INSERT INTO notifications (session_id, type, title, body) VALUES (?, ?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, n.SessionID, n.Type, n.Title, n.Body)
+	query := `INSERT INTO notifications (session_id, type, title, body, link) VALUES (?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, n.SessionID, n.Type, n.Title, n.Body, n.Link)
 	if err != nil {
 		return err
 	}
@@ -1202,6 +1202,23 @@ func (d *DB) GetAllTasksSummary(ctx context.Context) (map[string]int, error) {
 func (d *DB) LinkSessionToTask(ctx context.Context, sessionID string, taskID int64) error {
 	_, err := d.ExecContext(ctx, "UPDATE sessions SET task_id = ? WHERE id = ?", taskID, sessionID)
 	return err
+}
+
+// UnlinkSessionFromTask clears the task_id on a session and returns the old task ID.
+func (d *DB) UnlinkSessionFromTask(ctx context.Context, sessionID string) (int64, error) {
+	var taskID sql.NullInt64
+	err := d.GetContext(ctx, &taskID, "SELECT task_id FROM sessions WHERE id = ?", sessionID)
+	if err != nil {
+		return 0, err
+	}
+	if !taskID.Valid {
+		return 0, nil
+	}
+	_, err = d.ExecContext(ctx, "UPDATE sessions SET task_id = NULL WHERE id = ?", sessionID)
+	if err != nil {
+		return 0, err
+	}
+	return taskID.Int64, nil
 }
 
 func (d *DB) GetTaskForSession(ctx context.Context, sessionID string) (*ProjectTask, error) {
