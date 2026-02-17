@@ -54,6 +54,7 @@ class DocViewer {
             const isTaskUpdate = doc.title && doc.title.startsWith('Atualizar Tarefa:');
             const isTaskProposal = isTaskDelete || isTaskUpdate ||
                 (doc.title && doc.title.startsWith('Tarefa:'));
+            const isSkillProposal = doc.title && doc.title.startsWith('Skill:');
 
             if (isPendingMemoryDoc) {
                 this.openWithContent(doc.title, doc.content, {
@@ -139,6 +140,44 @@ class DocViewer {
                                     }
                                 } catch (e) {
                                     window.app?.showToast('Erro ao aprovar', 'error');
+                                }
+                            }
+                        }
+                    ]
+                });
+            } else if (isSkillProposal) {
+                this.openWithContent(doc.title, doc.content, {
+                    actions: [
+                        {
+                            label: 'Cancelar',
+                            class: 'btn btn-secondary',
+                            onClick: async () => {
+                                try {
+                                    await fetch(`/api/skill-proposal/reject/${docId}`, { method: 'POST' });
+                                    this.close();
+                                    window.aiChat?.updateDocCardStatus(docId, 'rejected');
+                                    window.app?.showToast('Proposta rejeitada.', 'info');
+                                } catch (e) {
+                                    this.close();
+                                }
+                            }
+                        },
+                        {
+                            label: 'Aprovar Skill',
+                            class: 'btn btn-primary',
+                            onClick: async () => {
+                                try {
+                                    const r = await fetch(`/api/skill-proposal/approve/${docId}`, { method: 'POST' });
+                                    if (r.ok) {
+                                        this.close();
+                                        window.aiChat?.updateDocCardStatus(docId, 'approved');
+                                        window.app?.showToast('Skill aprovada e salva no projeto.', 'success');
+                                    } else {
+                                        const err = await r.json();
+                                        window.app?.showToast(err.error || 'Erro ao aprovar skill', 'error');
+                                    }
+                                } catch (e) {
+                                    window.app?.showToast('Erro ao aprovar skill', 'error');
                                 }
                             }
                         }

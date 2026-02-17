@@ -91,6 +91,16 @@ type pendingTaskProposal struct {
 	Summary string
 }
 
+// pendingSkillProposal holds a skill proposal awaiting user approval.
+type pendingSkillProposal struct {
+	ProjectID int64  `json:"project_id"`
+	SkillName string `json:"skill_name"`
+	Content   string `json:"content"`
+	Category  string `json:"category"`
+	Action    string `json:"action"` // "create" or "update"
+	SkillID   int64  `json:"skill_id,omitempty"` // for updates
+}
+
 type API struct {
 	db           *database.DB
 	hub          *websocket.Hub
@@ -110,6 +120,9 @@ type API struct {
 
 	pendingTaskProposalsMu sync.Mutex
 	pendingTaskProposals   map[string]*pendingTaskProposal // docID -> pending task
+
+	pendingSkillProposalsMu sync.Mutex
+	pendingSkillProposals   map[string]*pendingSkillProposal // docID -> pending skill
 }
 
 // SetAIHandler sets the AI handler for AI chat functionality.
@@ -377,6 +390,106 @@ func (a *API) RejectTaskProposal(w http.ResponseWriter, r *http.Request) {
 
 	if !ok {
 		respondError(w, http.StatusNotFound, "No pending task proposal found for this document")
+		return
+	}
+
+	a.db.UpdateTempDocumentStatus(r.Context(), docID, "rejected")
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
+}
+
+// storePendingSkillProposal stores a proposed skill action for later approval.
+func (a *API) storePendingSkillProposal(docID string, proposal *pendingSkillProposal) {
+	a.pendingSkillProposalsMu.Lock()
+	defer a.pendingSkillProposalsMu.Unlock()
+	if a.pendingSkillProposals == nil {
+		a.pendingSkillProposals = make(map[string]*pendingSkillProposal)
+	}
+	a.pendingSkillProposals[docID] = proposal
+}
+
+// ApproveSkillProposal applies a pending skill proposal (create or update project skill).
+func (a *API) ApproveSkillProposal(w http.ResponseWriter, r *http.Request) {
+	docID := chi.URLParam(r, "docId")
+
+	a.pendingSkillProposalsMu.Lock()
+	pending, ok := a.pendingSkillProposals[docID]
+	if ok {
+		delete(a.pendingSkillProposals, docID)
+	}
+	a.pendingSkillProposalsMu.Unlock()
+
+	if !ok {
+		respondError(w, http.StatusNotFound, "No pending skill proposal found for this document")
+		return
+	}
+
+	a.db.UpdateTempDocumentStatus(r.Context(), docID, "approved")
+
+	switch pending.Action {
+	case "create":
+		ps := &database.ProjectSkill{
+			ProjectID: pending.ProjectID,
+			Name:      pending.SkillName,
+			Content:   pending.Content,
+			Enabled:   true,
+			Category:  pending.Category,
+		}
+		if err := a.db.CreateProjectSkill(r.Context(), ps); err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create project skill: %v", err))
+			return
+		}
+		a.hub.BroadcastStateUpdate("project_skill", map[string]interface{}{"action": "created", "project_id": pending.ProjectID, "skill": ps})
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"status":  "approved",
+			"action":  "created",
+			"skill":   ps,
+		})
+
+	case "update":
+		ps, err := a.db.GetProjectSkill(r.Context(), pending.SkillID)
+		if err != nil {
+			respondError(w, http.StatusNotFound, "Project skill not found")
+			return
+		}
+		if pending.SkillName != "" {
+			ps.Name = pending.SkillName
+		}
+		if pending.Content != "" {
+			ps.Content = pending.Content
+		}
+		if pending.Category != "" {
+			ps.Category = pending.Category
+		}
+		if err := a.db.UpdateProjectSkill(r.Context(), ps); err != nil {
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update project skill: %v", err))
+			return
+		}
+		a.hub.BroadcastStateUpdate("project_skill", map[string]interface{}{"action": "updated", "project_id": pending.ProjectID, "skill": ps})
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"status": "approved",
+			"action": "updated",
+			"skill":  ps,
+		})
+
+	default:
+		respondError(w, http.StatusBadRequest, "Unknown skill action: "+pending.Action)
+	}
+}
+
+// RejectSkillProposal discards a pending skill proposal.
+func (a *API) RejectSkillProposal(w http.ResponseWriter, r *http.Request) {
+	docID := chi.URLParam(r, "docId")
+
+	a.pendingSkillProposalsMu.Lock()
+	_, ok := a.pendingSkillProposals[docID]
+	if ok {
+		delete(a.pendingSkillProposals, docID)
+	}
+	a.pendingSkillProposalsMu.Unlock()
+
+	if !ok {
+		respondError(w, http.StatusNotFound, "No pending skill proposal found for this document")
 		return
 	}
 
