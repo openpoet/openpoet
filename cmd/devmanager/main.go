@@ -289,6 +289,17 @@ func main() {
 		aiHandler.EvaluateSession(context.Background(), sessionID, trigger, outputSnapshot)
 	}
 
+	// Wire task/suggestion guard callbacks for debounced evaluation
+	hookHandler.HasLinkedTask = func(sessionID string) bool {
+		task, err := db.GetTaskForSession(context.Background(), sessionID)
+		return err == nil && task != nil
+	}
+	hookHandler.HasRecentSuggestions = func(sessionID string) bool {
+		since := time.Now().Add(-3 * time.Minute)
+		has, err := db.HasRecentAISuggestions(context.Background(), sessionID, since)
+		return err == nil && has
+	}
+
 	// Wire activity tracking callback into hook handler
 	hookHandler.OnActivityTouch = func(sessionID string) {
 		db.TouchSessionActivity(context.Background(), sessionID)
@@ -492,7 +503,7 @@ func main() {
 		r.Get("/sessions/{id}/files/*", fileHandler.DownloadFile)
 		r.Post("/sessions/{id}/files", fileHandler.UploadFiles)
 		r.Post("/sessions/{id}/files/paste", fileHandler.PasteImage)
-
+		r.Post("/sessions/{id}/image-prompt-hint", hookHandler.HandleImagePromptHint)
 
 		// Config - Skills
 		r.Get("/config/skills", api.ListSkills)

@@ -1414,6 +1414,15 @@ func (d *DB) ListPendingAISuggestions(ctx context.Context) ([]AISuggestion, erro
 	return suggestions, err
 }
 
+// HasRecentAISuggestions checks if a session has any AI suggestions (any status) created after the given time.
+func (d *DB) HasRecentAISuggestions(ctx context.Context, sessionID string, since time.Time) (bool, error) {
+	var count int
+	err := d.GetContext(ctx, &count,
+		"SELECT COUNT(*) FROM ai_suggestions WHERE session_id = ? AND created_at > ?",
+		sessionID, since)
+	return count > 0, err
+}
+
 // UpdateAISuggestionConversation links a suggestion to a conversation.
 func (d *DB) UpdateAISuggestionConversation(ctx context.Context, id int64, conversationID int64) error {
 	_, err := d.ExecContext(ctx, "UPDATE ai_suggestions SET conversation_id = ? WHERE id = ?", conversationID, id)

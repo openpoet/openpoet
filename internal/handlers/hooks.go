@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -74,6 +75,12 @@ type HookHandler struct {
 	// OnPlanUpdated is called when ExitPlanMode is intercepted with plan content.
 	OnPlanUpdated func(sessionID string, planContent string)
 
+	// HasLinkedTask checks if a session has a linked task. Set by main.go.
+	HasLinkedTask func(sessionID string) bool
+
+	// HasRecentSuggestions checks if a session has any AI suggestions (any status) within the last 3 minutes. Set by main.go.
+	HasRecentSuggestions func(sessionID string) bool
+
 	mu                sync.Mutex
 	pending           map[string]*pendingPermission  // sessionID -> pending permission
 	alwaysAllow       map[string]map[string]bool     // sessionID -> toolName -> true
@@ -85,6 +92,8 @@ type HookHandler struct {
 	lastActivityTouch map[string]time.Time           // sessionID -> last DB touch for activity debounce
 	sessionMode       map[string]string              // sessionID -> "plan_mode" | "executing" | "idle"
 	modeIdleTimers    map[string]*time.Timer         // sessionID -> inactivity timer that sets mode to idle
+	imagePromptMeta   map[string]string              // sessionID -> user's text prompt when images were included
+	evalTimers        map[string]*time.Timer         // sessionID -> debounced evaluation timer
 }
 
 // NewHookHandler creates a new hook handler
@@ -103,6 +112,8 @@ func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, ses
 		lastActivityTouch: make(map[string]time.Time),
 		sessionMode:       make(map[string]string),
 		modeIdleTimers:    make(map[string]*time.Timer),
+		imagePromptMeta:   make(map[string]string),
+		evalTimers:        make(map[string]*time.Timer),
 	}
 }
 
@@ -729,9 +740,11 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
-	// For UserPromptSubmit events, trigger session evaluation (rate-limited, async)
+	// For UserPromptSubmit events, schedule debounced evaluation.
+	// Waits 20s after the last prompt for Claude Code to produce output,
+	// giving the evaluator richer context (especially for image inputs).
 	if eventName == "UserPromptSubmit" {
-		h.triggerSessionEvaluation(sessionID, "user_prompt")
+		h.scheduleDebouncedEval(sessionID)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -802,7 +815,20 @@ func (h *HookHandler) triggerSessionEvaluation(sessionID, trigger string) bool {
 		}
 	}
 
-	log.Printf("[hooks] Triggering session evaluation: session=%s trigger=%s outputLen=%d", sessionID, trigger, len(output))
+	// Consume image prompt metadata (if any) and append as context hint.
+	// This helps the AI evaluator understand the user's intent when the terminal
+	// output only shows file path references for images.
+	h.mu.Lock()
+	imagePrompt := h.imagePromptMeta[sessionID]
+	delete(h.imagePromptMeta, sessionID)
+	h.mu.Unlock()
+
+	if imagePrompt != "" {
+		hint := fmt.Sprintf("\n[DevManager context: User submitted input with image(s). User's text prompt: \"%s\"]\n", imagePrompt)
+		output = append(output, []byte(hint)...)
+	}
+
+	log.Printf("[hooks] Triggering session evaluation: session=%s trigger=%s outputLen=%d hasImageMeta=%v", sessionID, trigger, len(output), imagePrompt != "")
 	go h.OnEvaluateSession(sessionID, trigger, output)
 	return true
 }
@@ -818,10 +844,96 @@ func (h *HookHandler) ClearSession(sessionID string) {
 	delete(h.lastEvaluation, sessionID)
 	delete(h.lastActivityTouch, sessionID)
 	delete(h.sessionMode, sessionID)
+	delete(h.imagePromptMeta, sessionID)
+	if t, ok := h.evalTimers[sessionID]; ok {
+		t.Stop()
+		delete(h.evalTimers, sessionID)
+	}
 	if pending, ok := h.pending[sessionID]; ok {
 		pending.cancel()
 		delete(h.pending, sessionID)
 	}
+}
+
+// evalDebounceDelay is how long to wait after the last UserPromptSubmit before evaluating.
+// This gives Claude Code time to process the prompt and produce output, providing the
+// AI evaluator with richer context (especially important for image-based inputs).
+const evalDebounceDelay = 20 * time.Second
+
+// HandleImagePromptHint handles POST /api/sessions/{id}/image-prompt-hint
+// Called by the frontend when images are uploaded with a text prompt.
+// Stores the user's text prompt as metadata for the next session evaluation.
+func (h *HookHandler) HandleImagePromptHint(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+	if sessionID == "" {
+		respondError(w, http.StatusBadRequest, "Missing session ID")
+		return
+	}
+
+	var input struct {
+		UserPrompt string `json:"user_prompt"`
+		ImageCount int    `json:"image_count"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	h.mu.Lock()
+	h.imagePromptMeta[sessionID] = input.UserPrompt
+	h.mu.Unlock()
+
+	shortID := sessionID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	log.Printf("[hooks] Image prompt hint stored: session=%s imageCount=%d promptLen=%d",
+		shortID, input.ImageCount, len(input.UserPrompt))
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// scheduleDebouncedEval schedules (or reschedules) a debounced session evaluation.
+// Each UserPromptSubmit resets the timer. The evaluation fires once activity settles,
+// capturing Claude Code's response for richer context.
+func (h *HookHandler) scheduleDebouncedEval(sessionID string) {
+	h.mu.Lock()
+	// Cancel previous timer (debounce: each new prompt resets the clock)
+	if t, ok := h.evalTimers[sessionID]; ok {
+		t.Stop()
+	}
+	h.evalTimers[sessionID] = time.AfterFunc(evalDebounceDelay, func() {
+		h.mu.Lock()
+		delete(h.evalTimers, sessionID)
+		h.mu.Unlock()
+
+		shortID := sessionID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+
+		// Guard 1: session still running?
+		if h.sessionMgr == nil || !h.sessionMgr.IsSessionRunning(sessionID) {
+			log.Printf("[hooks] Debounced eval skipped: session %s not running", shortID)
+			return
+		}
+
+		// Guard 2: no linked task?
+		if h.HasLinkedTask != nil && h.HasLinkedTask(sessionID) {
+			log.Printf("[hooks] Debounced eval skipped: session %s already has linked task", shortID)
+			return
+		}
+
+		// Guard 3: no recent suggestions (any status) in last 3 min?
+		if h.HasRecentSuggestions != nil && h.HasRecentSuggestions(sessionID) {
+			log.Printf("[hooks] Debounced eval skipped: session %s has recent suggestions", shortID)
+			return
+		}
+
+		log.Printf("[hooks] Debounced eval firing for session %s", shortID)
+		h.triggerSessionEvaluation(sessionID, "user_prompt")
+	})
+	h.mu.Unlock()
 }
 
 // HandleGetPending handles GET /api/hooks/pending/{sessionId}
