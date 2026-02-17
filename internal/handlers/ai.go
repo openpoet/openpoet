@@ -2765,15 +2765,40 @@ func (h *AIHandler) HandleInitiateSkillCustomization(w http.ResponseWriter, r *h
 		return
 	}
 
+	// Fetch memory doc for project context (so AI doesn't need to use tools)
+	memDoc, _ := h.api.db.GetMemoryDoc(ctx, input.ProjectID)
+	memContent := ""
+	if memDoc != nil && memDoc.Content != "" {
+		memContent = memDoc.Content
+		if len(memContent) > 3000 {
+			memContent = memContent[:3000] + "\n...(truncated)"
+		}
+	}
+
+	// Build proactive context with explicit instructions for the AI
+	instructions := `IMPORTANT INSTRUCTIONS FOR THIS CONVERSATION:
+- Your goal is to help the user customize the skill content for their specific project.
+- You already have all the context you need: the skill content and the project memory doc are provided below.
+- DO NOT use tools like devmanager_list_project_files or devmanager_read_project_file to explore the project. You already have the project context.
+- When proposing changes, ALWAYS show the complete adapted skill content in a markdown code block so the user can copy it.
+- Keep the same markdown structure as the original skill but adapt the content for the specific project.
+- Be concise and direct. Show the adapted content immediately when asked.
+- Respond in the same language the user uses (Portuguese or English).`
+
 	ctxData := map[string]interface{}{
-		"intent":        "skill_customization",
-		"project_id":    input.ProjectID,
-		"project_name":  project.Name,
-		"project_path":  project.Path,
-		"skill_id":      skill.ID,
-		"skill_name":    skill.Name,
+		"intent":         "skill_customization",
+		"instructions":   instructions,
+		"project_id":     input.ProjectID,
+		"project_name":   project.Name,
+		"project_path":   project.Path,
+		"project_type":   project.Type,
+		"skill_id":       skill.ID,
+		"skill_name":     skill.Name,
 		"skill_category": skill.Category,
-		"skill_content": skill.Content,
+		"skill_content":  skill.Content,
+	}
+	if memContent != "" {
+		ctxData["project_memory_doc"] = memContent
 	}
 	proactiveCtx, _ := json.Marshal(ctxData)
 
@@ -2785,6 +2810,9 @@ func (h *AIHandler) HandleInitiateSkillCustomization(w http.ResponseWriter, r *h
 	assistantMsg := fmt.Sprintf("Vamos customizar a skill **%s** para o projeto **%s**.\n\n", skill.Name, project.Name)
 	assistantMsg += fmt.Sprintf("**Categoria:** %s\n\n", skill.Category)
 	assistantMsg += fmt.Sprintf("**Conteúdo atual da skill global:**\n```markdown\n%s\n```\n\n", content)
+	if memContent != "" {
+		assistantMsg += "Já tenho o contexto do projeto (memory doc) carregado. "
+	}
 	assistantMsg += "Como posso ajudar a adaptar esta skill para este projeto? Posso:\n" +
 		"- **Adaptar** o conteúdo para as necessidades específicas do projeto\n" +
 		"- **Adicionar** regras ou instruções específicas\n" +
