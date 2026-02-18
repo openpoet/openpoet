@@ -27,13 +27,15 @@ import (
 	"devmanager/internal/notifications"
 	"devmanager/internal/security"
 	"devmanager/internal/session"
+	"devmanager/internal/tunnel"
 	"devmanager/internal/voice"
 	"devmanager/internal/websocket"
 	"devmanager/web"
 )
 
-// BuildVersion is injected at build time via -ldflags
+// Build-time variables injected via -ldflags
 var BuildVersion = "dev"
+var DefaultRelayURL = "" // e.g., "wss://tunnel.devmanager.app/tunnel/connect"
 
 // debugResponseWriter wraps http.ResponseWriter to capture status and size for logging
 type debugResponseWriter struct {
@@ -251,6 +253,22 @@ func main() {
 	// Legacy callback — also reinit providers when flat settings change
 	api.ReinitAIProvider = api.ReinitAIProviders
 
+	// Initialize tunnel remote access
+	jwtSecret := loadOrGenerateJWTSecret(db)
+	pairingMgr := tunnel.NewPairingManager(db, encryptor, []byte(jwtSecret))
+	api.SetPairingManager(pairingMgr)
+
+	// Wire build-time relay URL into handlers
+	handlers.DefaultRelayURL = DefaultRelayURL
+
+	api.SetTunnelDeps(&handlers.TunnelDeps{
+		DB:         db,
+		Encryptor:  encryptor,
+		Hub:        hub,
+		Port:       cfg.Port,
+		PairingMgr: pairingMgr,
+	})
+
 	// Initialize OTEL handler for Claude Code token tracking
 	otelHandler := handlers.NewOTELHandler(db)
 
@@ -399,6 +417,9 @@ func main() {
 			next.ServeHTTP(w, r)
 		})
 	})
+
+	// Tunnel auth middleware (only activates for tunnel-originated requests)
+	r.Use(tunnel.AuthMiddleware(db, []byte(jwtSecret)))
 
 	// MCP HTTP endpoint (if enabled)
 	if mcpHandler != nil {
@@ -639,6 +660,15 @@ func main() {
 		// Token usage
 		r.Get("/token-usage/summary", api.GetTokenUsageSummary)
 		r.Delete("/token-usage", api.ClearTokenUsage)
+
+		// Remote Access / Tunnel
+		r.Get("/tunnel/status", api.GetTunnelStatus)
+		r.Post("/tunnel/enable", api.EnableTunnel)
+		r.Post("/tunnel/disable", api.DisableTunnel)
+		r.Get("/tunnel/devices", api.ListPairedDevices)
+		r.Delete("/tunnel/devices/{id}", api.RevokePairedDevice)
+		r.Delete("/tunnel/devices/{id}/permanent", api.DeletePairedDevice)
+		r.Get("/tunnel/pairing-info", api.GetPairingInfo)
 	})
 
 	// Test-only endpoints (only available when DEVMANAGER_TEST_MODE=1)
@@ -655,6 +685,11 @@ func main() {
 	// WebSocket routes
 	r.Get("/ws/session/{id}", wsHandler.HandleSessionWS)
 	r.Get("/ws/events", wsHandler.HandleEventsWS)
+
+	// Tunnel pairing routes (outside /api, exempt from auth)
+	r.Get("/pair", pairingMgr.HandlePairingPage)
+	r.Post("/pair", pairingMgr.HandlePairDevice)
+	r.Get("/pair/qr.png", pairingMgr.HandleQRImage)
 
 	// Static files and SPA - use web.FS from embed
 	webFS := web.FS
@@ -712,12 +747,24 @@ func main() {
 		}
 	}()
 
+	// Auto-connect tunnel if previously enabled (non-blocking)
+	go func() {
+		time.Sleep(2 * time.Second) // let server start first
+		if enabled, _ := db.GetSetting(context.Background(), "tunnel_enabled"); enabled == "true" {
+			log.Printf("[TUNNEL] Auto-connecting (previously enabled)")
+			api.AutoConnectTunnel()
+		}
+	}()
+
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	log.Println("Shutting down...")
+
+	// Disconnect tunnel
+	api.DisconnectTunnel()
 
 	// Close AI provider sessions (SDK providers may have persistent subprocesses)
 	providerMgr.CloseAll()
@@ -821,6 +868,21 @@ func serveMigrationError(cfg *config.Config) {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	server.Shutdown(shutdownCtx)
+}
+
+// loadOrGenerateJWTSecret loads the tunnel JWT secret from DB or generates a new one.
+func loadOrGenerateJWTSecret(db *database.DB) string {
+	jwtSecret, _ := db.GetSetting(context.Background(), "tunnel_jwt_secret")
+	if jwtSecret == "" {
+		generatedKey, err := security.GenerateKey()
+		if err != nil {
+			log.Printf("[TUNNEL] Failed to generate JWT secret: %v", err)
+			return ""
+		}
+		jwtSecret = generatedKey
+		db.SetSetting(context.Background(), "tunnel_jwt_secret", jwtSecret)
+	}
+	return jwtSecret
 }
 
 // decryptSetting reads an encrypted setting, auto-migrating plaintext values.

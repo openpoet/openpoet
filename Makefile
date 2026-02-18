@@ -12,8 +12,15 @@ all: deps vendor-js sidecar-deps build
 build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
-	go build -ldflags "-X main.BuildVersion=$$(git rev-parse --short HEAD)" -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
+	go build -ldflags "-X main.BuildVersion=$$(git rev-parse --short HEAD) -X main.DefaultRelayURL=$(RELAY_URL)" -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
 	@echo "Built: $(BUILD_DIR)/$(BINARY_NAME)"
+
+# Build the relay server
+build-relay:
+	@echo "Building relay server..."
+	@mkdir -p $(BUILD_DIR)
+	go build -o $(BUILD_DIR)/relay ./cmd/relay
+	@echo "Built: $(BUILD_DIR)/relay"
 
 # Build for multiple platforms
 build-all: deps vendor-js
@@ -142,6 +149,7 @@ help:
 	@echo "  fmt          Format code"
 	@echo "  lint         Lint code"
 	@echo "  icons        Generate PWA icons"
+	@echo "  build-relay  Build the relay server"
 	@echo "  deploy       Deploy to production (port 8081)"
 	@echo "  deploy-status Show last deploy status"
 	@echo "  deploy-log   Show recent deploy log"

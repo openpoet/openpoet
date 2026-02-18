@@ -42,6 +42,9 @@ const (
 
 	// Notification count updates
 	MsgTypeNotificationCount MessageType = "notification_count"
+
+	// Tunnel status
+	MsgTypeTunnelStatus MessageType = "tunnel_status"
 )
 
 type Message struct {
