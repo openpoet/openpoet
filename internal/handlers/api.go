@@ -546,7 +546,7 @@ func (a *API) ProposeMemoryDoc(w http.ResponseWriter, r *http.Request) {
 	a.hub.BroadcastChatDocCard(map[string]interface{}{
 		"doc_id":          docID,
 		"type":            "proposal",
-		"title":           fmt.Sprintf("Proposta de alteração — %s", project.Name),
+		"title":           fmt.Sprintf("Change proposal — %s", project.Name),
 		"summary":         input.Summary,
 		"conversation_id": input.ConversationID,
 	})
@@ -554,7 +554,7 @@ func (a *API) ProposeMemoryDoc(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "pending_approval",
 		"doc_id":  docID,
-		"message": fmt.Sprintf("Proposta criada para o projeto %s. O usuário precisa aprovar antes que a alteração seja aplicada.", project.Name),
+		"message": fmt.Sprintf("Proposal created for project %s. The user must approve before the change is applied.", project.Name),
 	})
 }
 

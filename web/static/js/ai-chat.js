@@ -333,17 +333,17 @@ class AIChatManager {
             const suggestions = rawSuggestions.map(s => window.app?._normalizeProactive(s) || s);
 
             const typeLabels = {
-                task_suggestion: 'Tarefa',
+                task_suggestion: 'Task',
                 memory_doc_update: 'Memory Doc',
                 insight: 'Insight',
-                alert: 'Alerta'
+                alert: 'Alert'
             };
 
             container.innerHTML = `
                 <div class="ai-chat-pending-section">
                     <div class="ai-chat-pending-header">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a7 7 0 0 1 7 7c0 2.5-1.5 4.5-3 6-1 1-1.5 2.5-1.5 4h-5c0-1.5-.5-3-1.5-4-1.5-1.5-3-3.5-3-6a7 7 0 0 1 7-7z"/><path d="M9 21h6"/></svg>
-                        Sugestoes pendentes (${suggestions.length})
+                        Pending suggestions (${suggestions.length})
                     </div>
                     ${suggestions.map(s => `
                         <div class="ai-chat-pending-item">
@@ -352,9 +352,9 @@ class AIChatManager {
                                 <span class="ai-chat-pending-title">${this._escapeHtml(s.title)}</span>
                             </div>
                             <div class="ai-chat-pending-item-actions">
-                                <button class="btn btn-primary btn-xs" onclick="window.app?.acceptSuggestion(${s.suggestion_id})">Aceitar</button>
-                                <button class="btn btn-outline btn-xs" onclick="window.app?.discussSuggestion(${s.suggestion_id})">Discutir</button>
-                                <button class="btn btn-secondary btn-xs" onclick="window.app?.dismissSuggestion(${s.suggestion_id})">Ignorar</button>
+                                <button class="btn btn-primary btn-xs" onclick="window.app?.acceptSuggestion(${s.suggestion_id})">Accept</button>
+                                <button class="btn btn-outline btn-xs" onclick="window.app?.discussSuggestion(${s.suggestion_id})">Discuss</button>
+                                <button class="btn btn-secondary btn-xs" onclick="window.app?.dismissSuggestion(${s.suggestion_id})">Dismiss</button>
                             </div>
                         </div>
                     `).join('')}
@@ -593,27 +593,27 @@ class AIChatManager {
             icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="11" x2="15" y2="11"/></svg>';
         }
 
-        const title = this.escapeHtml(data.title || 'Documento');
+        const title = this.escapeHtml(data.title || 'Document');
         const summary = data.summary ? `<div class="ai-chat-doc-card-summary">${this.escapeHtml(data.summary)}</div>` : '';
-        const taskCount = data.task_count ? `<div class="ai-chat-doc-card-task-count">${data.task_count} ação(ões)</div>` : '';
+        const taskCount = data.task_count ? `<div class="ai-chat-doc-card-task-count">${data.task_count} action(s)</div>` : '';
 
         let actionHtml;
         if (status === 'approved') {
-            actionHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-approved">Aprovado</span>';
+            actionHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-approved">Approved</span>';
         } else if (status === 'rejected') {
-            actionHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-rejected">Rejeitado</span>';
+            actionHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-rejected">Rejected</span>';
         } else {
             let btnLabel;
             if (isTaskProposal) {
-                if (data.title && data.title.startsWith('Excluir Tarefa:')) btnLabel = 'Revisar Exclusão';
-                else if (data.title && data.title.startsWith('Atualizar Tarefa:')) btnLabel = 'Revisar Alteração';
-                else btnLabel = 'Revisar Tarefa';
+                if (data.title && data.title.startsWith('Delete Task:')) btnLabel = 'Review Deletion';
+                else if (data.title && data.title.startsWith('Update Task:')) btnLabel = 'Review Change';
+                else btnLabel = 'Review Task';
             } else if (isSkillProposal) {
-                btnLabel = 'Revisar Skill';
+                btnLabel = 'Review Skill';
             } else if (isProposal) {
-                btnLabel = 'Revisar Proposta';
+                btnLabel = 'Review Proposal';
             } else {
-                btnLabel = 'Ver Documento';
+                btnLabel = 'View Document';
             }
             actionHtml = `<button class="ai-chat-doc-card-btn">${btnLabel}</button>`;
         }
@@ -656,9 +656,9 @@ class AIChatManager {
 
         let badgeHtml;
         if (status === 'approved') {
-            badgeHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-approved">Aprovado</span>';
+            badgeHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-approved">Approved</span>';
         } else if (status === 'rejected') {
-            badgeHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-rejected">Rejeitado</span>';
+            badgeHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-rejected">Rejected</span>';
         }
         if (badgeHtml) {
             card.insertAdjacentHTML('beforeend', badgeHtml);
@@ -778,15 +778,15 @@ class AIChatManager {
                         ${isUnread ? '<span class="ai-chat-history-unread"></span>' : ''}
                     </div>
                     <div class="ai-chat-history-date">${this.formatDate(c.updated_at)}</div>
-                    <button class="ai-chat-history-delete" data-id="${c.id}" title="Excluir">&times;</button>
+                    <button class="ai-chat-history-delete" data-id="${c.id}" title="Delete">&times;</button>
                 </div>
             `}).join('');
 
             const actionsHtml = `
                 <div class="ai-chat-history-actions">
-                    <button class="ai-chat-history-clear-all" title="Excluir todo o histórico">
+                    <button class="ai-chat-history-clear-all" title="Delete all history">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-                        Excluir tudo
+                        Delete all
                     </button>
                 </div>
             `;
@@ -848,15 +848,15 @@ class AIChatManager {
                     if (contentEl && msg.status === 'streaming') {
                         const indicator = document.createElement('div');
                         indicator.className = 'ai-chat-status-indicator ai-chat-status-streaming';
-                        indicator.innerHTML = '<em>Processando...</em>';
+                        indicator.innerHTML = '<em>Processing...</em>';
                         contentEl.appendChild(indicator);
                     } else if (contentEl && msg.status === 'error') {
                         const indicator = document.createElement('div');
                         indicator.className = 'ai-chat-status-indicator ai-chat-status-error';
                         if (msg.error_info === 'aborted') {
-                            indicator.innerHTML = '<em>[Resposta parada pelo usuário]</em>';
+                            indicator.innerHTML = '<em>[Response stopped by user]</em>';
                         } else {
-                            indicator.innerHTML = `<em>[Erro: ${this.escapeHtml(msg.error_info || 'Erro desconhecido')}]</em>`;
+                            indicator.innerHTML = `<em>[Error: ${this.escapeHtml(msg.error_info || 'Unknown error')}]</em>`;
                             this._addRetryButton(el, msg);
                         }
                         contentEl.appendChild(indicator);
@@ -875,9 +875,9 @@ class AIChatManager {
                 for (const doc of data.doc_cards) {
                     let type = 'document';
                     if (doc.title && doc.title.startsWith('Memory Doc:')) type = 'proposal';
-                    else if (doc.title && (doc.title.startsWith('Tarefa:') ||
-                        doc.title.startsWith('Atualizar Tarefa:') ||
-                        doc.title.startsWith('Excluir Tarefa:'))) type = 'task_proposal';
+                    else if (doc.title && (doc.title.startsWith('Task:') ||
+                        doc.title.startsWith('Update Task:') ||
+                        doc.title.startsWith('Delete Task:'))) type = 'task_proposal';
 
                     // Find the specific assistant message this doc card belongs to
                     let targetContent = null;
@@ -1038,7 +1038,7 @@ class AIChatManager {
     _addRetryButton(messageEl, msg) {
         const retryBtn = document.createElement('button');
         retryBtn.className = 'ai-chat-retry-btn';
-        retryBtn.textContent = 'Tentar novamente';
+        retryBtn.textContent = 'Try again';
         retryBtn.addEventListener('click', () => this.retryMessage(msg));
         messageEl.appendChild(retryBtn);
     }
@@ -1072,15 +1072,15 @@ class AIChatManager {
     }
 
     confirmDeleteConversation(id) {
-        showConfirmModal('Excluir conversa?', 'Esta ação não pode ser desfeita.', async () => {
+        showConfirmModal('Delete conversation?', 'This action cannot be undone.', async () => {
             await this.deleteConversation(id);
-        }, 'Excluir');
+        }, 'Delete');
     }
 
     confirmDeleteAllConversations() {
-        showConfirmModal('Excluir todo o histórico?', 'Todas as conversas serão removidas permanentemente.', async () => {
+        showConfirmModal('Delete all history?', 'All conversations will be permanently removed.', async () => {
             await this.deleteAllConversations();
-        }, 'Excluir');
+        }, 'Delete');
     }
 
     async deleteConversation(id) {

@@ -35,7 +35,7 @@ func (m *MockToolExecutor) ExecuteTool(_ context.Context, name string, input map
 	case "list_tasks":
 		return m.project.TasksJSON(), nil
 	case "get_task":
-		return `{"id": 1, "title": "Implementar autenticação JWT", "status": "todo", "priority": "high", "description": "Adicionar auth JWT nos endpoints."}`, nil
+		return `{"id": 1, "title": "Implement JWT authentication", "status": "todo", "priority": "high", "description": "Add JWT auth to API endpoints."}`, nil
 	case "create_task":
 		return `{"status": "pending_approval", "task_id": 99, "message": "Task proposal created. User must approve."}`, nil
 	case "update_task":
@@ -75,7 +75,7 @@ func (m *MockToolExecutor) ExecuteTool(_ context.Context, name string, input map
 	case "update_setting":
 		return `{"status": "updated"}`, nil
 	case "get_task_report":
-		return `{"total": 5, "todo": 3, "in_progress": 1, "done": 1, "urgent": 1, "overdue": 0, "next_recommended": {"id": 4, "title": "Corrigir validação de email"}}`, nil
+		return `{"total": 5, "todo": 3, "in_progress": 1, "done": 1, "urgent": 1, "overdue": 0, "next_recommended": {"id": 4, "title": "Fix email validation"}}`, nil
 	default:
 		return fmt.Sprintf(`{"status": "ok", "tool": "%s"}`, name), nil
 	}
@@ -209,7 +209,7 @@ func ValidateNotContains(substring string) ValidatorFunc {
 }
 
 // ValidateResponseLanguage checks if the response is in the expected language.
-// Uses a simple heuristic: Portuguese has specific characters/words, English doesn't.
+// Uses a simple heuristic based on common language-specific words.
 func ValidateResponseLanguage(lang string) ValidatorFunc {
 	return func(response string, _ []ToolCallRecord) ValidatorResult {
 		lower := strings.ToLower(response)
@@ -225,8 +225,6 @@ func ValidateResponseLanguage(lang string) ValidatorFunc {
 
 		var passed bool
 		switch lang {
-		case "pt":
-			passed = isPt && !isEn
 		case "en":
 			passed = isEn || !isPt
 		default:

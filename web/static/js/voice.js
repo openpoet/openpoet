@@ -291,7 +291,7 @@ class VoiceInput {
         this.indicator?.classList.remove('hidden');
         this.startBtn?.classList.add('recording');
         this.mobileBtn?.classList.add('recording');
-        // Hide "Enviar" button when in callback mode (image paste modal)
+        // Hide "Send" button when in callback mode (image paste modal)
         this.sendBtn?.classList.toggle('hidden', !!this.targetCallback);
     }
 

@@ -1944,7 +1944,7 @@ class DevManager {
                         <div class="value">${totalTokens.toLocaleString()}</div>
                     </div>
                     <div class="token-usage-stat">
-                        <div class="label">Custo Estimado</div>
+                        <div class="label">Estimated Cost</div>
                         <div class="value cost">$${(s.total_cost_usd || 0).toFixed(4)}</div>
                     </div>
                     <div class="token-usage-stat">
@@ -1960,7 +1960,7 @@ class DevManager {
             // By Model table
             if (data.by_model && data.by_model.length > 0) {
                 html += `<div class="token-usage-table-wrap"><table class="token-usage-model-table">
-                    <thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Custo</th><th>Reqs</th></tr></thead>
+                    <thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Cost</th><th>Reqs</th></tr></thead>
                     <tbody>`;
                 for (const m of data.by_model) {
                     const shortModel = (m.model || 'unknown').replace(/^claude-/, '').replace(/-\d{8}$/, '');
@@ -2034,7 +2034,7 @@ class DevManager {
                         <div class="value">${totalTokens.toLocaleString()}</div>
                     </div>
                     <div class="token-usage-stat">
-                        <div class="label">Custo Estimado</div>
+                        <div class="label">Estimated Cost</div>
                         <div class="value cost">$${(s.total_cost_usd || 0).toFixed(4)}</div>
                     </div>
                     <div class="token-usage-stat">
@@ -2051,7 +2051,7 @@ class DevManager {
             if (data.by_model && data.by_model.length > 0) {
                 html += '<h3 style="font-size:14px;margin:16px 0 8px;color:var(--color-text-secondary)">By Model</h3>';
                 html += `<div class="token-usage-table-wrap"><table class="token-usage-model-table">
-                    <thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Custo</th><th>Reqs</th></tr></thead>
+                    <thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Cost</th><th>Reqs</th></tr></thead>
                     <tbody>`;
                 for (const m of data.by_model) {
                     const shortModel = (m.model || 'unknown').replace(/^claude-/, '').replace(/-\d{8}$/, '');
@@ -2070,11 +2070,11 @@ class DevManager {
             if (data.by_ai_subcategory && data.by_ai_subcategory.length > 0) {
                 const subcatLabels = {
                     'chat': 'Chat',
-                    'skill_generate': 'Gerar Skill',
-                    'skill_validate': 'Validar Skill',
-                    'meta_eval': 'Avaliar Meta (legado)',
-                    'session_eval': 'Avaliar Sessão',
-                    '': 'Outro',
+                    'skill_generate': 'Generate Skill',
+                    'skill_validate': 'Validate Skill',
+                    'meta_eval': 'Evaluate Goal (legacy)',
+                    'session_eval': 'Evaluate Session',
+                    '': 'Other',
                 };
                 // Calculate AI totals
                 let aiInput = 0, aiOutput = 0, aiCost = 0, aiReqs = 0;
@@ -2097,11 +2097,11 @@ class DevManager {
                         <span>Out: ${aiOutput.toLocaleString()}</span>
                     </div>`;
                 html += `<div class="token-usage-table-wrap"><table class="token-usage-model-table token-project-model-table">
-                    <thead><tr><th>Tipo</th><th>Model</th><th>Input</th><th>Output</th><th>Custo</th><th>Reqs</th></tr></thead>
+                    <thead><tr><th>Type</th><th>Model</th><th>Input</th><th>Output</th><th>Cost</th><th>Reqs</th></tr></thead>
                     <tbody>`;
                 for (const s of data.by_ai_subcategory) {
                     const shortModel = (s.model || 'unknown').replace(/^claude-/, '').replace(/-\d{8}$/, '');
-                    const label = subcatLabels[s.subcategory] || s.subcategory || 'Outro';
+                    const label = subcatLabels[s.subcategory] || s.subcategory || 'Other';
                     html += `<tr>
                         <td>${this.escapeHtml(label)}</td>
                         <td>${this.escapeHtml(shortModel)}</td>
@@ -2143,7 +2143,7 @@ class DevManager {
                     const models = projectModels[p.project_id];
                     if (models && models.length > 0) {
                         html += `<div class="token-usage-table-wrap"><table class="token-usage-model-table token-project-model-table">
-                            <thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Custo</th><th>Reqs</th></tr></thead>
+                            <thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Cost</th><th>Reqs</th></tr></thead>
                             <tbody>`;
                         for (const m of models) {
                             const shortModel = (m.model || 'unknown').replace(/^claude-/, '').replace(/-\d{8}$/, '');
@@ -2187,18 +2187,18 @@ class DevManager {
 
     clearTokenUsage() {
         showConfirmModal(
-            'Limpar dados de tokens?',
-            'Todos os registros de uso de tokens serão removidos permanentemente. Esta ação não pode ser desfeita.',
+            'Clear token data?',
+            'All token usage records will be permanently removed. This action cannot be undone.',
             async () => {
                 try {
                     const result = await this.api('DELETE', '/token-usage');
-                    this.showToast(`${result.deleted} registros removidos`, 'success');
+                    this.showToast(`${result.deleted} records removed`, 'success');
                     this.loadGlobalTokenUsage(30);
                 } catch (e) {
-                    this.showToast('Erro ao limpar dados: ' + e.message, 'error');
+                    this.showToast('Error clearing data: ' + e.message, 'error');
                 }
             },
-            'Limpar'
+            'Clear'
         );
     }
 
@@ -2212,7 +2212,7 @@ class DevManager {
                 window.aiChat.loadConversation(result.conversation_id);
             }
         } catch (e) {
-            this.showToast('Erro ao iniciar edicao do memory doc', 'error');
+            this.showToast('Error starting memory doc editing', 'error');
         }
     }
 
@@ -3421,7 +3421,7 @@ class DevManager {
                 if (!targetSessionId) return;
 
                 // Clear current line, send text, then Enter after delay.
-                // This is the exact sequence that works with voice Enviar.
+                // This is the exact sequence that works with voice Send.
                 window.terminalManager.sendInputToSession(targetSessionId, '\x15'); // Ctrl+U
                 window.terminalManager.sendInputToSession(targetSessionId, text);
                 setTimeout(() => {
@@ -3697,9 +3697,9 @@ class DevManager {
             case 'tokens':
                 content = `<div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px;margin-bottom:12px">
                     <h2 style="margin:0;font-size:1.2rem">Token Usage</h2>
-                    <button class="btn btn-danger-outline btn-sm" onclick="app.clearTokenUsage()" title="Limpar dados de uso de tokens">
+                    <button class="btn btn-danger-outline btn-sm" onclick="app.clearTokenUsage()" title="Clear token usage data">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-                        Limpar
+                        Clear
                     </button>
                 </div>
                 <div id="token-usage-global-content"></div>`;
@@ -4307,8 +4307,8 @@ class DevManager {
 
     deleteProject(projectId) {
         showConfirmModal(
-            'Excluir projeto?',
-            'O projeto será removido permanentemente. Esta ação não pode ser desfeita.',
+            'Delete project?',
+            'The project will be permanently removed. This action cannot be undone.',
             async () => {
                 try {
                     await this.api('DELETE', `/projects/${projectId}`);
@@ -4324,7 +4324,7 @@ class DevManager {
                     this.showToast('Error', error.message, 'error');
                 }
             },
-            'Excluir'
+            'Delete'
         );
     }
 
@@ -4611,18 +4611,18 @@ class DevManager {
             const sessionId = window.terminalManager?.activeSessionId || this.currentSession;
             if (!sessionId) return;
             showConfirmModal(
-                'Desvincular Tarefa?',
-                'A tarefa será desvinculada desta sessão.',
+                'Unlink Task?',
+                'The task will be unlinked from this session.',
                 async () => {
                     try {
                         await this.api('POST', `/sessions/${sessionId}/unlink-task`);
                         this._updateLinkTaskButton(sessionId);
-                        this.showToast('OK', 'Tarefa desvinculada', 'info');
+                        this.showToast('OK', 'Task unlinked', 'info');
                     } catch (err) {
-                        this.showToast('Erro', err.message || 'Falha ao desvincular', 'error');
+                        this.showToast('Error', err.message || 'Failed to unlink', 'error');
                     }
                 },
-                'Desvincular'
+                'Unlink'
             );
         });
 
@@ -4696,10 +4696,10 @@ class DevManager {
     closeSkillModal() {
         if (this._skillModalDirty) {
             showConfirmModal(
-                'Descartar alterações?',
-                'Você tem alterações não salvas. Deseja descartá-las?',
+                'Discard changes?',
+                'You have unsaved changes. Do you want to discard them?',
                 () => { this.hideModal(); },
-                'Descartar'
+                'Discard'
             );
             return;
         }
@@ -4803,8 +4803,8 @@ class DevManager {
 
     deleteSkill(skillId) {
         showConfirmModal(
-            'Excluir skill?',
-            'A skill será removida permanentemente. Esta ação não pode ser desfeita.',
+            'Delete skill?',
+            'The skill will be permanently removed. This action cannot be undone.',
             async () => {
                 try {
                     await this.api('DELETE', `/config/skills/${skillId}`);
@@ -4814,7 +4814,7 @@ class DevManager {
                     this.showToast('Error', error.message, 'error');
                 }
             },
-            'Excluir'
+            'Delete'
         );
     }
 
@@ -4922,8 +4922,8 @@ class DevManager {
 
     restoreSkillVersion(skillId, versionId) {
         showConfirmModal(
-            'Restaurar versão?',
-            'O conteúdo atual será salvo como uma nova versão antes de restaurar.',
+            'Restore version?',
+            'The current content will be saved as a new version before restoring.',
             async () => {
                 try {
                     await this.api('POST', `/config/skills/${skillId}/versions/${versionId}/restore`);
@@ -4934,7 +4934,7 @@ class DevManager {
                     this.showToast('Error', error.message, 'error');
                 }
             },
-            'Restaurar'
+            'Restore'
         );
     }
 
@@ -5004,8 +5004,8 @@ class DevManager {
 
     deleteMCP(mcpId) {
         showConfirmModal(
-            'Excluir servidor MCP?',
-            'O servidor MCP será removido permanentemente.',
+            'Delete MCP server?',
+            'The MCP server will be permanently removed.',
             async () => {
                 try {
                     await this.api('DELETE', `/config/mcps/${mcpId}`);
@@ -5015,7 +5015,7 @@ class DevManager {
                     this.showToast('Error', error.message, 'error');
                 }
             },
-            'Excluir'
+            'Delete'
         );
     }
 
@@ -5752,7 +5752,7 @@ class DevManager {
                     <div class="done-section">
                         <div class="done-section-header" onclick="app.toggleDoneSection()">
                             <svg class="done-section-chevron${this._doneCollapsed ? ' collapsed' : ''}" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-                            <span class="done-section-title">Concluídas</span>
+                            <span class="done-section-title">Completed</span>
                             <span class="done-section-count">${doneTasks.length}</span>
                         </div>
                         <div class="done-section-body${doneCollapsed}">`;
@@ -5795,8 +5795,8 @@ class DevManager {
         let dueDateHtml = '';
         if (task.due_date?.Valid) {
             const d = new Date(task.due_date.Time);
-            const dateStr = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
-            const timeStr = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+            const dateStr = d.toLocaleDateString('en-US', { day: '2-digit', month: '2-digit' });
+            const timeStr = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
             const overdueTag = isOverdue ? ' overdue' : '';
             dueDateHtml = `<span class="task-due${overdueTag}">
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
@@ -5843,7 +5843,7 @@ class DevManager {
             const done = childrenList.filter(c => c.status === 'done').length;
             const inProg = childrenList.filter(c => c.status === 'in_progress').length;
             const pct = Math.round((done / total) * 100);
-            umbrellaHtml = `<span class="task-umbrella-badge" title="${done}/${total} concluídas, ${inProg} em andamento">${done}/${total}</span>
+            umbrellaHtml = `<span class="task-umbrella-badge" title="${done}/${total} completed, ${inProg} in progress">${done}/${total}</span>
                 <span class="task-umbrella-progress"><span class="task-umbrella-progress-bar" style="width:${pct}%"></span></span>`;
         }
 
@@ -5964,22 +5964,22 @@ class DevManager {
             subtaskCount = tasks.filter(t => t.parent_id?.Valid && t.parent_id.Int64 === taskId).length;
         } catch (e) { /* proceed without count */ }
 
-        let message = 'A tarefa será removida permanentemente.';
-        let confirmLabel = 'Excluir';
+        let message = 'The task will be permanently removed.';
+        let confirmLabel = 'Delete';
         if (subtaskCount > 0) {
-            message = `A tarefa e suas <strong>${subtaskCount} subtarefa(s)</strong> serão removidas permanentemente.`;
-            confirmLabel = 'Excluir tudo';
+            message = `The task and its <strong>${subtaskCount} subtask(s)</strong> will be permanently removed.`;
+            confirmLabel = 'Delete all';
         }
 
         showConfirmModal(
-            'Excluir tarefa?',
+            'Delete task?',
             message,
             async () => {
                 try {
                     await this.api('DELETE', `/projects/${projectId}/tasks/${taskId}`);
-                    this.showToast('Sucesso', 'Tarefa excluída', 'success');
+                    this.showToast('Success', 'Task deleted', 'success');
                 } catch (e) {
-                    this.showToast('Erro', e.message, 'error');
+                    this.showToast('Error', e.message, 'error');
                 }
             },
             confirmLabel
@@ -6381,7 +6381,7 @@ class DevManager {
                     const sessions = await this.api('GET', `/projects/${projectId}/tasks/${taskId}/sessions`);
                     if (sessions && sessions.length > 0) {
                         const sessItems = sessions.map(s => {
-                            const date = new Date(s.start_time).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+                            const date = new Date(s.start_time).toLocaleDateString('en-US', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
                             const isActive = s.status === 'running' || s.status === 'starting';
                             const badge = isActive ? '<span class="badge badge-running">running</span>' : `<span class="badge badge-${s.status}">${s.status}</span>`;
                             const nameLabel = s.name ? this.escapeHtml(s.name) : s.id.substring(0, 8);
@@ -6523,7 +6523,7 @@ class DevManager {
             }
 
         } catch (e) {
-            this.showToast('Erro', 'Falha ao carregar detalhes da tarefa', 'error');
+            this.showToast('Error', 'Failed to load task details', 'error');
         }
     }
 
@@ -6551,37 +6551,37 @@ class DevManager {
         const priorityLabel = task.priority || 'medium';
         if (isUmbrella) {
             const doneCount = subtasks.filter(s => s.status === 'done').length;
-            md += `**Status:** ${statusLabel} &nbsp;|&nbsp; **Prioridade:** ${priorityLabel} &nbsp;|&nbsp; **Umbrella:** ${doneCount}/${subtasks.length} concluídas\n\n`;
+            md += `**Status:** ${statusLabel} &nbsp;|&nbsp; **Priority:** ${priorityLabel} &nbsp;|&nbsp; **Umbrella:** ${doneCount}/${subtasks.length} completed\n\n`;
         } else {
-            md += `**Status:** ${statusLabel} &nbsp;|&nbsp; **Prioridade:** ${priorityLabel}\n\n`;
+            md += `**Status:** ${statusLabel} &nbsp;|&nbsp; **Priority:** ${priorityLabel}\n\n`;
         }
 
         // Awaiting approval notice — spinner DOM element is prepended when generating
         if (isAwaitingApproval) {
             if (task.verification_doc_id) {
-                md += `> **Aguardando Aprovação** — Documento de verificação disponível. Use os botões abaixo para aprovar ou rejeitar.\n\n`;
+                md += `> **Awaiting Approval** — Verification document available. Use the buttons below to approve or reject.\n\n`;
             }
         }
 
         // Due date
         if (task.due_date?.Valid) {
             const d = new Date(task.due_date.Time);
-            const dateStr = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+            const dateStr = d.toLocaleDateString('en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
             const isOverdue = d < new Date() && task.status !== 'done';
-            md += `**Prazo:** ${dateStr}${isOverdue ? ' **(ATRASADO)**' : ''}\n\n`;
+            md += `**Due date:** ${dateStr}${isOverdue ? ' **(OVERDUE)**' : ''}\n\n`;
         }
 
         // Description
         if (task.description) {
             md += `---\n\n${task.description}\n\n`;
         } else {
-            md += `---\n\n*Sem descrição.*\n\n`;
+            md += `---\n\n*No description.*\n\n`;
         }
 
         // Subtasks section
         if (isUmbrella) {
             const statusIcons = { done: '[x]', in_progress: '[~]', todo: '[ ]', awaiting_approval: '[?]' };
-            md += `---\n\n### Subtarefas\n\n`;
+            md += `---\n\n### Subtasks\n\n`;
             for (const sub of subtasks) {
                 const icon = statusIcons[sub.status] || '[ ]';
                 const subStatus = sub.status.replace('_', ' ');
@@ -6589,7 +6589,7 @@ class DevManager {
                 if (sub.due_date?.Valid) {
                     const sd = new Date(sub.due_date.Time);
                     const isSubOverdue = sd < new Date() && sub.status !== 'done';
-                    subDue = ` — prazo: ${sd.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}${isSubOverdue ? ' **(ATRASADO)**' : ''}`;
+                    subDue = ` — due: ${sd.toLocaleDateString('en-US', { day: '2-digit', month: '2-digit' })}${isSubOverdue ? ' **(OVERDUE)**' : ''}`;
                 }
                 md += `- ${icon} **${this.escapeHtml(sub.title)}** *(${subStatus})*${subDue}\n`;
             }
@@ -6598,9 +6598,9 @@ class DevManager {
 
         // Session history
         if (sessions && sessions.length > 0) {
-            md += `---\n\n### Sessões\n\n`;
+            md += `---\n\n### Sessions\n\n`;
             for (const s of sessions) {
-                const date = new Date(s.start_time).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+                const date = new Date(s.start_time).toLocaleDateString('en-US', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
                 const name = s.name || s.id.substring(0, 8);
                 const isActive = s.status === 'running' || s.status === 'starting';
                 const badge = isActive ? '🟢 running' : s.status;
@@ -6611,17 +6611,17 @@ class DevManager {
 
         // Documents section
         if (documents && documents.length > 0) {
-            md += `---\n\n### Documentos\n\n`;
+            md += `---\n\n### Documents\n\n`;
             for (const doc of documents) {
-                const docIcon = doc.type === 'plan' ? '[P]' : (doc.title.startsWith('Verificação') || doc.title.startsWith('Verificacao') ? '[V]' : '[D]');
+                const docIcon = doc.type === 'plan' ? '[P]' : (doc.title.startsWith('Verification') || doc.title.startsWith('Verification') ? '[V]' : '[D]');
                 const time = this.relativeTime(doc.created_at);
-                md += `${docIcon} **${this.escapeHtml(doc.title)}** — *${time}* <a href="#" data-action="open-doc" data-doc-id="${this.escapeHtml(doc.id)}" data-doc-type="${this.escapeHtml(doc.type)}" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Abrir</a>\n\n`;
+                md += `${docIcon} **${this.escapeHtml(doc.title)}** — *${time}* <a href="#" data-action="open-doc" data-doc-id="${this.escapeHtml(doc.id)}" data-doc-type="${this.escapeHtml(doc.type)}" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Open</a>\n\n`;
             }
         }
 
         // History timeline
         if (history && history.length > 0) {
-            md += `---\n\n### Historico\n\n`;
+            md += `---\n\n### History\n\n`;
             for (const entry of history) {
                 const icon = this.taskHistoryIcon(entry.event_type);
                 const label = this.taskHistoryLabel(entry);
@@ -6634,7 +6634,7 @@ class DevManager {
         // Project name
         const project = (this.projects || []).find(p => p.id === projectId);
         if (project) {
-            md += `\n---\n\n*Projeto: ${this.escapeHtml(project.name)}*\n`;
+            md += `\n---\n\n*Project: ${this.escapeHtml(project.name)}*\n`;
         }
 
         return md;
@@ -6646,9 +6646,9 @@ class DevManager {
         card.className = 'task-verification-spinner';
         card.innerHTML = `
             <div class="spinner"></div>
-            <div class="spinner-text">Gerando documento de verificação...</div>
-            <div class="spinner-subtext">Isso pode levar alguns segundos</div>
-            <button class="btn-skip" data-action="skip-verification">Pular verificação</button>
+            <div class="spinner-text">Generating verification document...</div>
+            <div class="spinner-subtext">This may take a few seconds</div>
+            <button class="btn-skip" data-action="skip-verification">Skip verification</button>
         `;
         return card;
     }
@@ -6656,7 +6656,7 @@ class DevManager {
     // Shared action builders
     _buildEditAction(projectId, taskId) {
         return {
-            label: 'Editar',
+            label: 'Edit',
             role: 'secondary',
             icon: this._taskDetailIcons.edit,
             class: 'btn btn-secondary',
@@ -6665,7 +6665,7 @@ class DevManager {
     }
     _buildApproveAction(projectId, taskId) {
         return {
-            label: 'Aprovar',
+            label: 'Approve',
             role: 'primary',
             class: 'btn btn-success',
             onClick: async () => {
@@ -6675,15 +6675,15 @@ class DevManager {
                     if (window.docViewer) window.docViewer._history = [];
                     window.docViewer.close();
                     await this.api('POST', `/projects/${projectId}/tasks/${taskId}/approve`);
-                    this.showToast('Sucesso', 'Tarefa aprovada e marcada como done', 'success');
+                    this.showToast('Success', 'Task approved and marked as done', 'success');
                     this.loadAllTasks();
-                } catch (e) { this.showToast('Erro', e.message, 'error'); }
+                } catch (e) { this.showToast('Error', e.message, 'error'); }
             }
         };
     }
     _buildRejectAction(projectId, taskId) {
         return {
-            label: 'Rejeitar',
+            label: 'Reject',
             role: 'primary',
             class: 'btn btn-danger',
             onClick: async () => {
@@ -6693,9 +6693,9 @@ class DevManager {
                     if (window.docViewer) window.docViewer._history = [];
                     window.docViewer.close();
                     await this.api('POST', `/projects/${projectId}/tasks/${taskId}/reject`);
-                    this.showToast('Info', 'Tarefa retornada para in_progress', 'info');
+                    this.showToast('Info', 'Task returned to in_progress', 'info');
                     this.loadAllTasks();
-                } catch (e) { this.showToast('Erro', e.message, 'error'); }
+                } catch (e) { this.showToast('Error', e.message, 'error'); }
             }
         };
     }
@@ -6713,7 +6713,7 @@ class DevManager {
             const resp = await fetch(`/api/documents/${docId}`);
             if (!resp.ok) return;
             const doc = await resp.json();
-            window.docViewer.openWithContent(doc.title || 'Verificação', doc.content);
+            window.docViewer.openWithContent(doc.title || 'Verification', doc.content);
         } catch (e) {
             console.error('Failed to auto-open verification doc:', e);
         }
@@ -6723,7 +6723,7 @@ class DevManager {
         const next = cycle[task.status] || 'in_progress';
         const nextLabel = next.replace(/_/g, ' ');
         return {
-            label: `Marcar ${nextLabel}`,
+            label: `Mark ${nextLabel}`,
             role: 'primary',
             icon: this._taskDetailIcons.check,
             class: 'btn btn-primary',
@@ -6737,16 +6737,16 @@ class DevManager {
                     } else {
                         window.docViewer.close();
                     }
-                    this.showToast('Sucesso', `Tarefa marcada como ${nextLabel}`, 'success');
+                    this.showToast('Success', `Task marked as ${nextLabel}`, 'success');
                     this.loadAllTasks();
-                } catch (e) { this.showToast('Erro', e.message, 'error'); }
+                } catch (e) { this.showToast('Error', e.message, 'error'); }
             }
         };
     }
     _buildSessionAction(projectId, taskId, activeSession) {
         if (activeSession) {
             return {
-                label: 'Ir para Sessão',
+                label: 'Go to Session',
                 role: 'primary',
                 icon: this._taskDetailIcons.session,
                 class: 'btn btn-success',
@@ -6754,7 +6754,7 @@ class DevManager {
             };
         }
         return {
-            label: 'Iniciar Sessão',
+            label: 'Start Session',
             role: 'primary',
             icon: this._taskDetailIcons.play,
             class: 'btn btn-success',
@@ -6763,17 +6763,17 @@ class DevManager {
     }
     _buildNoteAction(projectId, taskId) {
         return {
-            label: 'Adicionar Nota',
+            label: 'Add Note',
             role: 'secondary',
             icon: this._taskDetailIcons.note,
             class: 'btn btn-secondary',
             onClick: async () => {
-                const comment = prompt('Adicionar nota:');
+                const comment = prompt('Add note:');
                 if (comment && comment.trim()) {
                     try {
                         await this.api('POST', `/projects/${projectId}/tasks/${taskId}/history`, { comment: comment.trim() });
                         this.viewTaskDetail(projectId, taskId);
-                    } catch (e) { this.showToast('Erro', e.message, 'error'); }
+                    } catch (e) { this.showToast('Error', e.message, 'error'); }
                 }
             }
         };
@@ -6837,7 +6837,7 @@ class DevManager {
         if (diffMin < 60) return `${diffMin}m atras`;
         if (diffHour < 24) return `${diffHour}h atras`;
         if (diffDay < 7) return `${diffDay}d atras`;
-        return date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+        return date.toLocaleDateString('en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
     }
 
     taskHistoryIcon(eventType) {
@@ -6870,30 +6870,30 @@ class DevManager {
         try { details = JSON.parse(entry.details || '{}'); } catch {}
 
         const labels = {
-            task_created: () => `Tarefa criada (${details.status || 'todo'}, ${details.priority || 'medium'})`,
+            task_created: () => `Task created (${details.status || 'todo'}, ${details.priority || 'medium'})`,
             status_change: () => {
                 let label = `Status: ${details.old} → ${details.new}`;
                 if (details.reason === 'auto_on_link') label += ' (auto)';
                 if (details.reason === 'auto_update') label += ' (auto-update)';
                 return label;
             },
-            priority_change: () => `Prioridade: ${details.old} → ${details.new}`,
-            title_updated: () => `Titulo atualizado`,
-            description_updated: () => `Descricao atualizada`,
-            due_date_changed: () => `Prazo alterado`,
-            session_linked: () => `Sessao vinculada: ${details.session_name || details.session_id || ''}`,
-            session_started: () => `Sessao iniciada`,
-            session_ended: () => details.summary ? `Sessao encerrada — ${details.summary}` : `Sessao encerrada`,
-            suggestion_accepted: () => `Sugestao aceita: ${details.title || details.suggestion_type || ''}`,
-            suggestion_dismissed: () => `Sugestao ignorada: ${details.title || details.suggestion_type || ''}`,
-            comment_added: () => details.comment || 'Nota adicionada',
-            task_assigned: () => `Tarefa atribuida a sessao`,
-            parent_changed: () => `Tarefa pai alterada`,
-            verification_doc_created: () => `Documento de verificacao gerado`,
-            verification_approved: () => `Verificacao aprovada — tarefa concluida`,
-            verification_rejected: () => `Verificacao rejeitada — retornada para in_progress`,
-            plan_updated: () => details.is_rewrite ? 'Plano reescrito' : 'Plano criado',
-            session_unlinked: () => `Sessao desvinculada: ${details.session_name || ''}`,
+            priority_change: () => `Priority: ${details.old} → ${details.new}`,
+            title_updated: () => `Title updated`,
+            description_updated: () => `Description updated`,
+            due_date_changed: () => `Due date changed`,
+            session_linked: () => `Session linked: ${details.session_name || details.session_id || ''}`,
+            session_started: () => `Session started`,
+            session_ended: () => details.summary ? `Session ended — ${details.summary}` : `Session ended`,
+            suggestion_accepted: () => `Suggestion accepted: ${details.title || details.suggestion_type || ''}`,
+            suggestion_dismissed: () => `Suggestion dismissed: ${details.title || details.suggestion_type || ''}`,
+            comment_added: () => details.comment || 'Note added',
+            task_assigned: () => `Task assigned to session`,
+            parent_changed: () => `Parent task changed`,
+            verification_doc_created: () => `Verification document generated`,
+            verification_approved: () => `Verification approved — task completed`,
+            verification_rejected: () => `Verification rejected — returned to in_progress`,
+            plan_updated: () => details.is_rewrite ? 'Plan rewritten' : 'Plan created',
+            session_unlinked: () => `Session unlinked: ${details.session_name || ''}`,
         };
 
         const fn = labels[entry.event_type];
@@ -6904,11 +6904,11 @@ class DevManager {
         let details = {};
         try { details = JSON.parse(entry.details || '{}'); } catch {}
         if (entry.event_type === 'verification_doc_created' && details.doc_id) {
-            return ` <a href="#" data-action="open-doc" data-doc-id="${this.escapeHtml(details.doc_id)}" data-doc-type="document" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Abrir</a>`;
+            return ` <a href="#" data-action="open-doc" data-doc-id="${this.escapeHtml(details.doc_id)}" data-doc-type="document" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Open</a>`;
         }
         if (entry.event_type === 'plan_updated' && entry.session_id) {
             const sid = entry.session_id;
-            return ` <a href="#" data-action="open-doc" data-doc-id="plan:${this.escapeHtml(sid)}" data-doc-type="plan" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Ver plano</a>`;
+            return ` <a href="#" data-action="open-doc" data-doc-id="plan:${this.escapeHtml(sid)}" data-doc-type="plan" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">View plan</a>`;
         }
         return '';
     }
@@ -6919,12 +6919,12 @@ class DevManager {
             try {
                 const data = await this.api('GET', `/sessions/${sessionId}/plan`);
                 if (data?.plan_content) {
-                    window.docViewer.openWithContent('Plano de Sessão', data.plan_content);
+                    window.docViewer.openWithContent('Session Plan', data.plan_content);
                 } else {
-                    this.showToast('Info', 'Plano vazio', 'info');
+                    this.showToast('Info', 'Empty plan', 'info');
                 }
             } catch (e) {
-                this.showToast('Erro', 'Falha ao carregar plano', 'error');
+                this.showToast('Error', 'Failed to load plan', 'error');
             }
         } else {
             window.docViewer.open(docId);
@@ -6933,7 +6933,7 @@ class DevManager {
 
     async discussTaskWithAI(projectId, taskId) {
         if (!window.aiChat) {
-            this.showToast('AI Chat não disponível', '', 'error');
+            this.showToast('AI Chat not available', '', 'error');
             return;
         }
         try {
@@ -6946,7 +6946,7 @@ class DevManager {
                 window.aiChat.loadConversation(result.conversation_id);
             }
         } catch (e) {
-            this.showToast('Erro', 'Falha ao iniciar discussão com IA', 'error');
+            this.showToast('Error', 'Failed to start AI discussion', 'error');
         }
     }
 
@@ -7007,7 +7007,7 @@ class DevManager {
                 window.aiChat.loadConversation(result.conversation_id);
             }
         } catch (e) {
-            this.showToast('Erro ao iniciar criação com IA', e.message, 'error');
+            this.showToast('Error starting AI creation', e.message, 'error');
         }
     }
 
@@ -7204,7 +7204,7 @@ class DevManager {
                     <div class="done-section">
                         <div class="done-section-header" onclick="app.toggleDoneSection()">
                             <svg class="done-section-chevron${this._doneCollapsed ? ' collapsed' : ''}" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-                            <span class="done-section-title">Concluídas</span>
+                            <span class="done-section-title">Completed</span>
                             <span class="done-section-count">${doneCount}</span>
                         </div>
                         <div class="done-section-body${doneCollapsed}">`;
@@ -7252,8 +7252,8 @@ class DevManager {
         let dueDateHtml = '';
         if (hasDue) {
             const d = new Date(task.due_date.Time);
-            const dateStr = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
-            const timeStr = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+            const dateStr = d.toLocaleDateString('en-US', { day: '2-digit', month: '2-digit' });
+            const timeStr = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
             const overdueTag = isOverdue ? ' overdue' : '';
             dueDateHtml = `<span class="task-due${overdueTag}">
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
@@ -7301,7 +7301,7 @@ class DevManager {
             const done = childrenList.filter(c => c.status === 'done').length;
             const inProg = childrenList.filter(c => c.status === 'in_progress').length;
             const pct = Math.round((done / total) * 100);
-            umbrellaHtml = `<span class="task-umbrella-badge" title="${done}/${total} concluídas, ${inProg} em andamento">${done}/${total}</span>
+            umbrellaHtml = `<span class="task-umbrella-badge" title="${done}/${total} completed, ${inProg} in progress">${done}/${total}</span>
                 <span class="task-umbrella-progress"><span class="task-umbrella-progress-bar" style="width:${pct}%"></span></span>`;
         }
 
@@ -7677,10 +7677,10 @@ class DevManager {
         }
 
         const typeLabels = {
-            task_suggestion: 'Sugestao de Tarefa',
+            task_suggestion: 'Task Suggestion',
             memory_doc_update: 'Memory Doc',
             insight: 'Insight',
-            alert: 'Alerta'
+            alert: 'Alert'
         };
         const typeLabel = typeLabels[data.proactive_type] || data.proactive_type || 'AI';
 
@@ -7725,11 +7725,11 @@ class DevManager {
                 el.classList.add('ai-suggestion-exit');
                 setTimeout(() => el.remove(), 300);
             }
-            this.showToast('AI Suggestion', 'Sugestao aceita', 'success');
+            this.showToast('AI Suggestion', 'Suggestion accepted', 'success');
             // Refresh suggestions in chat panel if open
             if (window.aiChat?.isOpen) window.aiChat.refreshPendingSuggestions?.();
         } catch (e) {
-            this.showToast('Erro', e.message, 'error');
+            this.showToast('Error', e.message, 'error');
         }
     }
 
@@ -7758,7 +7758,7 @@ class DevManager {
                 await window.aiChat.loadConversation(result.conversation_id);
             }
         } catch (e) {
-            this.showToast('Erro', e.message || 'Falha ao abrir discussao', 'error');
+            this.showToast('Error', e.message || 'Failed to open discussion', 'error');
         }
 
         // Remove the card (chat takes over)
@@ -7782,7 +7782,7 @@ class DevManager {
 }
 
 // Global confirm modal - replaces native confirm() across the entire system
-function showConfirmModal(title, message, onConfirm, confirmLabel = 'Confirmar') {
+function showConfirmModal(title, message, onConfirm, confirmLabel = 'Confirm') {
     document.querySelector('.confirm-modal-overlay')?.remove();
 
     const overlay = document.createElement('div');
@@ -7792,7 +7792,7 @@ function showConfirmModal(title, message, onConfirm, confirmLabel = 'Confirmar')
             <div class="confirm-modal-title">${title}</div>
             <div class="confirm-modal-message">${message}</div>
             <div class="confirm-modal-actions">
-                <button class="confirm-modal-cancel">Cancelar</button>
+                <button class="confirm-modal-cancel">Cancel</button>
                 <button class="confirm-modal-confirm">${confirmLabel}</button>
             </div>
         </div>

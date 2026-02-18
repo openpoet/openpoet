@@ -766,11 +766,11 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	feedbackDocs, _ := h.api.db.ListUnacknowledgedFeedback(ctx, conv.ID)
 	if len(feedbackDocs) > 0 {
 		var fb strings.Builder
-		fb.WriteString("[Notificação do sistema — Feedback de propostas]\n")
+		fb.WriteString("[System notification — Proposal feedback]\n")
 		for _, doc := range feedbackDocs {
-			statusLabel := "APROVADA"
+			statusLabel := "APPROVED"
 			if doc.Status == "rejected" {
-				statusLabel = "REJEITADA"
+				statusLabel = "REJECTED"
 			}
 			fb.WriteString(fmt.Sprintf("- %s: %s — %s\n", doc.Title, doc.Summary, statusLabel))
 		}
@@ -1083,7 +1083,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			}
 
 			project, err := h.api.db.GetProject(proposalCtx, projectID)
-			projectName := "Projeto"
+			projectName := "Project"
 			if err == nil {
 				projectName = project.Name
 			}
@@ -1102,13 +1102,13 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if createCount > 0 {
-				summaryParts = append(summaryParts, fmt.Sprintf("criar %d tarefa(s)", createCount))
+				summaryParts = append(summaryParts, fmt.Sprintf("create %d task(s)", createCount))
 			}
 			if updateCount > 0 {
-				summaryParts = append(summaryParts, fmt.Sprintf("atualizar %d tarefa(s)", updateCount))
+				summaryParts = append(summaryParts, fmt.Sprintf("update %d task(s)", updateCount))
 			}
 			if deleteCount > 0 {
-				summaryParts = append(summaryParts, fmt.Sprintf("remover %d tarefa(s)", deleteCount))
+				summaryParts = append(summaryParts, fmt.Sprintf("delete %d task(s)", deleteCount))
 			}
 
 			// Build markdown content for preview — group subtasks under parents
@@ -1155,19 +1155,19 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 				num++
 				orderLabel := ""
 				if a.SortOrder > 0 {
-					orderLabel = fmt.Sprintf(" (Ordem: %d)", a.SortOrder)
+					orderLabel = fmt.Sprintf(" (Order: %d)", a.SortOrder)
 				}
-				contentBuilder.WriteString(fmt.Sprintf("### %d. Criar tarefa: %s%s\n", num, a.Title, orderLabel))
+				contentBuilder.WriteString(fmt.Sprintf("### %d. Create task: %s%s\n", num, a.Title, orderLabel))
 				if a.Description != "" {
-					contentBuilder.WriteString(fmt.Sprintf("**Descrição:** %s\n", a.Description))
+					contentBuilder.WriteString(fmt.Sprintf("**Description:** %s\n", a.Description))
 				}
-				contentBuilder.WriteString(fmt.Sprintf("**Prioridade:** %s | **Status:** %s\n", a.Priority, a.Status))
+				contentBuilder.WriteString(fmt.Sprintf("**Priority:** %s | **Status:** %s\n", a.Priority, a.Status))
 				if a.DueDate != "" {
-					contentBuilder.WriteString(fmt.Sprintf("**Data limite:** %s\n", a.DueDate))
+					contentBuilder.WriteString(fmt.Sprintf("**Due date:** %s\n", a.DueDate))
 				}
 
 				if children, ok := childActions[pa.idx]; ok {
-					contentBuilder.WriteString("\n**Subtarefas:**\n")
+					contentBuilder.WriteString("\n**Subtasks:**\n")
 					for subNum, ca := range children {
 						contentBuilder.WriteString(fmt.Sprintf("- **%d.%d** %s", num, subNum+1, ca.action.Title))
 						if ca.action.Description != "" {
@@ -1184,9 +1184,9 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 				num++
 				switch a.Action {
 				case "update":
-					contentBuilder.WriteString(fmt.Sprintf("### %d. Atualizar tarefa #%d: %s\n", num, a.TaskID, a.Title))
+					contentBuilder.WriteString(fmt.Sprintf("### %d. Update task #%d: %s\n", num, a.TaskID, a.Title))
 					if a.Description != "" {
-						contentBuilder.WriteString(fmt.Sprintf("**Descrição:** %s\n", a.Description))
+						contentBuilder.WriteString(fmt.Sprintf("**Description:** %s\n", a.Description))
 					}
 					prio := a.Priority
 					if prio == "" {
@@ -1196,14 +1196,14 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 					if stat == "" {
 						stat = "-"
 					}
-					contentBuilder.WriteString(fmt.Sprintf("**Prioridade:** %s | **Status:** %s\n", prio, stat))
+					contentBuilder.WriteString(fmt.Sprintf("**Priority:** %s | **Status:** %s\n", prio, stat))
 					if a.DueDate != "" {
-						contentBuilder.WriteString(fmt.Sprintf("**Data limite:** %s\n", a.DueDate))
+						contentBuilder.WriteString(fmt.Sprintf("**Due date:** %s\n", a.DueDate))
 					}
 				case "delete":
-					contentBuilder.WriteString(fmt.Sprintf("### %d. Excluir tarefa #%d: %s\n", num, a.TaskID, a.Title))
+					contentBuilder.WriteString(fmt.Sprintf("### %d. Delete task #%d: %s\n", num, a.TaskID, a.Title))
 					if a.Description != "" {
-						contentBuilder.WriteString(fmt.Sprintf("**Descrição:** %s\n", a.Description))
+						contentBuilder.WriteString(fmt.Sprintf("**Description:** %s\n", a.Description))
 					}
 					prio := a.Priority
 					if prio == "" {
@@ -1213,9 +1213,9 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 					if stat == "" {
 						stat = "-"
 					}
-					contentBuilder.WriteString(fmt.Sprintf("**Prioridade:** %s | **Status:** %s\n", prio, stat))
+					contentBuilder.WriteString(fmt.Sprintf("**Priority:** %s | **Status:** %s\n", prio, stat))
 					if a.DueDate != "" {
-						contentBuilder.WriteString(fmt.Sprintf("**Data limite:** %s\n", a.DueDate))
+						contentBuilder.WriteString(fmt.Sprintf("**Due date:** %s\n", a.DueDate))
 					}
 				}
 				contentBuilder.WriteString("\n")
@@ -1224,11 +1224,11 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			docID := uuid.New().String()[:8]
 			summary := fmt.Sprintf("%s — %s", strings.Join(summaryParts, ", "), projectName)
 
-			docPrefix := "Tarefa"
+			docPrefix := "Task"
 			if createCount == 0 && deleteCount == 0 && updateCount > 0 {
-				docPrefix = "Atualizar Tarefa"
+				docPrefix = "Update Task"
 			} else if createCount == 0 && updateCount == 0 && deleteCount > 0 {
-				docPrefix = "Excluir Tarefa"
+				docPrefix = "Delete Task"
 			}
 
 			docTitle := fmt.Sprintf("%s: %s", docPrefix, projectName)
@@ -1237,8 +1237,8 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			}
 
 			var fullContent strings.Builder
-			fullContent.WriteString(fmt.Sprintf("# Proposta de Tarefas — %s\n\n", projectName))
-			fullContent.WriteString(fmt.Sprintf("**Resumo:** %s\n\n", summary))
+			fullContent.WriteString(fmt.Sprintf("# Task Proposal — %s\n\n", projectName))
+			fullContent.WriteString(fmt.Sprintf("**Summary:** %s\n\n", summary))
 			fullContent.WriteString(contentBuilder.String())
 
 			tempDoc := &database.TempDocument{
@@ -1284,7 +1284,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		for _, sa := range skillActions {
 			projectID := sa.ProjectID
 			project, err := h.api.db.GetProject(proposalCtx, projectID)
-			projectName := "Projeto"
+			projectName := "Project"
 			if err == nil {
 				projectName = project.Name
 			}
@@ -1293,20 +1293,20 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			skillContent, _ := sa.Extra["content"].(string)
 			skillCategory, _ := sa.Extra["category"].(string)
 
-			actionLabel := "Criar"
+			actionLabel := "Create"
 			if sa.Action == "update_project_skill" {
-				actionLabel = "Atualizar"
+				actionLabel = "Update"
 			}
 
 			// Build preview content
 			var contentBuilder strings.Builder
-			contentBuilder.WriteString(fmt.Sprintf("# Proposta de Skill — %s\n\n", projectName))
-			contentBuilder.WriteString(fmt.Sprintf("**Ação:** %s skill do projeto\n", actionLabel))
-			contentBuilder.WriteString(fmt.Sprintf("**Nome:** %s\n", skillName))
+			contentBuilder.WriteString(fmt.Sprintf("# Skill Proposal — %s\n\n", projectName))
+			contentBuilder.WriteString(fmt.Sprintf("**Action:** %s project skill\n", actionLabel))
+			contentBuilder.WriteString(fmt.Sprintf("**Name:** %s\n", skillName))
 			if skillCategory != "" {
-				contentBuilder.WriteString(fmt.Sprintf("**Categoria:** %s\n", skillCategory))
+				contentBuilder.WriteString(fmt.Sprintf("**Category:** %s\n", skillCategory))
 			}
-			contentBuilder.WriteString(fmt.Sprintf("\n---\n\n### Conteúdo da Skill\n\n%s\n", skillContent))
+			contentBuilder.WriteString(fmt.Sprintf("\n---\n\n### Skill Content\n\n%s\n", skillContent))
 
 			docID := uuid.New().String()[:8]
 			summary := fmt.Sprintf("%s skill '%s' — %s", actionLabel, skillName, projectName)
@@ -1378,8 +1378,8 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			cardType := "document"
 			if strings.HasPrefix(doc.Title, "Memory Doc:") {
 				cardType = "proposal"
-			} else if strings.HasPrefix(doc.Title, "Tarefa:") || strings.HasPrefix(doc.Title, "Planejamento:") ||
-				strings.HasPrefix(doc.Title, "Atualizar Tarefa:") || strings.HasPrefix(doc.Title, "Excluir Tarefa:") {
+			} else if strings.HasPrefix(doc.Title, "Task:") || strings.HasPrefix(doc.Title, "Planning:") ||
+				strings.HasPrefix(doc.Title, "Update Task:") || strings.HasPrefix(doc.Title, "Delete Task:") {
 				cardType = "task_proposal"
 			}
 			safeSendSSE("doc_card", map[string]interface{}{
@@ -1688,8 +1688,8 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 					},
 				})
 				return fmt.Sprintf(
-					"IMPORTANTE: Skill '%s' NÃO foi criada ainda — será aplicada após aprovação do usuário. "+
-						"NÃO diga que a skill foi criada. Informe ao usuário que a proposta foi registrada e ele pode revisá-la no card abaixo.", skillName), nil
+					"IMPORTANT: Skill '%s' has NOT been created yet — it will be applied after user approval. "+
+						"Do NOT say the skill was created. Inform the user that the proposal has been registered and they can review it in the card below.", skillName), nil
 			}
 		}
 
@@ -1740,8 +1740,8 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 					displayName = fmt.Sprintf("#%d", id)
 				}
 				return fmt.Sprintf(
-					"IMPORTANTE: Skill '%s' NÃO foi atualizada ainda — será aplicada após aprovação do usuário. "+
-						"NÃO diga que a skill foi atualizada. Informe ao usuário que a proposta foi registrada e ele pode revisá-la no card abaixo.", displayName), nil
+					"IMPORTANT: Skill '%s' has NOT been updated yet — it will be applied after user approval. "+
+						"Do NOT say the skill was updated. Inform the user that the proposal has been registered and they can review it in the card below.", displayName), nil
 			}
 		}
 
@@ -1931,7 +1931,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		// Return viewer link + internal-only content for AI editing reference
 		// The doc_card SSE event is sent automatically by handleToolLoop
 		return fmt.Sprintf(
-			"Memory doc do projeto %s carregado (v%d). Um botão 'Ver Documento' foi exibido automaticamente no chat. NÃO gere links.\n\n"+
+			"Project %s memory doc loaded (v%d). A 'View Document' button was automatically displayed in chat. Do NOT generate links.\n\n"+
 				"<internal_reference>\n%s\n</internal_reference>\n\nLink interno: /app/doc/%s",
 			projectName, doc.Version, doc.Content, docID,
 		), nil
@@ -1971,11 +1971,11 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		h.api.storePendingMemoryDoc(docID, projectID, content, summary)
 
 		return fmt.Sprintf(
-			"IMPORTANTE: O conteúdo NÃO foi salvo ainda. Uma prévia foi criada para o usuário revisar.\n"+
-				"Um botão 'Revisar Proposta' foi exibido automaticamente no chat.\n"+
-				"NÃO diga que a alteração foi feita — ela AGUARDA aprovação do usuário.\n"+
-				"Informe ao usuário que a proposta para o projeto %s está disponível para revisão.\n"+
-				"Alterações propostas: %s\n"+
+			"IMPORTANT: The content has NOT been saved yet. A preview was created for the user to review.\n"+
+				"A 'Review Proposal' button was automatically displayed in chat.\n"+
+				"Do NOT say the change was made — it AWAITS user approval.\n"+
+				"Inform the user that the proposal for project %s is available for review.\n"+
+				"Proposed changes: %s\n"+
 				"Link interno: /app/doc/%s",
 			project.Name, summary, docID), nil
 
@@ -2144,8 +2144,8 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 				SortOrder:   sortOrder,
 			})
 			return fmt.Sprintf(
-				"IMPORTANTE: Task '%s' NÃO foi criada ainda — será criada após aprovação do usuário. "+
-					"NÃO diga que a tarefa foi criada.", title), nil
+				"IMPORTANT: Task '%s' has NOT been created yet — it will be created after user approval. "+
+					"Do NOT say the task was created.", title), nil
 		}
 		// Fallback: no collector available (e.g. called from HandleExecuteTool HTTP endpoint)
 		return "", fmt.Errorf("task creation requires a streaming context")
@@ -2213,7 +2213,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 					"action": "updated", "project_id": projectID, "task": updatedTask,
 				})
 			}
-			return fmt.Sprintf("Task '%s' status atualizado para '%s'.", task.Title, task.Status), nil
+			return fmt.Sprintf("Task '%s' status updated to '%s'.", task.Title, task.Status), nil
 		}
 
 		// Content change: collect with ALL fields (merged current + new) for full card display
@@ -2233,8 +2233,8 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 				DueDate:     dueDate,
 			})
 			return fmt.Sprintf(
-				"IMPORTANTE: Task '%s' NÃO foi atualizada ainda — será aplicada após aprovação do usuário. "+
-					"NÃO diga que a tarefa foi atualizada.", task.Title), nil
+				"IMPORTANT: Task '%s' has NOT been updated yet — it will be applied after user approval. "+
+					"Do NOT say the task was updated.", task.Title), nil
 		}
 		// Fallback: no collector available
 		return "", fmt.Errorf("task update requires a streaming context")
@@ -2270,8 +2270,8 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 				DueDate:     dueDate,
 			})
 			return fmt.Sprintf(
-				"IMPORTANTE: Task '%s' NÃO foi excluída ainda — será excluída após aprovação do usuário. "+
-					"NÃO diga que a tarefa foi excluída.", task.Title), nil
+				"IMPORTANT: Task '%s' has NOT been deleted yet — it will be deleted after user approval. "+
+					"Do NOT say the task was deleted.", task.Title), nil
 		}
 		return "", fmt.Errorf("task deletion requires a streaming context")
 
@@ -2413,7 +2413,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			return "", err
 		}
 
-		return fmt.Sprintf("Documento criado com sucesso. Um botão 'Ver Documento' foi exibido automaticamente no chat. NÃO gere links — o usuário usará o botão nativo. Link interno: /app/doc/%s", doc.ID), nil
+		return fmt.Sprintf("Document created successfully. A 'View Document' button was automatically displayed in chat. Do NOT generate links — the user will use the native button. Internal link: /app/doc/%s", doc.ID), nil
 
 	case "list_directory":
 		projectID, err := parseIDParam(input, "project_id")
@@ -2711,7 +2711,7 @@ func (h *AIHandler) buildDocCard(toolName, result string, input map[string]inter
 		return map[string]interface{}{
 			"doc_id":  docID,
 			"type":    "proposal",
-			"title":   "Proposta de alteração",
+			"title":   "Change proposal",
 			"summary": summary,
 		}
 	case "get_memory_doc":
@@ -2826,9 +2826,9 @@ func (h *AIHandler) HandleInitiateMemoryDocEdit(w http.ResponseWriter, r *http.R
 		if len(preview) > 300 {
 			preview = preview[:300] + "..."
 		}
-		assistantMsg = fmt.Sprintf("Carreguei o memory doc do projeto **%s**.\n\nPrevia do conteudo atual:\n> %s\n\nO que voce gostaria de alterar?", project.Name, preview)
+		assistantMsg = fmt.Sprintf("I loaded the memory doc for project **%s**.\n\nCurrent content preview:\n> %s\n\nWhat would you like to change?", project.Name, preview)
 	} else {
-		assistantMsg = fmt.Sprintf("O projeto **%s** ainda nao tem um memory doc. Deseja que eu crie um?", project.Name)
+		assistantMsg = fmt.Sprintf("Project **%s** doesn't have a memory doc yet. Would you like me to create one?", project.Name)
 	}
 
 	title := fmt.Sprintf("Edit Memory Doc: %s", project.Name)
@@ -2889,26 +2889,26 @@ func (h *AIHandler) HandleInitiateTaskCreation(w http.ResponseWriter, r *http.Re
 	// Build assistant message showing pre-filled data
 	var details string
 	if input.Title != "" {
-		details += fmt.Sprintf("- **Título:** %s\n", input.Title)
+		details += fmt.Sprintf("- **Title:** %s\n", input.Title)
 	}
 	if input.Description != "" {
-		details += fmt.Sprintf("- **Descrição:** %s\n", input.Description)
+		details += fmt.Sprintf("- **Description:** %s\n", input.Description)
 	}
 	if input.Priority != "" {
-		details += fmt.Sprintf("- **Prioridade:** %s\n", input.Priority)
+		details += fmt.Sprintf("- **Priority:** %s\n", input.Priority)
 	}
 	if input.DueDate != "" {
-		details += fmt.Sprintf("- **Prazo:** %s\n", input.DueDate)
+		details += fmt.Sprintf("- **Due date:** %s\n", input.DueDate)
 	}
 
 	assistantMsg := fmt.Sprintf(
-		"Criação de tarefa com IA para o projeto **%s**.\n\n", project.Name)
+		"AI-assisted task creation for project **%s**.\n\n", project.Name)
 	if details != "" {
-		assistantMsg += fmt.Sprintf("Dados já preenchidos:\n%s\n", details)
+		assistantMsg += fmt.Sprintf("Pre-filled data:\n%s\n", details)
 	}
-	assistantMsg += "Descreva melhor o que você precisa e eu vou ajudar a refinar a tarefa, quebrá-la em subtarefas se necessário, e criá-la no projeto."
+	assistantMsg += "Describe what you need in more detail and I'll help refine the task, break it into subtasks if needed, and create it in the project."
 
-	title := fmt.Sprintf("Nova Tarefa: %s", project.Name)
+	title := fmt.Sprintf("New Task: %s", project.Name)
 	conv, err := h.api.db.CreateProactiveConversation(ctx, title, "standard", "task_creation", string(proactiveCtx), assistantMsg)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to create conversation")
@@ -2988,22 +2988,22 @@ func (h *AIHandler) HandleInitiateTaskDiscussion(w http.ResponseWriter, r *http.
 
 	// Build assistant message
 	assistantMsg := fmt.Sprintf(
-		"Discussão sobre a tarefa **%s** do projeto **%s**.\n\n", task.Title, project.Name)
-	assistantMsg += fmt.Sprintf("**Status:** %s | **Prioridade:** %s\n\n",
+		"Discussion about task **%s** of project **%s**.\n\n", task.Title, project.Name)
+	assistantMsg += fmt.Sprintf("**Status:** %s | **Priority:** %s\n\n",
 		task.Status, task.Priority)
 	if task.DueDate.Valid {
-		assistantMsg += fmt.Sprintf("**Prazo:** %s\n\n",
-			task.DueDate.Time.Format("02/01/2006 15:04"))
+		assistantMsg += fmt.Sprintf("**Due date:** %s\n\n",
+			task.DueDate.Time.Format("2006-01-02 15:04"))
 	}
 	if task.Description != "" {
 		desc := task.Description
 		if len(desc) > 500 {
 			desc = desc[:500] + "..."
 		}
-		assistantMsg += fmt.Sprintf("**Descrição:**\n%s\n\n", desc)
+		assistantMsg += fmt.Sprintf("**Description:**\n%s\n\n", desc)
 	}
 	if len(subtasks) > 0 {
-		assistantMsg += fmt.Sprintf("**Subtarefas existentes (%d):**\n", len(subtasks))
+		assistantMsg += fmt.Sprintf("**Existing subtasks (%d):**\n", len(subtasks))
 		for _, st := range subtasks {
 			statusEmoji := map[string]string{
 				"todo": "⬜", "in_progress": "🔄", "awaiting_approval": "⏳", "done": "✅",
@@ -3015,17 +3015,17 @@ func (h *AIHandler) HandleInitiateTaskDiscussion(w http.ResponseWriter, r *http.
 		}
 		assistantMsg += "\n"
 	}
-	assistantMsg += "Como posso ajudar? Posso:\n" +
-		"- **Refinar** o título ou descrição da tarefa\n" +
-		"- **Quebrar** em subtarefas detalhadas\n" +
-		"- **Ajustar** status, prioridade ou prazo\n\n" +
-		"O que você gostaria de fazer?"
+	assistantMsg += "How can I help? I can:\n" +
+		"- **Refine** the task title or description\n" +
+		"- **Break** into detailed subtasks\n" +
+		"- **Adjust** status, priority, or due date\n\n" +
+		"What would you like to do?"
 
 	taskTitle := task.Title
 	if len(taskTitle) > 60 {
 		taskTitle = taskTitle[:60] + "..."
 	}
-	title := fmt.Sprintf("Discussão: %s", taskTitle)
+	title := fmt.Sprintf("Discussion: %s", taskTitle)
 	conv, err := h.api.db.CreateProactiveConversation(ctx, title, "standard", "task_discussion", string(proactiveCtx), assistantMsg)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to create conversation")
@@ -3127,20 +3127,20 @@ func (h *AIHandler) HandleInitiateSkillCustomization(w http.ResponseWriter, r *h
 		content = content[:2000] + "\n...(truncated)"
 	}
 
-	assistantMsg := fmt.Sprintf("Vamos customizar a skill **%s** para o projeto **%s**.\n\n", skill.Name, project.Name)
-	assistantMsg += fmt.Sprintf("**Categoria:** %s\n\n", skill.Category)
-	assistantMsg += fmt.Sprintf("**Conteúdo atual da skill global:**\n```markdown\n%s\n```\n\n", content)
+	assistantMsg := fmt.Sprintf("Let's customize skill **%s** for project **%s**.\n\n", skill.Name, project.Name)
+	assistantMsg += fmt.Sprintf("**Category:** %s\n\n", skill.Category)
+	assistantMsg += fmt.Sprintf("**Current global skill content:**\n```markdown\n%s\n```\n\n", content)
 	if memContent != "" {
-		assistantMsg += "Já tenho o contexto do projeto (memory doc) carregado. "
+		assistantMsg += "I already have the project context (memory doc) loaded. "
 	}
-	assistantMsg += "Como posso ajudar a adaptar esta skill para este projeto? Posso:\n" +
-		"- **Adaptar** o conteúdo para as necessidades específicas do projeto\n" +
-		"- **Adicionar** regras ou instruções específicas\n" +
-		"- **Remover** seções que não se aplicam\n" +
-		"- **Reescrever** completamente com foco neste projeto\n\n" +
-		"O que você gostaria de modificar?"
+	assistantMsg += "How can I help adapt this skill for this project? I can:\n" +
+		"- **Adapt** the content to the project's specific needs\n" +
+		"- **Add** specific rules or instructions\n" +
+		"- **Remove** sections that don't apply\n" +
+		"- **Rewrite** completely with focus on this project\n\n" +
+		"What would you like to modify?"
 
-	title := fmt.Sprintf("Customizar: %s → %s", skill.Name, project.Name)
+	title := fmt.Sprintf("Customize: %s → %s", skill.Name, project.Name)
 	if len(title) > 80 {
 		title = title[:80]
 	}
@@ -3434,9 +3434,7 @@ func extractSessionContext(cleanOutput []byte) string {
 		lower := strings.ToLower(trimmed)
 		if !inPlan && (strings.Contains(lower, "plan:") ||
 			strings.Contains(lower, "## plan") ||
-			strings.Contains(lower, "implementation plan") ||
-			strings.Contains(lower, "plano de implementação") ||
-			strings.Contains(lower, "plano:")) {
+			strings.Contains(lower, "implementation plan")) {
 			inPlan = true
 			planLines = append(planLines, trimmed)
 			continue
@@ -3624,10 +3622,10 @@ Respond with ONLY valid JSON, no markdown:
 {"title": "...", "description": "...", "priority": "..."}
 
 Rules:
-- Title: imperative verb + objective, max 80 chars. Examples: "Implementar validação de formulário de login", "Corrigir erro 500 na API de pagamentos", "Refatorar módulo de autenticação"
+- Title: imperative verb + objective, max 80 chars. Examples: "Implement login form validation", "Fix 500 error in payments API", "Refactor authentication module"
 - Description: 2-3 sentences describing the GOAL and expected outcome. Include which area of the codebase is affected if clear from context. Write as a task assignment: what should be done and why.
 - Priority: "urgent" for hotfixes/production issues, "high" for important features/bugs, "medium" for regular work, "low" for nice-to-haves
-- Use Portuguese (pt-BR)`, project.Name, sess.Name, sessionContext)
+- Use English`, project.Name, sess.Name, sessionContext)
 
 	req := &llm.Request{
 		System:    "You are a task management assistant. Respond ONLY with valid JSON, no markdown.",
@@ -4002,7 +4000,7 @@ Instructions:
 - Respond with JSON only: {"suggestions": [{"type": "<type>", "title": "<title>", "description": "<why>", "task_id": <id_or_null>, "task_data": {"title": "...", "description": "...", "priority": "..."}}], "summary": "<1-2 sentence summary of what was accomplished in this session, or empty string>"}
 - The "summary" field should describe what was accomplished. Only include it for session_end triggers. Use empty string for other triggers.
 - Be judicious - only suggest when it truly makes sense.
-- Use Portuguese (pt-BR) for title and description fields.`, tasksList, instructions)
+- Use English for title and description fields.`, tasksList, instructions)
 
 	model := h.getSlotModel(llm.SlotBackground)
 
@@ -4176,10 +4174,10 @@ Instructions:
 
 	// Create and broadcast each suggestion with proactive conversation
 	typeLabels := map[string]string{
-		"link_task":     "Vincular Tarefa",
-		"create_task":   "Nova Tarefa",
-		"update_task":   "Atualizar Tarefa",
-		"complete_task": "Completar Tarefa",
+		"link_task":     "Link Task",
+		"create_task":   "New Task",
+		"update_task":   "Update Task",
+		"complete_task": "Complete Task",
 	}
 
 	for _, s := range result.Suggestions {
@@ -4194,13 +4192,13 @@ Instructions:
 		if typeLabel == "" {
 			typeLabel = s.Type
 		}
-		assistantMsg := fmt.Sprintf("Ao analisar a sessao do projeto **%s**, identifiquei uma oportunidade:\n\n"+
-			"**Tipo:** %s\n"+
-			"**Titulo:** %s\n", project.Name, typeLabel, s.Title)
+		assistantMsg := fmt.Sprintf("While analyzing the session for project **%s**, I identified an opportunity:\n\n"+
+			"**Type:** %s\n"+
+			"**Title:** %s\n", project.Name, typeLabel, s.Title)
 		if s.Description != "" {
-			assistantMsg += fmt.Sprintf("**Descricao:** %s\n", s.Description)
+			assistantMsg += fmt.Sprintf("**Description:** %s\n", s.Description)
 		}
-		assistantMsg += "\nPosso ajudar a refinar esta sugestao. O que voce gostaria de fazer?"
+		assistantMsg += "\nI can help refine this suggestion. What would you like to do?"
 
 		// Create proactive conversation
 		proactiveExtra := map[string]interface{}{
@@ -4238,9 +4236,9 @@ Instructions:
 
 		// Broadcast as proactive notification
 		actions := []ProactiveAction{
-			{Label: "Aceitar", Action: "accept", Style: "primary"},
-			{Label: "Discutir", Action: "discuss", Style: "outline"},
-			{Label: "Ignorar", Action: "dismiss", Style: "secondary"},
+			{Label: "Accept", Action: "accept", Style: "primary"},
+			{Label: "Discuss", Action: "discuss", Style: "outline"},
+			{Label: "Ignore", Action: "dismiss", Style: "secondary"},
 		}
 		payload := map[string]interface{}{
 			"level":          "standard",
@@ -4636,23 +4634,23 @@ func (h *AIHandler) HandleDiscussSuggestion(w http.ResponseWriter, r *http.Reque
 
 	// Create a new proactive conversation for this suggestion
 	typeLabels := map[string]string{
-		"link_task":     "Vincular Tarefa",
-		"create_task":   "Nova Tarefa",
-		"update_task":   "Atualizar Tarefa",
-		"complete_task": "Completar Tarefa",
+		"link_task":     "Link Task",
+		"create_task":   "New Task",
+		"update_task":   "Update Task",
+		"complete_task": "Complete Task",
 	}
 	typeLabel := typeLabels[suggestion.Type]
 	if typeLabel == "" {
 		typeLabel = suggestion.Type
 	}
 
-	assistantMsg := fmt.Sprintf("Identifiquei uma oportunidade e gostaria de sugerir uma acao:\n\n"+
-		"**Tipo:** %s\n"+
-		"**Titulo:** %s\n", typeLabel, suggestion.Title)
+	assistantMsg := fmt.Sprintf("I identified an opportunity and would like to suggest an action:\n\n"+
+		"**Type:** %s\n"+
+		"**Title:** %s\n", typeLabel, suggestion.Title)
 	if suggestion.Description != "" {
-		assistantMsg += fmt.Sprintf("**Descricao:** %s\n", suggestion.Description)
+		assistantMsg += fmt.Sprintf("**Description:** %s\n", suggestion.Description)
 	}
-	assistantMsg += "\nPosso ajudar a refinar esta sugestao. O que voce gostaria de fazer?"
+	assistantMsg += "\nI can help refine this suggestion. What would you like to do?"
 
 	extra := map[string]interface{}{
 		"suggestion_id": suggestion.ID,
@@ -4727,28 +4725,28 @@ func (h *AIHandler) HandleTestProactive(w http.ResponseWriter, r *http.Request) 
 	switch input.Level {
 	case "critical":
 		pType = "alert"
-		title = "Erro critico detectado"
-		body = "O sistema detectou um erro critico que requer atencao imediata. O ultimo processo falhou com erro de permissao e os dados podem estar em estado inconsistente."
+		title = "Critical error detected"
+		body = "The system detected a critical error that requires immediate attention. The last process failed with a permission error and data may be in an inconsistent state."
 		actions = []ProactiveAction{
-			{Label: "Ver detalhes", Action: "discuss", Style: "primary"},
-			{Label: "Ignorar", Action: "dismiss", Style: "secondary"},
+			{Label: "View details", Action: "discuss", Style: "primary"},
+			{Label: "Ignore", Action: "dismiss", Style: "secondary"},
 		}
 	case "subtle":
 		pType = "memory_doc_update"
-		title = "Memory Doc atualizado"
-		body = "O memory doc do projeto foi atualizado com o conteudo do CLAUDE.md."
+		title = "Memory Doc updated"
+		body = "The project memory doc was updated with the CLAUDE.md content."
 		actions = []ProactiveAction{
-			{Label: "Ver", Action: "open", Style: "outline"},
+			{Label: "View", Action: "open", Style: "outline"},
 		}
 	default:
 		input.Level = "standard"
 		pType = "task_suggestion"
-		title = "Nova tarefa sugerida"
-		body = "Ao analisar a sessao recente, identifiquei que seria util criar uma tarefa para revisar as alteracoes feitas no pipeline de deploy."
+		title = "New task suggested"
+		body = "While analyzing the recent session, I identified that it would be useful to create a task to review the changes made to the deploy pipeline."
 		actions = []ProactiveAction{
-			{Label: "Aceitar", Action: "accept", Style: "primary"},
-			{Label: "Discutir", Action: "discuss", Style: "outline"},
-			{Label: "Ignorar", Action: "dismiss", Style: "secondary"},
+			{Label: "Accept", Action: "accept", Style: "primary"},
+			{Label: "Discuss", Action: "discuss", Style: "outline"},
+			{Label: "Ignore", Action: "dismiss", Style: "secondary"},
 		}
 	}
 
@@ -4805,7 +4803,7 @@ func (h *AIHandler) GenerateVerificationDoc(ctx context.Context, task *database.
 		model := h.getSlotModel(llm.SlotBackground)
 
 		req := &llm.Request{
-			System:    "You are a technical documentation assistant. Generate clear, actionable verification documents in Portuguese (pt-BR).",
+			System:    "You are a technical documentation assistant. Generate clear, actionable verification documents in English.",
 			Messages:  []llm.Message{llm.NewTextMessage("user", prompt)},
 			MaxTokens: 4096,
 			Model:     model,
@@ -4859,22 +4857,22 @@ func (h *AIHandler) GenerateVerificationDoc(ctx context.Context, task *database.
 // createFallbackVerificationDoc creates a simple verification document without AI.
 func (h *AIHandler) createFallbackVerificationDoc(task *database.ProjectTask, projectName string, sessions []string) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("## Resumo\n\nA tarefa **%s** do projeto **%s** foi marcada como aguardando aprovação.\n\n", task.Title, projectName))
+	sb.WriteString(fmt.Sprintf("## Summary\n\nTask **%s** of project **%s** has been marked as awaiting approval.\n\n", task.Title, projectName))
 	if task.Description != "" {
-		sb.WriteString(fmt.Sprintf("**Descrição:** %s\n\n", task.Description))
+		sb.WriteString(fmt.Sprintf("**Description:** %s\n\n", task.Description))
 	}
-	sb.WriteString("## Como Verificar\n\n")
-	sb.WriteString("1. Verifique se as alterações foram aplicadas corretamente\n")
-	sb.WriteString("2. Teste as funcionalidades mencionadas na descrição da tarefa\n")
-	sb.WriteString("3. Confirme que o build compila sem erros\n\n")
+	sb.WriteString("## How to Verify\n\n")
+	sb.WriteString("1. Verify that the changes were applied correctly\n")
+	sb.WriteString("2. Test the features mentioned in the task description\n")
+	sb.WriteString("3. Confirm that the build compiles without errors\n\n")
 	if len(sessions) > 0 {
-		sb.WriteString("## Sessões Vinculadas\n\n")
+		sb.WriteString("## Linked Sessions\n\n")
 		for _, s := range sessions {
 			sb.WriteString(fmt.Sprintf("- %s\n", s))
 		}
 		sb.WriteString("\n")
 	}
-	sb.WriteString("## Observações\n\nDocumento gerado automaticamente (sem IA). Verifique manualmente o trabalho realizado.\n")
+	sb.WriteString("## Notes\n\nDocument generated automatically (without AI). Manually verify the work performed.\n")
 	return sb.String()
 }
 
@@ -4883,7 +4881,7 @@ func (h *AIHandler) persistVerificationDoc(ctx context.Context, task *database.P
 	docID := uuid.New().String()[:8]
 	doc := &database.TempDocument{
 		ID:      docID,
-		Title:   fmt.Sprintf("Verificação: %s", task.Title),
+		Title:   fmt.Sprintf("Verification: %s", task.Title),
 		Content: content,
 		Status:  "pending",
 		TaskID:  sql.NullInt64{Int64: task.ID, Valid: true},

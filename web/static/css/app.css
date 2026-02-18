@@ -5488,6 +5488,10 @@ body {
     font-size: 12px;
     color: var(--color-text-secondary);
     line-height: 1.4;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
 }
 
 .ai-suggestion-actions {
@@ -5737,6 +5741,10 @@ body {
     color: var(--color-text);
     font-weight: 500;
     line-height: 1.4;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
 }
 
 .ai-proactive-toast-link {
@@ -5879,7 +5887,7 @@ body {
     flex-shrink: 0;
 }
 
-/* Mobile responsive for suggestion cards */
+/* Mobile responsive for suggestion cards and toasts */
 @media (max-width: 768px) {
     .ai-suggestions-container {
         bottom: 70px;
@@ -5889,6 +5897,37 @@ body {
 
     .ai-suggestion-card {
         width: 100%;
+    }
+
+    .ai-suggestion-desc {
+        -webkit-line-clamp: 2;
+    }
+
+    .ai-proactive-toast {
+        max-width: calc(100vw - 20px);
+        min-width: 0;
+        font-size: 13px;
+        padding: 10px 14px;
+    }
+
+    .ai-proactive-toast-title {
+        -webkit-line-clamp: 2;
+    }
+
+    .hook-toast-floating {
+        max-width: calc(100vw - 20px);
+        padding: 10px 14px;
+        gap: 8px;
+    }
+
+    .hook-toast-session-badge {
+        max-width: 40%;
+        font-size: 10px;
+        padding: 2px 6px;
+    }
+
+    .hook-toast-floating .toast-message {
+        font-size: 12px;
     }
 }
 
