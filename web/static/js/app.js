@@ -523,6 +523,19 @@ class DevManager {
                     this.viewTaskDetail(this._viewingTaskDetail.projectId, this._viewingTaskDetail.taskId);
                 }
                 break;
+            case 'verification_error':
+                // Replace spinner with error message when AI fails to generate verification doc
+                if (this._viewingTaskDetail && data.data?.task_id === this._viewingTaskDetail.taskId) {
+                    const spinner = document.querySelector('.task-verification-spinner');
+                    if (spinner) {
+                        spinner.innerHTML = `
+                            <div class="verification-error-icon">&#x26A0;</div>
+                            <div class="spinner-text" style="color: var(--danger-color, #e74c3c)">Verification document failed</div>
+                            <div class="spinner-subtext">${this.escapeHtml(data.data.error || 'Unknown error')}</div>
+                        `;
+                    }
+                }
+                break;
             case 'skill':
             case 'mcp':
             case 'settings':
@@ -6869,6 +6882,11 @@ class DevManager {
         if (isAwaitingApproval) {
             if (task.verification_doc_id) {
                 md += `> **Awaiting Approval** — Verification document available. Use the buttons below to approve or reject.\n\n`;
+            } else {
+                const failedEvent = (history || []).find(e => e.event_type === 'verification_doc_failed');
+                if (failedEvent) {
+                    md += `> **Awaiting Approval** — Verification document could not be generated. You can still approve or reject manually.\n\n`;
+                }
             }
         }
 
@@ -6958,6 +6976,18 @@ class DevManager {
             <div class="spinner-text">Generating verification document...</div>
             <div class="spinner-subtext">This may take a few seconds</div>
             <button class="btn-skip" data-action="skip-verification">Skip verification</button>
+        `;
+        return card;
+    }
+
+    // Build the verification error card DOM element
+    _buildVerificationError(errorMsg) {
+        const card = document.createElement('div');
+        card.className = 'task-verification-spinner';
+        card.innerHTML = `
+            <div class="verification-error-icon">&#x26A0;</div>
+            <div class="spinner-text" style="color: var(--danger-color, #e74c3c)">Verification document failed</div>
+            <div class="spinner-subtext">${this.escapeHtml(errorMsg)}</div>
         `;
         return card;
     }
@@ -7099,7 +7129,7 @@ class DevManager {
     }
 
     _openTaskDetail(ctx, md) {
-        const { task, sessions, projectId, taskId } = ctx;
+        const { task, sessions, history, projectId, taskId } = ctx;
         const isAwaitingApproval = task.status === 'awaiting_approval';
         const isDone = task.status === 'done';
         const activeSession = sessions?.find(s => s.status === 'running' || s.status === 'starting');
@@ -7109,7 +7139,15 @@ class DevManager {
 
         if (isAwaitingApproval) {
             if (!task.verification_doc_id) {
-                prependElement = this._buildVerificationSpinner(projectId, taskId);
+                // Check if there's a verification_doc_failed history event
+                const failedEvent = (history || []).find(e => e.event_type === 'verification_doc_failed');
+                if (failedEvent) {
+                    let errorMsg = 'Unknown error';
+                    try { const d = JSON.parse(failedEvent.details || '{}'); errorMsg = d.error || errorMsg; } catch {}
+                    prependElement = this._buildVerificationError(errorMsg);
+                } else {
+                    prependElement = this._buildVerificationSpinner(projectId, taskId);
+                }
             }
             if (task.verification_doc_id) {
                 actions.push(this._buildViewDocAction(task));
@@ -7166,6 +7204,7 @@ class DevManager {
             task_assigned: '**[=]**',
             parent_changed: '**[P]**',
             verification_doc_created: '**[V]**',
+            verification_doc_failed: '**[!]**',
             verification_approved: '**[OK]**',
             verification_rejected: '**[X]**',
             plan_updated: '**[P]**',
@@ -7199,6 +7238,7 @@ class DevManager {
             task_assigned: () => `Task assigned to session`,
             parent_changed: () => `Parent task changed`,
             verification_doc_created: () => `Verification document generated`,
+            verification_doc_failed: () => `Verification document failed: ${details.error || 'unknown error'}`,
             verification_approved: () => `Verification approved — task completed`,
             verification_rejected: () => `Verification rejected — returned to in_progress`,
             plan_updated: () => details.is_rewrite ? 'Plan rewritten' : 'Plan created',
