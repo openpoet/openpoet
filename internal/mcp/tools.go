@@ -339,7 +339,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		if json.Unmarshal(body, &result) == nil && result.Message != "" {
 			return result.Message, nil
 		}
-		return "Proposta de alteração criada. O usuário precisa aprovar antes que a alteração seja aplicada.", nil
+		return "Change proposal created. The user must approve before the change is applied.", nil
 
 	case "devmanager_get_my_task":
 		if sessionID == "" {
@@ -502,7 +502,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 			Link string `json:"link"`
 		}
 		if json.Unmarshal(body, &result) == nil {
-			return fmt.Sprintf("Documento criado com sucesso. Um botão 'Ver Documento' foi exibido automaticamente no chat. NÃO gere links — o usuário usará o botão nativo. Link interno: %s", result.Link), nil
+			return fmt.Sprintf("Document created successfully. A 'View Document' button was automatically displayed in chat. Do NOT generate links — the user will use the native button. Internal link: %s", result.Link), nil
 		}
 		return string(body), nil
 
@@ -979,7 +979,7 @@ func formatTaskDetail(client *APIClient, projectID int64, taskID int64, taskBody
 				icon := "[D]"
 				if d.Type == "plan" {
 					icon = "[P]"
-				} else if strings.HasPrefix(d.Title, "Verificação") || strings.HasPrefix(d.Title, "Verificacao") {
+				} else if strings.HasPrefix(d.Title, "Verification") {
 					icon = "[V]"
 				}
 				sb.WriteString(fmt.Sprintf("- %s %s (id: %s, status: %s)\n", icon, d.Title, d.ID, d.Status))

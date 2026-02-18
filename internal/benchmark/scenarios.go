@@ -12,7 +12,7 @@ func AllScenarios() []Scenario {
 			Category:    CategoryTasks,
 			Description: "Model should create a task with appropriate title and description",
 			Messages: []llm.Message{
-				llm.NewTextMessage("user", "Criar tarefa para adicionar autenticação JWT nos endpoints da API"),
+				llm.NewTextMessage("user", "Create a task to add JWT authentication to the API endpoints"),
 			},
 			Validators: []ValidatorFunc{
 				ValidateToolCalled("create_task"),
@@ -32,7 +32,7 @@ func AllScenarios() []Scenario {
 			Category:    CategoryTasks,
 			Description: "Model should list tasks and identify priorities",
 			Messages: []llm.Message{
-				llm.NewTextMessage("user", "Quais tarefas são mais urgentes no projeto test-webapp?"),
+				llm.NewTextMessage("user", "Which tasks are most urgent in the test-webapp project?"),
 			},
 			Validators: []ValidatorFunc{
 				ValidateToolCalled("list_tasks"),
@@ -40,7 +40,7 @@ func AllScenarios() []Scenario {
 			},
 			JudgeRubric: `The assistant should:
 1. Call list_tasks with project_id "1" to get current tasks
-2. Identify the urgent task (ID 4: "Corrigir validação de email")
+2. Identify the urgent task (ID 4: "Fix email validation")
 3. May also mention high-priority tasks (IDs 1 and 3)
 4. Response should be concise (1-3 sentences)
 5. Should NOT paste the full task list — just summarize priorities`,
@@ -52,7 +52,7 @@ func AllScenarios() []Scenario {
 			Category:    CategoryTasks,
 			Description: "Model should create umbrella + subtasks using parent_ref",
 			Messages: []llm.Message{
-				llm.NewTextMessage("user", "Dividir o deploy do projeto em subtarefas: configurar Docker, configurar CI/CD, e configurar monitoramento"),
+				llm.NewTextMessage("user", "Split the project deploy into subtasks: configure Docker, configure CI/CD, and configure monitoring"),
 			},
 			Validators: []ValidatorFunc{
 				ValidateToolCalled("create_task"),
@@ -74,7 +74,7 @@ func AllScenarios() []Scenario {
 			Category:    CategorySkills,
 			Description: "Model should create a skill with markdown instructions",
 			Messages: []llm.Message{
-				llm.NewTextMessage("user", "Criar uma skill de boas práticas Go para o projeto"),
+				llm.NewTextMessage("user", "Create a Go best practices skill for the project"),
 			},
 			Validators: []ValidatorFunc{
 				ValidateToolCalled("create_skill"),
@@ -93,7 +93,7 @@ func AllScenarios() []Scenario {
 			Category:    CategorySkills,
 			Description: "Model should explain skills without calling any tool",
 			Messages: []llm.Message{
-				llm.NewTextMessage("user", "O que são skills no DevManager?"),
+				llm.NewTextMessage("user", "What are skills in DevManager?"),
 			},
 			Validators: []ValidatorFunc{
 				ValidateNoToolCalled(),
@@ -115,7 +115,7 @@ func AllScenarios() []Scenario {
 			Category:    CategoryCode,
 			Description: "Model should use tools to find a specific handler",
 			Messages: []llm.Message{
-				llm.NewTextMessage("user", "Onde está o handler de health check no projeto test-webapp?"),
+				llm.NewTextMessage("user", "Where is the health check handler in the test-webapp project?"),
 			},
 			Validators: []ValidatorFunc{
 				ValidateAnyToolCalled("read_file", "grep_content", "find_files", "list_directory"),
@@ -134,7 +134,7 @@ func AllScenarios() []Scenario {
 			Category:    CategoryCode,
 			Description: "Model should use create_document for long explanations",
 			Messages: []llm.Message{
-				llm.NewTextMessage("user", "Explique a arquitetura completa do projeto test-webapp"),
+				llm.NewTextMessage("user", "Explain the complete architecture of the test-webapp project"),
 			},
 			Validators: []ValidatorFunc{
 				ValidateToolCalled("create_document"),
@@ -155,7 +155,7 @@ func AllScenarios() []Scenario {
 			Category:    CategoryTools,
 			Description: "Model should call list_directory for file listing",
 			Messages: []llm.Message{
-				llm.NewTextMessage("user", "Liste os arquivos do projeto test-webapp"),
+				llm.NewTextMessage("user", "List the files of the test-webapp project"),
 			},
 			Validators: []ValidatorFunc{
 				ValidateToolCalled("list_directory"),
@@ -173,7 +173,7 @@ func AllScenarios() []Scenario {
 			Category:    CategoryTools,
 			Description: "Model should respond without calling any tool",
 			Messages: []llm.Message{
-				llm.NewTextMessage("user", "Obrigado pela ajuda!"),
+				llm.NewTextMessage("user", "Thanks for the help!"),
 			},
 			Validators: []ValidatorFunc{
 				ValidateNoToolCalled(),
@@ -181,7 +181,7 @@ func AllScenarios() []Scenario {
 			},
 			JudgeRubric: `The assistant should:
 1. NOT call any tool — this is just a social message
-2. Respond briefly and naturally (e.g. "De nada!" or similar)
+2. Respond briefly and naturally (e.g. "You're welcome!" or similar)
 3. Should be 1 sentence maximum
 4. Should NOT offer to do more or list capabilities`,
 			ExpectedTools: []string{},
@@ -194,7 +194,7 @@ func AllScenarios() []Scenario {
 			Category:    CategoryMemory,
 			Description: "Model should call get_memory_doc and respond with 1 sentence only",
 			Messages: []llm.Message{
-				llm.NewTextMessage("user", "Me mostra o memory doc do projeto test-webapp"),
+				llm.NewTextMessage("user", "Show me the memory doc for the test-webapp project"),
 			},
 			Validators: []ValidatorFunc{
 				ValidateToolCalled("get_memory_doc"),
@@ -204,7 +204,7 @@ func AllScenarios() []Scenario {
 			},
 			JudgeRubric: `The assistant should:
 1. Call get_memory_doc with project_id "1"
-2. Respond with ONLY 1 sentence like "Memory doc do projeto test-webapp carregado."
+2. Respond with ONLY 1 sentence like "Project test-webapp memory doc loaded."
 3. MUST NOT paste, quote, or summarize the content from <internal_reference>
 4. MUST NOT show the document content in the chat
 5. The system shows a native viewer card — assistant should not generate links`,
@@ -218,7 +218,7 @@ func AllScenarios() []Scenario {
 			Category:    CategoryConversation,
 			Description: "Model should answer in 1-2 sentences per the cardinal rule",
 			Messages: []llm.Message{
-				llm.NewTextMessage("user", "Quantos projetos temos configurados?"),
+				llm.NewTextMessage("user", "How many projects do we have configured?"),
 			},
 			Validators: []ValidatorFunc{
 				ValidateToolCalled("list_projects"),
@@ -227,7 +227,7 @@ func AllScenarios() []Scenario {
 			JudgeRubric: `The assistant should:
 1. Call list_projects to get the count
 2. Answer in 1-2 sentences (cardinal brevity rule)
-3. Should say something like "Temos 1 projeto configurado: test-webapp."
+3. Should say something like "There is 1 project configured: test-webapp."
 4. MUST NOT list project details, paths, or configuration
 5. MUST NOT announce what it's about to do before calling the tool`,
 			ExpectedTools: []string{"list_projects"},
@@ -249,8 +249,8 @@ func AllScenarios() []Scenario {
 1. Call list_projects
 2. Respond in ENGLISH (user wrote in English)
 3. Should be 1-2 sentences maximum
-4. The system prompt says: "Use pt-BR se o usuário escrever em português; caso contrário, use English."
-5. Response should match the user's language`,
+4. The system prompt says to always respond in English.
+5. Response should be in English`,
 			ExpectedTools: []string{"list_projects"},
 		},
 	}

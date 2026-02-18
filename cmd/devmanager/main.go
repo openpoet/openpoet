@@ -972,7 +972,7 @@ func runTaskDueChecker(db *database.DB, notifService *notifications.Service, hub
 }
 
 const migrationErrorPageHTML = `<!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1012,9 +1012,9 @@ const migrationErrorPageHTML = `<!DOCTYPE html>
 <body>
 <div class="container">
   <div class="icon">&#9888;&#65039;</div>
-  <h1>A aplicação não pôde iniciar</h1>
-  <p>Ocorreu um problema interno. Verifique os logs para mais detalhes.</p>
-  <button onclick="doRetry(this)">Tentar Novamente</button>
+  <h1>The application could not start</h1>
+  <p>An internal problem occurred. Check the logs for more details.</p>
+  <button onclick="doRetry(this)">Try Again</button>
   <div class="status" id="status"><span class="spinner"></span> Reiniciando...</div>
 </div>
 <script>
