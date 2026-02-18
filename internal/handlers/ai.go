@@ -4797,83 +4797,82 @@ func (h *AIHandler) GenerateVerificationDoc(ctx context.Context, task *database.
 	// Try to get LLM provider
 	p := h.getProviderForSlot(llm.SlotBackground)
 
-	var content string
-	if p != nil {
-		prompt := llm.VerificationDocPrompt(task.Title, task.Description, projectName, sessionSummaries, historyEntries)
-		model := h.getSlotModel(llm.SlotBackground)
+	if p == nil {
+		log.Printf("[AI-Verification] No LLM provider configured for task %d", task.ID)
+		h.broadcastVerificationError(task, "No AI provider configured for the background slot. Configure one in Settings > AI Providers.")
+		return
+	}
 
-		req := &llm.Request{
-			System:    "You are a technical documentation assistant. Generate clear, actionable verification documents in English.",
-			Messages:  []llm.Message{llm.NewTextMessage("user", prompt)},
-			MaxTokens: 4096,
-			Model:     model,
+	prompt := llm.VerificationDocPrompt(task.Title, task.Description, projectName, sessionSummaries, historyEntries)
+	model := h.getSlotModel(llm.SlotBackground)
+
+	req := &llm.Request{
+		System:    "You are a technical documentation assistant. Generate clear, actionable verification documents in English.",
+		Messages:  []llm.Message{llm.NewTextMessage("user", prompt)},
+		MaxTokens: 4096,
+		Model:     model,
+	}
+
+	var fullText strings.Builder
+	log.Printf("[AI-AUDIT] CALL_START subcategory=verification_doc task=%d model=%s", task.ID, model)
+	resp, err := p.StreamMessage(ctx, req, func(event llm.StreamEvent) error {
+		if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
+			fullText.WriteString(event.Delta.Text)
 		}
+		return nil
+	})
 
-		var fullText strings.Builder
-		log.Printf("[AI-AUDIT] CALL_START subcategory=verification_doc task=%d model=%s", task.ID, model)
-		resp, err := p.StreamMessage(ctx, req, func(event llm.StreamEvent) error {
-			if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
-				fullText.WriteString(event.Delta.Text)
-			}
-			return nil
+	if err != nil {
+		log.Printf("[AI-Verification] LLM call failed for task %d: %v", task.ID, err)
+		log.Printf("[AI-AUDIT] CALL_FAIL subcategory=verification_doc task=%d error=%v", task.ID, err)
+		h.broadcastVerificationError(task, fmt.Sprintf("AI failed to generate verification document: %v", err))
+		return
+	}
+
+	log.Printf("[AI-AUDIT] CALL_OK subcategory=verification_doc task=%d text_len=%d", task.ID, fullText.Len())
+	content := strings.TrimSpace(fullText.String())
+	// Record token usage
+	if resp != nil && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
+		usageModel := model
+		if resp.Model != "" {
+			usageModel = resp.Model
+		}
+		if usageModel == "" {
+			usageModel = "unknown"
+		}
+		h.api.db.CreateTokenUsage(ctx, &database.TokenUsage{
+			Source:              "ai_assistant",
+			Subcategory:         "verification_doc",
+			Model:               usageModel,
+			InputTokens:         resp.Usage.InputTokens,
+			OutputTokens:        resp.Usage.OutputTokens,
+			CacheReadTokens:     resp.Usage.CacheReadTokens,
+			CacheCreationTokens: resp.Usage.CacheCreationTokens,
+			CostUSD:             llm.CalculateCost(usageModel, resp.Usage.InputTokens, resp.Usage.OutputTokens),
 		})
-
-		if err != nil {
-			log.Printf("[AI-Verification] LLM call failed for task %d: %v, using fallback", task.ID, err)
-			log.Printf("[AI-AUDIT] CALL_FAIL subcategory=verification_doc task=%d error=%v", task.ID, err)
-			content = h.createFallbackVerificationDoc(task, projectName, sessionSummaries)
-		} else {
-			log.Printf("[AI-AUDIT] CALL_OK subcategory=verification_doc task=%d text_len=%d", task.ID, fullText.Len())
-			content = strings.TrimSpace(fullText.String())
-			// Record token usage
-			if resp != nil && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
-				usageModel := model
-				if resp.Model != "" {
-					usageModel = resp.Model
-				}
-				if usageModel == "" {
-					usageModel = "unknown"
-				}
-				h.api.db.CreateTokenUsage(ctx, &database.TokenUsage{
-					Source:              "ai_assistant",
-					Subcategory:         "verification_doc",
-					Model:               usageModel,
-					InputTokens:         resp.Usage.InputTokens,
-					OutputTokens:        resp.Usage.OutputTokens,
-					CacheReadTokens:     resp.Usage.CacheReadTokens,
-					CacheCreationTokens: resp.Usage.CacheCreationTokens,
-					CostUSD:             llm.CalculateCost(usageModel, resp.Usage.InputTokens, resp.Usage.OutputTokens),
-				})
-			}
-		}
-	} else {
-		log.Printf("[AI-Verification] No LLM provider, using fallback for task %d", task.ID)
-		content = h.createFallbackVerificationDoc(task, projectName, sessionSummaries)
 	}
 
 	h.persistVerificationDoc(ctx, task, content)
 }
 
-// createFallbackVerificationDoc creates a simple verification document without AI.
-func (h *AIHandler) createFallbackVerificationDoc(task *database.ProjectTask, projectName string, sessions []string) string {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("## Summary\n\nTask **%s** of project **%s** has been marked as awaiting approval.\n\n", task.Title, projectName))
-	if task.Description != "" {
-		sb.WriteString(fmt.Sprintf("**Description:** %s\n\n", task.Description))
-	}
-	sb.WriteString("## How to Verify\n\n")
-	sb.WriteString("1. Verify that the changes were applied correctly\n")
-	sb.WriteString("2. Test the features mentioned in the task description\n")
-	sb.WriteString("3. Confirm that the build compiles without errors\n\n")
-	if len(sessions) > 0 {
-		sb.WriteString("## Linked Sessions\n\n")
-		for _, s := range sessions {
-			sb.WriteString(fmt.Sprintf("- %s\n", s))
-		}
-		sb.WriteString("\n")
-	}
-	sb.WriteString("## Notes\n\nDocument generated automatically (without AI). Manually verify the work performed.\n")
-	return sb.String()
+// broadcastVerificationError sends a notification toast, records a task history event,
+// and broadcasts a state update so the frontend can replace the spinner with an error message.
+func (h *AIHandler) broadcastVerificationError(task *database.ProjectTask, reason string) {
+	h.api.hub.BroadcastNotification(map[string]interface{}{
+		"title": "Verification doc failed",
+		"body":  reason,
+		"type":  "error",
+	})
+	// Record a history event so the frontend knows the error even after page refresh
+	h.api.recordTaskHistory(context.Background(), task.ID, task.ProjectID, "verification_doc_failed", map[string]interface{}{
+		"error": reason,
+	}, "ai", "")
+	// Broadcast a task-specific event so the frontend can update the spinner in real-time
+	h.api.hub.BroadcastStateUpdate("verification_error", map[string]interface{}{
+		"task_id":    task.ID,
+		"project_id": task.ProjectID,
+		"error":     reason,
+	})
 }
 
 // persistVerificationDoc saves the verification document and links it to the task.
