@@ -294,6 +294,8 @@ class HookManager {
                     this.hidePendingBadge(msg.data.session_id);
                     this.renderToolPanel();
                     this.updateToolBadge();
+                    // Refresh sidebar session cards so the pending badge is cleared
+                    if (window.app?.loadSessions) window.app.loadSessions();
                     // Close push notifications via Service Worker
                     if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
                         navigator.serviceWorker.controller.postMessage({
