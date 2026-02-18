@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	anthropicAPIURL     = "https://api.anthropic.com/v1/messages"
-	anthropicAPIVersion = "2023-06-01"
+	AnthropicAPIURL     = "https://api.anthropic.com/v1/messages"
+	AnthropicAPIVersion = "2023-06-01"
 )
 
 // AnthropicProvider makes direct HTTP calls to the Anthropic Messages API.
@@ -84,14 +84,14 @@ func (p *AnthropicProvider) StreamMessage(ctx context.Context, req *Request, cal
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", anthropicAPIURL, bytes.NewReader(jsonBody))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", AnthropicAPIURL, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("x-api-key", p.apiKey)
-	httpReq.Header.Set("anthropic-version", anthropicAPIVersion)
+	httpReq.Header.Set("anthropic-version", AnthropicAPIVersion)
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
