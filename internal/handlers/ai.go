@@ -9,6 +9,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -401,6 +403,121 @@ func (h *AIHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, result)
 }
 
+// filterEnv returns a copy of env with entries matching the given key removed.
+func filterEnv(env []string, key string) []string {
+	prefix := key + "="
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, prefix) {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
+}
+
+// testAnthropicAPI makes a minimal non-streaming API call to validate an API key and model.
+func testAnthropicAPI(apiKey, model string) error {
+	if model == "" {
+		model = llm.DefaultModel
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	testBody, _ := json.Marshal(map[string]interface{}{
+		"model":      model,
+		"max_tokens": 1,
+		"messages": []map[string]string{
+			{"role": "user", "content": "hi"},
+		},
+	})
+
+	req, err := http.NewRequest("POST", llm.AnthropicAPIURL, bytes.NewReader(testBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", llm.AnthropicAPIVersion)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("cannot connect to Anthropic API: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 200 {
+		io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	var errResp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	extractMsg := func() string {
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error.Message != "" {
+			return errResp.Error.Message
+		}
+		return ""
+	}
+
+	switch resp.StatusCode {
+	case 401:
+		return fmt.Errorf("invalid API key (authentication failed)")
+	case 403:
+		return fmt.Errorf("API key lacks permission (status 403)")
+	case 400:
+		if msg := extractMsg(); msg != "" {
+			return fmt.Errorf("%s", msg)
+		}
+		return fmt.Errorf("bad request (status 400)")
+	case 429:
+		return fmt.Errorf("rate limited — API key is valid but currently throttled")
+	case 529:
+		return fmt.Errorf("Anthropic API is overloaded — try again later")
+	default:
+		if msg := extractMsg(); msg != "" {
+			return fmt.Errorf("%s", msg)
+		}
+		return fmt.Errorf("API returned status %d", resp.StatusCode)
+	}
+}
+
+// testClaudeCLI runs a minimal Claude CLI command to validate the model works.
+func testClaudeCLI(model string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	args := []string{"-p", "hi", "--max-turns", "1", "--output-format", "text"}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	// Clear CLAUDECODE env var to avoid "nested session" blocking
+	cmd.Env = filterEnv(os.Environ(), "CLAUDECODE")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(output))
+		if msg != "" {
+			// Extract meaningful part from CLI error output
+			for _, line := range strings.Split(msg, "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" && !strings.HasPrefix(line, "╭") && !strings.HasPrefix(line, "│") && !strings.HasPrefix(line, "╰") {
+					return fmt.Errorf("%s", line)
+				}
+			}
+			return fmt.Errorf("%s", msg)
+		}
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("CLI test timed out after 30s")
+		}
+		return fmt.Errorf("CLI exited with error: %v", err)
+	}
+	return nil
+}
+
 // HandleTestConnection tests an AI provider connection without saving settings.
 // Accepts the new AI config format: provider_type, api_key, model, base_url.
 func (h *AIHandler) HandleTestConnection(w http.ResponseWriter, r *http.Request) {
@@ -434,16 +551,35 @@ func (h *AIHandler) HandleTestConnection(w http.ResponseWriter, r *http.Request)
 
 	switch params.ProviderType {
 	case "gosdk":
-		available := llm.IsClaudeCLIAvailable()
-		result["configured"] = available
-		if !available {
+		if !llm.IsClaudeCLIAvailable() {
+			result["configured"] = false
 			result["error"] = "Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code"
+			break
+		}
+
+		// Run a real CLI command to validate the model
+		model := params.Model
+		if err := testClaudeCLI(model); err != nil {
+			result["configured"] = false
+			result["error"] = err.Error()
+		} else {
+			result["configured"] = true
 		}
 
 	case "apikey":
 		if params.APIKey == "" {
 			result["configured"] = false
 			result["error"] = "No API key provided"
+			break
+		}
+		model := params.Model
+		if model == "" {
+			model = llm.DefaultModel
+		}
+		result["model"] = model
+		if err := testAnthropicAPI(params.APIKey, model); err != nil {
+			result["configured"] = false
+			result["error"] = err.Error()
 		} else {
 			result["configured"] = true
 		}
@@ -465,12 +601,10 @@ func (h *AIHandler) HandleTestConnection(w http.ResponseWriter, r *http.Request)
 			break
 		}
 
-		result["configured"] = true
-
 		// Test with a real API call to validate connectivity, auth, and model
 		client := &http.Client{Timeout: 30 * time.Second}
 		testBody, _ := json.Marshal(map[string]interface{}{
-			"model": model,
+			"model":      model,
 			"max_tokens": 1,
 			"messages": []map[string]string{
 				{"role": "user", "content": "hi"},
@@ -483,14 +617,16 @@ func (h *AIHandler) HandleTestConnection(w http.ResponseWriter, r *http.Request)
 		}
 		resp, err := client.Do(req)
 		if err != nil {
+			result["configured"] = false
 			result["error"] = "Cannot connect to server at " + baseURL
 		} else {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == 401 || resp.StatusCode == 403 {
+				result["configured"] = false
 				result["error"] = "Authentication failed (status " + strconv.Itoa(resp.StatusCode) + ")"
 			} else if resp.StatusCode != 200 {
-				// Try to extract error message from response
+				result["configured"] = false
 				var errResp struct {
 					Error struct {
 						Message string `json:"message"`
@@ -501,11 +637,30 @@ func (h *AIHandler) HandleTestConnection(w http.ResponseWriter, r *http.Request)
 				} else {
 					result["error"] = "Server returned error (status " + strconv.Itoa(resp.StatusCode) + ")"
 				}
+			} else {
+				result["configured"] = true
 			}
 		}
 
 	case "nodesdk":
-		result["configured"] = true
+		if _, err := exec.LookPath("node"); err != nil {
+			result["configured"] = false
+			result["error"] = "Node.js not found. Install Node.js 18+ to use the Node SDK provider."
+			break
+		}
+
+		// nodesdk also uses Anthropic API under the hood; validate via CLI
+		model := params.Model
+		if llm.IsClaudeCLIAvailable() {
+			if err := testClaudeCLI(model); err != nil {
+				result["configured"] = false
+				result["error"] = err.Error()
+			} else {
+				result["configured"] = true
+			}
+		} else {
+			result["configured"] = true // Node.js present; can't validate model without CLI
+		}
 
 	default:
 		result["configured"] = false
