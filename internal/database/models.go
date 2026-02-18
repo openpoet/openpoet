@@ -229,6 +229,25 @@ type TokenUsage struct {
 	CreatedAt           time.Time      `db:"created_at" json:"created_at"`
 }
 
+type AIConfig struct {
+	ID              int64     `db:"id" json:"id"`
+	Name            string    `db:"name" json:"name"`
+	ProviderType    string    `db:"provider_type" json:"provider_type"`
+	APIKeyEncrypted string    `db:"api_key_encrypted" json:"-"`
+	APIKeyIV        string    `db:"api_key_iv" json:"-"`
+	APIKeyPreview   string    `db:"api_key_preview" json:"api_key_preview"`
+	Model           string    `db:"model" json:"model"`
+	BaseURL         string    `db:"base_url" json:"base_url"`
+	ExtraJSON       string    `db:"extra_json" json:"extra_json"`
+	CreatedAt       time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt       time.Time `db:"updated_at" json:"updated_at"`
+}
+
+type AIConfigAssignment struct {
+	Slot     string        `db:"slot" json:"slot"`
+	ConfigID sql.NullInt64 `db:"config_id" json:"config_id"`
+}
+
 type MemoryDoc struct {
 	ID            int64          `db:"id" json:"id"`
 	ProjectID     int64          `db:"project_id" json:"project_id"`

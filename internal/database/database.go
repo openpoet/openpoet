@@ -410,6 +410,74 @@ func (d *DB) DeleteMCPServer(ctx context.Context, id int64) error {
 	return err
 }
 
+// AI Config operations
+
+func (d *DB) CreateAIConfig(ctx context.Context, c *AIConfig) error {
+	query := `INSERT INTO ai_configs (name, provider_type, api_key_encrypted, api_key_iv, api_key_preview, model, base_url, extra_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, c.Name, c.ProviderType, c.APIKeyEncrypted, c.APIKeyIV, c.APIKeyPreview, c.Model, c.BaseURL, c.ExtraJSON)
+	if err != nil {
+		return err
+	}
+	c.ID, _ = result.LastInsertId()
+	return nil
+}
+
+func (d *DB) GetAIConfig(ctx context.Context, id int64) (*AIConfig, error) {
+	var c AIConfig
+	err := d.GetContext(ctx, &c, "SELECT * FROM ai_configs WHERE id = ?", id)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (d *DB) ListAIConfigs(ctx context.Context) ([]AIConfig, error) {
+	var configs []AIConfig
+	err := d.SelectContext(ctx, &configs, "SELECT * FROM ai_configs ORDER BY name")
+	return configs, err
+}
+
+func (d *DB) UpdateAIConfig(ctx context.Context, c *AIConfig) error {
+	query := `UPDATE ai_configs SET name=?, provider_type=?, api_key_encrypted=?, api_key_iv=?, api_key_preview=?, model=?, base_url=?, extra_json=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, c.Name, c.ProviderType, c.APIKeyEncrypted, c.APIKeyIV, c.APIKeyPreview, c.Model, c.BaseURL, c.ExtraJSON, time.Now(), c.ID)
+	return err
+}
+
+func (d *DB) DeleteAIConfig(ctx context.Context, id int64) error {
+	_, err := d.ExecContext(ctx, "DELETE FROM ai_configs WHERE id = ?", id)
+	return err
+}
+
+// AI Config Assignment operations
+
+func (d *DB) GetAIConfigAssignments(ctx context.Context) ([]AIConfigAssignment, error) {
+	var assignments []AIConfigAssignment
+	err := d.SelectContext(ctx, &assignments, "SELECT slot, config_id FROM ai_config_assignments ORDER BY slot")
+	return assignments, err
+}
+
+func (d *DB) SetAIConfigAssignment(ctx context.Context, slot string, configID *int64) error {
+	if configID == nil {
+		_, err := d.ExecContext(ctx, "UPDATE ai_config_assignments SET config_id = NULL WHERE slot = ?", slot)
+		return err
+	}
+	_, err := d.ExecContext(ctx, "UPDATE ai_config_assignments SET config_id = ? WHERE slot = ?", *configID, slot)
+	return err
+}
+
+func (d *DB) GetAIConfigForSlot(ctx context.Context, slot string) (*AIConfig, error) {
+	var c AIConfig
+	err := d.GetContext(ctx, &c, `
+		SELECT c.* FROM ai_configs c
+		INNER JOIN ai_config_assignments a ON a.config_id = c.id
+		WHERE a.slot = ?`, slot)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
 // Settings operations
 func (d *DB) GetSetting(ctx context.Context, key string) (string, error) {
 	var value string

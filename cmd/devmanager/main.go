@@ -229,28 +229,27 @@ func main() {
 	// Wire hub into config syncer for live progress
 	configSync.SetHub(hub)
 
-	// Initialize AI provider
-	aiProvider := initAIProvider(db, encryptor, fmt.Sprintf("http://localhost:%d", cfg.Port))
-	aiHandler := handlers.NewAIHandler(api, aiProvider)
+	// Initialize AI provider manager (per-slot providers)
+	apiURL := fmt.Sprintf("http://localhost:%d", cfg.Port)
+	providerMgr := initProviderManager(db, encryptor, apiURL)
+	aiHandler := handlers.NewAIHandler(api, providerMgr)
 
 	// Wire AI handler into API for AI chat functionality
 	api.SetAIHandler(aiHandler)
 
 	// Wire tool executor into SDK providers (lazy binding — provider created before handler)
-	if goSDK, ok := aiProvider.(*llm.GoSDKProvider); ok {
-		goSDK.SetToolExecutor(aiHandler)
-	}
+	providerMgr.SetToolExecutor(aiHandler)
 
-	// Wire AI provider reinitialization callback
-	apiURL := fmt.Sprintf("http://localhost:%d", cfg.Port)
-	api.ReinitAIProvider = func() {
-		newProvider := initAIProvider(db, encryptor, apiURL)
-		aiHandler.SetProvider(newProvider)
-		if goSDK, ok := newProvider.(*llm.GoSDKProvider); ok {
-			goSDK.SetToolExecutor(aiHandler)
-		}
-		log.Printf("[AI] Provider reinitialized after settings change")
+	// Wire AI provider reinitialization callbacks
+	api.ReinitAIProviders = func() {
+		newMgr := initProviderManager(db, encryptor, apiURL)
+		newMgr.SetToolExecutor(aiHandler)
+		aiHandler.SetProviderManager(newMgr)
+		providerMgr = newMgr
+		log.Printf("[AI] All providers reinitialized after config change")
 	}
+	// Legacy callback — also reinit providers when flat settings change
+	api.ReinitAIProvider = api.ReinitAIProviders
 
 	// Initialize OTEL handler for Claude Code token tracking
 	otelHandler := handlers.NewOTELHandler(db)
@@ -285,8 +284,8 @@ func main() {
 	}
 
 	// Wire AI evaluation callback into hook handler for mid-session triggers
-	hookHandler.OnEvaluateSession = func(sessionID string, trigger string, outputSnapshot []byte) {
-		aiHandler.EvaluateSession(context.Background(), sessionID, trigger, outputSnapshot)
+	hookHandler.OnEvaluateSession = func(sessionID string, trigger string, outputSnapshot []byte) bool {
+		return aiHandler.EvaluateSession(context.Background(), sessionID, trigger, outputSnapshot)
 	}
 
 	// Wire task/suggestion guard callbacks for debounced evaluation
@@ -524,6 +523,14 @@ func main() {
 		r.Put("/config/mcps/{id}", api.UpdateMCPServer)
 		r.Delete("/config/mcps/{id}", api.DeleteMCPServer)
 
+		// Config - AI Configs
+		r.Get("/config/ai-configs", api.ListAIConfigs)
+		r.Post("/config/ai-configs", api.CreateAIConfig)
+		r.Put("/config/ai-configs/{id}", api.UpdateAIConfig)
+		r.Delete("/config/ai-configs/{id}", api.DeleteAIConfig)
+		r.Get("/config/ai-config-assignments", api.GetAIConfigAssignments)
+		r.Put("/config/ai-config-assignments", api.UpdateAIConfigAssignments)
+
 		// Config - Settings
 		r.Get("/config/settings", api.GetSettings)
 		r.Put("/config/settings", api.UpdateSettings)
@@ -713,9 +720,7 @@ func main() {
 	log.Println("Shutting down...")
 
 	// Close AI provider sessions (SDK providers may have persistent subprocesses)
-	if sp, ok := aiProvider.(llm.SessionProvider); ok {
-		sp.CloseAllSessions()
-	}
+	providerMgr.CloseAll()
 
 	// Stop all sessions
 	sessionMgr.StopAll()
@@ -818,19 +823,6 @@ func serveMigrationError(cfg *config.Config) {
 	server.Shutdown(shutdownCtx)
 }
 
-// newGoSDKWithBudget creates a GoSDKProvider with optional budget from settings.
-func newGoSDKWithBudget(db *database.DB, apiURL string) *llm.GoSDKProvider {
-	p := llm.NewGoSDKProvider(apiURL)
-	if budgetStr, _ := db.GetSetting(context.Background(), "ai_budget_usd"); budgetStr != "" {
-		var budget float64
-		if _, err := fmt.Sscanf(budgetStr, "%f", &budget); err == nil && budget > 0 {
-			p.SetBudgetUSD(budget)
-			log.Printf("[AI] Budget limit: $%.2f per query", budget)
-		}
-	}
-	return p
-}
-
 // decryptSetting reads an encrypted setting, auto-migrating plaintext values.
 func decryptSetting(db *database.DB, enc *security.Encryptor, key string) string {
 	ctx := context.Background()
@@ -868,105 +860,40 @@ func decryptSetting(db *database.DB, enc *security.Encryptor, key string) string
 	return plaintext
 }
 
-// initAIProvider creates the appropriate LLM provider based on settings.
-func initAIProvider(db *database.DB, enc *security.Encryptor, apiURL string) llm.Provider {
+// initProviderManager creates a ProviderManager with per-slot configs from the database.
+func initProviderManager(db *database.DB, enc *security.Encryptor, apiURL string) *llm.ProviderManager {
+	pm := llm.NewProviderManager(apiURL)
 	ctx := context.Background()
 
-	// Check provider setting
-	providerType, _ := db.GetSetting(ctx, "ai_provider")
-
-	switch providerType {
-	case "apikey":
-		apiKey := decryptSetting(db, enc, "anthropic_api_key")
-		if apiKey != "" {
-			log.Printf("[AI] Using Anthropic API key provider")
-			return llm.NewAnthropicProvider(apiKey)
+	for _, slot := range []llm.Slot{llm.SlotChat, llm.SlotBackground, llm.SlotSession} {
+		cfg, err := db.GetAIConfigForSlot(ctx, string(slot))
+		if err != nil || cfg == nil {
+			log.Printf("[AI] Slot %s: no config assigned (auto-detect)", slot)
+			continue
 		}
-		log.Printf("[AI] Provider set to apikey but no API key configured")
-		return nil
 
-	case "gosdk":
-		if llm.IsClaudeCLIAvailable() {
-			log.Printf("[AI] Using Go Agent SDK provider (streaming, session-based)")
-			return newGoSDKWithBudget(db, apiURL)
-		}
-		log.Printf("[AI] Provider set to gosdk but Claude CLI not available")
-		return nil
-
-	case "ollama":
-		ollamaURL, _ := db.GetSetting(ctx, "ollama_base_url")
-		ollamaKey := decryptSetting(db, enc, "ollama_api_key")
-		ollamaModel, _ := db.GetSetting(ctx, "ollama_model")
-		if ollamaURL == "" {
-			ollamaURL = "http://localhost:11434"
-		}
-		if ollamaModel == "" {
-			ollamaModel = "qwen3-coder"
-		}
-		log.Printf("[AI] Using Ollama provider at %s with model %s", ollamaURL, ollamaModel)
-		return llm.NewOllamaProvider(ollamaURL, ollamaKey, ollamaModel)
-
-	case "ollama-sdk":
-		if llm.IsClaudeCLIAvailable() {
-			ollamaURL, _ := db.GetSetting(ctx, "ollama_base_url")
-			ollamaKey := decryptSetting(db, enc, "ollama_api_key")
-			ollamaModel, _ := db.GetSetting(ctx, "ollama_model")
-			if ollamaURL == "" {
-				ollamaURL = "http://localhost:11434"
-			}
-			if ollamaModel == "" {
-				ollamaModel = "qwen3-coder"
-			}
-
-			env := map[string]string{
-				"ANTHROPIC_BASE_URL":             ollamaURL,
-				"ANTHROPIC_DEFAULT_OPUS_MODEL":   ollamaModel,
-				"ANTHROPIC_DEFAULT_SONNET_MODEL": ollamaModel,
-				"ANTHROPIC_DEFAULT_HAIKU_MODEL":  ollamaModel,
-				"CLAUDE_CODE_SUBAGENT_MODEL":     ollamaModel,
-			}
-			if ollamaKey != "" {
-				env["ANTHROPIC_AUTH_TOKEN"] = ollamaKey
+		// Decrypt the API key
+		apiKey := ""
+		if cfg.APIKeyEncrypted != "" && cfg.APIKeyIV != "" {
+			decrypted, decErr := enc.Decrypt(cfg.APIKeyEncrypted, cfg.APIKeyIV)
+			if decErr != nil {
+				log.Printf("[AI] Slot %s: failed to decrypt API key for config %q: %v", slot, cfg.Name, decErr)
 			} else {
-				env["ANTHROPIC_AUTH_TOKEN"] = "ollama"
+				apiKey = decrypted
 			}
-
-			p := newGoSDKWithBudget(db, apiURL)
-			p.SetExtraEnv(env)
-			p.SetProviderName("ollama-sdk")
-			log.Printf("[AI] Using Ollama via Go Agent SDK at %s with model %s", ollamaURL, ollamaModel)
-			return p
 		}
-		log.Printf("[AI] Provider set to ollama-sdk but Claude CLI not available")
-		return nil
 
-	case "nodesdk":
-		log.Printf("[AI] Using Node.js Agent SDK sidecar provider")
-		return llm.NewNodeSDKProvider(apiURL)
-
-	case "claudecode":
-		// Legacy: redirect to gosdk
-		if llm.IsClaudeCLIAvailable() {
-			log.Printf("[AI] Legacy claudecode provider redirected to Go Agent SDK")
-			return newGoSDKWithBudget(db, apiURL)
-		}
-		log.Printf("[AI] Provider set to claudecode but CLI not available")
-		return nil
-
-	default:
-		// Auto-detect: try Go SDK (Claude CLI) first, then API key
-		if llm.IsClaudeCLIAvailable() {
-			log.Printf("[AI] Auto-detected Go Agent SDK provider (streaming, session-based)")
-			return newGoSDKWithBudget(db, apiURL)
-		}
-		apiKey := decryptSetting(db, enc, "anthropic_api_key")
-		if apiKey != "" {
-			log.Printf("[AI] Auto-detected Anthropic API key provider")
-			return llm.NewAnthropicProvider(apiKey)
-		}
-		log.Printf("[AI] No AI provider available (no Claude CLI, no API key)")
-		return nil
+		pm.SetSlotConfig(slot, &llm.ProviderConfig{
+			ProviderType: cfg.ProviderType,
+			APIKey:       apiKey,
+			Model:        cfg.Model,
+			BaseURL:      cfg.BaseURL,
+			ExtraJSON:    cfg.ExtraJSON,
+		})
+		log.Printf("[AI] Slot %s: config=%q type=%s model=%s", slot, cfg.Name, cfg.ProviderType, cfg.Model)
 	}
+
+	return pm
 }
 
 // recoverDataFromBackup copies data from an old DB backup into the fresh DB.
@@ -974,7 +901,7 @@ func recoverDataFromBackup(db *database.DB, backupPath string) {
 	tables := []string{
 		"projects", "sessions", "skills",
 		"mcp_servers", "settings", "push_subscriptions", "notifications",
-		"ai_conversations", "ai_messages", "memory_docs",
+		"ai_conversations", "ai_messages", "memory_docs", "ai_configs", "ai_config_assignments",
 		"temp_documents", "project_tasks",
 	}
 
