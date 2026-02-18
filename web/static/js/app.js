@@ -6780,7 +6780,7 @@ class DevManager {
     }
     _buildAIAction(projectId, taskId) {
         return {
-            label: 'Discutir com IA',
+            label: 'Discuss with AI',
             role: 'secondary',
             icon: this._taskDetailIcons.ai,
             aiAction: true,
@@ -7477,9 +7477,9 @@ class DevManager {
             conversation_id: raw.conversation_id?.Int64 ?? raw.conversation_id ?? null,
             suggestion_id: raw.id || null,
             actions: [
-                {label: 'Aceitar', action: 'accept', style: 'primary'},
-                {label: 'Discutir', action: 'discuss', style: 'outline'},
-                {label: 'Ignorar', action: 'dismiss', style: 'secondary'},
+                {label: 'Accept', action: 'accept', style: 'primary'},
+                {label: 'Discuss', action: 'discuss', style: 'outline'},
+                {label: 'Dismiss', action: 'dismiss', style: 'secondary'},
             ],
         };
     }
