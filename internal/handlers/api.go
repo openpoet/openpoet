@@ -7,6 +7,7 @@ import (
 	"devmanager/internal/database"
 	"devmanager/internal/files"
 	"devmanager/internal/configsync"
+	"devmanager/internal/llm"
 	"devmanager/internal/mcp"
 	"devmanager/internal/notifications"
 	"devmanager/internal/security"
@@ -112,8 +113,10 @@ type API struct {
 	aiHandler    *AIHandler
 	otelHandler  *OTELHandler
 
-	// ReinitAIProvider is called when AI settings change to reinitialize the provider.
+	// ReinitAIProvider is called when legacy AI settings change (kept for backward compat).
 	ReinitAIProvider func()
+	// ReinitAIProviders is called when AI configs/assignments change to reinitialize all providers.
+	ReinitAIProviders func()
 
 	pendingMemoryDocsMu sync.Mutex
 	pendingMemoryDocs   map[string]*pendingMemoryDoc // docID -> pending edit
@@ -936,7 +939,6 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		ProjectID int64             `json:"project_id"`
 		TaskID    *int64            `json:"task_id,omitempty"`
-		Name      string            `json:"name,omitempty"`
 		EnvVars   map[string]string `json:"env_vars,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -992,36 +994,38 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 
-	// Inject Ollama env vars if ollama provider is configured
-	provider, _ := a.db.GetSetting(r.Context(), "ai_provider")
-	if provider == "ollama" {
-		ollamaURL, _ := a.db.GetSetting(r.Context(), "ollama_base_url")
-		if ollamaURL == "" {
-			ollamaURL = "http://localhost:11434"
-		}
-		ollamaKey, _ := a.GetDecryptedSetting(r.Context(), "ollama_api_key")
-		ollamaModel, _ := a.db.GetSetting(r.Context(), "ollama_model")
-		if ollamaModel == "" {
-			ollamaModel = "qwen3-coder"
-		}
-
-		log.Printf("[Ollama] Injecting env vars: url=%s, model=%s, has_key=%v", ollamaURL, ollamaModel, ollamaKey != "")
-
-		input.EnvVars["ANTHROPIC_BASE_URL"] = ollamaURL
-
-		// Override model env vars to use configured Ollama model
-		input.EnvVars["ANTHROPIC_DEFAULT_OPUS_MODEL"] = ollamaModel
-		input.EnvVars["ANTHROPIC_DEFAULT_SONNET_MODEL"] = ollamaModel
-		input.EnvVars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = ollamaModel
-		input.EnvVars["CLAUDE_CODE_SUBAGENT_MODEL"] = ollamaModel
-
-		// For Ollama: use ANTHROPIC_AUTH_TOKEN for authentication
-		// - Remote Ollama: ANTHROPIC_AUTH_TOKEN=<api_key>
-		// - Local Ollama: ANTHROPIC_AUTH_TOKEN=ollama
-		if ollamaKey != "" {
-			input.EnvVars["ANTHROPIC_AUTH_TOKEN"] = ollamaKey
-		} else {
-			input.EnvVars["ANTHROPIC_AUTH_TOKEN"] = "ollama"
+	// Inject env vars based on the claude_session slot config
+	if a.aiHandler != nil && a.aiHandler.providerMgr != nil {
+		sessionConfig := a.aiHandler.providerMgr.GetSlotConfig(llm.SlotSession)
+		if sessionConfig != nil {
+			switch sessionConfig.ProviderType {
+			case "ollama", "ollama-sdk":
+				baseURL := sessionConfig.BaseURL
+				if baseURL == "" {
+					baseURL = "http://localhost:11434"
+				}
+				model := sessionConfig.Model
+				if model == "" {
+					model = "qwen3-coder"
+				}
+				log.Printf("[Session] Injecting Ollama env vars: url=%s, model=%s", baseURL, model)
+				input.EnvVars["ANTHROPIC_BASE_URL"] = baseURL
+				input.EnvVars["ANTHROPIC_API_KEY"] = ""
+				input.EnvVars["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
+				input.EnvVars["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
+				input.EnvVars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
+				input.EnvVars["CLAUDE_CODE_SUBAGENT_MODEL"] = model
+				if sessionConfig.APIKey != "" {
+					input.EnvVars["ANTHROPIC_AUTH_TOKEN"] = sessionConfig.APIKey
+				} else {
+					input.EnvVars["ANTHROPIC_AUTH_TOKEN"] = "ollama"
+				}
+			case "apikey":
+				if sessionConfig.APIKey != "" {
+					input.EnvVars["ANTHROPIC_API_KEY"] = sessionConfig.APIKey
+					log.Printf("[Session] Injecting Anthropic API key from session config")
+				}
+			}
 		}
 	}
 
@@ -1037,20 +1041,14 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update session name if provided
-	if input.Name != "" {
-		a.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", input.Name, sess.ID)
-		sess.Name = input.Name
-	}
-
-	// Create session-task link if starting from a task
+	// Auto-generate session name
 	if linkedTask != nil {
-		a.db.LinkSessionToTask(r.Context(), sess.ID, linkedTask.ID)
+		// Task-linked session: use task title
+		autoName := "Task: " + linkedTask.Title
+		a.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", autoName, sess.ID)
+		sess.Name = autoName
 
-		// Rename session to match task title
-		newName := "Task: " + linkedTask.Title
-		a.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, sess.ID)
-		sess.Name = newName
+		a.db.LinkSessionToTask(r.Context(), sess.ID, linkedTask.ID)
 
 		// Auto-set task status to in_progress if it's currently todo
 		if linkedTask.Status == "todo" {
@@ -1067,6 +1065,11 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		if a.hookHandler != nil {
 			a.hookHandler.SetTaskNotification(sess.ID, linkedTask.ID, linkedTask.Title, linkedTask.Description)
 		}
+	} else {
+		// Regular session: use project name + timestamp
+		autoName := project.Name + " (" + time.Now().Format("15:04:05") + ")"
+		a.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", autoName, sess.ID)
+		sess.Name = autoName
 	}
 
 	respondJSON(w, http.StatusCreated, sess)
@@ -1607,6 +1610,189 @@ func (a *API) DeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 
 	a.hub.BroadcastStateUpdate("mcp", map[string]interface{}{"action": "deleted", "id": id})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ============ AI Configs ============
+
+func (a *API) ListAIConfigs(w http.ResponseWriter, r *http.Request) {
+	configs, err := a.db.ListAIConfigs(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if configs == nil {
+		configs = []database.AIConfig{}
+	}
+	respondJSON(w, http.StatusOK, configs)
+}
+
+func (a *API) CreateAIConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name         string `json:"name"`
+		ProviderType string `json:"provider_type"`
+		APIKey       string `json:"api_key"`
+		Model        string `json:"model"`
+		BaseURL      string `json:"base_url"`
+		ExtraJSON    string `json:"extra_json"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	if req.Name == "" || req.ProviderType == "" {
+		respondError(w, http.StatusBadRequest, "Name and provider_type are required")
+		return
+	}
+	if req.ExtraJSON == "" {
+		req.ExtraJSON = "{}"
+	}
+
+	c := database.AIConfig{
+		Name:         req.Name,
+		ProviderType: req.ProviderType,
+		Model:        req.Model,
+		BaseURL:      req.BaseURL,
+		ExtraJSON:    req.ExtraJSON,
+	}
+
+	// Encrypt API key if provided
+	if req.APIKey != "" {
+		encrypted, iv, err := a.encryptor.Encrypt(req.APIKey)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to encrypt API key")
+			return
+		}
+		c.APIKeyEncrypted = encrypted
+		c.APIKeyIV = iv
+		c.APIKeyPreview = apiKeyPreview(req.APIKey)
+	}
+
+	if err := a.db.CreateAIConfig(r.Context(), &c); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if a.ReinitAIProviders != nil {
+		a.ReinitAIProviders()
+	}
+	a.hub.BroadcastStateUpdate("ai_config", map[string]interface{}{"action": "created", "config": c})
+	respondJSON(w, http.StatusCreated, c)
+}
+
+func (a *API) UpdateAIConfig(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid AI config ID")
+		return
+	}
+
+	existing, err := a.db.GetAIConfig(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "AI config not found")
+		return
+	}
+
+	var req struct {
+		Name         string `json:"name"`
+		ProviderType string `json:"provider_type"`
+		APIKey       string `json:"api_key"`
+		Model        string `json:"model"`
+		BaseURL      string `json:"base_url"`
+		ExtraJSON    string `json:"extra_json"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if req.Name != "" {
+		existing.Name = req.Name
+	}
+	if req.ProviderType != "" {
+		existing.ProviderType = req.ProviderType
+	}
+	existing.Model = req.Model
+	existing.BaseURL = req.BaseURL
+	if req.ExtraJSON != "" {
+		existing.ExtraJSON = req.ExtraJSON
+	}
+
+	// Encrypt API key if provided (empty = keep existing)
+	if req.APIKey != "" {
+		encrypted, iv, encErr := a.encryptor.Encrypt(req.APIKey)
+		if encErr != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to encrypt API key")
+			return
+		}
+		existing.APIKeyEncrypted = encrypted
+		existing.APIKeyIV = iv
+		existing.APIKeyPreview = apiKeyPreview(req.APIKey)
+	}
+
+	if err := a.db.UpdateAIConfig(r.Context(), existing); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if a.ReinitAIProviders != nil {
+		a.ReinitAIProviders()
+	}
+	a.hub.BroadcastStateUpdate("ai_config", map[string]interface{}{"action": "updated", "config": existing})
+	respondJSON(w, http.StatusOK, existing)
+}
+
+func (a *API) DeleteAIConfig(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid AI config ID")
+		return
+	}
+
+	if err := a.db.DeleteAIConfig(r.Context(), id); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if a.ReinitAIProviders != nil {
+		a.ReinitAIProviders()
+	}
+	a.hub.BroadcastStateUpdate("ai_config", map[string]interface{}{"action": "deleted", "id": id})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) GetAIConfigAssignments(w http.ResponseWriter, r *http.Request) {
+	assignments, err := a.db.GetAIConfigAssignments(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, assignments)
+}
+
+func (a *API) UpdateAIConfigAssignments(w http.ResponseWriter, r *http.Request) {
+	var req map[string]*int64 // slot -> config_id (null = unassign)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	validSlots := map[string]bool{"ai_chat": true, "ai_background": true, "claude_session": true}
+	for slot, configID := range req {
+		if !validSlots[slot] {
+			respondError(w, http.StatusBadRequest, fmt.Sprintf("Invalid slot: %s", slot))
+			return
+		}
+		if err := a.db.SetAIConfigAssignment(r.Context(), slot, configID); err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	if a.ReinitAIProviders != nil {
+		a.ReinitAIProviders()
+	}
+	a.hub.BroadcastStateUpdate("ai_config", map[string]interface{}{"action": "assignments_updated"})
+	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // ============ Settings ============
