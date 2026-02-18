@@ -7,9 +7,30 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	claudecode "github.com/severity1/claude-agent-sdk-go"
 )
+
+const (
+	// oneShotMaxRetries is the number of retry attempts for retryable one-shot errors.
+	oneShotMaxRetries = 3
+	// oneShotInitialBackoff is the initial wait time before the first retry.
+	oneShotInitialBackoff = 2 * time.Second
+	// oneShotMaxBackoff caps the exponential backoff.
+	oneShotMaxBackoff = 10 * time.Second
+)
+
+// isRetryableOneShotError checks if a one-shot error is retryable.
+// The SDK returns "unknown message type: <type>" for events it doesn't recognize
+// (e.g., rate_limit_event). These are non-fatal from the API perspective but
+// permanently kill the SDK's iterator, so we must retry the entire query.
+func isRetryableOneShotError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "unknown message type")
+}
 
 // GoSDKProvider wraps the community Go Agent SDK (severity1/claude-agent-sdk-go)
 // to provide AI interactions in two modes:
@@ -121,6 +142,10 @@ func (p *GoSDKProvider) buildOneShotOptions(req *Request) []claudecode.Option {
 	opts := []claudecode.Option{
 		claudecode.WithPermissionMode(claudecode.PermissionModeBypassPermissions),
 		claudecode.WithMaxTurns(3),
+		// Capture CLI stderr for diagnostics (rate_limit_event investigation)
+		claudecode.WithStderrCallback(func(line string) {
+			log.Printf("[GoSDK-stderr] %s", line)
+		}),
 	}
 
 	// Inject extra env vars (e.g. ANTHROPIC_BASE_URL for Ollama)
@@ -222,12 +247,86 @@ func (p *GoSDKProvider) StreamMessage(ctx context.Context, req *Request, callbac
 
 // ---------- ONE-SHOT MODE ----------
 
-// streamOneShot handles isolated queries using claudecode.Query().
-// The CLI process starts, runs the query, returns the result, and exits.
-// No MCP tools, no session persistence, no budget control.
+// oneShotResult holds the output of a single one-shot attempt.
+type oneShotResult struct {
+	response     Response
+	fullText     string
+	blockStarted bool
+}
+
+// streamOneShot handles isolated queries using claudecode.Query() with retry logic.
+// If the SDK encounters a retryable error (e.g., "unknown message type: rate_limit_event"),
+// the entire query is retried with exponential backoff since the SDK iterator is permanently
+// killed by such errors and cannot be resumed.
 func (p *GoSDKProvider) streamOneShot(ctx context.Context, prompt string, req *Request, callback StreamCallback) (*Response, error) {
+	var lastErr error
+	backoff := oneShotInitialBackoff
+
+	for attempt := 0; attempt <= oneShotMaxRetries; attempt++ {
+		if attempt > 0 {
+			log.Printf("[GoSDK] One-shot retry %d/%d after %v (previous error: %v)", attempt, oneShotMaxRetries, backoff, lastErr)
+
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("gosdk one-shot cancelled during retry: %w", ctx.Err())
+			case <-time.After(backoff):
+			}
+
+			backoff = backoff * 2
+			if backoff > oneShotMaxBackoff {
+				backoff = oneShotMaxBackoff
+			}
+		}
+
+		log.Printf("[GoSDK] One-shot attempt %d/%d: model=%s system_len=%d prompt_len=%d",
+			attempt+1, oneShotMaxRetries+1, req.Model, len(req.System), len(prompt))
+
+		result, err := p.executeOneShot(ctx, prompt, req, callback)
+		if err == nil {
+			// Success — finalize stream events
+			if result.blockStarted {
+				callback(StreamEvent{Type: "content_block_stop", Index: 0})
+			}
+			callback(StreamEvent{
+				Type:  "message_delta",
+				Delta: &StreamDelta{StopReason: "end_turn"},
+			})
+			result.response.Content = []ContentBlock{{Type: "text", Text: result.fullText}}
+			log.Printf("[GoSDK] One-shot completed: model=%s text_len=%d attempt=%d",
+				result.response.Model, len(result.fullText), attempt+1)
+			return &result.response, nil
+		}
+
+		// Check if retryable
+		if !isRetryableOneShotError(err) {
+			// Non-retryable: clean up and fail immediately
+			if result != nil && result.blockStarted {
+				callback(StreamEvent{Type: "content_block_stop", Index: 0})
+			}
+			log.Printf("[GoSDK] One-shot non-retryable error on attempt %d: %v", attempt+1, err)
+			return nil, err
+		}
+
+		// Retryable error — log and continue to next attempt
+		log.Printf("[GoSDK] One-shot retryable error on attempt %d: %v", attempt+1, err)
+		lastErr = err
+
+		// Close any partial stream before retrying
+		if result != nil && result.blockStarted {
+			callback(StreamEvent{Type: "content_block_stop", Index: 0})
+		}
+	}
+
+	// All retries exhausted
+	return nil, fmt.Errorf("gosdk one-shot failed after %d attempts: %w", oneShotMaxRetries+1, lastErr)
+}
+
+// executeOneShot runs a single one-shot query attempt.
+// Returns the result on success, or a partial result + error on failure.
+func (p *GoSDKProvider) executeOneShot(ctx context.Context, prompt string, req *Request, callback StreamCallback) (*oneShotResult, error) {
 	opts := p.buildOneShotOptions(req)
 
+	startTime := time.Now()
 	iter, err := claudecode.Query(ctx, prompt, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("gosdk one-shot error: %w", err)
@@ -238,21 +337,41 @@ func (p *GoSDKProvider) streamOneShot(ctx context.Context, prompt string, req *R
 	response.StopReason = "end_turn"
 	var fullText strings.Builder
 	blockStarted := false
+	msgCount := 0
 
 	for {
 		msg, err := iter.Next(ctx)
 		if err != nil {
 			if err == claudecode.ErrNoMoreMessages {
+				log.Printf("[GoSDK] Iterator exhausted: %d messages received in %v", msgCount, time.Since(startTime).Round(time.Millisecond))
 				break
 			}
-			if blockStarted {
-				callback(StreamEvent{Type: "content_block_stop", Index: 0})
+			log.Printf("[GoSDK] Iterator error after %d messages (fullText=%d bytes, elapsed=%v): %v",
+				msgCount, fullText.Len(), time.Since(startTime).Round(time.Millisecond), err)
+
+			// The SDK's queryIterator treats ALL errors as fatal and closes the iterator.
+			// When the Claude CLI sends message types the SDK doesn't recognize
+			// (e.g. "rate_limit_event"), the parser returns a MessageParseError which
+			// permanently kills the iterator. If we already received the assistant's
+			// response text, treat this as a graceful completion — we only lose the
+			// ResultMessage metadata (usage/cost).
+			if fullText.Len() > 0 && strings.Contains(err.Error(), "unknown message type") {
+				log.Printf("[GoSDK] Ignoring non-fatal parse error (response already received): %v", err)
+				break
 			}
-			return nil, fmt.Errorf("gosdk one-shot read error: %w", err)
+			return &oneShotResult{
+				response:     response,
+				fullText:     fullText.String(),
+				blockStarted: blockStarted,
+			}, fmt.Errorf("gosdk one-shot read error: %w", err)
 		}
+
+		msgCount++
 
 		switch m := msg.(type) {
 		case *claudecode.AssistantMessage:
+			log.Printf("[GoSDK] Message #%d: AssistantMessage (model=%s, blocks=%d, hasError=%v)",
+				msgCount, m.Model, len(m.Content), m.HasError())
 			if m.HasError() {
 				if blockStarted {
 					callback(StreamEvent{Type: "content_block_stop", Index: 0})
@@ -282,6 +401,8 @@ func (p *GoSDKProvider) streamOneShot(ctx context.Context, prompt string, req *R
 			}
 
 		case *claudecode.ResultMessage:
+			log.Printf("[GoSDK] Message #%d: ResultMessage (isError=%v, sessionID=%s, costUSD=%v)",
+				msgCount, m.IsError, m.SessionID, m.TotalCostUSD)
 			if m.TotalCostUSD != nil {
 				response.CostUSD = *m.TotalCostUSD
 			}
@@ -313,21 +434,17 @@ func (p *GoSDKProvider) streamOneShot(ctx context.Context, prompt string, req *R
 				})
 				fullText.WriteString(*m.Result)
 			}
+
+		default:
+			log.Printf("[GoSDK] Message #%d: unexpected type %T", msgCount, msg)
 		}
 	}
 
-	// Finalize stream events
-	if blockStarted {
-		callback(StreamEvent{Type: "content_block_stop", Index: 0})
-	}
-	callback(StreamEvent{
-		Type:  "message_delta",
-		Delta: &StreamDelta{StopReason: "end_turn"},
-	})
-
-	response.Content = []ContentBlock{{Type: "text", Text: fullText.String()}}
-	log.Printf("[GoSDK] One-shot query completed (model=%s)", response.Model)
-	return &response, nil
+	return &oneShotResult{
+		response:     response,
+		fullText:     fullText.String(),
+		blockStarted: blockStarted,
+	}, nil
 }
 
 // ---------- INTERACTIVE MODE ----------

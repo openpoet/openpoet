@@ -66,8 +66,9 @@ type HookHandler struct {
 	sessionMgr   *session.Manager
 
 	// OnEvaluateSession is called asynchronously when a session evaluation is triggered.
+	// Returns true if suggestions were generated, false otherwise.
 	// Set by main.go to wire AI evaluation into hook events.
-	OnEvaluateSession func(sessionID string, trigger string, outputSnapshot []byte)
+	OnEvaluateSession func(sessionID string, trigger string, outputSnapshot []byte) bool
 
 	// OnActivityTouch is called (debounced) when a session has activity, to update last_activity_at.
 	OnActivityTouch func(sessionID string)
@@ -504,9 +505,9 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Trigger plan_accepted evaluation when ExitPlanMode is approved
+		// Trigger plan_accepted evaluation when ExitPlanMode is approved (fire-and-forget)
 		if isExitPlan && decision.Behavior == "allow" {
-			h.triggerSessionEvaluation(sessionID, "plan_accepted")
+			h.triggerSessionEvaluation(sessionID, "plan_accepted") //nolint:errcheck
 			// Transition out of plan mode
 			h.mu.Lock()
 			h.sessionMode[sessionID] = "executing"
@@ -786,10 +787,11 @@ func (h *HookHandler) MarkUserStopped(sessionID string) {
 }
 
 // triggerSessionEvaluation triggers an async AI evaluation for a session with rate limiting.
-// Returns true if the evaluation was triggered, false if rate-limited or unavailable.
-func (h *HookHandler) triggerSessionEvaluation(sessionID, trigger string) bool {
+// Returns (triggered, resultCh) where triggered indicates if evaluation was started,
+// and resultCh receives true if suggestions were generated.
+func (h *HookHandler) triggerSessionEvaluation(sessionID, trigger string) (bool, <-chan bool) {
 	if h.OnEvaluateSession == nil {
-		return false
+		return false, nil
 	}
 
 	// Shorter cooldown for plan_accepted (strong signal of scope change)
@@ -802,7 +804,7 @@ func (h *HookHandler) triggerSessionEvaluation(sessionID, trigger string) bool {
 	if last, ok := h.lastEvaluation[sessionID]; ok && time.Since(last) < cooldown {
 		h.mu.Unlock()
 		log.Printf("[hooks] Session evaluation rate-limited for %s (trigger=%s, last=%v ago, cooldown=%v)", sessionID, trigger, time.Since(last).Round(time.Second), cooldown)
-		return false
+		return false, nil
 	}
 	h.lastEvaluation[sessionID] = time.Now()
 	h.mu.Unlock()
@@ -816,8 +818,6 @@ func (h *HookHandler) triggerSessionEvaluation(sessionID, trigger string) bool {
 	}
 
 	// Consume image prompt metadata (if any) and append as context hint.
-	// This helps the AI evaluator understand the user's intent when the terminal
-	// output only shows file path references for images.
 	h.mu.Lock()
 	imagePrompt := h.imagePromptMeta[sessionID]
 	delete(h.imagePromptMeta, sessionID)
@@ -829,8 +829,11 @@ func (h *HookHandler) triggerSessionEvaluation(sessionID, trigger string) bool {
 	}
 
 	log.Printf("[hooks] Triggering session evaluation: session=%s trigger=%s outputLen=%d hasImageMeta=%v", sessionID, trigger, len(output), imagePrompt != "")
-	go h.OnEvaluateSession(sessionID, trigger, output)
-	return true
+	resultCh := make(chan bool, 1)
+	go func() {
+		resultCh <- h.OnEvaluateSession(sessionID, trigger, output)
+	}()
+	return true, resultCh
 }
 
 // ClearSession removes all state for a session (call when session ends)
@@ -855,10 +858,10 @@ func (h *HookHandler) ClearSession(sessionID string) {
 	}
 }
 
-// evalDebounceDelay is how long to wait after the last UserPromptSubmit before evaluating.
-// This gives Claude Code time to process the prompt and produce output, providing the
-// AI evaluator with richer context (especially important for image-based inputs).
-const evalDebounceDelay = 20 * time.Second
+// evalRetryDelay is how long to wait before retrying evaluation when the first
+// immediate evaluation produced no suggestions. By then, Claude Code has had time
+// to process the prompt and produce output, giving the evaluator richer context.
+const evalRetryDelay = 40 * time.Second
 
 // HandleImagePromptHint handles POST /api/sessions/{id}/image-prompt-hint
 // Called by the frontend when images are uploaded with a text prompt.
@@ -893,47 +896,82 @@ func (h *HookHandler) HandleImagePromptHint(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusOK)
 }
 
-// scheduleDebouncedEval schedules (or reschedules) a debounced session evaluation.
-// Each UserPromptSubmit resets the timer. The evaluation fires once activity settles,
-// capturing Claude Code's response for richer context.
+// scheduleDebouncedEval triggers an immediate session evaluation on user prompt,
+// with a single retry after evalRetryDelay if no suggestions are generated.
+// Each new UserPromptSubmit cancels any pending retry and starts fresh.
 func (h *HookHandler) scheduleDebouncedEval(sessionID string) {
+	shortID := sessionID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+
+	// Cancel any pending retry timer from a previous prompt
 	h.mu.Lock()
-	// Cancel previous timer (debounce: each new prompt resets the clock)
 	if t, ok := h.evalTimers[sessionID]; ok {
 		t.Stop()
-	}
-	h.evalTimers[sessionID] = time.AfterFunc(evalDebounceDelay, func() {
-		h.mu.Lock()
 		delete(h.evalTimers, sessionID)
-		h.mu.Unlock()
-
-		shortID := sessionID
-		if len(shortID) > 8 {
-			shortID = shortID[:8]
-		}
-
-		// Guard 1: session still running?
-		if h.sessionMgr == nil || !h.sessionMgr.IsSessionRunning(sessionID) {
-			log.Printf("[hooks] Debounced eval skipped: session %s not running", shortID)
-			return
-		}
-
-		// Guard 2: no linked task?
-		if h.HasLinkedTask != nil && h.HasLinkedTask(sessionID) {
-			log.Printf("[hooks] Debounced eval skipped: session %s already has linked task", shortID)
-			return
-		}
-
-		// Guard 3: no recent suggestions (any status) in last 3 min?
-		if h.HasRecentSuggestions != nil && h.HasRecentSuggestions(sessionID) {
-			log.Printf("[hooks] Debounced eval skipped: session %s has recent suggestions", shortID)
-			return
-		}
-
-		log.Printf("[hooks] Debounced eval firing for session %s", shortID)
-		h.triggerSessionEvaluation(sessionID, "user_prompt")
-	})
+	}
 	h.mu.Unlock()
+
+	// Guard 1: session still running?
+	if h.sessionMgr == nil || !h.sessionMgr.IsSessionRunning(sessionID) {
+		log.Printf("[hooks] Immediate eval skipped: session %s not running", shortID)
+		return
+	}
+
+	// Guard 2: session already has linked task?
+	if h.HasLinkedTask != nil && h.HasLinkedTask(sessionID) {
+		log.Printf("[hooks] Immediate eval skipped: session %s already has linked task", shortID)
+		return
+	}
+
+	// Guard 3: recent suggestions exist?
+	if h.HasRecentSuggestions != nil && h.HasRecentSuggestions(sessionID) {
+		log.Printf("[hooks] Immediate eval skipped: session %s has recent suggestions", shortID)
+		return
+	}
+
+	// Fire evaluation IMMEDIATELY
+	log.Printf("[hooks] Immediate eval firing for session %s", shortID)
+	triggered, resultCh := h.triggerSessionEvaluation(sessionID, "user_prompt")
+	if !triggered {
+		return // rate-limited
+	}
+
+	// Wait for result in background; schedule retry if no suggestions
+	go func() {
+		gotSuggestions := <-resultCh
+		if gotSuggestions {
+			log.Printf("[hooks] Immediate eval produced suggestions for session %s, no retry needed", shortID)
+			return
+		}
+
+		log.Printf("[hooks] Immediate eval produced no suggestions for session %s, scheduling retry in %v", shortID, evalRetryDelay)
+		h.mu.Lock()
+		h.evalTimers[sessionID] = time.AfterFunc(evalRetryDelay, func() {
+			h.mu.Lock()
+			delete(h.evalTimers, sessionID)
+			h.mu.Unlock()
+
+			// Re-check guards before retrying
+			if h.sessionMgr == nil || !h.sessionMgr.IsSessionRunning(sessionID) {
+				log.Printf("[hooks] Retry eval skipped: session %s not running", shortID)
+				return
+			}
+			if h.HasLinkedTask != nil && h.HasLinkedTask(sessionID) {
+				log.Printf("[hooks] Retry eval skipped: session %s already has linked task", shortID)
+				return
+			}
+			if h.HasRecentSuggestions != nil && h.HasRecentSuggestions(sessionID) {
+				log.Printf("[hooks] Retry eval skipped: session %s has recent suggestions", shortID)
+				return
+			}
+
+			log.Printf("[hooks] Retry eval firing for session %s", shortID)
+			h.triggerSessionEvaluation(sessionID, "user_prompt_retry")
+		})
+		h.mu.Unlock()
+	}()
 }
 
 // HandleGetPending handles GET /api/hooks/pending/{sessionId}

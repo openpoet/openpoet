@@ -128,8 +128,8 @@ func (a *activeStreamInfo) closeAll() {
 
 // AIHandler handles all AI-related endpoints.
 type AIHandler struct {
-	api      *API
-	provider llm.Provider
+	api         *API
+	providerMgr *llm.ProviderManager
 
 	mu          sync.RWMutex
 	rateLimiter map[string][]time.Time // simple per-minute rate limiting
@@ -154,13 +154,29 @@ type AIHandler struct {
 }
 
 // NewAIHandler creates a new AI handler.
-func NewAIHandler(api *API, provider llm.Provider) *AIHandler {
+func NewAIHandler(api *API, providerMgr *llm.ProviderManager) *AIHandler {
 	return &AIHandler{
 		api:          api,
-		provider:     provider,
+		providerMgr:  providerMgr,
 		rateLimiter:  make(map[string][]time.Time),
 		activeStreams: make(map[int64]*activeStreamInfo),
 	}
+}
+
+// SetProviderManager replaces the provider manager (used during reinit).
+func (h *AIHandler) SetProviderManager(pm *llm.ProviderManager) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.providerMgr = pm
+}
+
+// getSlotModel returns the model for a given slot, or empty for auto-detect.
+func (h *AIHandler) getSlotModel(slot llm.Slot) string {
+	cfg := h.providerMgr.GetSlotConfig(slot)
+	if cfg != nil && cfg.Model != "" {
+		return cfg.Model
+	}
+	return ""
 }
 
 func (h *AIHandler) registerStream(convID int64, cancel context.CancelFunc) {
@@ -295,17 +311,9 @@ func (h *AIHandler) HandleStopChat(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }
 
-// SetProvider updates the provider (e.g. when settings change).
-func (h *AIHandler) SetProvider(p llm.Provider) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.provider = p
-}
-
-func (h *AIHandler) getProvider() llm.Provider {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.provider
+// getProviderForSlot returns the provider for the specified AI operation slot.
+func (h *AIHandler) getProviderForSlot(slot llm.Slot) llm.Provider {
+	return h.providerMgr.GetProvider(slot)
 }
 
 // checkRateLimit returns true if the request is within rate limit (20/min).
@@ -333,201 +341,175 @@ func (h *AIHandler) checkRateLimit(key string) bool {
 	return true
 }
 
-// HandleStatus returns the AI configuration status.
+// classifyAIError converts raw LLM errors into user-friendly messages.
+// The full error is always logged server-side; this returns a clean message for the UI.
+func classifyAIError(err error) string {
+	errStr := err.Error()
+	switch {
+	case strings.Contains(errStr, "rate_limit") || strings.Contains(errStr, "rate limit"):
+		return "AI is temporarily rate-limited. Please try again in a few seconds."
+	case strings.Contains(errStr, "unknown message type"):
+		return "AI encountered a temporary communication error. Please try again."
+	case strings.Contains(errStr, "context canceled") || strings.Contains(errStr, "context deadline exceeded"):
+		return "AI request timed out. Please try again."
+	case strings.Contains(errStr, "one-shot failed after"):
+		return "AI is temporarily unavailable after multiple attempts. Please try again later."
+	case strings.Contains(errStr, "connect error") || strings.Contains(errStr, "CLI not found"):
+		return "AI service is not available. Check that Claude CLI is installed."
+	default:
+		return "AI generation failed. Please try again."
+	}
+}
+
+// HandleStatus returns the AI configuration status per slot.
 func (h *AIHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
-	p := h.getProvider()
+	slots := []llm.Slot{llm.SlotChat, llm.SlotBackground, llm.SlotSession}
+	slotStatuses := make(map[string]interface{})
 
-	result := map[string]interface{}{
-		"configured": p != nil,
-	}
-
-	if p != nil {
-		result["provider"] = p.Name()
-	}
-
-	// Get model setting based on provider
-	providerType, _ := h.api.db.GetSetting(r.Context(), "ai_provider")
-	var model string
-	if providerType == "ollama" {
-		model, _ = h.api.db.GetSetting(r.Context(), "ollama_model")
-	} else {
-		model, _ = h.api.db.GetSetting(r.Context(), "ai_model")
-	}
-	if model == "" {
-		model = "(provider default)"
-	}
-	result["model"] = model
-
-	// For Ollama, actually test the connection
-	if providerType == "ollama" && p != nil {
-		ollamaURL, _ := h.api.db.GetSetting(r.Context(), "ollama_base_url")
-		if ollamaURL == "" {
-			ollamaURL = "http://localhost:11434"
+	for _, slot := range slots {
+		p := h.providerMgr.GetProvider(slot)
+		cfg := h.providerMgr.GetSlotConfig(slot)
+		status := map[string]interface{}{
+			"configured": p != nil,
 		}
-
-		// Test if the model exists by calling /v1/models
-		resp, err := http.Get(ollamaURL + "/v1/models")
-		if err != nil {
-			result["error"] = "Cannot connect to Ollama server"
+		if p != nil {
+			status["provider"] = p.Name()
+		}
+		if cfg != nil && cfg.Model != "" {
+			status["model"] = cfg.Model
 		} else {
-			resp.Body.Close()
-			if resp.StatusCode != 200 {
-				result["error"] = "Ollama server returned error"
-			}
+			status["model"] = "(auto-detect)"
 		}
-
-		// Optionally test if the specific model is available
-		if model != "" && model != "(provider default)" {
-			modelResp, err := http.Get(ollamaURL + "/v1/models")
-			if err == nil {
-				body, _ := io.ReadAll(modelResp.Body)
-				modelResp.Body.Close()
-				// Check if model name is in the response
-				if !bytes.Contains(body, []byte(model)) {
-					result["error"] = fmt.Sprintf("Model '%s' not found on Ollama server", model)
-				}
-			}
-		}
+		slotStatuses[string(slot)] = status
 	}
+
+	// Legacy top-level fields for backward compatibility
+	chatP := h.providerMgr.GetProvider(llm.SlotChat)
+	result := map[string]interface{}{
+		"configured": chatP != nil,
+		"slots":      slotStatuses,
+	}
+	if chatP != nil {
+		result["provider"] = chatP.Name()
+	}
+	chatModel := h.getSlotModel(llm.SlotChat)
+	if chatModel == "" {
+		chatModel = "(auto-detect)"
+	}
+	result["model"] = chatModel
 
 	respondJSON(w, http.StatusOK, result)
 }
 
 // HandleTestConnection tests an AI provider connection without saving settings.
-// It receives the form values directly and tests connectivity.
+// Accepts the new AI config format: provider_type, api_key, model, base_url.
 func (h *AIHandler) HandleTestConnection(w http.ResponseWriter, r *http.Request) {
 	var params struct {
-		Provider    string `json:"ai_provider"`
-		APIKey      string `json:"anthropic_api_key"`
-		OllamaURL   string `json:"ollama_base_url"`
-		OllamaKey   string `json:"ollama_api_key"`
-		OllamaModel string `json:"ollama_model"`
-		Model       string `json:"ai_model"`
+		ProviderType string `json:"provider_type"`
+		APIKey       string `json:"api_key"`
+		Model        string `json:"model"`
+		BaseURL      string `json:"base_url"`
+		ConfigID     *int64 `json:"config_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
-	result := map[string]interface{}{}
+	// If no API key provided but config_id given, use stored key
+	if params.APIKey == "" && params.ConfigID != nil {
+		cfg, err := h.api.db.GetAIConfig(r.Context(), *params.ConfigID)
+		if err == nil && cfg != nil && cfg.APIKeyEncrypted != "" && cfg.APIKeyIV != "" {
+			decrypted, decErr := h.api.encryptor.Decrypt(cfg.APIKeyEncrypted, cfg.APIKeyIV)
+			if decErr == nil {
+				params.APIKey = decrypted
+			}
+		}
+	}
 
-	switch params.Provider {
+	result := map[string]interface{}{
+		"provider": params.ProviderType,
+		"model":    params.Model,
+	}
+
+	switch params.ProviderType {
 	case "gosdk":
 		available := llm.IsClaudeCLIAvailable()
 		result["configured"] = available
-		result["provider"] = "gosdk"
-		if available {
-			result["model"] = "(Claude CLI default)"
-		} else {
+		if !available {
 			result["error"] = "Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code"
 		}
 
 	case "apikey":
-		apiKey := params.APIKey
-		// If no key provided in form, try to read existing from DB
-		if apiKey == "" {
-			apiKey, _ = h.api.GetDecryptedSetting(r.Context(), "anthropic_api_key")
-		}
-		if apiKey == "" {
+		if params.APIKey == "" {
 			result["configured"] = false
 			result["error"] = "No API key provided"
 		} else {
-			// Test with a minimal API call
 			result["configured"] = true
-			result["provider"] = "apikey"
-			model := params.Model
-			if model == "" {
-				model = "(provider default)"
-			}
-			result["model"] = model
 		}
 
-	case "ollama":
-		ollamaURL := params.OllamaURL
-		if ollamaURL == "" {
-			ollamaURL = "http://localhost:11434"
+	case "ollama", "ollama-sdk":
+		baseURL := params.BaseURL
+		if baseURL == "" {
+			baseURL = "http://localhost:11434"
 		}
-		ollamaModel := params.OllamaModel
-		if ollamaModel == "" {
-			ollamaModel = "qwen3-coder"
+		model := params.Model
+		if model == "" {
+			model = "qwen3-coder"
+		}
+		result["model"] = model
+
+		if params.ProviderType == "ollama-sdk" && !llm.IsClaudeCLIAvailable() {
+			result["configured"] = false
+			result["error"] = "Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code"
+			break
 		}
 
 		result["configured"] = true
-		result["provider"] = "ollama"
-		result["model"] = ollamaModel
 
-		// Test connection to Ollama server
-		resp, err := http.Get(ollamaURL + "/v1/models")
+		// Test with a real API call to validate connectivity, auth, and model
+		client := &http.Client{Timeout: 30 * time.Second}
+		testBody, _ := json.Marshal(map[string]interface{}{
+			"model": model,
+			"max_tokens": 1,
+			"messages": []map[string]string{
+				{"role": "user", "content": "hi"},
+			},
+		})
+		req, _ := http.NewRequest("POST", baseURL+"/v1/chat/completions", bytes.NewReader(testBody))
+		req.Header.Set("Content-Type", "application/json")
+		if params.APIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+params.APIKey)
+		}
+		resp, err := client.Do(req)
 		if err != nil {
-			result["error"] = "Cannot connect to Ollama server at " + ollamaURL
+			result["error"] = "Cannot connect to server at " + baseURL
 		} else {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			if resp.StatusCode != 200 {
-				result["error"] = "Ollama server returned error"
-			} else if !bytes.Contains(body, []byte(ollamaModel)) {
-				result["error"] = fmt.Sprintf("Model '%s' not found on Ollama server", ollamaModel)
-			}
-		}
-
-	case "ollama-sdk":
-		ollamaURL := params.OllamaURL
-		if ollamaURL == "" {
-			ollamaURL = "http://localhost:11434"
-		}
-		ollamaModel := params.OllamaModel
-		if ollamaModel == "" {
-			ollamaModel = "qwen3-coder"
-		}
-
-		cliAvailable := llm.IsClaudeCLIAvailable()
-		result["configured"] = cliAvailable
-		result["provider"] = "ollama-sdk"
-		result["model"] = ollamaModel
-
-		if !cliAvailable {
-			result["error"] = "Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code"
-		} else {
-			// Also test Ollama connectivity
-			resp, err := http.Get(ollamaURL + "/v1/models")
-			if err != nil {
-				result["error"] = "Cannot connect to Ollama server at " + ollamaURL
-			} else {
-				body, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if resp.StatusCode != 200 {
-					result["error"] = "Ollama server returned error"
-				} else if !bytes.Contains(body, []byte(ollamaModel)) {
-					result["error"] = fmt.Sprintf("Model '%s' not found on Ollama server", ollamaModel)
+			if resp.StatusCode == 401 || resp.StatusCode == 403 {
+				result["error"] = "Authentication failed (status " + strconv.Itoa(resp.StatusCode) + ")"
+			} else if resp.StatusCode != 200 {
+				// Try to extract error message from response
+				var errResp struct {
+					Error struct {
+						Message string `json:"message"`
+					} `json:"error"`
+				}
+				if json.Unmarshal(body, &errResp) == nil && errResp.Error.Message != "" {
+					result["error"] = errResp.Error.Message
+				} else {
+					result["error"] = "Server returned error (status " + strconv.Itoa(resp.StatusCode) + ")"
 				}
 			}
 		}
 
 	case "nodesdk":
 		result["configured"] = true
-		result["provider"] = "nodesdk"
-		result["model"] = "(Node.js Agent SDK)"
 
 	default:
-		// Auto-detect
-		if llm.IsClaudeCLIAvailable() {
-			result["configured"] = true
-			result["provider"] = "gosdk"
-			result["model"] = "(Claude CLI auto-detected)"
-		} else {
-			apiKey := params.APIKey
-			if apiKey == "" {
-				apiKey, _ = h.api.GetDecryptedSetting(r.Context(), "anthropic_api_key")
-			}
-			if apiKey != "" {
-				result["configured"] = true
-				result["provider"] = "apikey"
-				result["model"] = "(auto-detected API key)"
-			} else {
-				result["configured"] = false
-				result["error"] = "No provider available. Install Claude CLI or provide an API key."
-			}
-		}
+		result["configured"] = false
+		result["error"] = "Unknown provider type: " + params.ProviderType
 	}
 
 	respondJSON(w, http.StatusOK, result)
@@ -535,7 +517,7 @@ func (h *AIHandler) HandleTestConnection(w http.ResponseWriter, r *http.Request)
 
 // HandleChat handles the main chat endpoint with SSE streaming.
 func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
-	p := h.getProvider()
+	p := h.getProviderForSlot(llm.SlotChat)
 	if p == nil {
 		respondError(w, http.StatusServiceUnavailable, "AI not configured. Set an API key or install Claude Code CLI.")
 		return
@@ -675,14 +657,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	systemPrompt := h.buildSystemPromptWithContext(ctx, proactiveCtx, isSessionProvider)
 
-	// Get model based on provider
-	providerType, _ := h.api.db.GetSetting(ctx, "ai_provider")
-	var model string
-	if providerType == "ollama" || providerType == "ollama-sdk" {
-		model, _ = h.api.db.GetSetting(ctx, "ollama_model")
-	} else {
-		model, _ = h.api.db.GetSetting(ctx, "ai_model")
-	}
+	model := h.getSlotModel(llm.SlotChat)
 
 	// Determine if we should use tools:
 	// - Session providers (gosdk, nodesdk, ollama-sdk) handle tools internally via MCP — no tools in request
@@ -850,6 +825,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	var streamingErr error
+	log.Printf("[AI-AUDIT] CALL_START subcategory=chat conversation=%d model=%s", conv.ID, req.Model)
 	resp, streamingErr = p.StreamMessage(streamCtx, req, func(event llm.StreamEvent) error {
 		switch event.Type {
 		case "content_block_start":
@@ -876,6 +852,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	if streamingErr != nil {
 		log.Printf("[AI] Stream error: %v", streamingErr)
+		log.Printf("[AI-AUDIT] CALL_FAIL subcategory=chat conversation=%d error=%v", conv.ID, streamingErr)
 		if streamCtx.Err() == context.Canceled {
 			streamErr = "aborted"
 		} else {
@@ -886,6 +863,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	log.Printf("[AI-AUDIT] CALL_OK subcategory=chat conversation=%d", conv.ID)
 
 	// Track total token usage across all streaming calls
 	if resp != nil {
@@ -1460,6 +1438,7 @@ func (h *AIHandler) handleToolLoop(
 
 		// Continue streaming
 		var err error
+		log.Printf("[AI-AUDIT] CALL_START subcategory=chat_tool_loop iteration=%d", i)
 		resp, err = p.StreamMessage(ctx, req, func(event llm.StreamEvent) error {
 			if event.Type == "content_block_start" && event.ContentBlock != nil && event.ContentBlock.Type == "tool_use" {
 				sendSSE("tool_start", map[string]interface{}{
@@ -1480,8 +1459,10 @@ func (h *AIHandler) handleToolLoop(
 
 		if err != nil {
 			log.Printf("[ToolLoop] StreamMessage error at iteration %d: %v", i, err)
+			log.Printf("[AI-AUDIT] CALL_FAIL subcategory=chat_tool_loop iteration=%d error=%v", i, err)
 			return accumulated, err
 		}
+		log.Printf("[AI-AUDIT] CALL_OK subcategory=chat_tool_loop iteration=%d", i)
 
 		// Log model's response after receiving tool results
 		if resp != nil {
@@ -3103,7 +3084,7 @@ func (h *AIHandler) HandleDeleteAllConversations(w http.ResponseWriter, r *http.
 
 // HandleGenerateSkill generates a skill from a description (SSE streaming).
 func (h *AIHandler) HandleGenerateSkill(w http.ResponseWriter, r *http.Request) {
-	p := h.getProvider()
+	p := h.getProviderForSlot(llm.SlotBackground)
 	if p == nil {
 		respondError(w, http.StatusServiceUnavailable, "AI not configured")
 		return
@@ -3127,7 +3108,7 @@ func (h *AIHandler) HandleGenerateSkill(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	model, _ := h.api.db.GetSetting(r.Context(), "ai_model")
+	model := h.getSlotModel(llm.SlotBackground)
 
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -3152,6 +3133,7 @@ func (h *AIHandler) HandleGenerateSkill(w http.ResponseWriter, r *http.Request) 
 
 	var fullText strings.Builder
 
+	log.Printf("[AI-AUDIT] CALL_START subcategory=skill_generate model=%s", model)
 	resp, err := p.StreamMessage(r.Context(), req, func(event llm.StreamEvent) error {
 		if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
 			fullText.WriteString(event.Delta.Text)
@@ -3163,11 +3145,13 @@ func (h *AIHandler) HandleGenerateSkill(w http.ResponseWriter, r *http.Request) 
 	})
 
 	if err != nil {
+		log.Printf("[AI-AUDIT] CALL_FAIL subcategory=skill_generate error=%v", err)
 		h.sendSSE(w, flusher, "error", map[string]interface{}{
-			"message": err.Error(),
+			"message": classifyAIError(err),
 		})
 		return
 	}
+	log.Printf("[AI-AUDIT] CALL_OK subcategory=skill_generate text_len=%d", fullText.Len())
 
 	// Record token usage
 	if resp != nil && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
@@ -3380,7 +3364,7 @@ func processCR(data []byte) []byte {
 
 // HandleSuggestTaskData analyzes session output and suggests task title/description/priority.
 func (h *AIHandler) HandleSuggestTaskData(w http.ResponseWriter, r *http.Request) {
-	p := h.getProvider()
+	p := h.getProviderForSlot(llm.SlotBackground)
 	if p == nil {
 		respondError(w, http.StatusServiceUnavailable, "AI not configured")
 		return
@@ -3455,7 +3439,7 @@ func (h *AIHandler) HandleSuggestTaskData(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	model, _ := h.api.db.GetSetting(r.Context(), "ai_model")
+	model := h.getSlotModel(llm.SlotBackground)
 
 	// Extract structured context from terminal output (heuristics + raw fallback)
 	sessionContext := extractSessionContext(cleanOutput)
@@ -3498,6 +3482,7 @@ Rules:
 	}
 
 	var fullText strings.Builder
+	log.Printf("[AI-AUDIT] CALL_START subcategory=suggest_task session=%s model=%s", sessionID, model)
 	resp, err := p.StreamMessage(r.Context(), req, func(event llm.StreamEvent) error {
 		if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
 			fullText.WriteString(event.Delta.Text)
@@ -3506,9 +3491,11 @@ Rules:
 	})
 
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "AI generation failed: "+err.Error())
+		log.Printf("[AI-AUDIT] CALL_FAIL subcategory=suggest_task session=%s error=%v", sessionID, err)
+		respondError(w, http.StatusInternalServerError, classifyAIError(err))
 		return
 	}
+	log.Printf("[AI-AUDIT] CALL_OK subcategory=suggest_task session=%s text_len=%d", sessionID, fullText.Len())
 
 	// Record token usage
 	if resp != nil && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
@@ -3564,7 +3551,7 @@ Rules:
 
 // HandleValidateSkill validates a skill's format and content.
 func (h *AIHandler) HandleValidateSkill(w http.ResponseWriter, r *http.Request) {
-	p := h.getProvider()
+	p := h.getProviderForSlot(llm.SlotBackground)
 	if p == nil {
 		respondError(w, http.StatusServiceUnavailable, "AI not configured")
 		return
@@ -3588,7 +3575,7 @@ func (h *AIHandler) HandleValidateSkill(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	model, _ := h.api.db.GetSetting(r.Context(), "ai_model")
+	model := h.getSlotModel(llm.SlotBackground)
 
 	req := &llm.Request{
 		System: llm.SkillValidationPrompt,
@@ -3601,6 +3588,7 @@ func (h *AIHandler) HandleValidateSkill(w http.ResponseWriter, r *http.Request) 
 
 	var fullText strings.Builder
 
+	log.Printf("[AI-AUDIT] CALL_START subcategory=skill_validate model=%s", model)
 	resp, err := p.StreamMessage(r.Context(), req, func(event llm.StreamEvent) error {
 		if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
 			fullText.WriteString(event.Delta.Text)
@@ -3609,9 +3597,11 @@ func (h *AIHandler) HandleValidateSkill(w http.ResponseWriter, r *http.Request) 
 	})
 
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("[AI-AUDIT] CALL_FAIL subcategory=skill_validate error=%v", err)
+		respondError(w, http.StatusInternalServerError, classifyAIError(err))
 		return
 	}
+	log.Printf("[AI-AUDIT] CALL_OK subcategory=skill_validate text_len=%d", fullText.Len())
 
 	// Record token usage
 	if resp != nil && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
@@ -3671,13 +3661,13 @@ func parseIDParam(input map[string]interface{}, key string) (int64, error) {
 
 // EvaluateSession uses AI to evaluate a session and proactively suggest task actions.
 // Triggered on session_start, session_end, user_prompt, plan_accepted, or session_request.
-func (h *AIHandler) EvaluateSession(ctx context.Context, sessionID string, trigger string, outputSnapshot []byte) {
+func (h *AIHandler) EvaluateSession(ctx context.Context, sessionID string, trigger string, outputSnapshot []byte) bool {
 	log.Printf("[AI-Session] EvaluateSession called: session=%s trigger=%s outputLen=%d", sessionID[:8], trigger, len(outputSnapshot))
 
-	p := h.getProvider()
+	p := h.getProviderForSlot(llm.SlotBackground)
 	if p == nil {
 		log.Printf("[AI-Session] ABORTED: provider is nil")
-		return
+		return false
 	}
 	log.Printf("[AI-Session] Provider OK: %T", p)
 
@@ -3685,19 +3675,19 @@ func (h *AIHandler) EvaluateSession(ctx context.Context, sessionID string, trigg
 	val, _ := h.api.db.GetSetting(ctx, "task_auto_eval_enabled")
 	if val != "true" {
 		log.Printf("[AI-Session] Task evaluation disabled (trigger=%s), skipping", trigger)
-		return
+		return false
 	}
 
 	sess, err := h.api.db.GetSession(ctx, sessionID)
 	if err != nil {
 		log.Printf("[AI-Session] Session %s not found: %v", sessionID, err)
-		return
+		return false
 	}
 
 	project, err := h.api.db.GetProject(ctx, sess.ProjectID)
 	if err != nil {
 		log.Printf("[AI-Session] Project %d not found: %v", sess.ProjectID, err)
-		return
+		return false
 	}
 	log.Printf("[AI-Session] Context: project=%s session_status=%s tasks_query_start", project.Name, sess.Status)
 
@@ -3713,7 +3703,7 @@ func (h *AIHandler) EvaluateSession(ctx context.Context, sessionID string, trigg
 	// Early exits based on trigger + linked task state
 	if trigger == "session_end" && !hasLinkedTask {
 		log.Printf("[AI-Session] Skipping session_end: no linked task (no point creating task for finished work)")
-		return
+		return false
 	}
 
 	// Format tasks list
@@ -3760,7 +3750,7 @@ func (h *AIHandler) EvaluateSession(ctx context.Context, sessionID string, trigg
 		// Task linking is handled by user_prompt trigger (with actual context)
 		// and by the UI modal shown before session start.
 		log.Printf("[AI-Session] Skipping session_start: no context to evaluate (task suggestions deferred to user_prompt)")
-		return
+		return false
 
 	case "session_end":
 		triggerDesc = "ended"
@@ -3859,7 +3849,7 @@ Instructions:
 - Be judicious - only suggest when it truly makes sense.
 - Use Portuguese (pt-BR) for title and description fields.`, tasksList, instructions)
 
-	model, _ := h.api.db.GetSetting(ctx, "ai_model")
+	model := h.getSlotModel(llm.SlotBackground)
 
 	log.Printf("[AI-Session] Calling LLM: model=%s promptLen=%d", model, len(prompt))
 
@@ -3871,6 +3861,7 @@ Instructions:
 	}
 
 	var fullText strings.Builder
+	log.Printf("[AI-AUDIT] CALL_START subcategory=session_eval session=%s trigger=%s model=%s", sessionID[:8], trigger, model)
 	evalResp, err := p.StreamMessage(ctx, req, func(event llm.StreamEvent) error {
 		if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
 			fullText.WriteString(event.Delta.Text)
@@ -3880,8 +3871,10 @@ Instructions:
 
 	if err != nil {
 		log.Printf("[AI-Session] LLM call FAILED for session %s: %v", sessionID, err)
-		return
+		log.Printf("[AI-AUDIT] CALL_FAIL subcategory=session_eval session=%s error=%v", sessionID[:8], err)
+		return false
 	}
+	log.Printf("[AI-AUDIT] CALL_OK subcategory=session_eval session=%s text_len=%d", sessionID[:8], fullText.Len())
 
 	// Record token usage
 	if evalResp != nil && (evalResp.Usage.InputTokens > 0 || evalResp.Usage.OutputTokens > 0) {
@@ -3928,12 +3921,12 @@ Instructions:
 
 	if err := json.Unmarshal([]byte(responseText), &result); err != nil {
 		log.Printf("[AI-Session] JSON parse FAILED for session %s: %v\nResponse: %s", sessionID, err, responseText)
-		return
+		return false
 	}
 
 	if len(result.Suggestions) == 0 {
 		log.Printf("[AI-Session] No suggestions for session %s (%s)", sessionID[:8], trigger)
-		return
+		return false
 	}
 
 	// Post-LLM filter: remove suggestion types not allowed for this trigger
@@ -3967,7 +3960,7 @@ Instructions:
 
 	if len(result.Suggestions) == 0 {
 		log.Printf("[AI-Session] All suggestions filtered out for session %s (%s)", sessionID[:8], trigger)
-		return
+		return false
 	}
 
 	log.Printf("[AI-Session] Got %d suggestions for session %s (after filter)", len(result.Suggestions), sessionID[:8])
@@ -4023,7 +4016,7 @@ Instructions:
 			}
 		}
 		log.Printf("[AI-Session] Auto-update applied for session %s, skipping suggestion creation", sessionID[:8])
-		return
+		return true
 	}
 
 	// Create and broadcast each suggestion with proactive conversation
@@ -4107,6 +4100,7 @@ Instructions:
 		}
 		h.api.hub.BroadcastAIProactive(payload)
 	}
+	return true
 }
 
 // ListSuggestions returns pending AI suggestions.
@@ -4648,14 +4642,12 @@ func (h *AIHandler) GenerateVerificationDoc(ctx context.Context, task *database.
 	}
 
 	// Try to get LLM provider
-	h.mu.RLock()
-	p := h.provider
-	h.mu.RUnlock()
+	p := h.getProviderForSlot(llm.SlotBackground)
 
 	var content string
 	if p != nil {
 		prompt := llm.VerificationDocPrompt(task.Title, task.Description, projectName, sessionSummaries, historyEntries)
-		model, _ := h.api.db.GetSetting(ctx, "ai_model")
+		model := h.getSlotModel(llm.SlotBackground)
 
 		req := &llm.Request{
 			System:    "You are a technical documentation assistant. Generate clear, actionable verification documents in Portuguese (pt-BR).",
@@ -4665,6 +4657,7 @@ func (h *AIHandler) GenerateVerificationDoc(ctx context.Context, task *database.
 		}
 
 		var fullText strings.Builder
+		log.Printf("[AI-AUDIT] CALL_START subcategory=verification_doc task=%d model=%s", task.ID, model)
 		resp, err := p.StreamMessage(ctx, req, func(event llm.StreamEvent) error {
 			if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
 				fullText.WriteString(event.Delta.Text)
@@ -4674,8 +4667,10 @@ func (h *AIHandler) GenerateVerificationDoc(ctx context.Context, task *database.
 
 		if err != nil {
 			log.Printf("[AI-Verification] LLM call failed for task %d: %v, using fallback", task.ID, err)
+			log.Printf("[AI-AUDIT] CALL_FAIL subcategory=verification_doc task=%d error=%v", task.ID, err)
 			content = h.createFallbackVerificationDoc(task, projectName, sessionSummaries)
 		} else {
+			log.Printf("[AI-AUDIT] CALL_OK subcategory=verification_doc task=%d text_len=%d", task.ID, fullText.Len())
 			content = strings.TrimSpace(fullText.String())
 			// Record token usage
 			if resp != nil && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {

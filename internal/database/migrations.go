@@ -45,6 +45,7 @@ var migrations = []Migration{
 	{Version: 27, Description: "notifications: add link column for context-aware navigation", Up: migrateV27},
 	{Version: 28, Description: "ai_suggestions: add unlink_task type to CHECK constraint", Up: migrateV28},
 	{Version: 29, Description: "tasks: remove blocked status from CHECK constraint", Up: migrateV29},
+	{Version: 30, Description: "ai: add ai_configs and ai_config_assignments tables for multi-provider support", Up: migrateV30},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -774,6 +775,96 @@ func migrateV29(tx *sqlx.Tx) error {
 			return fmt.Errorf("migrateV29 failed: %w\nSQL: %s", err, s)
 		}
 	}
+	return nil
+}
+
+// migrateV30 adds ai_configs and ai_config_assignments tables for multi-provider support.
+// Migrates existing flat settings into a "Default" configuration if ai_provider is set.
+func migrateV30(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS ai_configs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT UNIQUE NOT NULL,
+			provider_type TEXT NOT NULL,
+			api_key_encrypted TEXT NOT NULL DEFAULT '',
+			api_key_iv TEXT NOT NULL DEFAULT '',
+			api_key_preview TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			base_url TEXT NOT NULL DEFAULT '',
+			extra_json TEXT NOT NULL DEFAULT '{}',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS ai_config_assignments (
+			slot TEXT PRIMARY KEY,
+			config_id INTEGER REFERENCES ai_configs(id) ON DELETE SET NULL
+		)`,
+		`INSERT OR IGNORE INTO ai_config_assignments(slot, config_id) VALUES ('ai_chat', NULL)`,
+		`INSERT OR IGNORE INTO ai_config_assignments(slot, config_id) VALUES ('ai_background', NULL)`,
+		`INSERT OR IGNORE INTO ai_config_assignments(slot, config_id) VALUES ('claude_session', NULL)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV30 failed: %w\nSQL: %s", err, s)
+		}
+	}
+
+	// Migrate existing flat settings into a "Default" config
+	var providerType string
+	err := tx.Get(&providerType, "SELECT value FROM settings WHERE key = 'ai_provider'")
+	if err != nil || providerType == "" {
+		// No provider configured — skip migration, slots stay NULL (auto-detect)
+		return nil
+	}
+
+	// Read existing settings
+	getSetting := func(key string) string {
+		var val string
+		_ = tx.Get(&val, "SELECT value FROM settings WHERE key = ?", key)
+		return val
+	}
+
+	model := getSetting("ai_model")
+	baseURL := ""
+	apiKeyEnc := getSetting("anthropic_api_key")
+	apiKeyIV := getSetting("anthropic_api_key_iv")
+	apiKeyPreview := getSetting("anthropic_api_key_preview")
+
+	// For ollama providers, use ollama-specific settings
+	if providerType == "ollama" || providerType == "ollama-sdk" {
+		baseURL = getSetting("ollama_base_url")
+		if m := getSetting("ollama_model"); m != "" {
+			model = m
+		}
+		if apiKeyEnc == "" {
+			apiKeyEnc = getSetting("ollama_api_key")
+			apiKeyIV = getSetting("ollama_api_key_iv")
+			apiKeyPreview = getSetting("ollama_api_key_preview")
+		}
+	}
+
+	// Create "Default" config
+	result, err := tx.Exec(
+		`INSERT INTO ai_configs (name, provider_type, api_key_encrypted, api_key_iv, api_key_preview, model, base_url)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"Default", providerType, apiKeyEnc, apiKeyIV, apiKeyPreview, model, baseURL,
+	)
+	if err != nil {
+		// If insert fails (e.g. duplicate name), skip assignment
+		log.Printf("[Migration V30] Could not create Default config: %v", err)
+		return nil
+	}
+
+	configID, _ := result.LastInsertId()
+
+	// Assign the Default config to all 3 slots
+	for _, slot := range []string{"ai_chat", "ai_background", "claude_session"} {
+		if _, err := tx.Exec("UPDATE ai_config_assignments SET config_id = ? WHERE slot = ?", configID, slot); err != nil {
+			return fmt.Errorf("migrateV30 assign %s failed: %w", slot, err)
+		}
+	}
+
+	log.Printf("[Migration V30] Migrated existing settings into 'Default' config (id=%d, type=%s)", configID, providerType)
 	return nil
 }
 
