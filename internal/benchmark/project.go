@@ -210,11 +210,11 @@ type User struct {
 
 func (p *TestProject) initTasks() {
 	p.tasks = []testTask{
-		{ID: 1, Title: "Implementar autenticação JWT", Description: "Adicionar auth JWT nos endpoints. Critérios: login retorna token, endpoints protegidos requerem token válido.", Status: "todo", Priority: "high"},
-		{ID: 2, Title: "Configurar pipeline de deploy", Description: "Criar pipeline CI/CD para deploy automático. Critérios: push na main dispara deploy, rollback funciona.", Status: "todo", Priority: "medium"},
-		{ID: 3, Title: "Adicionar testes unitários", Description: "Cobertura de testes para handlers e models. Critérios: cobertura > 80%, testes passam no CI.", Status: "in_progress", Priority: "high"},
-		{ID: 4, Title: "Corrigir validação de email", Description: "Email aceita formato inválido. Critérios: emails inválidos retornam 400, emails válidos são aceitos.", Status: "todo", Priority: "urgent"},
-		{ID: 5, Title: "Documentar API com OpenAPI", Description: "Gerar spec OpenAPI 3.0 dos endpoints. Critérios: spec válida, Swagger UI disponível em /docs.", Status: "done", Priority: "low"},
+		{ID: 1, Title: "Implement JWT authentication", Description: "Add JWT auth to endpoints. Criteria: login returns token, protected endpoints require valid token.", Status: "todo", Priority: "high"},
+		{ID: 2, Title: "Configure deploy pipeline", Description: "Create CI/CD pipeline for automatic deploy. Criteria: push to main triggers deploy, rollback works.", Status: "todo", Priority: "medium"},
+		{ID: 3, Title: "Add unit tests", Description: "Test coverage for handlers and models. Criteria: coverage > 80%, tests pass in CI.", Status: "in_progress", Priority: "high"},
+		{ID: 4, Title: "Fix email validation", Description: "Email accepts invalid format. Criteria: invalid emails return 400, valid emails are accepted.", Status: "todo", Priority: "urgent"},
+		{ID: 5, Title: "Document API with OpenAPI", Description: "Generate OpenAPI 3.0 spec for endpoints. Criteria: valid spec, Swagger UI available at /docs.", Status: "done", Priority: "low"},
 	}
 }
 
