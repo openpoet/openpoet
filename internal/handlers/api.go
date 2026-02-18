@@ -12,6 +12,7 @@ import (
 	"devmanager/internal/notifications"
 	"devmanager/internal/security"
 	"devmanager/internal/session"
+	"devmanager/internal/tunnel"
 	"devmanager/internal/websocket"
 	"encoding/hex"
 	"encoding/json"
@@ -58,10 +59,12 @@ type PlanningTaskAction struct {
 
 // sensitiveSettingKeys lists setting keys that must be stored encrypted.
 var sensitiveSettingKeys = map[string]bool{
-	"anthropic_api_key": true,
-	"openai_api_key":    true,
-	"groq_api_key":      true,
-	"ollama_api_key":    true,
+	"anthropic_api_key":  true,
+	"openai_api_key":     true,
+	"groq_api_key":       true,
+	"ollama_api_key":     true,
+	"tunnel_relay_token": true,
+	"tunnel_jwt_secret":  true,
 }
 
 // aiProviderSettingKeys lists settings that require AI provider reinitialization when changed.
@@ -126,6 +129,24 @@ type API struct {
 
 	pendingSkillProposalsMu sync.Mutex
 	pendingSkillProposals   map[string]*pendingSkillProposal // docID -> pending skill
+
+	// Tunnel client for remote access (dynamically created/destroyed)
+	tunnelMu     sync.Mutex
+	tunnelClient *tunnel.Client
+	tunnelDeps   *TunnelDeps
+	pairingMgr   *tunnel.PairingManager
+}
+
+// DefaultRelayURL is the pre-configured relay URL injected at build time.
+var DefaultRelayURL string
+
+// TunnelDeps holds dependencies for dynamic tunnel client creation.
+type TunnelDeps struct {
+	DB         *database.DB
+	Encryptor  *security.Encryptor
+	Hub        *websocket.Hub
+	Port       int
+	PairingMgr *tunnel.PairingManager
 }
 
 // SetAIHandler sets the AI handler for AI chat functionality.
@@ -3788,5 +3809,275 @@ func (a *API) SeedTokenUsage(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusCreated, map[string]interface{}{
 		"id":      tu.ID,
 		"message": "Token usage record seeded",
+	})
+}
+
+// SetTunnelDeps sets the dependencies for dynamic tunnel client creation.
+func (a *API) SetTunnelDeps(deps *TunnelDeps) {
+	a.tunnelDeps = deps
+}
+
+// SetPairingManager sets the pairing manager reference.
+func (a *API) SetPairingManager(pm *tunnel.PairingManager) {
+	a.pairingMgr = pm
+}
+
+// GetTunnelStatus returns the current tunnel status.
+func (a *API) GetTunnelStatus(w http.ResponseWriter, r *http.Request) {
+	a.tunnelMu.Lock()
+	status := "disabled"
+	url := ""
+	subdomain := ""
+	if a.tunnelClient != nil {
+		status = a.tunnelClient.Status()
+		url = a.tunnelClient.PublicURL()
+		subdomain = a.tunnelClient.Subdomain()
+	}
+	a.tunnelMu.Unlock()
+
+	devices, _ := a.db.ListPairedDevices(r.Context())
+	deviceCount := 0
+	if devices != nil {
+		deviceCount = len(devices)
+	}
+
+	// Check if a token is stored
+	hasToken := false
+	if tok, _ := a.db.GetSetting(r.Context(), "tunnel_relay_token"); tok != "" {
+		hasToken = true
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"status":            status,
+		"url":               url,
+		"subdomain":         subdomain,
+		"device_count":      deviceCount,
+		"default_relay_url": DefaultRelayURL,
+		"has_token":         hasToken,
+	})
+}
+
+// EnableTunnel creates a tunnel client dynamically and connects it.
+func (a *API) EnableTunnel(w http.ResponseWriter, r *http.Request) {
+	a.tunnelMu.Lock()
+	defer a.tunnelMu.Unlock()
+
+	// Already connected?
+	if a.tunnelClient != nil && a.tunnelClient.Status() == "connected" {
+		respondJSON(w, http.StatusOK, map[string]string{
+			"status": "already_connected",
+			"url":    a.tunnelClient.PublicURL(),
+		})
+		return
+	}
+
+	// Disconnect existing if any
+	if a.tunnelClient != nil {
+		a.tunnelClient.Disconnect()
+		a.tunnelClient = nil
+	}
+
+	client, err := a.createAndConnectTunnel(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.tunnelClient = client
+	a.db.SetSetting(r.Context(), "tunnel_enabled", "true")
+	respondJSON(w, http.StatusOK, map[string]string{"status": "connecting"})
+}
+
+// DisableTunnel stops the tunnel connection.
+func (a *API) DisableTunnel(w http.ResponseWriter, r *http.Request) {
+	a.tunnelMu.Lock()
+	defer a.tunnelMu.Unlock()
+
+	if a.tunnelClient != nil {
+		a.tunnelClient.Disconnect()
+		a.tunnelClient = nil
+	}
+	a.db.SetSetting(r.Context(), "tunnel_enabled", "false")
+	respondJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
+}
+
+// AutoConnectTunnel is called on startup if tunnel_enabled=true.
+func (a *API) AutoConnectTunnel() {
+	a.tunnelMu.Lock()
+	defer a.tunnelMu.Unlock()
+
+	if a.tunnelClient != nil {
+		return
+	}
+
+	client, err := a.createAndConnectTunnel(context.Background())
+	if err != nil {
+		log.Printf("[TUNNEL] Auto-connect failed: %v", err)
+		return
+	}
+	a.tunnelClient = client
+}
+
+// DisconnectTunnel is called on shutdown.
+func (a *API) DisconnectTunnel() {
+	a.tunnelMu.Lock()
+	defer a.tunnelMu.Unlock()
+
+	if a.tunnelClient != nil {
+		a.tunnelClient.Disconnect()
+		a.tunnelClient = nil
+	}
+}
+
+// createAndConnectTunnel creates a new tunnel client, auto-registers if needed, and connects.
+// Must be called with a.tunnelMu held.
+func (a *API) createAndConnectTunnel(ctx context.Context) (*tunnel.Client, error) {
+	if a.tunnelDeps == nil {
+		return nil, fmt.Errorf("tunnel dependencies not configured")
+	}
+
+	// Read relay URL from DB, fall back to build-time default
+	relayURL, _ := a.db.GetSetting(ctx, "tunnel_relay_url")
+	if relayURL == "" {
+		relayURL = DefaultRelayURL
+	}
+	if relayURL == "" {
+		return nil, fmt.Errorf("no relay URL configured")
+	}
+
+	// Read token from DB (decrypted)
+	relayToken, _ := a.GetDecryptedSetting(ctx, "tunnel_relay_token")
+
+	// Auto-register if no token
+	if relayToken == "" {
+		token, err := a.autoRegisterTunnel(ctx, relayURL)
+		if err != nil {
+			return nil, fmt.Errorf("auto-registration failed: %w", err)
+		}
+		relayToken = token
+	}
+
+	// Create client
+	client := tunnel.NewClient(relayURL, relayToken, fmt.Sprintf("localhost:%d", a.tunnelDeps.Port))
+	client.OnStatus = func(status, url string) {
+		a.tunnelDeps.Hub.BroadcastStateUpdate("tunnel", map[string]string{"status": status, "url": url})
+		log.Printf("[TUNNEL] Status: %s, URL: %s", status, url)
+	}
+
+	// Set encryption key
+	if a.tunnelDeps.PairingMgr != nil {
+		if encKey, err := a.tunnelDeps.PairingMgr.GetEncryptionKeyRaw(); err == nil {
+			client.SetEncryptionKey(encKey)
+		}
+	}
+
+	if err := client.Connect(context.Background()); err != nil {
+		return nil, fmt.Errorf("connect failed: %w", err)
+	}
+
+	return client, nil
+}
+
+// autoRegisterTunnel calls the relay's open registration endpoint to get a per-user token.
+func (a *API) autoRegisterTunnel(ctx context.Context, relayURL string) (string, error) {
+	token, err := tunnel.RegisterWithRelay(relayURL)
+	if err != nil {
+		return "", err
+	}
+
+	// Store token encrypted in DB
+	cipher, iv, encErr := a.tunnelDeps.Encryptor.Encrypt(token)
+	if encErr != nil {
+		return "", fmt.Errorf("encrypt token: %w", encErr)
+	}
+	a.db.SetSetting(ctx, "tunnel_relay_token", cipher)
+	a.db.SetSetting(ctx, "tunnel_relay_token_iv", iv)
+	preview := token[:8] + "..."
+	a.db.SetSetting(ctx, "tunnel_relay_token_preview", preview)
+
+	log.Printf("[TUNNEL] Auto-registered with relay, token=%s", preview)
+	return token, nil
+}
+
+// ListPairedDevices returns all paired devices.
+func (a *API) ListPairedDevices(w http.ResponseWriter, r *http.Request) {
+	devices, err := a.db.ListPairedDevices(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to list devices")
+		return
+	}
+	respondJSON(w, http.StatusOK, devices)
+}
+
+// RevokePairedDevice revokes a paired device by ID.
+func (a *API) RevokePairedDevice(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		respondError(w, http.StatusBadRequest, "Missing device ID")
+		return
+	}
+
+	if err := a.db.RevokePairedDevice(r.Context(), id); err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to revoke device")
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("tunnel_devices", nil)
+	respondJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+}
+
+// DeletePairedDevice permanently deletes a paired device by ID.
+func (a *API) DeletePairedDevice(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		respondError(w, http.StatusBadRequest, "Missing device ID")
+		return
+	}
+
+	if err := a.db.DeletePairedDevice(r.Context(), id); err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to delete device")
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("tunnel_devices", nil)
+	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// GetPairingInfo generates a QR token and 6-digit code for device pairing.
+func (a *API) GetPairingInfo(w http.ResponseWriter, r *http.Request) {
+	if a.pairingMgr == nil {
+		respondError(w, http.StatusBadRequest, "Pairing not configured")
+		return
+	}
+
+	a.tunnelMu.Lock()
+	url := ""
+	if a.tunnelClient != nil {
+		url = a.tunnelClient.PublicURL()
+	}
+	a.tunnelMu.Unlock()
+
+	code, err := a.pairingMgr.GenerateCode()
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to generate pairing code")
+		return
+	}
+
+	qrToken, err := a.pairingMgr.GenerateQRToken()
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to generate QR token")
+		return
+	}
+
+	qrURL := ""
+	if url != "" {
+		qrURL = url + "/pair?token=" + qrToken
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"code":       code,
+		"qr_url":     qrURL,
+		"tunnel_url": url,
+		"expires_in": 300, // 5 minutes
 	})
 }

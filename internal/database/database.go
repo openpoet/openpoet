@@ -1776,3 +1776,42 @@ func (d *DB) UpsertMemoryDoc(ctx context.Context, projectID int64, content, upda
 	}
 	return d.GetMemoryDoc(ctx, projectID)
 }
+
+// Paired device operations
+
+func (d *DB) CreatePairedDevice(ctx context.Context, dev *PairedDevice) error {
+	query := `INSERT INTO paired_devices (id, device_name, user_agent, encryption_key, encryption_key_iv)
+			  VALUES (?, ?, ?, ?, ?)`
+	_, err := d.ExecContext(ctx, query, dev.ID, dev.DeviceName, dev.UserAgent, dev.EncryptionKey, dev.EncryptionKeyIV)
+	return err
+}
+
+func (d *DB) GetPairedDevice(ctx context.Context, id string) (*PairedDevice, error) {
+	var dev PairedDevice
+	err := d.GetContext(ctx, &dev, "SELECT * FROM paired_devices WHERE id = ?", id)
+	if err != nil {
+		return nil, err
+	}
+	return &dev, nil
+}
+
+func (d *DB) ListPairedDevices(ctx context.Context) ([]PairedDevice, error) {
+	var devices []PairedDevice
+	err := d.SelectContext(ctx, &devices, "SELECT * FROM paired_devices ORDER BY created_at DESC")
+	return devices, err
+}
+
+func (d *DB) UpdatePairedDeviceLastSeen(ctx context.Context, id string) error {
+	_, err := d.ExecContext(ctx, "UPDATE paired_devices SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?", id)
+	return err
+}
+
+func (d *DB) RevokePairedDevice(ctx context.Context, id string) error {
+	_, err := d.ExecContext(ctx, "UPDATE paired_devices SET revoked = 1 WHERE id = ?", id)
+	return err
+}
+
+func (d *DB) DeletePairedDevice(ctx context.Context, id string) error {
+	_, err := d.ExecContext(ctx, "DELETE FROM paired_devices WHERE id = ?", id)
+	return err
+}

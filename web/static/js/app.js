@@ -27,6 +27,7 @@ class DevManager {
 
     init() {
         this.setupNavigation();
+        this._initTunnelEncryption();
         this.setupWebSocket();
         this.loadInitialData();
         this.setupEventListeners();
@@ -322,6 +323,56 @@ class DevManager {
         });
     }
 
+    // --- App-layer tunnel encryption ---
+
+    _initTunnelEncryption() {
+        // Check for encryption key from QR pairing (passed via cookie)
+        const cookieKey = this._getCookie('dm_enc_key');
+        if (cookieKey) {
+            localStorage.setItem('dm_encryption_key', cookieKey);
+            // Clear the cookie immediately
+            document.cookie = 'dm_enc_key=; path=/; max-age=0';
+        }
+
+        // Check if we have an encryption key
+        const key = localStorage.getItem('dm_encryption_key');
+        if (key) {
+            this._importEncryptionKey(key);
+        }
+    }
+
+    async _importEncryptionKey(base64Key) {
+        try {
+            const keyBytes = Uint8Array.from(atob(base64Key), c => c.charCodeAt(0));
+            this._tunnelCryptoKey = await crypto.subtle.importKey(
+                'raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']
+            );
+        } catch (e) {
+            console.warn('[TUNNEL] Failed to import encryption key:', e);
+            this._tunnelCryptoKey = null;
+        }
+    }
+
+    async _decryptTunnelMessage(encMsg) {
+        if (!this._tunnelCryptoKey) {
+            throw new Error('No encryption key available');
+        }
+
+        const ciphertext = Uint8Array.from(atob(encMsg.data), c => c.charCodeAt(0));
+        const iv = Uint8Array.from(atob(encMsg.iv), c => c.charCodeAt(0));
+
+        const plaintext = await crypto.subtle.decrypt(
+            { name: 'AES-GCM', iv }, this._tunnelCryptoKey, ciphertext
+        );
+
+        return new TextDecoder().decode(plaintext);
+    }
+
+    _getCookie(name) {
+        const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+        return match ? decodeURIComponent(match[2]) : null;
+    }
+
     // WebSocket
     setupWebSocket() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -337,8 +388,22 @@ class DevManager {
             setTimeout(() => this.setupWebSocket(), 3000);
         };
 
-        this.ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
+        this.ws.onmessage = async (event) => {
+            let data = event.data;
+
+            // Decrypt if app-layer encryption is active
+            if (typeof data === 'string' && data.includes('"_encrypted":true')) {
+                try {
+                    const enc = JSON.parse(data);
+                    if (enc._encrypted) {
+                        data = await this._decryptTunnelMessage(enc);
+                    }
+                } catch (e) {
+                    // Not encrypted or decryption failed, use raw data
+                }
+            }
+
+            const msg = JSON.parse(data);
             this.handleWebSocketMessage(msg);
         };
 
@@ -462,6 +527,12 @@ class DevManager {
             case 'mcp':
             case 'settings':
                 this.loadConfig();
+                break;
+            case 'tunnel':
+                if (data.data) this.updateTunnelUI({ ...this._tunnelStatus, ...data.data });
+                break;
+            case 'tunnel_devices':
+                this.loadTunnelDevices();
                 break;
             case 'project_skill':
                 if (this.currentView === 'project-detail' && this._detailProject && data.data?.project_id === this._detailProject.id) {
@@ -3883,6 +3954,44 @@ class DevManager {
         const html = `
             <div class="card" style="margin-bottom: 16px;">
                 <div class="card-header">
+                    <div class="card-title">Remote Access</div>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: 12px; color: var(--text-secondary, #999); font-size: 13px;">
+                        Access DevManager from your phone or other devices remotely.
+                    </p>
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+                        <span id="tunnel-status-dot" style="width: 10px; height: 10px; border-radius: 50%; background: #484f58; flex-shrink: 0;"></span>
+                        <span id="tunnel-status-text" style="font-size: 13px; flex: 1;">Checking...</span>
+                        <button class="btn btn-sm" id="tunnel-toggle-btn" onclick="app.toggleTunnel()">Enable</button>
+                    </div>
+                    <div id="tunnel-url-display" style="display: none; margin-bottom: 8px; padding: 8px; background: var(--bg-tertiary, #0d1117); border-radius: 6px; font-family: monospace; font-size: 12px; word-break: break-all;"></div>
+                    <div id="tunnel-usage-display" style="display: none; margin-bottom: 12px; font-size: 11px; color: var(--text-secondary, #999);"></div>
+                    <div id="tunnel-pairing-section" style="display: none; border-top: 1px solid var(--border-color, #30363d); padding-top: 12px;">
+                        <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+                            <button class="btn btn-sm" onclick="app.showPairingQR()" title="Show QR code for phone pairing">Show QR Code</button>
+                            <button class="btn btn-sm" onclick="app.showPairingCode()" title="Show 6-digit code for other devices">Show Pairing Code</button>
+                        </div>
+                        <div id="pairing-display" style="text-align: center; display: none;"></div>
+                    </div>
+                    <div id="tunnel-devices-section" style="display: none; border-top: 1px solid var(--border-color, #30363d); padding-top: 12px; margin-top: 12px;">
+                        <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">Paired Devices</div>
+                        <div id="tunnel-devices-list"></div>
+                    </div>
+                    <details style="margin-top: 12px;">
+                        <summary style="cursor: pointer; font-size: 12px; color: var(--text-secondary, #999);">Advanced</summary>
+                        <div style="margin-top: 8px;">
+                            <div class="form-group" style="margin-bottom: 8px;">
+                                <label class="form-label">Relay URL (leave empty for default)</label>
+                                <input type="text" class="form-input" id="tunnel-relay-url" placeholder="Default relay URL">
+                            </div>
+                            <button class="btn btn-sm" onclick="app.saveTunnelSettings()">Save</button>
+                        </div>
+                    </details>
+                </div>
+            </div>
+            <div class="card" style="margin-bottom: 16px;">
+                <div class="card-header">
                     <div class="card-title">Theme</div>
                 </div>
                 <div class="card-body">
@@ -4045,6 +4154,15 @@ class DevManager {
                     }
                 }
             }
+            // Populate tunnel settings
+            if (this.settings) {
+                const relayURL = document.getElementById('tunnel-relay-url');
+                if (relayURL && this.settings.tunnel_relay_url) {
+                    relayURL.value = this.settings.tunnel_relay_url;
+                }
+            }
+
+            this.loadTunnelStatus();
             this.loadMCPAPIKeyStatus();
             this.loadToolPolicies();
         }, 0);
@@ -5408,6 +5526,197 @@ class DevManager {
             await this.api('DELETE', '/config/mcp-api-key');
             this.showToast('Success', 'API key revoked', 'success');
             this.loadMCPAPIKeyStatus();
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    // --- Remote Access / Tunnel ---
+
+    async loadTunnelStatus() {
+        try {
+            const data = await this.api('GET', '/tunnel/status');
+            this._tunnelStatus = data;
+            this.updateTunnelUI(data);
+        } catch (e) { /* ignore */ }
+    }
+
+    updateTunnelUI(data) {
+        const dot = document.getElementById('tunnel-status-dot');
+        const text = document.getElementById('tunnel-status-text');
+        const urlDisplay = document.getElementById('tunnel-url-display');
+        const usageDisplay = document.getElementById('tunnel-usage-display');
+        const toggleBtn = document.getElementById('tunnel-toggle-btn');
+        const pairingSection = document.getElementById('tunnel-pairing-section');
+        const devicesSection = document.getElementById('tunnel-devices-section');
+
+        if (!dot || !text) return;
+
+        const colors = { connected: '#3fb950', connecting: '#d29922', disconnected: '#484f58', disabled: '#484f58' };
+        const labels = { connected: 'Connected', connecting: 'Connecting...', disconnected: 'Disconnected', disabled: 'Disabled' };
+
+        dot.style.background = colors[data.status] || colors.disabled;
+        text.textContent = labels[data.status] || data.status;
+
+        if (data.url && data.status === 'connected') {
+            if (urlDisplay) {
+                urlDisplay.style.display = 'block';
+                urlDisplay.textContent = data.url;
+            }
+            if (pairingSection) pairingSection.style.display = 'block';
+        } else {
+            if (urlDisplay) urlDisplay.style.display = 'none';
+            if (pairingSection) pairingSection.style.display = 'none';
+        }
+
+        // Usage display
+        if (usageDisplay && data.usage) {
+            const u = data.usage;
+            const bytesUsedMB = (u.bytes_used / (1024 * 1024)).toFixed(1);
+            const bytesLimitMB = (u.bytes_limit / (1024 * 1024)).toFixed(0);
+            usageDisplay.style.display = 'block';
+            usageDisplay.textContent = `Requests: ${u.requests_used} / ${u.requests_limit} this hour | Data: ${bytesUsedMB} MB / ${bytesLimitMB} MB`;
+        } else if (usageDisplay) {
+            usageDisplay.style.display = 'none';
+        }
+
+        if (toggleBtn) {
+            if (data.status === 'connected' || data.status === 'connecting') {
+                toggleBtn.textContent = 'Disable';
+                toggleBtn.className = 'btn btn-danger btn-sm';
+            } else {
+                toggleBtn.textContent = 'Enable';
+                toggleBtn.className = 'btn btn-primary btn-sm';
+            }
+        }
+
+        if (devicesSection && data.device_count > 0) {
+            devicesSection.style.display = 'block';
+            this.loadTunnelDevices();
+        }
+
+        // Set default relay URL placeholder in advanced section
+        const relayInput = document.getElementById('tunnel-relay-url');
+        if (relayInput && data.default_relay_url) {
+            relayInput.placeholder = data.default_relay_url || 'Default relay URL';
+        }
+    }
+
+    async saveTunnelSettings() {
+        const relayURL = document.getElementById('tunnel-relay-url')?.value;
+
+        const settings = {};
+        if (relayURL !== undefined) settings.tunnel_relay_url = relayURL;
+
+        try {
+            await this.api('PUT', '/config/settings', settings);
+            this.showToast('Success', 'Relay URL saved.', 'success');
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    async toggleTunnel() {
+        try {
+            const status = this._tunnelStatus?.status;
+            if (status === 'connected' || status === 'connecting') {
+                await this.api('POST', '/tunnel/disable');
+                this.showToast('Success', 'Remote access disabled', 'success');
+            } else {
+                await this.api('POST', '/tunnel/enable');
+                this.showToast('Success', 'Connecting to relay...', 'success');
+            }
+            setTimeout(() => this.loadTunnelStatus(), 1000);
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    async showPairingQR() {
+        try {
+            const info = await this.api('GET', '/tunnel/pairing-info');
+            const display = document.getElementById('pairing-display');
+            if (!display) return;
+            display.style.display = 'block';
+            display.innerHTML = `
+                <img src="/pair/qr.png?url=${encodeURIComponent(info.tunnel_url)}" alt="QR Code" style="width: 200px; height: 200px; border-radius: 8px; margin-bottom: 8px;">
+                <div style="font-size: 12px; color: var(--text-secondary, #999);">Scan with your phone camera</div>
+                <div style="font-size: 11px; color: var(--text-secondary, #666); margin-top: 4px;">Expires in ${info.expires_in / 60} minutes</div>
+            `;
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    async showPairingCode() {
+        try {
+            const info = await this.api('GET', '/tunnel/pairing-info');
+            const display = document.getElementById('pairing-display');
+            if (!display) return;
+            display.style.display = 'block';
+            display.innerHTML = `
+                <div style="font-size: 36px; font-weight: bold; letter-spacing: 8px; font-family: monospace; margin-bottom: 8px;">${info.code}</div>
+                <div style="font-size: 12px; color: var(--text-secondary, #999);">Enter this code on your device at:</div>
+                <div style="font-size: 11px; color: var(--color-primary, #58a6ff); margin-top: 4px; word-break: break-all;">${info.tunnel_url}/pair</div>
+                <div style="font-size: 11px; color: var(--text-secondary, #666); margin-top: 4px;">Expires in ${info.expires_in / 60} minutes</div>
+            `;
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    async loadTunnelDevices() {
+        try {
+            const devices = await this.api('GET', '/tunnel/devices');
+            const list = document.getElementById('tunnel-devices-list');
+            if (!list) return;
+
+            if (!devices || devices.length === 0) {
+                list.innerHTML = '<div style="font-size: 12px; color: var(--text-secondary, #999);">No paired devices</div>';
+                return;
+            }
+
+            list.innerHTML = devices.map(d => {
+                const lastSeen = new Date(d.last_seen_at).toLocaleString();
+                const statusColor = d.revoked ? '#f85149' : '#3fb950';
+                const statusText = d.revoked ? 'Revoked' : 'Active';
+                return `
+                    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-color, #21262d); font-size: 12px;">
+                        <div>
+                            <div style="font-weight: 500;">${this.escapeHtml(d.device_name)}</div>
+                            <div style="color: var(--text-secondary, #999);">Last seen: ${lastSeen}</div>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="color: ${statusColor}; font-size: 11px;">${statusText}</span>
+                            ${d.revoked ? `<button class="btn btn-danger-outline btn-xs" onclick="app.deletePairedDevice('${d.id}')" title="Delete permanently">Delete</button>`
+                                        : `<button class="btn btn-danger-outline btn-xs" onclick="app.revokePairedDevice('${d.id}')" title="Revoke access">Revoke</button>`}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            const devicesSection = document.getElementById('tunnel-devices-section');
+            if (devicesSection) devicesSection.style.display = 'block';
+        } catch (e) { /* ignore */ }
+    }
+
+    async revokePairedDevice(id) {
+        try {
+            await this.api('DELETE', `/tunnel/devices/${id}`);
+            this.showToast('Success', 'Device revoked', 'success');
+            this.loadTunnelDevices();
+            this.loadTunnelStatus();
+        } catch (error) {
+            this.showToast('Error', error.message, 'error');
+        }
+    }
+
+    async deletePairedDevice(id) {
+        try {
+            await this.api('DELETE', `/tunnel/devices/${id}/permanent`);
+            this.showToast('Success', 'Device deleted', 'success');
+            this.loadTunnelDevices();
+            this.loadTunnelStatus();
         } catch (error) {
             this.showToast('Error', error.message, 'error');
         }
