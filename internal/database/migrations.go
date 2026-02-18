@@ -46,6 +46,7 @@ var migrations = []Migration{
 	{Version: 28, Description: "ai_suggestions: add unlink_task type to CHECK constraint", Up: migrateV28},
 	{Version: 29, Description: "tasks: remove blocked status from CHECK constraint", Up: migrateV29},
 	{Version: 30, Description: "ai: add ai_configs and ai_config_assignments tables for multi-provider support", Up: migrateV30},
+	{Version: 31, Description: "tunnel: add paired_devices table for remote access authentication", Up: migrateV31},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -895,4 +896,18 @@ func migrateV4(tx *sqlx.Tx) error {
 		}
 	}
 	return nil
+}
+
+func migrateV31(tx *sqlx.Tx) error {
+	_, err := tx.Exec(`CREATE TABLE IF NOT EXISTS paired_devices (
+		id TEXT PRIMARY KEY,
+		device_name TEXT NOT NULL DEFAULT '',
+		user_agent TEXT NOT NULL DEFAULT '',
+		encryption_key TEXT NOT NULL DEFAULT '',
+		encryption_key_iv TEXT NOT NULL DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		revoked INTEGER DEFAULT 0
+	)`)
+	return err
 }

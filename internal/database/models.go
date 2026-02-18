@@ -258,3 +258,14 @@ type MemoryDoc struct {
 	CreatedAt     time.Time      `db:"created_at" json:"created_at"`
 	UpdatedAt     time.Time      `db:"updated_at" json:"updated_at"`
 }
+
+type PairedDevice struct {
+	ID              string    `db:"id" json:"id"`
+	DeviceName      string    `db:"device_name" json:"device_name"`
+	UserAgent       string    `db:"user_agent" json:"user_agent"`
+	EncryptionKey   string    `db:"encryption_key" json:"-"`
+	EncryptionKeyIV string    `db:"encryption_key_iv" json:"-"`
+	CreatedAt       time.Time `db:"created_at" json:"created_at"`
+	LastSeenAt      time.Time `db:"last_seen_at" json:"last_seen_at"`
+	Revoked         bool      `db:"revoked" json:"revoked"`
+}
