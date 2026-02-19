@@ -254,10 +254,13 @@ class VoiceInput {
             if (!targetSessionId) return;
 
             if (submit) {
+                const delays = window.app
+                    ? window.app.getInputDelays(targetSessionId, 'voice')
+                    : { textToEnter: 50 };
                 window.terminalManager.sendInputToSession(targetSessionId, text);
                 setTimeout(() => {
                     window.terminalManager.sendInputToSession(targetSessionId, '\r');
-                }, 50);
+                }, delays.textToEnter);
             } else {
                 // Move to end of line, add space if line has text, paste
                 window.terminalManager.sendInputToSession(targetSessionId, '\x05'); // Ctrl+E
