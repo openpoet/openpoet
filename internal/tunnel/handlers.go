@@ -2,143 +2,75 @@ package tunnel
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
-	"strings"
-
-	"github.com/skip2/go-qrcode"
 )
 
-// HandlePairingPage serves the pairing page or auto-validates a QR token.
+// HandlePairingPage generates a pending pairing session and displays the code.
+// The remote device sees the code and waits for the local admin to enter it.
 func (pm *PairingManager) HandlePairingPage(w http.ResponseWriter, r *http.Request) {
-	// Check if this is a QR code flow (token in query param)
-	token := r.URL.Query().Get("token")
-	if token != "" {
-		valid, err := pm.ValidateQRToken(token)
-		if err != nil || !valid {
-			servePairingHTML(w, "Invalid or expired pairing link. Please try again.")
-			return
-		}
-
-		// QR token valid — complete pairing
-		deviceID, sessionToken, encKey, err := pm.CompletePairing(r.UserAgent())
-		if err != nil {
-			log.Printf("[PAIRING] Failed to complete QR pairing: %v", err)
-			servePairingHTML(w, "Pairing failed. Please try again.")
-			return
-		}
-
-		log.Printf("[PAIRING] Device paired via QR: %s", deviceID)
-		SetSessionCookie(w, sessionToken)
-		// Pass encryption key via a short-lived cookie (read once by JS, then cleared)
-		if encKey != "" {
-			http.SetCookie(w, &http.Cookie{
-				Name:     "dm_enc_key",
-				Value:    encKey,
-				Path:     "/",
-				MaxAge:   60, // 1 minute - JS reads and clears it
-				HttpOnly: false, // Must be readable by JavaScript
-				SameSite: http.SameSiteLaxMode,
-			})
-		}
-		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+	code, sessionID, expirySecs, err := pm.CreatePendingPairing(r.UserAgent())
+	if err != nil {
+		log.Printf("[PAIRING] Failed to create pending pairing: %v", err)
+		http.Error(w, "Failed to generate pairing code", http.StatusInternalServerError)
 		return
 	}
 
-	// No token — show 6-digit code entry form
-	servePairingHTML(w, "")
+	log.Printf("[PAIRING] Pending session created: %s (code: %s..., expires in %ds)", sessionID[:8], code[:3], expirySecs)
+	servePairingDisplayHTML(w, code, sessionID, expirySecs)
 }
 
-// HandlePairDevice validates a 6-digit code and completes pairing.
-func (pm *PairingManager) HandlePairDevice(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Code string `json:"code"`
-	}
-
-	if r.Header.Get("Content-Type") == "application/json" {
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
-			return
-		}
-	} else {
-		r.ParseForm()
-		body.Code = r.FormValue("code")
-	}
-
-	if body.Code == "" {
-		respondPairError(w, "Please enter a pairing code.")
+// HandlePairingStatus is the polling endpoint for remote devices waiting for approval.
+func (pm *PairingManager) HandlePairingStatus(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("id")
+	if sessionID == "" {
+		http.Error(w, `{"error":"missing session id"}`, http.StatusBadRequest)
 		return
 	}
 
-	if !pm.ValidateCode(body.Code) {
-		respondPairError(w, "Invalid or expired code. Please try again.")
-		return
-	}
-
-	deviceID, sessionToken, encKey, err := pm.CompletePairing(r.UserAgent())
+	approved, sessionToken, encKey, err := pm.CheckPairingStatus(sessionID)
 	if err != nil {
-		log.Printf("[PAIRING] Failed to complete code pairing: %v", err)
-		respondPairError(w, "Pairing failed. Please try again.")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusGone)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
-	log.Printf("[PAIRING] Device paired via code: %s", deviceID)
+	if !approved {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"approved": false})
+		return
+	}
+
+	// Approved — set session cookie on this response so the remote device is authenticated
 	SetSessionCookie(w, sessionToken)
 
-	if r.Header.Get("Content-Type") == "application/json" {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":        true,
-			"device_id":      deviceID,
-			"redirect":       "/",
-			"encryption_key": encKey,
+	// Pass encryption key via a short-lived cookie (read once by JS, then cleared)
+	if encKey != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "dm_enc_key",
+			Value:    encKey,
+			Path:     "/",
+			MaxAge:   60,
+			HttpOnly: false,
+			SameSite: http.SameSiteLaxMode,
 		})
-	} else {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-	}
-}
-
-// HandleQRImage generates and serves a QR code PNG image.
-func (pm *PairingManager) HandleQRImage(w http.ResponseWriter, r *http.Request) {
-	tunnelURL := r.URL.Query().Get("url")
-	if tunnelURL == "" {
-		http.Error(w, "Missing url parameter", http.StatusBadRequest)
-		return
 	}
 
-	token, err := pm.GenerateQRToken()
-	if err != nil {
-		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
-		return
-	}
-
-	pairingURL := strings.TrimRight(tunnelURL, "/") + "/pair?token=" + token
-
-	png, err := qrcode.Encode(pairingURL, qrcode.Medium, 256)
-	if err != nil {
-		http.Error(w, "Failed to generate QR code", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Write(png)
-}
-
-func respondPairError(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	json.NewEncoder(w).Encode(map[string]bool{"approved": true})
+
+	log.Printf("[PAIRING] Device paired via reversed flow, session: %s", sessionID[:8])
 }
 
-func servePairingHTML(w http.ResponseWriter, errorMsg string) {
+func servePairingDisplayHTML(w http.ResponseWriter, code string, sessionID string, expirySecs int) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 
-	errorDiv := ""
-	if errorMsg != "" {
-		errorDiv = `<div class="error">` + errorMsg + `</div>`
-	}
+	// Split code into individual digits for the display
+	digits := make([]byte, len(code))
+	copy(digits, code)
 
 	html := `<!DOCTYPE html>
 <html lang="en">
@@ -163,7 +95,7 @@ body {
 	border: 1px solid #30363d;
 	border-radius: 12px;
 	padding: 32px;
-	max-width: 400px;
+	max-width: 420px;
 	width: 100%;
 	text-align: center;
 }
@@ -178,157 +110,155 @@ p {
 	font-size: 0.9em;
 	line-height: 1.5;
 }
-.code-inputs {
+.code-display {
 	display: flex;
-	gap: 8px;
+	gap: 10px;
 	justify-content: center;
 	margin-bottom: 24px;
 }
-.code-inputs input {
-	width: 48px;
-	height: 56px;
-	text-align: center;
-	font-size: 24px;
+.code-digit {
+	width: 52px;
+	height: 64px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 32px;
 	font-weight: bold;
+	font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
 	background: #0d1117;
 	border: 2px solid #30363d;
-	border-radius: 8px;
+	border-radius: 10px;
 	color: #e6edf3;
-	outline: none;
-	transition: border-color 0.2s;
+	user-select: all;
 }
-.code-inputs input:focus {
-	border-color: #58a6ff;
-}
-button {
-	width: 100%;
-	padding: 12px;
-	font-size: 1em;
-	font-weight: 600;
-	background: #238636;
-	color: #fff;
-	border: none;
-	border-radius: 8px;
-	cursor: pointer;
-	transition: background 0.2s;
-}
-button:hover { background: #2ea043; }
-button:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
-.error {
-	background: #da36331a;
-	border: 1px solid #da3633;
-	color: #f85149;
-	padding: 10px;
-	border-radius: 6px;
+.status {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
 	margin-bottom: 16px;
 	font-size: 0.85em;
+	color: #8b949e;
 }
-.spinner {
-	display: none;
-	width: 24px;
-	height: 24px;
-	border: 3px solid #30363d;
-	border-top-color: #58a6ff;
+.status-dot {
+	width: 8px;
+	height: 8px;
 	border-radius: 50%;
-	animation: spin 0.8s linear infinite;
-	margin: 0 auto 16px;
+	background: #f0883e;
+	animation: pulse 2s ease-in-out infinite;
 }
-@keyframes spin { to { transform: rotate(360deg); } }
+.status-dot.approved {
+	background: #3fb950;
+	animation: none;
+}
+.status-dot.expired {
+	background: #f85149;
+	animation: none;
+}
+@keyframes pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.4; }
+}
+.timer {
+	font-size: 0.8em;
+	color: #484f58;
+	margin-bottom: 8px;
+}
+.instructions {
+	background: #0d1117;
+	border: 1px solid #21262d;
+	border-radius: 8px;
+	padding: 16px;
+	margin-top: 16px;
+	text-align: left;
+}
+.instructions ol {
+	margin: 0;
+	padding-left: 20px;
+	font-size: 0.82em;
+	color: #8b949e;
+	line-height: 1.8;
+}
 .logo { font-size: 2em; margin-bottom: 16px; }
 </style>
 </head>
 <body>
 <div class="card">
-	<div class="logo">&#x1f4bb;</div>
-	<h1>Pair Device</h1>
-	<p>Enter the 6-digit code shown on your DevManager screen.</p>
-	` + errorDiv + `
-	<div id="spinner" class="spinner"></div>
-	<form id="pairForm">
-		<div class="code-inputs">
-			<input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="off" autofocus>
-			<input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="off">
-			<input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="off">
-			<input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="off">
-			<input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="off">
-			<input type="text" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="off">
-		</div>
-		<button type="submit" id="submitBtn" disabled>Pair Device</button>
-	</form>
+	<div class="logo">&#x1f517;</div>
+	<h1>Pair This Device</h1>
+	<p>To grant this device access to DevManager, enter the code below on your admin machine.</p>
+	<div class="code-display" id="codeDisplay">
+		<div class="code-digit">` + string(digits[0]) + `</div>
+		<div class="code-digit">` + string(digits[1]) + `</div>
+		<div class="code-digit">` + string(digits[2]) + `</div>
+		<div class="code-digit">` + string(digits[3]) + `</div>
+		<div class="code-digit">` + string(digits[4]) + `</div>
+		<div class="code-digit">` + string(digits[5]) + `</div>
+	</div>
+	<div class="status" id="status">
+		<div class="status-dot" id="statusDot"></div>
+		<span id="statusText">Waiting for approval...</span>
+	</div>
+	<div class="timer" id="timer"></div>
+	<div class="instructions">
+		<ol>
+			<li>On your computer, open <strong>DevManager</strong></li>
+			<li>Go to <strong>Config &gt; Settings &gt; Remote Access</strong></li>
+			<li>Click <strong>Pair New Device</strong> and type this code</li>
+			<li>Once approved, this page will redirect automatically</li>
+		</ol>
+	</div>
 </div>
 <script>
-const inputs = document.querySelectorAll('.code-inputs input');
-const form = document.getElementById('pairForm');
-const btn = document.getElementById('submitBtn');
-const spinner = document.getElementById('spinner');
+const SESSION_ID = "` + sessionID + `";
+const EXPIRY_SECONDS = ` + fmt.Sprintf("%d", expirySecs) + `;
+let remaining = EXPIRY_SECONDS;
+let pollTimer = null;
+let countdownTimer = null;
 
-inputs.forEach((input, i) => {
-	input.addEventListener('input', (e) => {
-		const val = e.target.value.replace(/[^0-9]/g, '');
-		e.target.value = val;
-		if (val && i < inputs.length - 1) inputs[i + 1].focus();
-		checkComplete();
-	});
-	input.addEventListener('keydown', (e) => {
-		if (e.key === 'Backspace' && !e.target.value && i > 0) {
-			inputs[i - 1].focus();
-		}
-	});
-	input.addEventListener('paste', (e) => {
-		e.preventDefault();
-		const text = (e.clipboardData || window.clipboardData).getData('text').replace(/[^0-9]/g, '');
-		for (let j = 0; j < Math.min(text.length, inputs.length); j++) {
-			inputs[j].value = text[j];
-		}
-		if (text.length >= inputs.length) inputs[inputs.length - 1].focus();
-		checkComplete();
-	});
-});
-
-function checkComplete() {
-	const code = Array.from(inputs).map(i => i.value).join('');
-	btn.disabled = code.length < 6;
+function updateTimer() {
+	remaining--;
+	if (remaining <= 0) {
+		clearInterval(countdownTimer);
+		clearInterval(pollTimer);
+		document.getElementById('timer').textContent = 'Code expired';
+		document.getElementById('statusText').textContent = 'Code expired. Refresh to get a new code.';
+		document.getElementById('statusDot').className = 'status-dot expired';
+		return;
+	}
+	const m = Math.floor(remaining / 60);
+	const s = remaining % 60;
+	document.getElementById('timer').textContent = 'Expires in ' + m + ':' + String(s).padStart(2, '0');
 }
 
-form.addEventListener('submit', async (e) => {
-	e.preventDefault();
-	const code = Array.from(inputs).map(i => i.value).join('');
-	if (code.length < 6) return;
-
-	btn.disabled = true;
-	spinner.style.display = 'block';
-
+async function pollStatus() {
 	try {
-		const res = await fetch('/pair', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ code }),
-		});
-		const data = await res.json();
-		if (data.success) {
-			if (data.encryption_key) {
-				localStorage.setItem('dm_encryption_key', data.encryption_key);
-			}
-			window.location.href = data.redirect || '/';
-		} else {
-			showError(data.error || 'Pairing failed');
+		const res = await fetch('/pair/status?id=' + SESSION_ID);
+		if (res.status === 410) {
+			clearInterval(pollTimer);
+			clearInterval(countdownTimer);
+			document.getElementById('statusText').textContent = 'Session expired. Refresh to try again.';
+			document.getElementById('statusDot').className = 'status-dot expired';
+			return;
 		}
-	} catch (err) {
-		showError('Connection error. Please try again.');
+		const data = await res.json();
+		if (data.approved) {
+			clearInterval(pollTimer);
+			clearInterval(countdownTimer);
+			document.getElementById('statusText').textContent = 'Paired! Redirecting...';
+			document.getElementById('statusDot').className = 'status-dot approved';
+			setTimeout(() => { window.location.href = '/'; }, 500);
+		}
+	} catch (e) {
+		// Network error, keep polling
 	}
-	btn.disabled = false;
-	spinner.style.display = 'none';
-});
-
-function showError(msg) {
-	let el = document.querySelector('.error');
-	if (!el) {
-		el = document.createElement('div');
-		el.className = 'error';
-		form.parentNode.insertBefore(el, form);
-	}
-	el.textContent = msg;
 }
+
+updateTimer();
+countdownTimer = setInterval(updateTimer, 1000);
+pollTimer = setInterval(pollStatus, 3000);
+// First poll immediately
+pollStatus();
 </script>
 </body>
 </html>`

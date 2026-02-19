@@ -3981,11 +3981,19 @@ class DevManager {
                     <div id="tunnel-url-display" style="display: none; margin-bottom: 10px; padding: 10px 12px; background: var(--color-bg-tertiary, #0d1117); border: 1px solid var(--color-border, #30363d); border-radius: 8px; font-family: monospace; font-size: 12px; word-break: break-all; user-select: all; cursor: pointer;" onclick="navigator.clipboard.writeText(this.textContent).then(() => app.showToast('Copied', 'URL copied to clipboard', 'success'))" title="Click to copy"></div>
                     <div id="tunnel-usage-display" style="display: none; margin-bottom: 12px; padding: 6px 10px; font-size: 11px; color: var(--color-text-secondary, #999); background: var(--color-bg-tertiary, #0d1117); border-radius: 6px;"></div>
                     <div id="tunnel-pairing-section" style="display: none; border-top: 1px solid var(--color-border, #30363d); padding-top: 12px;">
-                        <div style="display: flex; gap: 8px; margin-bottom: 12px;">
-                            <button class="btn btn-sm" onclick="app.showPairingQR()" title="Show QR code for phone pairing" style="flex: 1; padding: 8px 12px;">Show QR Code</button>
-                            <button class="btn btn-sm" onclick="app.showPairingCode()" title="Show 6-digit code for other devices" style="flex: 1; padding: 8px 12px;">Show Pairing Code</button>
+                        <button class="btn btn-sm" id="pair-start-btn" onclick="app.showPairForm()" title="Pair a new remote device" style="width: 100%; padding: 10px;">Pair New Device</button>
+                        <div id="tunnel-pair-form" style="display: none; margin-top: 12px;">
+                            <div id="tunnel-pair-link" style="margin-bottom: 14px;">
+                                <div style="font-size: 12px; color: var(--color-text-secondary, #999); margin-bottom: 6px;"><strong>Step 1</strong> — Send this link to the device you want to pair:</div>
+                                <div style="display: flex; gap: 6px; align-items: center;">
+                                    <div id="tunnel-pair-url" style="flex: 1; padding: 8px 10px; background: var(--color-bg-tertiary); border: 1px solid var(--color-border); border-radius: 6px; font-family: monospace; font-size: 11px; word-break: break-all; user-select: all;"></div>
+                                    <button class="btn btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('tunnel-pair-url').textContent).then(() => app.showToast('Copied', 'Pairing link copied', 'success'))" title="Copy pairing link" style="padding: 8px 10px; flex-shrink: 0;">Copy</button>
+                                </div>
+                            </div>
+                            <div style="font-size: 12px; color: var(--color-text-secondary, #999); margin-bottom: 8px;"><strong>Step 2</strong> — Type the 6-digit code displayed on that device:</div>
+                            <div style="display: flex; gap: 6px; justify-content: center; margin-bottom: 10px;" id="pair-code-inputs"></div>
+                            <button class="btn btn-sm" id="pair-confirm-btn" onclick="app.confirmPairing()" disabled style="width: 100%; padding: 10px;">Approve Pairing</button>
                         </div>
-                        <div id="pairing-display" style="text-align: center; display: none;"></div>
                     </div>
                     <div id="tunnel-devices-section" style="display: none; border-top: 1px solid var(--color-border, #30363d); padding-top: 12px; margin-top: 12px;">
                         <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">Paired Devices</div>
@@ -5645,38 +5653,94 @@ class DevManager {
         }
     }
 
-    async showPairingQR() {
-        try {
-            const info = await this.api('GET', '/tunnel/pairing-info');
-            const display = document.getElementById('pairing-display');
-            if (!display) return;
-            display.style.display = 'block';
-            display.innerHTML = `
-                <div style="display: inline-block; padding: 12px; background: #fff; border-radius: 12px; margin-bottom: 10px;">
-                    <img src="/pair/qr.png?url=${encodeURIComponent(info.tunnel_url)}" alt="QR Code" style="width: 180px; height: 180px; display: block;">
-                </div>
-                <div style="font-size: 12px; color: var(--color-text-secondary, #999);">Scan with your phone camera</div>
-                <div style="font-size: 11px; color: var(--color-text-muted, #666); margin-top: 4px;">Expires in ${info.expires_in / 60} minutes</div>
-            `;
-        } catch (error) {
-            this.showToast('Error', error.message, 'error');
+    showPairForm() {
+        const form = document.getElementById('tunnel-pair-form');
+        const startBtn = document.getElementById('pair-start-btn');
+        if (!form) return;
+
+        // Populate pairing link
+        const pairUrlEl = document.getElementById('tunnel-pair-url');
+        if (pairUrlEl && this._tunnelStatus?.url) {
+            pairUrlEl.textContent = this._tunnelStatus.url + '/pair';
         }
+
+        // Build digit inputs dynamically
+        const container = document.getElementById('pair-code-inputs');
+        container.innerHTML = '';
+        const inputStyle = 'width: 40px; height: 48px; text-align: center; font-size: 22px; font-weight: bold; font-family: monospace; background: var(--color-bg-tertiary); border: 2px solid var(--color-border); border-radius: 8px; color: var(--color-text);';
+        for (let d = 0; d < 6; d++) {
+            const inp = document.createElement('input');
+            inp.type = 'text';
+            inp.maxLength = 1;
+            inp.inputMode = 'numeric';
+            inp.pattern = '[0-9]';
+            inp.autocomplete = 'off';
+            inp.className = 'pair-digit-input';
+            inp.style.cssText = inputStyle;
+            container.appendChild(inp);
+        }
+
+        const inputs = container.querySelectorAll('.pair-digit-input');
+        const btn = document.getElementById('pair-confirm-btn');
+
+        const checkComplete = () => {
+            const code = Array.from(inputs).map(i => i.value).join('');
+            if (btn) btn.disabled = code.length < 6;
+        };
+
+        inputs.forEach((input, i) => {
+            input.addEventListener('input', (e) => {
+                const val = e.target.value.replace(/[^0-9]/g, '');
+                e.target.value = val;
+                if (val && i < inputs.length - 1) inputs[i + 1].focus();
+                checkComplete();
+            });
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Backspace' && !e.target.value && i > 0) {
+                    inputs[i - 1].focus();
+                }
+            });
+            input.addEventListener('paste', (e) => {
+                e.preventDefault();
+                const text = (e.clipboardData || window.clipboardData).getData('text').replace(/[^0-9]/g, '');
+                for (let j = 0; j < Math.min(text.length, inputs.length); j++) {
+                    inputs[j].value = text[j];
+                }
+                if (text.length >= inputs.length) inputs[inputs.length - 1].focus();
+                checkComplete();
+            });
+        });
+
+        // Show form, hide button, focus first input
+        form.style.display = 'block';
+        if (startBtn) startBtn.style.display = 'none';
+        inputs[0]?.focus();
     }
 
-    async showPairingCode() {
+    async confirmPairing() {
+        const container = document.getElementById('pair-code-inputs');
+        if (!container) return;
+
+        const inputs = container.querySelectorAll('.pair-digit-input');
+        const code = Array.from(inputs).map(i => i.value).join('');
+        if (code.length < 6) return;
+
+        const btn = document.getElementById('pair-confirm-btn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Pairing...'; }
+
         try {
-            const info = await this.api('GET', '/tunnel/pairing-info');
-            const display = document.getElementById('pairing-display');
-            if (!display) return;
-            display.style.display = 'block';
-            display.innerHTML = `
-                <div style="font-size: 36px; font-weight: bold; letter-spacing: 8px; font-family: monospace; margin-bottom: 8px;">${info.code}</div>
-                <div style="font-size: 12px; color: var(--text-secondary, #999);">Enter this code on your device at:</div>
-                <div style="font-size: 11px; color: var(--color-primary, #58a6ff); margin-top: 4px; word-break: break-all;">${info.tunnel_url}/pair</div>
-                <div style="font-size: 11px; color: var(--text-secondary, #666); margin-top: 4px;">Expires in ${info.expires_in / 60} minutes</div>
-            `;
+            await this.api('POST', '/tunnel/pair-confirm', { code });
+            this.showToast('Success', 'Device paired successfully', 'success');
+            // Reset back to button state
+            const form = document.getElementById('tunnel-pair-form');
+            const startBtn = document.getElementById('pair-start-btn');
+            if (form) form.style.display = 'none';
+            if (startBtn) startBtn.style.display = '';
+            this.loadTunnelDevices();
+            this.loadTunnelStatus();
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this.showToast('Error', error.message || 'Invalid or expired code', 'error');
+            if (btn) { btn.disabled = false; btn.textContent = 'Confirm Pairing'; }
         }
     }
 

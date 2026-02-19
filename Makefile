@@ -15,12 +15,13 @@ build:
 	go build -ldflags "-X main.BuildVersion=$$(git rev-parse --short HEAD) -X main.DefaultRelayURL=$(RELAY_URL)" -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
 	@echo "Built: $(BUILD_DIR)/$(BINARY_NAME)"
 
-# Build the relay server
+# Build the relay server (local + Linux amd64 for VPS)
 build-relay:
 	@echo "Building relay server..."
 	@mkdir -p $(BUILD_DIR)
 	go build -o $(BUILD_DIR)/relay ./cmd/relay
-	@echo "Built: $(BUILD_DIR)/relay"
+	GOOS=linux GOARCH=amd64 go build -o $(BUILD_DIR)/relay-linux-amd64 ./cmd/relay
+	@echo "Built: $(BUILD_DIR)/relay (local) + $(BUILD_DIR)/relay-linux-amd64 (VPS)"
 
 # Build for multiple platforms
 build-all: deps vendor-js

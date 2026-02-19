@@ -299,8 +299,22 @@ class TerminalManager {
             }
         };
 
-        ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
+        ws.onmessage = async (event) => {
+            let data = event.data;
+
+            // Decrypt if tunnel encryption is active
+            if (typeof data === 'string' && data.includes('"_encrypted":true')) {
+                try {
+                    const enc = JSON.parse(data);
+                    if (enc._encrypted && window.app && window.app._tunnelCryptoKey) {
+                        data = await window.app._decryptTunnelMessage(enc);
+                    }
+                } catch (e) {
+                    // Not encrypted or decryption failed, use raw data
+                }
+            }
+
+            const msg = JSON.parse(data);
             if (msg.type === 'session_output' && msg.data) {
                 terminal.write(msg.data);
             } else if (msg.type === 'session_status') {

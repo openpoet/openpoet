@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,6 +30,11 @@ type Client struct {
 	status    string // disconnected, connecting, connected
 
 	OnStatus func(status, url string)
+
+	// OnAuthFailed is called when the relay rejects the token.
+	// It should clear the old token, register a new one, and return it.
+	// If nil or returns error, the client stops retrying.
+	OnAuthFailed func() (newToken string, err error)
 
 	// Encryption key for app-layer encryption (raw 32-byte AES key)
 	encryptionKey []byte
@@ -145,6 +151,23 @@ func (c *Client) reconnectLoop() {
 
 		if err != nil {
 			log.Printf("[TUNNEL] Connection error: %v, reconnecting in %s", err, backoff)
+
+			// On auth failure, try to re-register automatically
+			if strings.Contains(err.Error(), "registration rejected") && c.OnAuthFailed != nil {
+				log.Printf("[TUNNEL] Token rejected, attempting re-registration...")
+				newToken, reregErr := c.OnAuthFailed()
+				if reregErr != nil {
+					log.Printf("[TUNNEL] Re-registration failed: %v", reregErr)
+				} else {
+					c.mu.Lock()
+					c.authToken = newToken
+					c.mu.Unlock()
+					log.Printf("[TUNNEL] Re-registered with new token, retrying immediately")
+					backoff = time.Second
+					c.setStatus("disconnected", "")
+					continue // retry immediately with new token
+				}
+			}
 		} else {
 			log.Printf("[TUNNEL] Disconnected, reconnecting in %s", backoff)
 		}
@@ -403,19 +426,25 @@ func (c *Client) handleWSOpen(ctx context.Context, conn *websocket.Conn, msg *Me
 				return
 			}
 
-			// Encrypt frame if encryption key is set
-			frameData := string(data)
 			isText := msgType == websocket.MessageText
 			c.mu.Lock()
 			encKey := c.encryptionKey
 			c.mu.Unlock()
 
+			var frameData string
 			if encKey != nil {
+				// Encrypt with AES-256-GCM — browser JS decrypts with Web Crypto API.
+				// EncryptFrame returns JSON: {"_encrypted":true,"data":"...","iv":"..."}
 				encrypted, encErr := EncryptFrame(data, encKey)
 				if encErr == nil {
 					frameData = string(encrypted)
-					isText = true // encrypted JSON is always text
+					isText = true // encrypted JSON envelope is always text
+				} else {
+					frameData = base64.StdEncoding.EncodeToString(data)
 				}
+			} else {
+				// No encryption — base64-encode for safe JSON transport
+				frameData = base64.StdEncoding.EncodeToString(data)
 			}
 
 			payload := &WSDataPayload{
@@ -444,11 +473,18 @@ func (c *Client) handleWSData(msg *Message) {
 		return
 	}
 
+	// Decode base64-encoded data
+	rawData, decErr := base64.StdEncoding.DecodeString(wsData.Data)
+	if decErr != nil {
+		// Fallback: treat as raw string (backwards compat)
+		rawData = []byte(wsData.Data)
+	}
+
 	msgType := websocket.MessageBinary
 	if wsData.IsText {
 		msgType = websocket.MessageText
 	}
-	localConn.Write(c.ctx, msgType, []byte(wsData.Data))
+	localConn.Write(c.ctx, msgType, rawData)
 }
 
 func (c *Client) handleWSClose(msg *Message) {
