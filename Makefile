@@ -128,6 +128,11 @@ deploy-status:
 deploy-log:
 	@./scripts/deploy.sh --log
 
+# Start website dev server
+website-dev:
+	@echo "Starting website dev server on :8000..."
+	cd website && python3 -m http.server 8000
+
 # Show help
 help:
 	@echo "DevManager Makefile"
