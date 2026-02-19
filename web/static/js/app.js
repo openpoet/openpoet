@@ -3970,7 +3970,7 @@ class DevManager {
                     <div class="card-title">Remote Access</div>
                 </div>
                 <div class="card-body">
-                    <p style="margin-bottom: 12px; color: var(--text-secondary, #999); font-size: 13px;">
+                    <p style="margin-bottom: 12px; color: var(--color-text-secondary, #999); font-size: 13px;">
                         Access DevManager from your phone or other devices remotely.
                     </p>
                     <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
@@ -3978,16 +3978,16 @@ class DevManager {
                         <span id="tunnel-status-text" style="font-size: 13px; flex: 1;">Checking...</span>
                         <button class="btn btn-sm" id="tunnel-toggle-btn" onclick="app.toggleTunnel()">Enable</button>
                     </div>
-                    <div id="tunnel-url-display" style="display: none; margin-bottom: 8px; padding: 8px; background: var(--bg-tertiary, #0d1117); border-radius: 6px; font-family: monospace; font-size: 12px; word-break: break-all;"></div>
-                    <div id="tunnel-usage-display" style="display: none; margin-bottom: 12px; font-size: 11px; color: var(--text-secondary, #999);"></div>
-                    <div id="tunnel-pairing-section" style="display: none; border-top: 1px solid var(--border-color, #30363d); padding-top: 12px;">
+                    <div id="tunnel-url-display" style="display: none; margin-bottom: 10px; padding: 10px 12px; background: var(--color-bg-tertiary, #0d1117); border: 1px solid var(--color-border, #30363d); border-radius: 8px; font-family: monospace; font-size: 12px; word-break: break-all; user-select: all; cursor: pointer;" onclick="navigator.clipboard.writeText(this.textContent).then(() => app.showToast('Copied', 'URL copied to clipboard', 'success'))" title="Click to copy"></div>
+                    <div id="tunnel-usage-display" style="display: none; margin-bottom: 12px; padding: 6px 10px; font-size: 11px; color: var(--color-text-secondary, #999); background: var(--color-bg-tertiary, #0d1117); border-radius: 6px;"></div>
+                    <div id="tunnel-pairing-section" style="display: none; border-top: 1px solid var(--color-border, #30363d); padding-top: 12px;">
                         <div style="display: flex; gap: 8px; margin-bottom: 12px;">
-                            <button class="btn btn-sm" onclick="app.showPairingQR()" title="Show QR code for phone pairing">Show QR Code</button>
-                            <button class="btn btn-sm" onclick="app.showPairingCode()" title="Show 6-digit code for other devices">Show Pairing Code</button>
+                            <button class="btn btn-sm" onclick="app.showPairingQR()" title="Show QR code for phone pairing" style="flex: 1; padding: 8px 12px;">Show QR Code</button>
+                            <button class="btn btn-sm" onclick="app.showPairingCode()" title="Show 6-digit code for other devices" style="flex: 1; padding: 8px 12px;">Show Pairing Code</button>
                         </div>
                         <div id="pairing-display" style="text-align: center; display: none;"></div>
                     </div>
-                    <div id="tunnel-devices-section" style="display: none; border-top: 1px solid var(--border-color, #30363d); padding-top: 12px; margin-top: 12px;">
+                    <div id="tunnel-devices-section" style="display: none; border-top: 1px solid var(--color-border, #30363d); padding-top: 12px; margin-top: 12px;">
                         <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">Paired Devices</div>
                         <div id="tunnel-devices-list"></div>
                     </div>
@@ -5652,9 +5652,11 @@ class DevManager {
             if (!display) return;
             display.style.display = 'block';
             display.innerHTML = `
-                <img src="/pair/qr.png?url=${encodeURIComponent(info.tunnel_url)}" alt="QR Code" style="width: 200px; height: 200px; border-radius: 8px; margin-bottom: 8px;">
-                <div style="font-size: 12px; color: var(--text-secondary, #999);">Scan with your phone camera</div>
-                <div style="font-size: 11px; color: var(--text-secondary, #666); margin-top: 4px;">Expires in ${info.expires_in / 60} minutes</div>
+                <div style="display: inline-block; padding: 12px; background: #fff; border-radius: 12px; margin-bottom: 10px;">
+                    <img src="/pair/qr.png?url=${encodeURIComponent(info.tunnel_url)}" alt="QR Code" style="width: 180px; height: 180px; display: block;">
+                </div>
+                <div style="font-size: 12px; color: var(--color-text-secondary, #999);">Scan with your phone camera</div>
+                <div style="font-size: 11px; color: var(--color-text-muted, #666); margin-top: 4px;">Expires in ${info.expires_in / 60} minutes</div>
             `;
         } catch (error) {
             this.showToast('Error', error.message, 'error');

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/skip2/go-qrcode"
 )
@@ -37,7 +38,6 @@ func (pm *PairingManager) HandlePairingPage(w http.ResponseWriter, r *http.Reque
 				Path:     "/",
 				MaxAge:   60, // 1 minute - JS reads and clears it
 				HttpOnly: false, // Must be readable by JavaScript
-				Secure:   true,
 				SameSite: http.SameSiteLaxMode,
 			})
 		}
@@ -90,11 +90,11 @@ func (pm *PairingManager) HandlePairDevice(w http.ResponseWriter, r *http.Reques
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":        true,
 			"device_id":      deviceID,
-			"redirect":       "/",
+			"redirect":       "./",
 			"encryption_key": encKey,
 		})
 	} else {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, "./", http.StatusSeeOther)
 	}
 }
 
@@ -112,7 +112,7 @@ func (pm *PairingManager) HandleQRImage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	pairingURL := tunnelURL + "/pair?token=" + token
+	pairingURL := strings.TrimRight(tunnelURL, "/") + "/pair?token=" + token
 
 	png, err := qrcode.Encode(pairingURL, qrcode.Medium, 256)
 	if err != nil {
@@ -299,7 +299,7 @@ form.addEventListener('submit', async (e) => {
 	spinner.style.display = 'block';
 
 	try {
-		const res = await fetch('/pair', {
+		const res = await fetch('pair', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ code }),
@@ -309,7 +309,7 @@ form.addEventListener('submit', async (e) => {
 			if (data.encryption_key) {
 				localStorage.setItem('dm_encryption_key', data.encryption_key);
 			}
-			window.location.href = data.redirect || '/';
+			window.location.href = data.redirect || './';
 		} else {
 			showError(data.error || 'Pairing failed');
 		}
