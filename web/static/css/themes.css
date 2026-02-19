@@ -2,8 +2,8 @@
    Theme System - CSS Variable Overrides
    ============================================ */
 
-/* Default dark theme (Midnight) inherits from :root in app.css.
-   Only non-dark themes need overrides here. */
+/* Default theme (Tokyo Night) inherits from :root in app.css.
+   All themes apply overrides via data-theme attribute. */
 
 /* ---- Daylight (Light Theme) ---- */
 [data-theme="light"] {
