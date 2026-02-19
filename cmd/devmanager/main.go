@@ -668,7 +668,7 @@ func main() {
 		r.Get("/tunnel/devices", api.ListPairedDevices)
 		r.Delete("/tunnel/devices/{id}", api.RevokePairedDevice)
 		r.Delete("/tunnel/devices/{id}/permanent", api.DeletePairedDevice)
-		r.Get("/tunnel/pairing-info", api.GetPairingInfo)
+		r.Post("/tunnel/pair-confirm", api.ConfirmPairing)
 	})
 
 	// Test-only endpoints (only available when DEVMANAGER_TEST_MODE=1)
@@ -688,8 +688,7 @@ func main() {
 
 	// Tunnel pairing routes (outside /api, exempt from auth)
 	r.Get("/pair", pairingMgr.HandlePairingPage)
-	r.Post("/pair", pairingMgr.HandlePairDevice)
-	r.Get("/pair/qr.png", pairingMgr.HandleQRImage)
+	r.Get("/pair/status", pairingMgr.HandlePairingStatus)
 
 	// Static files and SPA - use web.FS from embed
 	webFS := web.FS

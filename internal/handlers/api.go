@@ -3964,6 +3964,17 @@ func (a *API) createAndConnectTunnel(ctx context.Context) (*tunnel.Client, error
 		log.Printf("[TUNNEL] Status: %s, URL: %s", status, url)
 	}
 
+	// On auth failure, clear old token and re-register automatically
+	client.OnAuthFailed = func() (string, error) {
+		ctx := context.Background()
+		// Clear old token
+		a.db.SetSetting(ctx, "tunnel_relay_token", "")
+		a.db.SetSetting(ctx, "tunnel_relay_token_iv", "")
+		a.db.SetSetting(ctx, "tunnel_relay_token_preview", "")
+		// Register new token
+		return a.autoRegisterTunnel(ctx, relayURL)
+	}
+
 	// Set encryption key
 	if a.tunnelDeps.PairingMgr != nil {
 		if encKey, err := a.tunnelDeps.PairingMgr.GetEncryptionKeyRaw(); err == nil {
@@ -4043,41 +4054,34 @@ func (a *API) DeletePairedDevice(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// GetPairingInfo generates a QR token and 6-digit code for device pairing.
-func (a *API) GetPairingInfo(w http.ResponseWriter, r *http.Request) {
+// ConfirmPairing validates a 6-digit code entered by the local admin to pair a remote device.
+func (a *API) ConfirmPairing(w http.ResponseWriter, r *http.Request) {
 	if a.pairingMgr == nil {
 		respondError(w, http.StatusBadRequest, "Pairing not configured")
 		return
 	}
 
-	a.tunnelMu.Lock()
-	url := ""
-	if a.tunnelClient != nil {
-		url = a.tunnelClient.PublicURL()
+	var body struct {
+		Code string `json:"code"`
 	}
-	a.tunnelMu.Unlock()
-
-	code, err := a.pairingMgr.GenerateCode()
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to generate pairing code")
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
-	qrToken, err := a.pairingMgr.GenerateQRToken()
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to generate QR token")
+	if body.Code == "" || len(body.Code) != 6 {
+		respondError(w, http.StatusBadRequest, "Please enter a valid 6-digit code")
 		return
 	}
 
-	qrURL := ""
-	if url != "" {
-		qrURL = url + "/pair?token=" + qrToken
+	deviceID, err := a.pairingMgr.ConfirmPairing(body.Code)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"code":       code,
-		"qr_url":     qrURL,
-		"tunnel_url": url,
-		"expires_in": 300, // 5 minutes
+		"success":   true,
+		"device_id": deviceID,
 	})
 }
