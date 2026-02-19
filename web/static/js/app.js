@@ -3476,20 +3476,56 @@ class DevManager {
         });
     }
 
+    _isRemoteSession(sessionId) {
+        const tabData = this.openTabs.get(sessionId);
+        if (tabData && tabData.projectId) {
+            const project = this.projects.find(p => p.id === tabData.projectId);
+            if (project) return project.type === 'remote';
+        }
+        const session = this.sessions.find(s => s.id === sessionId);
+        if (session) {
+            const project = this.projects.find(p => p.id === session.project_id);
+            if (project) return project.type === 'remote';
+        }
+        return false;
+    }
+
+    getInputDelays(sessionId, context = 'mobile') {
+        const isRemote = this._isRemoteSession(sessionId);
+        switch (context) {
+            case 'quick':
+                return { ctrlUToText: isRemote ? 150 : 0, textToEnter: isRemote ? 1500 : 1000 };
+            case 'mobile':
+                return { ctrlUToText: isRemote ? 150 : 0, textToEnter: isRemote ? 1200 : 700 };
+            case 'voice':
+                return { ctrlUToText: 0, textToEnter: isRemote ? 300 : 50 };
+            default:
+                return { ctrlUToText: isRemote ? 150 : 0, textToEnter: isRemote ? 1200 : 700 };
+        }
+    }
+
     sendQuickCommand(command) {
         if (!window.terminalManager) return;
 
-        // Capture target session ID NOW to prevent input going to a different
-        // session if the active session changes during the 700ms delay.
         const targetSessionId = window.terminalManager.activeSessionId;
         if (!targetSessionId) return;
 
-        // Use the canonical three-step mobile terminal input sequence
+        const delays = this.getInputDelays(targetSessionId, 'quick');
+
+        // Canonical three-step mobile terminal input sequence
         window.terminalManager.sendInputToSession(targetSessionId, '\x15'); // Ctrl+U - clear current line
-        window.terminalManager.sendInputToSession(targetSessionId, command);
-        setTimeout(() => {
-            window.terminalManager.sendInputToSession(targetSessionId, '\r'); // Enter after 700ms
-        }, 700);
+        const sendTextAndEnter = () => {
+            window.terminalManager.sendInputToSession(targetSessionId, command);
+            setTimeout(() => {
+                window.terminalManager.sendInputToSession(targetSessionId, '\r');
+            }, delays.textToEnter);
+        };
+
+        if (delays.ctrlUToText > 0) {
+            setTimeout(sendTextAndEnter, delays.ctrlUToText);
+        } else {
+            sendTextAndEnter();
+        }
     }
 
     sendMobileTerminalInput() {
@@ -3499,18 +3535,25 @@ class DevManager {
         const text = input.value.trim();
         if (text) {
             if (window.terminalManager) {
-                // Capture target session ID NOW to prevent input going to a different
-                // session if the active session changes during the 700ms delay.
                 const targetSessionId = window.terminalManager.activeSessionId;
                 if (!targetSessionId) return;
 
+                const delays = this.getInputDelays(targetSessionId, 'mobile');
+
                 // Clear current line, send text, then Enter after delay.
-                // This is the exact sequence that works with voice Send.
                 window.terminalManager.sendInputToSession(targetSessionId, '\x15'); // Ctrl+U
-                window.terminalManager.sendInputToSession(targetSessionId, text);
-                setTimeout(() => {
-                    window.terminalManager.sendInputToSession(targetSessionId, '\r');
-                }, 700);
+                const sendTextAndEnter = () => {
+                    window.terminalManager.sendInputToSession(targetSessionId, text);
+                    setTimeout(() => {
+                        window.terminalManager.sendInputToSession(targetSessionId, '\r');
+                    }, delays.textToEnter);
+                };
+
+                if (delays.ctrlUToText > 0) {
+                    setTimeout(sendTextAndEnter, delays.ctrlUToText);
+                } else {
+                    sendTextAndEnter();
+                }
             }
             input.value = '';
         } else {
@@ -4728,7 +4771,7 @@ class DevManager {
 
         // Terminal back button
         document.getElementById('btn-back-sessions')?.addEventListener('click', () => {
-            this.showView('projects');
+            this.showView('sessions');
         });
 
         // Link Task button
