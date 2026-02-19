@@ -109,8 +109,10 @@ func SetSessionCookie(w http.ResponseWriter, tokenStr string) {
 		Path:     "/",
 		MaxAge:   int(sessionMaxAge.Seconds()),
 		HttpOnly: true,
-		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
+		// Not setting Secure: the cookie must work on both HTTP (localhost)
+		// and HTTPS (production relay). Transport security is provided by
+		// the tunnel's WebSocket connection, not the cookie flag.
 	})
 }
 

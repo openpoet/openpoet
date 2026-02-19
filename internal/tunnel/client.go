@@ -284,8 +284,15 @@ func (c *Client) handleHTTPRequest(ctx context.Context, conn *websocket.Conn, ms
 		return
 	}
 
-	// Copy headers, add tunnel marker
+	// Copy headers, add tunnel marker.
+	// Remove Accept-Encoding so Go's http.Client doesn't negotiate
+	// compression — the response body will be sent as plain text through
+	// the tunnel, so we need it uncompressed with matching Content-Length.
 	for k, vals := range reqData.Headers {
+		lower := strings.ToLower(k)
+		if lower == "accept-encoding" {
+			continue
+		}
 		for _, v := range vals {
 			localReq.Header.Add(k, v)
 		}
@@ -340,10 +347,24 @@ func (c *Client) handleWSOpen(ctx context.Context, conn *websocket.Conn, msg *Me
 	wsScheme := "ws"
 	localURL := fmt.Sprintf("%s://%s%s", wsScheme, c.localAddr, wsData.Path)
 
+	// Forward original request headers (includes cookies for auth)
+	dialHeaders := http.Header{
+		TunnelHeader: {"true"},
+	}
+	for k, vals := range wsData.Headers {
+		lower := strings.ToLower(k)
+		// Skip WebSocket hop-by-hop headers
+		if lower == "upgrade" || lower == "connection" || lower == "sec-websocket-key" ||
+			lower == "sec-websocket-version" || lower == "sec-websocket-extensions" ||
+			lower == "sec-websocket-protocol" || lower == "accept-encoding" {
+			continue
+		}
+		for _, v := range vals {
+			dialHeaders.Add(k, v)
+		}
+	}
 	localConn, _, err := websocket.Dial(ctx, localURL, &websocket.DialOptions{
-		HTTPHeader: http.Header{
-			TunnelHeader: {"true"},
-		},
+		HTTPHeader: dialHeaders,
 	})
 	if err != nil {
 		log.Printf("[TUNNEL] Failed to open local WS %s: %v", wsData.Path, err)
