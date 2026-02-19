@@ -12,54 +12,58 @@ import (
 	"devmanager/internal/database"
 	"devmanager/internal/security"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 )
 
 const (
-	pairingTokenExpiry = 5 * time.Minute
-	codeExpiry         = 5 * time.Minute
-	codeLength         = 6
+	pairingExpiry = 2 * time.Minute
+	codeLength    = 6
 )
 
-// PairingCode is an active 6-digit code for device pairing.
-type PairingCode struct {
-	Code      string
-	ExpiresAt time.Time
+// PendingPairing represents a pairing session initiated by a remote device.
+// The remote device displays the code; the local admin enters it to approve.
+type PendingPairing struct {
+	Code          string
+	SessionID     string
+	UserAgent     string
+	ExpiresAt     time.Time
+	Approved      bool
+	SessionToken  string // set after approval
+	EncryptionKey string // set after approval
 }
 
-// PairingManager handles QR code and 6-digit code pairing flows.
+// PairingManager handles the reversed pairing flow:
+// remote device generates/displays code, local admin enters it to approve.
 type PairingManager struct {
 	db        *database.DB
 	encryptor *security.Encryptor
 	jwtSecret []byte
 
 	// Tunnel-wide encryption key (base64-encoded raw AES-256 key)
-	// Shared with all devices during pairing, used by tunnel client for encryption.
 	tunnelEncKey string
 
-	codes map[string]*PairingCode // code → PairingCode
-	mu    sync.Mutex
+	pendingSessions map[string]*PendingPairing // sessionID → PendingPairing
+	pendingByCode   map[string]string          // code → sessionID
+	mu              sync.Mutex
 }
 
 // NewPairingManager creates a new PairingManager.
 func NewPairingManager(db *database.DB, encryptor *security.Encryptor, jwtSecret []byte) *PairingManager {
 	pm := &PairingManager{
-		db:        db,
-		encryptor: encryptor,
-		jwtSecret: jwtSecret,
-		codes:     make(map[string]*PairingCode),
+		db:              db,
+		encryptor:       encryptor,
+		jwtSecret:       jwtSecret,
+		pendingSessions: make(map[string]*PendingPairing),
+		pendingByCode:   make(map[string]string),
 	}
 
-	// Load or generate tunnel-wide encryption key
 	pm.loadOrGenerateEncKey()
 
-	// Periodic cleanup of expired codes
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
-			pm.cleanupExpiredCodes()
+			pm.cleanupExpired()
 		}
 	}()
 
@@ -82,14 +86,12 @@ func (pm *PairingManager) loadOrGenerateEncKey() {
 		}
 	}
 
-	// Generate new key
 	key, err := security.GenerateKey()
 	if err != nil {
 		return
 	}
 	pm.tunnelEncKey = key
 
-	// Store encrypted
 	cipher, iv, err := pm.encryptor.Encrypt(key)
 	if err != nil {
 		return
@@ -106,90 +108,142 @@ func (pm *PairingManager) GetEncryptionKeyRaw() ([]byte, error) {
 	return base64.StdEncoding.DecodeString(pm.tunnelEncKey)
 }
 
-// GenerateQRToken creates a short-lived JWT for QR code pairing.
-func (pm *PairingManager) GenerateQRToken() (string, error) {
-	claims := &jwt.RegisteredClaims{
-		Subject:   "pair",
-		IssuedAt:  jwt.NewNumericDate(time.Now()),
-		ExpiresAt: jwt.NewNumericDate(time.Now().Add(pairingTokenExpiry)),
-		ID:        uuid.New().String(),
+// CreatePendingPairing creates a new pending pairing session or reuses an existing
+// valid one from the same user agent. This way, refreshing the page keeps the same
+// code and countdown instead of invalidating a code the admin may be typing.
+// Returns the 6-digit code, session ID, and seconds until expiry.
+func (pm *PairingManager) CreatePendingPairing(userAgent string) (code string, sessionID string, expirySecs int, err error) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	now := time.Now()
+
+	// Reuse existing valid pending session from same user agent if available
+	for _, p := range pm.pendingSessions {
+		if p.UserAgent == userAgent && !p.Approved && now.Before(p.ExpiresAt) {
+			remaining := int(p.ExpiresAt.Sub(now).Seconds())
+			return p.Code, p.SessionID, remaining, nil
+		}
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(pm.jwtSecret)
+
+	// Clean up any expired/used sessions from same user agent
+	for id, p := range pm.pendingSessions {
+		if p.UserAgent == userAgent {
+			delete(pm.pendingByCode, p.Code)
+			delete(pm.pendingSessions, id)
+		}
+	}
+
+	// Generate a code that doesn't collide with any active pending session
+	for attempts := 0; attempts < 10; attempts++ {
+		code, err = generateNumericCode(codeLength)
+		if err != nil {
+			return "", "", 0, fmt.Errorf("generate code: %w", err)
+		}
+		if _, exists := pm.pendingByCode[code]; !exists {
+			break
+		}
+	}
+
+	sessionID = uuid.New().String()
+	pm.pendingSessions[sessionID] = &PendingPairing{
+		Code:      code,
+		SessionID: sessionID,
+		UserAgent: userAgent,
+		ExpiresAt: now.Add(pairingExpiry),
+	}
+	pm.pendingByCode[code] = sessionID
+
+	return code, sessionID, int(pairingExpiry.Seconds()), nil
 }
 
-// ValidateQRToken validates a QR pairing token.
-func (pm *PairingManager) ValidateQRToken(tokenStr string) (bool, error) {
-	claims := &jwt.RegisteredClaims{}
-	token, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
-		return pm.jwtSecret, nil
-	})
-	if err != nil || !token.Valid {
-		return false, err
-	}
-	if claims.Subject != "pair" {
-		return false, fmt.Errorf("invalid token subject")
-	}
-	return true, nil
-}
+// ConfirmPairing validates a 6-digit code entered by the local admin.
+// Creates the paired device and stores the session token for the remote device to pick up.
+func (pm *PairingManager) ConfirmPairing(code string) (deviceID string, err error) {
+	pm.mu.Lock()
 
-// GenerateCode creates a random 6-digit code for device pairing.
-func (pm *PairingManager) GenerateCode() (string, error) {
-	code, err := generateNumericCode(codeLength)
+	sessionID, ok := pm.pendingByCode[code]
+	if !ok {
+		pm.mu.Unlock()
+		return "", fmt.Errorf("invalid pairing code")
+	}
+
+	pending, ok := pm.pendingSessions[sessionID]
+	if !ok || time.Now().After(pending.ExpiresAt) {
+		delete(pm.pendingByCode, code)
+		if ok {
+			delete(pm.pendingSessions, sessionID)
+		}
+		pm.mu.Unlock()
+		return "", fmt.Errorf("pairing code expired")
+	}
+
+	if pending.Approved {
+		pm.mu.Unlock()
+		return "", fmt.Errorf("pairing already completed")
+	}
+
+	// Remove the code mapping (one-time use)
+	delete(pm.pendingByCode, code)
+
+	// Unlock before calling CompletePairing (it doesn't need the lock)
+	userAgent := pending.UserAgent
+	pm.mu.Unlock()
+
+	// Create the device and session
+	deviceID, sessionToken, encKey, err := pm.completePairing(userAgent)
 	if err != nil {
 		return "", err
 	}
 
+	// Store result for the polling remote device
 	pm.mu.Lock()
-	pm.codes[code] = &PairingCode{
-		Code:      code,
-		ExpiresAt: time.Now().Add(codeExpiry),
-	}
+	pending.Approved = true
+	pending.SessionToken = sessionToken
+	pending.EncryptionKey = encKey
 	pm.mu.Unlock()
 
-	return code, nil
+	return deviceID, nil
 }
 
-// ValidateCode checks if a 6-digit code is valid and removes it (one-time use).
-func (pm *PairingManager) ValidateCode(code string) bool {
+// CheckPairingStatus checks if a pending pairing session has been approved.
+// Called by the remote device polling /pair/status.
+func (pm *PairingManager) CheckPairingStatus(sessionID string) (approved bool, sessionToken string, encKey string, err error) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	pc, ok := pm.codes[code]
+	pending, ok := pm.pendingSessions[sessionID]
 	if !ok {
-		return false
+		return false, "", "", fmt.Errorf("session not found")
 	}
-	delete(pm.codes, code)
 
-	return time.Now().Before(pc.ExpiresAt)
+	if time.Now().After(pending.ExpiresAt) {
+		delete(pm.pendingSessions, sessionID)
+		delete(pm.pendingByCode, pending.Code)
+		return false, "", "", fmt.Errorf("session expired")
+	}
+
+	if !pending.Approved {
+		return false, "", "", nil
+	}
+
+	// Approved — return session info and clean up
+	sessionToken = pending.SessionToken
+	encKey = pending.EncryptionKey
+	delete(pm.pendingSessions, sessionID)
+
+	return true, sessionToken, encKey, nil
 }
 
-// ActiveCodeExists returns true if there is an active (non-expired) pairing code.
-func (pm *PairingManager) ActiveCodeExists() bool {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-
-	for code, pc := range pm.codes {
-		if time.Now().Before(pc.ExpiresAt) {
-			_ = code
-			return true
-		}
-	}
-	return false
-}
-
-// CompletePairing creates a paired device and returns a session JWT.
-// The returned encryptionKey is the tunnel-wide key that the device needs for decryption.
-func (pm *PairingManager) CompletePairing(userAgent string) (deviceID string, sessionToken string, encryptionKey string, err error) {
+// completePairing creates a paired device and returns a session JWT.
+func (pm *PairingManager) completePairing(userAgent string) (deviceID string, sessionToken string, encryptionKey string, err error) {
 	deviceID = uuid.New().String()
 
-	// Use tunnel-wide encryption key (not per-device)
 	encKeyCipher, encKeyIV := "", ""
 	if pm.tunnelEncKey != "" {
 		encKeyCipher, encKeyIV, _ = pm.encryptor.Encrypt(pm.tunnelEncKey)
 	}
 
-	// Derive device name from user-agent
 	deviceName := parseDeviceName(userAgent)
 
 	dev := &database.PairedDevice{
@@ -204,7 +258,6 @@ func (pm *PairingManager) CompletePairing(userAgent string) (deviceID string, se
 		return "", "", "", fmt.Errorf("create device: %w", err)
 	}
 
-	// Create session JWT
 	sessionToken, err = CreateSessionToken(deviceID, pm.jwtSecret)
 	if err != nil {
 		return "", "", "", fmt.Errorf("create session token: %w", err)
@@ -213,14 +266,15 @@ func (pm *PairingManager) CompletePairing(userAgent string) (deviceID string, se
 	return deviceID, sessionToken, pm.tunnelEncKey, nil
 }
 
-func (pm *PairingManager) cleanupExpiredCodes() {
+func (pm *PairingManager) cleanupExpired() {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
 	now := time.Now()
-	for code, pc := range pm.codes {
-		if now.After(pc.ExpiresAt) {
-			delete(pm.codes, code)
+	for id, p := range pm.pendingSessions {
+		if now.After(p.ExpiresAt) {
+			delete(pm.pendingByCode, p.Code)
+			delete(pm.pendingSessions, id)
 		}
 	}
 }
@@ -239,12 +293,10 @@ func generateNumericCode(length int) (string, error) {
 }
 
 func parseDeviceName(ua string) string {
-	// Simple extraction of device/browser from User-Agent
 	if ua == "" {
 		return "Unknown Device"
 	}
 
-	// Common patterns
 	patterns := []struct {
 		contains string
 		name     string

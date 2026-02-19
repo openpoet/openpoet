@@ -13,7 +13,6 @@ require (
 	github.com/pkg/sftp v1.13.6
 	github.com/sashabaranov/go-openai v1.29.2
 	github.com/severity1/claude-agent-sdk-go v0.6.12
-	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/crypto v0.28.0
 	modernc.org/sqlite v1.33.1
 )
