@@ -2,33 +2,6 @@
 // Manages predefined themes with CSS variable overrides, terminal sync, and persistence
 
 const THEMES = {
-    dark: {
-        name: 'Midnight',
-        metaColor: '#1a1a2e',
-        preview: ['#0f0f1a', '#1a1a2e', '#6366f1'],
-        terminal: {
-            background: '#0f0f1a',
-            foreground: '#e4e4e7',
-            cursor: '#6366f1',
-            selection: 'rgba(99, 102, 241, 0.3)',
-            black: '#1a1a2e',
-            red: '#ef4444',
-            green: '#22c55e',
-            yellow: '#f59e0b',
-            blue: '#3b82f6',
-            magenta: '#a855f7',
-            cyan: '#06b6d4',
-            white: '#e4e4e7',
-            brightBlack: '#3a3a5a',
-            brightRed: '#f87171',
-            brightGreen: '#4ade80',
-            brightYellow: '#fbbf24',
-            brightBlue: '#60a5fa',
-            brightMagenta: '#c084fc',
-            brightCyan: '#22d3ee',
-            brightWhite: '#ffffff'
-        }
-    },
     light: {
         name: 'Daylight',
         metaColor: '#ffffff',
@@ -358,16 +331,16 @@ const THEMES = {
 const STORAGE_KEY = 'devmanager-theme';
 
 function getCurrentThemeId() {
-    return localStorage.getItem(STORAGE_KEY) || 'light';
+    return localStorage.getItem(STORAGE_KEY) || 'tokyonight';
 }
 
 function getTerminalTheme() {
     const id = getCurrentThemeId();
-    return THEMES[id]?.terminal || THEMES.light.terminal;
+    return THEMES[id]?.terminal || THEMES.tokyonight.terminal;
 }
 
 function applyTheme(themeId) {
-    if (!THEMES[themeId]) themeId = 'light';
+    if (!THEMES[themeId]) themeId = 'tokyonight';
 
     // Set data-theme attribute
     document.documentElement.setAttribute('data-theme', themeId);

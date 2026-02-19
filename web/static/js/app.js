@@ -3949,7 +3949,7 @@ class DevManager {
 
         // Build theme picker
         const themes = window.devManagerTheme ? window.devManagerTheme.THEMES : {};
-        const currentTheme = window.devManagerTheme ? window.devManagerTheme.getCurrentThemeId() : 'dark';
+        const currentTheme = window.devManagerTheme ? window.devManagerTheme.getCurrentThemeId() : 'tokyonight';
         let themeSwatches = '';
         for (const [id, theme] of Object.entries(themes)) {
             const active = id === currentTheme ? ' active' : '';
