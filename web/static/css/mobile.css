@@ -1037,7 +1037,7 @@
 
     .quick-cmd-desc {
         font-size: 12px;
-        color: var(--color-text-muted);
+        color: var(--color-text-secondary);
     }
 
     /* Doc Review Overlay - full-screen on mobile */

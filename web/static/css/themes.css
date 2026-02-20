@@ -152,7 +152,7 @@
     --color-border: #44475a;
     --color-text: #f8f8f2;
     --color-text-secondary: #c0c0d0;
-    --color-text-muted: #6272a4;
+    --color-text-muted: #7b8bbf;
     --color-primary: #bd93f9;
     --color-primary-hover: #caa8fc;
     --color-primary-active: #a87cf0;
@@ -172,14 +172,14 @@
     --color-tab-sidebar-bg: #21222c;
     --color-tab-border: #44475a;
     --color-tab-header-text: #c0c0d0;
-    --color-tab-text: #6272a4;
+    --color-tab-text: #7b8bbf;
     --color-tab-text-active: #f8f8f2;
     --color-tab-hover-bg: #343746;
     --color-tab-active-bg: #44475a;
     --color-tab-accent: #bd93f9;
     --color-tab-group-bg: #343746;
-    --color-tab-group-text: #6272a4;
-    --color-tab-group-toggle: #6272a4;
+    --color-tab-group-text: #7b8bbf;
+    --color-tab-group-toggle: #7b8bbf;
     --color-tab-input-bg: #44475a;
 
     /* Terminal */
@@ -189,7 +189,7 @@
     --color-status-running: #50fa7b;
     --color-status-disconnected: #f1fa8c;
     --color-status-error: #ff5555;
-    --color-status-stopped: #6272a4;
+    --color-status-stopped: #7b8bbf;
 
     /* Overlay */
     --color-overlay-bg: rgba(33, 34, 44, 0.7);
@@ -201,8 +201,8 @@
     --color-gradient-end: #ff79c6;
 
     /* Badges */
-    --color-badge-todo-bg: rgba(98, 114, 164, 0.2);
-    --color-badge-todo-text: #6272a4;
+    --color-badge-todo-bg: rgba(123, 139, 191, 0.2);
+    --color-badge-todo-text: #7b8bbf;
     --color-badge-progress-text: #8be9fd;
     --color-badge-done-text: #50fa7b;
     --color-badge-error-text: #ff5555;
@@ -219,9 +219,9 @@
     --color-bg-tertiary: #0a4050;
     --color-surface: #1a5060;
     --color-border: #2a6070;
-    --color-text: #93a1a1;
-    --color-text-secondary: #839496;
-    --color-text-muted: #657b83;
+    --color-text: #b0bfbf;
+    --color-text-secondary: #93a1a1;
+    --color-text-muted: #7e9298;
     --color-primary: #268bd2;
     --color-primary-hover: #2aa0f0;
     --color-primary-active: #2079b8;
@@ -240,15 +240,15 @@
     /* Tab sidebar */
     --color-tab-sidebar-bg: #002b36;
     --color-tab-border: #0a4050;
-    --color-tab-header-text: #839496;
-    --color-tab-text: #657b83;
-    --color-tab-text-active: #93a1a1;
+    --color-tab-header-text: #93a1a1;
+    --color-tab-text: #7e9298;
+    --color-tab-text-active: #b0bfbf;
     --color-tab-hover-bg: #073642;
     --color-tab-active-bg: #0a4050;
     --color-tab-accent: #268bd2;
     --color-tab-group-bg: #073642;
-    --color-tab-group-text: #657b83;
-    --color-tab-group-toggle: #657b83;
+    --color-tab-group-text: #7e9298;
+    --color-tab-group-toggle: #7e9298;
     --color-tab-input-bg: #0a4050;
 
     /* Terminal */
@@ -258,7 +258,7 @@
     --color-status-running: #859900;
     --color-status-disconnected: #b58900;
     --color-status-error: #dc322f;
-    --color-status-stopped: #657b83;
+    --color-status-stopped: #7e9298;
 
     /* Overlay */
     --color-overlay-bg: rgba(0, 43, 54, 0.7);
@@ -270,8 +270,8 @@
     --color-gradient-end: #6c71c4;
 
     /* Badges */
-    --color-badge-todo-bg: rgba(101, 123, 131, 0.2);
-    --color-badge-todo-text: #657b83;
+    --color-badge-todo-bg: rgba(126, 146, 152, 0.2);
+    --color-badge-todo-text: #7e9298;
     --color-badge-progress-text: #268bd2;
     --color-badge-done-text: #859900;
     --color-badge-error-text: #dc322f;
@@ -290,7 +290,7 @@
     --color-border: #49483e;
     --color-text: #f8f8f2;
     --color-text-secondary: #cfcfc2;
-    --color-text-muted: #75715e;
+    --color-text-muted: #908c76;
     --color-primary: #f92672;
     --color-primary-hover: #fb4d8c;
     --color-primary-active: #e01e65;
@@ -310,14 +310,14 @@
     --color-tab-sidebar-bg: #1e1f1c;
     --color-tab-border: #49483e;
     --color-tab-header-text: #cfcfc2;
-    --color-tab-text: #75715e;
+    --color-tab-text: #908c76;
     --color-tab-text-active: #f8f8f2;
     --color-tab-hover-bg: #3e3d32;
     --color-tab-active-bg: #49483e;
     --color-tab-accent: #f92672;
     --color-tab-group-bg: #3e3d32;
-    --color-tab-group-text: #75715e;
-    --color-tab-group-toggle: #75715e;
+    --color-tab-group-text: #908c76;
+    --color-tab-group-toggle: #908c76;
     --color-tab-input-bg: #49483e;
 
     /* Terminal */
@@ -327,7 +327,7 @@
     --color-status-running: #a6e22e;
     --color-status-disconnected: #e6db74;
     --color-status-error: #f92672;
-    --color-status-stopped: #75715e;
+    --color-status-stopped: #908c76;
 
     /* Overlay */
     --color-overlay-bg: rgba(30, 31, 28, 0.7);
@@ -339,8 +339,8 @@
     --color-gradient-end: #ae81ff;
 
     /* Badges */
-    --color-badge-todo-bg: rgba(117, 113, 94, 0.2);
-    --color-badge-todo-text: #75715e;
+    --color-badge-todo-bg: rgba(144, 140, 118, 0.2);
+    --color-badge-todo-text: #908c76;
     --color-badge-progress-text: #66d9ef;
     --color-badge-done-text: #a6e22e;
     --color-badge-error-text: #f92672;
@@ -428,7 +428,7 @@
     --color-border: #3b4261;
     --color-text: #c0caf5;
     --color-text-secondary: #a9b1d6;
-    --color-text-muted: #565f89;
+    --color-text-muted: #6e78a8;
     --color-primary: #7aa2f7;
     --color-primary-hover: #89b0fc;
     --color-primary-active: #6a92e7;
@@ -448,14 +448,14 @@
     --color-tab-sidebar-bg: #16161e;
     --color-tab-border: #3b4261;
     --color-tab-header-text: #a9b1d6;
-    --color-tab-text: #565f89;
+    --color-tab-text: #6e78a8;
     --color-tab-text-active: #c0caf5;
     --color-tab-hover-bg: #24283b;
     --color-tab-active-bg: #3b4261;
     --color-tab-accent: #7aa2f7;
     --color-tab-group-bg: #24283b;
-    --color-tab-group-text: #565f89;
-    --color-tab-group-toggle: #565f89;
+    --color-tab-group-text: #6e78a8;
+    --color-tab-group-toggle: #6e78a8;
     --color-tab-input-bg: #3b4261;
 
     /* Terminal */
@@ -465,7 +465,7 @@
     --color-status-running: #9ece6a;
     --color-status-disconnected: #e0af68;
     --color-status-error: #f7768e;
-    --color-status-stopped: #565f89;
+    --color-status-stopped: #6e78a8;
 
     /* Overlay */
     --color-overlay-bg: rgba(22, 22, 30, 0.7);
@@ -477,8 +477,8 @@
     --color-gradient-end: #bb9af7;
 
     /* Badges */
-    --color-badge-todo-bg: rgba(86, 95, 137, 0.2);
-    --color-badge-todo-text: #565f89;
+    --color-badge-todo-bg: rgba(110, 120, 168, 0.2);
+    --color-badge-todo-text: #6e78a8;
     --color-badge-progress-text: #7dcfff;
     --color-badge-done-text: #9ece6a;
     --color-badge-error-text: #f7768e;
@@ -772,8 +772,8 @@
     --color-surface: #143870;
     --color-border: #1a4580;
     --color-text: #d0e0d8;
-    --color-text-secondary: #90b8c8;
-    --color-text-muted: #4a80a0;
+    --color-text-secondary: #a8ccd8;
+    --color-text-muted: #6a9ab5;
     --color-primary: #009c3b;
     --color-primary-hover: #10b84a;
     --color-primary-active: #008030;
@@ -792,15 +792,15 @@
     /* Tab sidebar */
     --color-tab-sidebar-bg: #021430;
     --color-tab-border: #1a4580;
-    --color-tab-header-text: #90b8c8;
-    --color-tab-text: #4a80a0;
+    --color-tab-header-text: #a8ccd8;
+    --color-tab-text: #6a9ab5;
     --color-tab-text-active: #d0e0d8;
     --color-tab-hover-bg: #0a2a58;
     --color-tab-active-bg: #143870;
     --color-tab-accent: #009c3b;
     --color-tab-group-bg: #0a2a58;
-    --color-tab-group-text: #4a80a0;
-    --color-tab-group-toggle: #4a80a0;
+    --color-tab-group-text: #6a9ab5;
+    --color-tab-group-toggle: #6a9ab5;
     --color-tab-input-bg: #143870;
 
     /* Terminal */
@@ -810,7 +810,7 @@
     --color-status-running: #30cc50;
     --color-status-disconnected: #ffdf00;
     --color-status-error: #e84040;
-    --color-status-stopped: #4a80a0;
+    --color-status-stopped: #6a9ab5;
 
     /* Overlay */
     --color-overlay-bg: rgba(2, 20, 48, 0.7);
@@ -822,8 +822,8 @@
     --color-gradient-end: #4090d8;
 
     /* Badges */
-    --color-badge-todo-bg: rgba(74, 128, 160, 0.2);
-    --color-badge-todo-text: #4a80a0;
+    --color-badge-todo-bg: rgba(106, 154, 181, 0.2);
+    --color-badge-todo-text: #6a9ab5;
     --color-badge-progress-text: #4090d8;
     --color-badge-done-text: #30cc50;
     --color-badge-error-text: #e84040;
