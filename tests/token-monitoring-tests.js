@@ -1,8 +1,8 @@
 /**
- * Token Monitoring Tests - DevManager
+ * Token Monitoring Tests - OpenPoet
  *
  * Execute with Playwright MCP against http://localhost:8080
- * Server must be started with DEVMANAGER_TEST_MODE=1
+ * Server must be started with OPENPOET_TEST_MODE=1
  *
  * Test groups:
  *   A: AI Assistant tokens (requires AI provider configured)
@@ -267,7 +267,7 @@ function buildOTELPayload(sessionId, model, tokens) {
         resourceMetrics: [{
             resource: {
                 attributes: [
-                    { key: 'devmanager.session_id', value: strVal(sessionId) },
+                    { key: 'openpoet.session_id', value: strVal(sessionId) },
                 ],
             },
             scopeMetrics: [{

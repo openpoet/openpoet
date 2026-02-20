@@ -1,6 +1,6 @@
 # Binary / Build
 /build/
-/devmanager
+/openpoet
 
 # Database
 *.db

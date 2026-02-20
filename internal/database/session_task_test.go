@@ -9,7 +9,7 @@ import (
 
 func setupTestDB(t *testing.T) *DB {
 	t.Helper()
-	tmpFile, err := os.CreateTemp("", "devmanager-test-*.db")
+	tmpFile, err := os.CreateTemp("", "openpoet-test-*.db")
 	if err != nil {
 		t.Fatal(err)
 	}

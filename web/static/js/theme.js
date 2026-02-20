@@ -1,4 +1,4 @@
-// Theme System for DevManager
+// Theme System for OpenPoet
 // Manages predefined themes with CSS variable overrides, terminal sync, and persistence
 
 const THEMES = {
@@ -328,7 +328,7 @@ const THEMES = {
     }
 };
 
-const STORAGE_KEY = 'devmanager-theme';
+const STORAGE_KEY = 'openpoet-theme';
 
 function getCurrentThemeId() {
     return localStorage.getItem(STORAGE_KEY) || 'tokyonight';
@@ -374,7 +374,7 @@ function initTheme() {
 }
 
 // Expose globally
-window.devManagerTheme = {
+window.openPoetTheme = {
     THEMES,
     applyTheme,
     getTerminalTheme,

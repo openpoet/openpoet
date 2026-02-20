@@ -17,25 +17,25 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"devmanager/internal/benchmark"
-	"devmanager/internal/config"
-	"devmanager/internal/database"
-	"devmanager/internal/handlers"
-	"devmanager/internal/llm"
-	"devmanager/internal/configsync"
-	"devmanager/internal/mcp"
-	"devmanager/internal/notifications"
-	"devmanager/internal/security"
-	"devmanager/internal/session"
-	"devmanager/internal/tunnel"
-	"devmanager/internal/voice"
-	"devmanager/internal/websocket"
-	"devmanager/web"
+	"openpoet/internal/benchmark"
+	"openpoet/internal/config"
+	"openpoet/internal/database"
+	"openpoet/internal/handlers"
+	"openpoet/internal/llm"
+	"openpoet/internal/configsync"
+	"openpoet/internal/mcp"
+	"openpoet/internal/notifications"
+	"openpoet/internal/security"
+	"openpoet/internal/session"
+	"openpoet/internal/tunnel"
+	"openpoet/internal/voice"
+	"openpoet/internal/websocket"
+	"openpoet/web"
 )
 
 // Build-time variables injected via -ldflags
 var BuildVersion = "dev"
-var DefaultRelayURL = "" // e.g., "wss://tunnel.devmanager.app/tunnel/connect"
+var DefaultRelayURL = "" // e.g., "wss://tunnel.openpoet.app/tunnel/connect"
 
 // debugResponseWriter wraps http.ResponseWriter to capture status and size for logging
 type debugResponseWriter struct {
@@ -72,7 +72,7 @@ func (dw *debugResponseWriter) Write(b []byte) (int, error) {
 
 func main() {
 	// Strip Claude Code marker env vars so Go SDK subprocesses are not rejected
-	// as "nested sessions" when DevManager itself was launched from Claude Code.
+	// as "nested sessions" when OpenPoet itself was launched from Claude Code.
 	os.Unsetenv("CLAUDECODE")
 	os.Unsetenv("CLAUDE_CODE_ENTRYPOINT")
 
@@ -85,17 +85,17 @@ func main() {
 			switch os.Args[i] {
 			case "--session-id":
 				if i+1 < len(os.Args) {
-					os.Setenv("DEVMANAGER_SESSION_ID", os.Args[i+1])
+					os.Setenv("OPENPOET_SESSION_ID", os.Args[i+1])
 					i++
 				}
 			case "--api-url":
 				if i+1 < len(os.Args) {
-					os.Setenv("DEVMANAGER_API_URL", os.Args[i+1])
+					os.Setenv("OPENPOET_API_URL", os.Args[i+1])
 					i++
 				}
 			}
 		}
-		apiURL := os.Getenv("DEVMANAGER_API_URL")
+		apiURL := os.Getenv("OPENPOET_API_URL")
 		if apiURL == "" {
 			apiURL = "http://localhost:8080"
 		}
@@ -112,7 +112,7 @@ func main() {
 	// Parse command line flags
 	bind := flag.String("bind", "", "Address to bind (default: 0.0.0.0)")
 	port := flag.Int("port", 0, "Port to listen on (default: 8080)")
-	dbPath := flag.String("db", "", "Database path (default: devmanager.db)")
+	dbPath := flag.String("db", "", "Database path (default: openpoet.db)")
 	openaiKey := flag.String("openai-key", "", "OpenAI API key for voice transcription")
 	mcpHTTP := flag.Bool("mcp-http", false, "Enable MCP HTTP endpoint at /mcp")
 	flag.Parse()
@@ -446,7 +446,7 @@ func main() {
 		// Version
 		r.Get("/version", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Cache-Control", "no-store")
 			json.NewEncoder(w).Encode(map[string]string{"version": BuildVersion})
 		})
 
@@ -671,8 +671,8 @@ func main() {
 		r.Post("/tunnel/pair-confirm", api.ConfirmPairing)
 	})
 
-	// Test-only endpoints (only available when DEVMANAGER_TEST_MODE=1)
-	if os.Getenv("DEVMANAGER_TEST_MODE") == "1" {
+	// Test-only endpoints (only available when OPENPOET_TEST_MODE=1)
+	if os.Getenv("OPENPOET_TEST_MODE") == "1" {
 		log.Printf("[TEST] Test mode enabled — test endpoints available")
 		r.Post("/api/test/seed-token-usage", api.SeedTokenUsage)
 	}
@@ -693,14 +693,24 @@ func main() {
 	// Static files and SPA - use web.FS from embed
 	webFS := web.FS
 
-	// Serve static files
+	// Serve static files with proper cache headers
 	staticFS, _ := fs.Sub(webFS, "static")
-	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
+	staticHandler := http.StripPrefix("/static/", http.FileServer(http.FS(staticFS)))
+	r.Handle("/static/*", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" {
+			// Versioned assets (?v=hash) — content-addressed, cache indefinitely
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			// Non-versioned (vendor libs, images) — short cache with revalidation
+			w.Header().Set("Cache-Control", "public, max-age=3600, must-revalidate")
+		}
+		staticHandler.ServeHTTP(w, r)
+	}))
 
 	// Serve service worker with version injection
 	r.Get("/sw.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-store")
 		data, _ := fs.ReadFile(webFS, "sw.js")
 		content := strings.ReplaceAll(string(data), "__BUILD_VERSION__", BuildVersion)
 		w.Write([]byte(content))
@@ -715,7 +725,7 @@ func main() {
 	// Serve index.html with version injection for all SPA routes
 	r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-store")
 		data, err := fs.ReadFile(webFS, "templates/index.html")
 		if err != nil {
 			http.Error(w, "Not Found", http.StatusNotFound)
@@ -740,7 +750,7 @@ func main() {
 
 	// Start server in goroutine
 	go func() {
-		log.Printf("DevManager starting on http://%s", cfg.Address())
+		log.Printf("OpenPoet starting on http://%s", cfg.Address())
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server error: %v", err)
 		}
@@ -782,7 +792,7 @@ func main() {
 		log.Printf("Server shutdown error: %v", err)
 	}
 
-	fmt.Println("DevManager stopped")
+	fmt.Println("OpenPoet stopped")
 }
 
 // initDatabase tries to open/migrate the database. On failure, it silently
@@ -1037,7 +1047,7 @@ const migrationErrorPageHTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DevManager</title>
+<title>OpenPoet</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {

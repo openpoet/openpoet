@@ -1,7 +1,7 @@
 /**
- * DevManager Tools — MCP server for the Node.js Agent SDK sidecar.
+ * OpenPoet Tools — MCP server for the Node.js Agent SDK sidecar.
  *
- * Each tool proxies its execution to the DevManager Go backend via HTTP POST
+ * Each tool proxies its execution to the OpenPoet Go backend via HTTP POST
  * to /api/ai/execute-tool. This avoids duplicating tool logic and keeps the
  * Go backend as the single source of truth.
  */
@@ -9,14 +9,14 @@ import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 
 /**
- * Calls the DevManager Go backend to execute a tool.
- * @param {string} apiURL - Base URL of the DevManager backend
+ * Calls the OpenPoet Go backend to execute a tool.
+ * @param {string} apiURL - Base URL of the OpenPoet backend
  * @param {string} toolName - Name of the tool to execute
  * @param {object} args - Tool arguments
  * @param {number} conversationID - Conversation ID for context
  * @returns {Promise<{content: Array, isError?: boolean}>}
  */
-async function callDevManager(apiURL, toolName, args, conversationID = 0) {
+async function callOpenPoet(apiURL, toolName, args, conversationID = 0) {
     try {
         const resp = await fetch(`${apiURL}/api/ai/execute-tool`, {
             method: 'POST',
@@ -46,21 +46,21 @@ async function callDevManager(apiURL, toolName, args, conversationID = 0) {
 }
 
 /**
- * Builds the DevManager MCP server with all tools registered.
+ * Builds the OpenPoet MCP server with all tools registered.
  * Tools proxy to the Go backend via HTTP.
- * @param {string} apiURL - Base URL of the DevManager Go backend
+ * @param {string} apiURL - Base URL of the OpenPoet Go backend
  * @param {number} conversationID - Conversation ID for context
  * @returns {McpSdkServer}
  */
-export function buildDevManagerTools(apiURL, conversationID = 0) {
-    const proxy = (name, args) => callDevManager(apiURL, name, args, conversationID);
+export function buildOpenPoetTools(apiURL, conversationID = 0) {
+    const proxy = (name, args) => callOpenPoet(apiURL, name, args, conversationID);
 
     return createSdkMcpServer({
-        name: 'devmanager',
+        name: 'openpoet',
         version: '1.0.0',
         tools: [
             // Skill management
-            tool('create_skill', 'Create a new skill in DevManager', {
+            tool('create_skill', 'Create a new skill in OpenPoet', {
                 name: z.string().describe('Unique name, lowercase with hyphens'),
                 content: z.string().describe('Markdown content with instructions'),
                 category: z.string().optional().describe('Category label'),
@@ -77,11 +77,11 @@ export function buildDevManagerTools(apiURL, conversationID = 0) {
                 id: z.string().describe('Skill ID'),
             }, (args) => proxy('delete_skill', args)),
 
-            tool('list_skills', 'List all skills in DevManager', {},
+            tool('list_skills', 'List all skills in OpenPoet', {},
                 () => proxy('list_skills', {})),
 
             // Project management
-            tool('list_projects', 'List all projects in DevManager', {},
+            tool('list_projects', 'List all projects in OpenPoet', {},
                 () => proxy('list_projects', {})),
 
             // MCP servers
@@ -96,7 +96,7 @@ export function buildDevManagerTools(apiURL, conversationID = 0) {
             }, (args) => proxy('create_mcp_server', args)),
 
             // Settings
-            tool('update_setting', 'Update a DevManager setting', {
+            tool('update_setting', 'Update a OpenPoet setting', {
                 key: z.string().describe('Setting key'),
                 value: z.string().describe('Setting value'),
             }, (args) => proxy('update_setting', args)),

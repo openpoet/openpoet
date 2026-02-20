@@ -2,7 +2,7 @@ package session
 
 import (
 	"context"
-	"devmanager/internal/database"
+	"openpoet/internal/database"
 	"fmt"
 	"io"
 	"log"
@@ -72,10 +72,10 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 	r.client = client
 	log.Printf("[remote] SSH connection established to %s", addr)
 
-	// Set up reverse tunnel so remote bridge.sh can reach local DevManager
-	log.Printf("[remote] Setting up reverse tunnel, envVars before: DEVMANAGER_HOOK_URL=%s", r.envVars["DEVMANAGER_HOOK_URL"])
+	// Set up reverse tunnel so remote bridge.sh can reach local OpenPoet
+	log.Printf("[remote] Setting up reverse tunnel, envVars before: OPENPOET_HOOK_URL=%s", r.envVars["OPENPOET_HOOK_URL"])
 	r.setupReverseTunnel(client)
-	log.Printf("[remote] After tunnel setup, envVars: DEVMANAGER_HOOK_URL=%s", r.envVars["DEVMANAGER_HOOK_URL"])
+	log.Printf("[remote] After tunnel setup, envVars: OPENPOET_HOOK_URL=%s", r.envVars["OPENPOET_HOOK_URL"])
 
 	// Create session
 	session, err := client.NewSession()
@@ -238,15 +238,15 @@ func (r *RemoteRunner) buildSSHConfig() (*ssh.ClientConfig, error) {
 }
 
 // setupReverseTunnel creates an SSH reverse tunnel so bridge.sh on the remote
-// machine can reach the local DevManager API.
+// machine can reach the local OpenPoet API.
 func (r *RemoteRunner) setupReverseTunnel(client *ssh.Client) {
-	hookURL, ok := r.envVars["DEVMANAGER_HOOK_URL"]
+	hookURL, ok := r.envVars["OPENPOET_HOOK_URL"]
 	if !ok || hookURL == "" {
-		log.Printf("[remote] Tunnel: no DEVMANAGER_HOOK_URL set, skipping tunnel")
+		log.Printf("[remote] Tunnel: no OPENPOET_HOOK_URL set, skipping tunnel")
 		return
 	}
 
-	// Parse the local DevManager address from the env var (e.g. "http://0.0.0.0:8080")
+	// Parse the local OpenPoet address from the env var (e.g. "http://0.0.0.0:8080")
 	localAddr := strings.TrimPrefix(hookURL, "http://")
 	// Replace 0.0.0.0 with 127.0.0.1 for local connections
 	localAddr = strings.Replace(localAddr, "0.0.0.0", "127.0.0.1", 1)
@@ -265,11 +265,11 @@ func (r *RemoteRunner) setupReverseTunnel(client *ssh.Client) {
 	log.Printf("[remote] Tunnel: remote listener created at %s", tunnelAddr)
 
 	// Update the env var to point to the tunnel on the remote side
-	r.envVars["DEVMANAGER_HOOK_URL"] = "http://" + tunnelAddr
-	log.Printf("[remote] Tunnel: DEVMANAGER_HOOK_URL updated to http://%s", tunnelAddr)
+	r.envVars["OPENPOET_HOOK_URL"] = "http://" + tunnelAddr
+	log.Printf("[remote] Tunnel: OPENPOET_HOOK_URL updated to http://%s", tunnelAddr)
 	log.Printf("[remote] Tunnel: active — remote %s -> local %s", tunnelAddr, localAddr)
 
-	// Forward connections from remote listener to local DevManager
+	// Forward connections from remote listener to local OpenPoet
 	go func() {
 		connCount := 0
 		for {
@@ -284,10 +284,10 @@ func (r *RemoteRunner) setupReverseTunnel(client *ssh.Client) {
 
 			go func(remote net.Conn, id int) {
 				defer remote.Close()
-				log.Printf("[remote] Tunnel: conn #%d — dialing local DevManager at %s", id, localAddr)
+				log.Printf("[remote] Tunnel: conn #%d — dialing local OpenPoet at %s", id, localAddr)
 				local, err := net.Dial("tcp", localAddr)
 				if err != nil {
-					log.Printf("[remote] Tunnel: conn #%d — FAILED to connect to local DevManager %s: %v", id, localAddr, err)
+					log.Printf("[remote] Tunnel: conn #%d — FAILED to connect to local OpenPoet %s: %v", id, localAddr, err)
 					return
 				}
 				defer local.Close()

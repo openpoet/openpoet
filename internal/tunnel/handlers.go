@@ -77,7 +77,7 @@ func servePairingDisplayHTML(w http.ResponseWriter, code string, sessionID strin
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DevManager - Pair Device</title>
+<title>OpenPoet - Pair Device</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -186,7 +186,7 @@ p {
 <div class="card">
 	<div class="logo">&#x1f517;</div>
 	<h1>Pair This Device</h1>
-	<p>To grant this device access to DevManager, enter the code below on your admin machine.</p>
+	<p>To grant this device access to OpenPoet, enter the code below on your admin machine.</p>
 	<div class="code-display" id="codeDisplay">
 		<div class="code-digit">` + string(digits[0]) + `</div>
 		<div class="code-digit">` + string(digits[1]) + `</div>
@@ -202,7 +202,7 @@ p {
 	<div class="timer" id="timer"></div>
 	<div class="instructions">
 		<ol>
-			<li>On your computer, open <strong>DevManager</strong></li>
+			<li>On your computer, open <strong>OpenPoet</strong></li>
 			<li>Go to <strong>Config &gt; Settings &gt; Remote Access</strong></li>
 			<li>Click <strong>Pair New Device</strong> and type this code</li>
 			<li>Once approved, this page will redirect automatically</li>

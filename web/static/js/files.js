@@ -338,7 +338,7 @@ class FileBrowser {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         data: imageData,
-                        dir: '.devmanager/images'
+                        dir: '.openpoet/images'
                     })
                 });
 

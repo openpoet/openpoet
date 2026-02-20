@@ -196,10 +196,10 @@ class NotifBadge {
     async markAllRead() {
         try {
             await fetch('/api/notifications/read-all', { method: 'PUT' });
-            this.notifications.forEach(n => n.read = true);
+            this.notifications = [];
             this.activeCount = 0;
             this.updateCount(0);
-            this.renderPanel();
+            this.hide();
         } catch (err) {
             console.warn('[NotifBadge] Failed to mark all read:', err);
         }

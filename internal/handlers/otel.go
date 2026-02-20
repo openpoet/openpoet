@@ -3,8 +3,8 @@ package handlers
 import (
 	"context"
 	"database/sql"
-	"devmanager/internal/database"
-	"devmanager/internal/llm"
+	"openpoet/internal/database"
+	"openpoet/internal/llm"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -52,7 +52,7 @@ func (h *OTELHandler) HandleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, rm := range payload.ResourceMetrics {
-		sessionID := extractResourceAttribute(rm.Resource, "devmanager.session_id")
+		sessionID := extractResourceAttribute(rm.Resource, "openpoet.session_id")
 		if sessionID == "" {
 			continue
 		}

@@ -26,7 +26,7 @@ type SessionProvider interface {
 	CloseAllSessions()
 }
 
-// ToolExecutor executes DevManager tools. Shared between ai.go tool loop
+// ToolExecutor executes OpenPoet tools. Shared between ai.go tool loop
 // and SDK providers' in-process MCP servers.
 type ToolExecutor interface {
 	ExecuteTool(ctx context.Context, name string, input map[string]any, conversationID int64) (string, error)

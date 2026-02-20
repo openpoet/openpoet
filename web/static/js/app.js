@@ -1,5 +1,5 @@
-// DevManager Application
-class DevManager {
+// OpenPoet Application
+class OpenPoet {
     constructor() {
         this.ws = null;
         this.currentView = 'projects';
@@ -21,6 +21,9 @@ class DevManager {
 
         // View state preservation (scroll, filters, tabs)
         this._viewState = {};
+
+        // Update banner guard (initialized before init() to prevent race with SW message listener)
+        this._updateBannerShown = false;
 
         this.init();
     }
@@ -84,7 +87,11 @@ class DevManager {
                 } else if (event.data && event.data.type === 'navigate_to_session') {
                     this.openTerminal(event.data.session_id);
                 } else if (event.data && event.data.type === 'sw_updated') {
-                    this.showUpdateBanner();
+                    const metaVersion = document.querySelector('meta[name="app-version"]')?.content;
+                    if (metaVersion && event.data.version &&
+                        event.data.version !== 'openpoet-' + metaVersion) {
+                        this.showUpdateBanner();
+                    }
                 }
             });
         }
@@ -182,7 +189,7 @@ class DevManager {
             await this.openTerminal(mostRecent.id);
             this._updateNavForTerminal();
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -573,8 +580,19 @@ class DevManager {
 
         const response = await fetch(`/api${path}`, options);
         if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error || 'Request failed');
+            let errorMsg = 'Request failed';
+            let retryAfter = null;
+            try {
+                const error = await response.json();
+                errorMsg = error.error || errorMsg;
+                retryAfter = error.retry_after || null;
+            } catch {
+                try { errorMsg = await response.text(); } catch {}
+            }
+            const err = new Error(errorMsg);
+            err.status = response.status;
+            err.retryAfter = retryAfter;
+            throw err;
         }
         if (response.status === 204) return null;
         return response.json();
@@ -644,7 +662,7 @@ class DevManager {
             this.renderProjects();
             this._restoreScrollTop('projects-list', this._viewState['projects']?.scrollTop);
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -745,7 +763,7 @@ class DevManager {
             this.showToast('Success', taskId ? 'Session started from task' : 'Session started', 'success');
             this.openTerminal(session.id, session, session.name);
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -1228,7 +1246,7 @@ class DevManager {
             } catch (error) {
                 submitBtn.disabled = false;
                 submitBtn.textContent = 'Link Task';
-                this.showToast('Error', error.message, 'error');
+                this._showApiError(error);
             }
         });
     }
@@ -2380,7 +2398,7 @@ class DevManager {
             this.loadProjects();
             this.showView('projects');
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -2411,7 +2429,7 @@ class DevManager {
             this.renderSessions();
             this._restoreScrollTop('sessions-list', this._viewState['sessions']?.scrollTop);
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -2599,20 +2617,25 @@ class DevManager {
             await this.api('DELETE', `/sessions/${sessionId}`);
             this.showToast('Success', 'Session stopped', 'success');
 
-            // Remove tab without switching to another session
+            // Remove tab
             const tabElement = document.querySelector(`.terminal-tab[data-session-id="${sessionId}"]`);
             if (tabElement) tabElement.remove();
             this.openTabs.delete(sessionId);
             window.terminalManager.disconnect(sessionId);
             this.saveTabsToStorage();
 
-            // Always show empty state after stopping a session
-            this._showSessionsEmptyState();
+            // Switch to next active session if available, otherwise show empty state
+            if (this.openTabs.size > 0) {
+                const nextSessionId = Array.from(this.openTabs.keys())[0];
+                this.openTerminal(nextSessionId);
+            } else {
+                this._showSessionsEmptyState();
+            }
 
             await this.loadSessions();
         } catch (error) {
             console.error('stopSession error:', error);
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -2910,14 +2933,11 @@ class DevManager {
         // Save tabs to storage
         this.saveTabsToStorage();
 
-        // Update mobile dropdown
+        // Switch to next active session if available, otherwise show empty state
         if (this.openTabs.size > 0) {
             const nextSessionId = Array.from(this.openTabs.keys())[0];
-            this.updateMobileSessionTrigger(nextSessionId);
-        }
-
-        // If no tabs left, show empty sessions state
-        if (this.openTabs.size === 0) {
+            this.openTerminal(nextSessionId);
+        } else {
             this._showSessionsEmptyState();
         }
     }
@@ -2967,9 +2987,14 @@ class DevManager {
             }
         });
 
-        // If tabs were removed, show empty sessions state
+        // If tabs were removed, switch to next session or show empty state
         if (tabsRemoved) {
-            this._showSessionsEmptyState();
+            if (this.openTabs.size > 0) {
+                const nextSessionId = Array.from(this.openTabs.keys())[0];
+                this.openTerminal(nextSessionId);
+            } else {
+                this._showSessionsEmptyState();
+            }
         }
     }
 
@@ -3045,8 +3070,10 @@ class DevManager {
             const { sessionId, status } = e.detail;
             this.updateTabStatus(sessionId, status);
 
-            // When session ends, close its tab and navigate away
-            if (status === 'completed' || status === 'stopped' || status === 'error' || status === 'disconnected') {
+            // When session ends (server-confirmed), close its tab and navigate away.
+            // 'disconnected' is NOT included — it means the WebSocket dropped,
+            // not that the session ended. The terminal will auto-reconnect.
+            if (status === 'completed' || status === 'stopped' || status === 'error') {
                 setTimeout(() => {
                     if (this.openTabs.has(sessionId)) {
                         this.closeTab(sessionId);
@@ -3569,11 +3596,11 @@ class DevManager {
     saveTabOrder() {
         const tabs = Array.from(document.querySelectorAll('.terminal-tab'));
         const order = tabs.map(tab => tab.dataset.sessionId);
-        localStorage.setItem('devmanager-tab-order', JSON.stringify(order));
+        localStorage.setItem('openpoet-tab-order', JSON.stringify(order));
     }
 
     restoreTabOrder() {
-        const orderJson = localStorage.getItem('devmanager-tab-order');
+        const orderJson = localStorage.getItem('openpoet-tab-order');
         if (!orderJson) return;
 
         try {
@@ -3603,7 +3630,7 @@ class DevManager {
             });
         });
 
-        localStorage.setItem('devmanager-tabs-state', JSON.stringify({
+        localStorage.setItem('openpoet-tabs-state', JSON.stringify({
             tabs: tabsState,
             activeSessionId: window.terminalManager.activeSessionId,
             timestamp: Date.now()
@@ -3611,7 +3638,7 @@ class DevManager {
     }
 
     async restoreTabsFromStorage() {
-        const stateJson = localStorage.getItem('devmanager-tabs-state');
+        const stateJson = localStorage.getItem('openpoet-tabs-state');
         if (!stateJson) return;
 
         try {
@@ -3620,7 +3647,7 @@ class DevManager {
             // Check if state is not too old (24 hours)
             const maxAge = 24 * 60 * 60 * 1000;
             if (Date.now() - state.timestamp > maxAge) {
-                localStorage.removeItem('devmanager-tabs-state');
+                localStorage.removeItem('openpoet-tabs-state');
                 return;
             }
 
@@ -3690,7 +3717,7 @@ class DevManager {
 
         } catch (e) {
             console.error('Failed to restore tabs from storage:', e);
-            localStorage.removeItem('devmanager-tabs-state');
+            localStorage.removeItem('openpoet-tabs-state');
         }
     }
 
@@ -3797,7 +3824,7 @@ class DevManager {
             }
             this.renderConfig();
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -3991,13 +4018,13 @@ class DevManager {
         }
 
         // Build theme picker
-        const themes = window.devManagerTheme ? window.devManagerTheme.THEMES : {};
-        const currentTheme = window.devManagerTheme ? window.devManagerTheme.getCurrentThemeId() : 'tokyonight';
+        const themes = window.openPoetTheme ? window.openPoetTheme.THEMES : {};
+        const currentTheme = window.openPoetTheme ? window.openPoetTheme.getCurrentThemeId() : 'tokyonight';
         let themeSwatches = '';
         for (const [id, theme] of Object.entries(themes)) {
             const active = id === currentTheme ? ' active' : '';
             themeSwatches += `
-                <button class="theme-swatch${active}" data-theme="${id}" onclick="window.devManagerTheme.applyTheme('${id}')" title="${theme.name}">
+                <button class="theme-swatch${active}" data-theme="${id}" onclick="window.openPoetTheme.applyTheme('${id}')" title="${theme.name}">
                     <div class="theme-swatch-preview">
                         <div class="swatch-bar" style="background:${theme.preview[0]}"></div>
                         <div class="swatch-bar" style="background:${theme.preview[1]}"></div>
@@ -4014,7 +4041,7 @@ class DevManager {
                 </div>
                 <div class="card-body">
                     <p style="margin-bottom: 12px; color: var(--color-text-secondary, #999); font-size: 13px;">
-                        Access DevManager from your phone or other devices remotely.
+                        Access OpenPoet from your phone or other devices remotely.
                     </p>
                     <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
                         <span id="tunnel-status-dot" style="width: 10px; height: 10px; border-radius: 50%; background: #484f58; flex-shrink: 0;"></span>
@@ -4146,7 +4173,7 @@ class DevManager {
                 </div>
                 <div class="card-body">
                     <p style="margin-bottom: 12px; color: var(--text-secondary, #999); font-size: 13px;">
-                        Expose DevManager tools over HTTP for external AI systems (e.g. OpenClaw). Restart required after enabling.
+                        Expose OpenPoet tools over HTTP for external AI systems (e.g. OpenClaw). Restart required after enabling.
                     </p>
                     <div class="form-checkbox" style="margin-bottom: 12px;">
                         <input type="checkbox" id="mcp-http-enabled">
@@ -4169,7 +4196,7 @@ class DevManager {
                 </div>
                 <div class="card-body">
                     <p style="margin-bottom: 12px; color: var(--text-secondary, #999); font-size: 13px;">
-                        Control which DevManager tools are available in each context. Uncheck tools to deny them.
+                        Control which OpenPoet tools are available in each context. Uncheck tools to deny them.
                     </p>
                     <div id="tp-contexts" style="display: flex; flex-direction: column; gap: 8px;"></div>
                     <button class="btn btn-primary btn-sm" style="margin-top: 12px;" onclick="app.saveToolPolicies()">Save</button>
@@ -4483,7 +4510,7 @@ class DevManager {
             this.showToast('Success', 'Project saved', 'success');
             this.loadProjects();
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -4503,7 +4530,7 @@ class DevManager {
                         this.loadProjects();
                     }
                 } catch (error) {
-                    this.showToast('Error', error.message, 'error');
+                    this._showApiError(error);
                 }
             },
             'Delete'
@@ -4513,7 +4540,6 @@ class DevManager {
     // Auto-update version check
     setupVersionCheck() {
         this.appVersion = document.querySelector('meta[name="app-version"]')?.content || '';
-        this._updateBannerShown = false;
 
         // Check for updates every 60 seconds
         setInterval(() => this.checkForUpdate(), 60000);
@@ -4541,7 +4567,7 @@ class DevManager {
     }
 
     showUpdateBanner() {
-        if (this._updateBannerShown) return;
+        if (this._updateBannerShown || document.getElementById('update-banner')) return;
         this._updateBannerShown = true;
 
         const banner = document.createElement('div');
@@ -4553,6 +4579,20 @@ class DevManager {
             <button onclick="this.parentElement.remove()" style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.4);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:13px;">Depois</button>
         `;
         document.body.prepend(banner);
+    }
+
+    // Show API error with special handling for rate limits (429)
+    _showApiError(error) {
+        if (error.status === 429) {
+            let msg = error.message;
+            if (error.retryAfter) {
+                const secs = error.retryAfter;
+                msg += secs < 60 ? ` Try again in ${secs}s.` : ` Try again in ${Math.ceil(secs / 60)} min.`;
+            }
+            this.showToast('Rate Limited', msg, 'warning');
+        } else {
+            this._showApiError(error);
+        }
     }
 
     // Toast notifications
@@ -4581,7 +4621,7 @@ class DevManager {
         }
         container.appendChild(toast);
 
-        setTimeout(() => toast.remove(), 5000);
+        setTimeout(() => toast.remove(), type === 'warning' ? 8000 : 5000);
     }
 
     // Utility
@@ -4760,7 +4800,7 @@ class DevManager {
                 await this.api('POST', '/config/sync-all');
                 this.showToast('Success', 'Config synced to all projects', 'success');
             } catch (error) {
-                this.showToast('Error', error.message, 'error');
+                this._showApiError(error);
             }
         });
 
@@ -4974,7 +5014,7 @@ class DevManager {
             this.showToast('Success', 'Skill saved', 'success');
             this.loadConfig();
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -4993,7 +5033,7 @@ class DevManager {
                     this.showToast('Success', 'Skill deleted', 'success');
                     this.loadConfig();
                 } catch (error) {
-                    this.showToast('Error', error.message, 'error');
+                    this._showApiError(error);
                 }
             },
             'Delete'
@@ -5007,7 +5047,7 @@ class DevManager {
             await this.api('PUT', `/config/skills/${skillId}`, { ...skill, enabled });
             this.showToast('Success', enabled ? 'Skill enabled' : 'Skill disabled', 'success');
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
             // Revert checkbox
             this.loadConfig();
         }
@@ -5019,7 +5059,7 @@ class DevManager {
             this.showToast('Success', 'Skill duplicated', 'success');
             this.loadConfig();
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5030,7 +5070,7 @@ class DevManager {
             this.showToast('Success', 'Skills synced to all projects', 'success');
             this.loadConfig();
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5041,12 +5081,12 @@ class DevManager {
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = 'devmanager-skills.json';
+            a.download = 'openpoet-skills.json';
             a.click();
             URL.revokeObjectURL(url);
             this.showToast('Success', 'Skills exported', 'success');
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5098,7 +5138,7 @@ class DevManager {
                 <button class="btn btn-secondary" onclick="app.hideModal()">Close</button>
             `);
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5113,7 +5153,7 @@ class DevManager {
                     this.showToast('Success', 'Version restored', 'success');
                     this.loadConfig();
                 } catch (error) {
-                    this.showToast('Error', error.message, 'error');
+                    this._showApiError(error);
                 }
             },
             'Restore'
@@ -5175,7 +5215,7 @@ class DevManager {
             this.showToast('Success', 'MCP server saved', 'success');
             this.loadConfig();
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5194,7 +5234,7 @@ class DevManager {
                     this.showToast('Success', 'MCP server deleted', 'success');
                     this.loadConfig();
                 } catch (error) {
-                    this.showToast('Error', error.message, 'error');
+                    this._showApiError(error);
                 }
             },
             'Delete'
@@ -5464,7 +5504,7 @@ class DevManager {
             this.hideModal();
             this.loadConfig();
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5477,7 +5517,7 @@ class DevManager {
                     await this.api('DELETE', `/config/ai-configs/${configId}`);
                     this.loadConfig();
                 } catch (error) {
-                    this.showToast('Error', error.message, 'error');
+                    this._showApiError(error);
                 }
             },
             'Delete'
@@ -5500,7 +5540,7 @@ class DevManager {
             this.showToast('Success', 'Assignments saved', 'success');
             this.loadConfig();
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5511,7 +5551,7 @@ class DevManager {
             });
             this.showToast('Success', `Task auto-update ${enabled ? 'enabled' : 'disabled'}`, 'success');
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5529,7 +5569,7 @@ class DevManager {
             });
             this.showToast('Success', `Task auto-evaluation ${enabled ? 'enabled' : 'disabled'}`, 'success');
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5548,7 +5588,7 @@ class DevManager {
             await this.api('PUT', '/config/settings', settings);
             this.showToast('Success', 'Settings saved', 'success');
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5560,7 +5600,7 @@ class DevManager {
             });
             this.showToast('Success', 'MCP HTTP settings saved. Restart required.', 'success');
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5581,7 +5621,7 @@ class DevManager {
             this.showToast('API Key Generated', `Key: ${data.key}`, 'success');
             this.loadMCPAPIKeyStatus();
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5591,7 +5631,7 @@ class DevManager {
             this.showToast('Success', 'API key revoked', 'success');
             this.loadMCPAPIKeyStatus();
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5676,7 +5716,7 @@ class DevManager {
             await this.api('PUT', '/config/settings', settings);
             this.showToast('Success', 'Relay URL saved.', 'success');
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5692,7 +5732,7 @@ class DevManager {
             }
             setTimeout(() => this.loadTunnelStatus(), 1000);
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5829,7 +5869,7 @@ class DevManager {
             this.loadTunnelDevices();
             this.loadTunnelStatus();
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5840,7 +5880,7 @@ class DevManager {
             this.loadTunnelDevices();
             this.loadTunnelStatus();
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -5980,7 +6020,7 @@ class DevManager {
             await this.api('PUT', '/config/tool-policies', policies);
             this.showToast('Success', 'Tool policies saved', 'success');
         } catch (error) {
-            this.showToast('Error', error.message, 'error');
+            this._showApiError(error);
         }
     }
 
@@ -6033,8 +6073,14 @@ class DevManager {
             });
 
             if (!resp.ok) {
-                const err = await resp.json();
-                throw new Error(err.error || 'Generation failed');
+                let errorMsg = 'Generation failed';
+                try {
+                    const err = await resp.json();
+                    errorMsg = err.error || errorMsg;
+                } catch {
+                    try { errorMsg = await resp.text(); } catch {}
+                }
+                throw new Error(errorMsg);
             }
 
             const reader = resp.body.getReader();
@@ -6387,7 +6433,7 @@ class DevManager {
         }
     }
 
-    async deleteTask(projectId, taskId) {
+    async deleteTask(projectId, taskId, { onConfirm } = {}) {
         // Fetch project tasks to count subtasks
         let subtaskCount = 0;
         try {
@@ -6407,6 +6453,7 @@ class DevManager {
             message,
             async () => {
                 try {
+                    if (onConfirm) onConfirm();
                     await this.api('DELETE', `/projects/${projectId}/tasks/${taskId}`);
                     this.showToast('Success', 'Task deleted', 'success');
                 } catch (e) {
@@ -6967,6 +7014,7 @@ class DevManager {
         play: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>',
         check: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>',
         session: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
+        trash: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>',
     };
 
     _buildTaskDetailMarkdown(ctx) {
@@ -7191,7 +7239,7 @@ class DevManager {
             }
         };
     }
-    _buildSessionAction(projectId, taskId, activeSession) {
+    _buildSessionAction(projectId, taskId, activeSession, stoppedSession) {
         if (activeSession) {
             return {
                 label: 'Go to Session',
@@ -7199,6 +7247,24 @@ class DevManager {
                 icon: this._taskDetailIcons.session,
                 class: 'btn btn-success',
                 onClick: () => { window.docViewer.close(); this.openTerminal(activeSession.id); }
+            };
+        }
+        if (stoppedSession) {
+            return {
+                label: 'Reopen Session',
+                role: 'primary',
+                icon: this._taskDetailIcons.session,
+                class: 'btn btn-success',
+                onClick: async () => {
+                    window.docViewer.close();
+                    try {
+                        const sess = await this.api('POST', `/sessions/${stoppedSession.id}/reopen`);
+                        this.showToast('Success', 'Session reopened (continuing conversation)', 'success');
+                        this.openTerminal(sess.id, sess, sess.name);
+                    } catch (e) {
+                        this.showToast('Error', `Failed to reopen session: ${e.message}`, 'error');
+                    }
+                }
             };
         }
         return {
@@ -7236,12 +7302,26 @@ class DevManager {
             onClick: async () => { window.docViewer.close(); await this.discussTaskWithAI(projectId, taskId); }
         };
     }
+    _buildDeleteAction(projectId, taskId) {
+        return {
+            label: 'Delete',
+            role: 'secondary',
+            icon: this._taskDetailIcons.trash,
+            danger: true,
+            onClick: () => {
+                this.deleteTask(projectId, taskId, {
+                    onConfirm: () => window.docViewer.close()
+                });
+            }
+        };
+    }
 
     _openTaskDetail(ctx, md) {
         const { task, sessions, history, projectId, taskId } = ctx;
         const isAwaitingApproval = task.status === 'awaiting_approval';
         const isDone = task.status === 'done';
         const activeSession = sessions?.find(s => s.status === 'running' || s.status === 'starting');
+        const latestStoppedSession = !activeSession ? sessions?.find(s => s.status === 'stopped' || s.status === 'completed') : null;
 
         const actions = [];
         let prependElement = null;
@@ -7265,12 +7345,13 @@ class DevManager {
             actions.push(this._buildApproveAction(projectId, taskId));
         } else if (!isDone) {
             actions.push(this._buildStatusAction(projectId, taskId, task));
-            actions.push(this._buildSessionAction(projectId, taskId, activeSession));
+            actions.push(this._buildSessionAction(projectId, taskId, activeSession, latestStoppedSession));
         }
 
         actions.push(this._buildEditAction(projectId, taskId));
         actions.push(this._buildNoteAction(projectId, taskId));
         actions.push(this._buildAIAction(projectId, taskId));
+        actions.push(this._buildDeleteAction(projectId, taskId));
 
         window.docViewer.openWithContent(task.title, md, {
             actions,
@@ -8268,5 +8349,5 @@ function showConfirmModal(title, message, onConfirm, confirmLabel = 'Confirm') {
 window.showConfirmModal = showConfirmModal;
 
 // Initialize app
-const app = new DevManager();
+const app = new OpenPoet();
 window.app = app;

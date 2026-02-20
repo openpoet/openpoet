@@ -4,11 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="theme-color" content="#1a1b26">
-    <script>(function(){var t=localStorage.getItem('devmanager-theme')||'tokyonight';document.documentElement.setAttribute('data-theme',t);var m={light:'#ffffff',nord:'#3b4252',dracula:'#21222c',solarized:'#073642',monokai:'#272822',gruvbox:'#282828',tokyonight:'#1a1b26',sakura:'#fef2f4',cafe:'#faf6f0',arctic:'#f0f7ff',paper:'#f5f0e8',brasil:'#041e42'};var c=document.querySelector('meta[name="theme-color"]');if(c&&m[t])c.setAttribute('content',m[t]);})()</script>
+    <script>(function(){var t=localStorage.getItem('openpoet-theme')||'tokyonight';document.documentElement.setAttribute('data-theme',t);var m={light:'#ffffff',nord:'#3b4252',dracula:'#21222c',solarized:'#073642',monokai:'#272822',gruvbox:'#282828',tokyonight:'#1a1b26',sakura:'#fef2f4',cafe:'#faf6f0',arctic:'#f0f7ff',paper:'#f5f0e8',brasil:'#041e42'};var c=document.querySelector('meta[name="theme-color"]');if(c&&m[t])c.setAttribute('content',m[t]);})()</script>
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="app-version" content="__BUILD_VERSION__">
-    <title>DevManager - Claude Code Orchestrator</title>
+    <title>OpenPoet - Claude Code Orchestrator</title>
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -21,7 +21,7 @@
         <!-- Sidebar -->
         <aside id="sidebar" class="sidebar">
             <div class="sidebar-header">
-                <h1 class="logo">DevManager</h1>
+                <h1 class="logo">OpenPoet</h1>
                 <button id="sidebar-toggle" class="btn-icon" aria-label="Toggle sidebar">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="3" y1="12" x2="21" y2="12"></line>
@@ -388,13 +388,6 @@
                                 <div class="quick-cmd-info">
                                     <span class="quick-cmd-name">/config</span>
                                     <span class="quick-cmd-desc">Open configuration</span>
-                                </div>
-                            </button>
-                            <button class="quick-cmd-item" data-cmd="/cost">
-                                <span class="quick-cmd-icon">&#128176;</span>
-                                <div class="quick-cmd-info">
-                                    <span class="quick-cmd-name">/cost</span>
-                                    <span class="quick-cmd-desc">Show session cost</span>
                                 </div>
                             </button>
                         </div>

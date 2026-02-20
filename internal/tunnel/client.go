@@ -18,7 +18,7 @@ import (
 // TunnelHeader is set on requests forwarded through the tunnel.
 const TunnelHeader = "X-Tunnel-Request"
 
-// Client connects to a relay server and forwards requests to the local DevManager.
+// Client connects to a relay server and forwards requests to the local OpenPoet.
 type Client struct {
 	relayURL  string // wss://relay.example.com/tunnel/connect
 	authToken string
@@ -144,9 +144,15 @@ func (c *Client) reconnectLoop() {
 			return
 		}
 
+		connStart := time.Now()
 		err := c.connectOnce(ctx)
 		if ctx.Err() != nil {
 			return // context cancelled, intentional disconnect
+		}
+
+		// Reset backoff if the connection was stable (lasted > 30s)
+		if time.Since(connStart) > 30*time.Second {
+			backoff = time.Second
 		}
 
 		if err != nil {

@@ -12,10 +12,10 @@ const (
 )
 
 // ToolDef is the unified tool definition used across all paths.
-// This is the SINGLE SOURCE OF TRUTH for all DevManager tools.
+// This is the SINGLE SOURCE OF TRUTH for all OpenPoet tools.
 type ToolDef struct {
 	Name           string              // Canonical name without prefix (e.g. "create_skill")
-	MCPName        string              // Explicit MCP name (if empty, auto = "devmanager_" + Name)
+	MCPName        string              // Explicit MCP name (if empty, auto = "openpoet_" + Name)
 	Description    string              // Default description
 	MCPDescription string              // Override description for MCP context (if empty, uses Description)
 	InputSchema    ToolDefinitionInput // Typed Go schema (single source of truth)
@@ -38,7 +38,7 @@ func AllToolDefs() []ToolDef {
 
 		{
 			Name:        "create_skill",
-			Description: "Create a new skill in DevManager. Skills are markdown instructions synced to projects as .claude/skills/<name>/SKILL.md for Claude Code to follow.",
+			Description: "Create a new skill in OpenPoet. Skills are markdown instructions synced to projects as .claude/skills/<name>/SKILL.md for Claude Code to follow.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
@@ -79,8 +79,8 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:           "list_skills",
-			Description:    "List all skills in DevManager.",
-			MCPDescription: "List all skills in DevManager. Skills are markdown instruction templates stored in the database.",
+			Description:    "List all skills in OpenPoet.",
+			MCPDescription: "List all skills in OpenPoet. Skills are markdown instruction templates stored in the database.",
 			InputSchema: ToolDefinitionInput{
 				Type:       "object",
 				Properties: map[string]ToolPropertySchema{},
@@ -89,8 +89,8 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:           "list_projects",
-			Description:    "List all projects in DevManager.",
-			MCPDescription: "List all projects managed by DevManager.",
+			Description:    "List all projects in OpenPoet.",
+			MCPDescription: "List all projects managed by OpenPoet.",
 			InputSchema: ToolDefinitionInput{
 				Type:       "object",
 				Properties: map[string]ToolPropertySchema{},
@@ -100,8 +100,8 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:           "list_mcp_servers",
-			Description:    "List all MCP servers in DevManager.",
-			MCPDescription: "List all MCP server configurations in DevManager.",
+			Description:    "List all MCP servers in OpenPoet.",
+			MCPDescription: "List all MCP server configurations in OpenPoet.",
 			InputSchema: ToolDefinitionInput{
 				Type:       "object",
 				Properties: map[string]ToolPropertySchema{},
@@ -125,7 +125,7 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:        "update_setting",
-			Description: "Update a DevManager setting.",
+			Description: "Update a OpenPoet setting.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
@@ -162,7 +162,7 @@ func AllToolDefs() []ToolDef {
 		{
 			Name:           "update_memory_doc",
 			Description:    "Propose changes to the memory doc (CLAUDE.md) for a project. Creates a preview for user approval — changes are NOT applied immediately. Only use when the user explicitly asks.",
-			MCPDescription: "Propose changes to a project's memory doc. Changes are NOT applied immediately — they create a proposal that the user must approve via the DevManager UI.",
+			MCPDescription: "Propose changes to a project's memory doc. Changes are NOT applied immediately — they create a proposal that the user must approve via the OpenPoet UI.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
@@ -277,7 +277,7 @@ func AllToolDefs() []ToolDef {
 		{
 			Name:           "read_document",
 			Description:    "Read the full content of a document by ID.",
-			MCPDescription: "Read the full content of a document by ID. Use after devmanager_get_task to read specific documents.",
+			MCPDescription: "Read the full content of a document by ID. Use after openpoet_get_task to read specific documents.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
@@ -289,7 +289,7 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:           "list_directory",
-			MCPName:        "devmanager_list_project_files",
+			MCPName:        "openpoet_list_project_files",
 			Description:    "List files and directories in a project path. Returns names, sizes, and types. Use to browse the project structure.",
 			MCPDescription: "List files and directories in a project. Returns names, sizes, and types. Use path parameter to navigate subdirectories.",
 			InputSchema: ToolDefinitionInput{
@@ -305,7 +305,7 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:           "read_file",
-			MCPName:        "devmanager_read_project_file",
+			MCPName:        "openpoet_read_project_file",
 			Description:    "Read the content of a text file from a project. Supports optional line offset and limit for reading specific sections of large files. Max 2MB file size.",
 			MCPDescription: "Read the content of a text file from a project. Max 2MB, text files only. Returns the file content as text.",
 			InputSchema: ToolDefinitionInput{
@@ -371,7 +371,7 @@ func AllToolDefs() []ToolDef {
 
 		{
 			Name:        "update_mcp_server",
-			Description: "Update a DevManager MCP server configuration by ID.",
+			Description: "Update a OpenPoet MCP server configuration by ID.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
@@ -388,7 +388,7 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:        "delete_mcp_server",
-			Description: "Delete a DevManager MCP server configuration by ID.",
+			Description: "Delete a OpenPoet MCP server configuration by ID.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
@@ -400,7 +400,7 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:        "get_my_task",
-			Description: "Get the task linked to the current session (if any). Returns the task details including status, title, description. Only works within a DevManager session.",
+			Description: "Get the task linked to the current session (if any). Returns the task details including status, title, description. Only works within a OpenPoet session.",
 			InputSchema: ToolDefinitionInput{
 				Type:       "object",
 				Properties: map[string]ToolPropertySchema{},
@@ -409,7 +409,7 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:        "get_session_info",
-			Description: "Get information about the current DevManager session, including session ID, project, status, and linked task. Only works within a DevManager session.",
+			Description: "Get information about the current OpenPoet session, including session ID, project, status, and linked task. Only works within a OpenPoet session.",
 			InputSchema: ToolDefinitionInput{
 				Type:       "object",
 				Properties: map[string]ToolPropertySchema{},
@@ -418,7 +418,7 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:        "request_task_evaluation",
-			Description: "Request the DevManager AI Assistant to evaluate the current session and proactively suggest task actions (create, update, link, or complete tasks). The AI Assistant will analyze the session output and suggest actions to the user via floating notification cards. Use this when you believe the session's work is relevant to task management.",
+			Description: "Request the OpenPoet AI Assistant to evaluate the current session and proactively suggest task actions (create, update, link, or complete tasks). The AI Assistant will analyze the session output and suggest actions to the user via floating notification cards. Use this when you believe the session's work is relevant to task management.",
 			InputSchema: ToolDefinitionInput{
 				Type:       "object",
 				Properties: map[string]ToolPropertySchema{},
@@ -530,7 +530,7 @@ func ChatTools() []ToolDefinition {
 	return result
 }
 
-// MCPTools returns tool definitions for the MCP protocol (with devmanager_ prefix).
+// MCPTools returns tool definitions for the MCP protocol (with openpoet_ prefix).
 // The context parameter controls ChatOnly filtering:
 //   - "chat": includes all tools (even ChatOnly ones)
 //   - anything else: excludes ChatOnly tools (used by terminal sessions)
@@ -545,7 +545,7 @@ func MCPTools(context string) []MCPToolDef {
 		}
 		mcpName := td.MCPName
 		if mcpName == "" {
-			mcpName = "devmanager_" + td.Name
+			mcpName = "openpoet_" + td.Name
 		}
 		desc := td.Description
 		if td.MCPDescription != "" {

@@ -12,12 +12,12 @@ import (
 // When forMCP is true (GoSDK/session providers), the prompt adapts for the MCP context:
 // - Removes the "Available Tools" section (Claude CLI already provides tool descriptions)
 // - Adds a tool naming convention note so the model maps prompt references (e.g. "list_tasks")
-//   to actual MCP tool names (e.g. "mcp__devmanager__list_tasks")
+//   to actual MCP tool names (e.g. "mcp__openpoet__list_tasks")
 func ChatSystemPrompt(skills []string, projects []string, mcps []string, forMCP ...bool) string {
 	isMCP := len(forMCP) > 0 && forMCP[0]
 	var sb strings.Builder
 
-	sb.WriteString(`You are the DevManager AI Assistant.
+	sb.WriteString(`You are the OpenPoet AI Assistant.
 
 ## CARDINAL RULE — Brevity and fidelity
 - Responses: 1-2 sentences. Do not interpret, expand, or rephrase the user's request.
@@ -26,20 +26,20 @@ func ChatSystemPrompt(skills []string, projects []string, mcps []string, forMCP 
 - For long responses (>5 lines), use create_document. Never paste document content in chat.
 - Always respond in English.
 
-## What is DevManager
-DevManager is a web application that orchestrates Claude Code sessions across multiple projects. It lets users:
+## What is OpenPoet
+OpenPoet is a web application that orchestrates Claude Code sessions across multiple projects. It lets users:
 - Manage multiple projects (local or remote via SSH)
 - Start Claude Code terminal sessions for each project
 - Create and manage "skills" (instruction templates for Claude Code)
 - Configure MCP servers that are injected into Claude Code sessions
 - Sync configurations (skills, MCPs) to project directories
 
-## What are Skills in DevManager
-IMPORTANT: A "skill" in DevManager is a **markdown document stored in the database** that contains instructions for Claude Code to follow during sessions. Skills are NOT bash scripts, NOT files in ~/.claude/skills/, and NOT executable programs. They are plain text/markdown instruction templates.
+## What are Skills in OpenPoet
+IMPORTANT: A "skill" in OpenPoet is a **markdown document stored in the database** that contains instructions for Claude Code to follow during sessions. Skills are NOT bash scripts, NOT files in ~/.claude/skills/, and NOT executable programs. They are plain text/markdown instruction templates.
 
 Each skill has: an ID, a name, content (markdown text with instructions), a category, and an enabled/disabled status. When a user starts a Claude Code session, enabled skills are synced to the project directory so Claude Code can use them.
 
-Example of a DevManager skill content:
+Example of a OpenPoet skill content:
 """
 # Python Best Practices
 - Always use type hints in function signatures
@@ -51,7 +51,7 @@ Example of a DevManager skill content:
 
 	sb.WriteString(`
 ## Your Role
-You manage DevManager resources via tools. Use the appropriate tool and confirm briefly.
+You manage OpenPoet resources via tools. Use the appropriate tool and confirm briefly.
 `)
 
 	if isMCP {
@@ -59,9 +59,9 @@ You manage DevManager resources via tools. Use the appropriate tool and confirm 
 		// Just add the naming convention so the model maps references in this prompt.
 		sb.WriteString(`
 ## Tool Naming Convention
-Tools are available via MCP with the prefix "mcp__devmanager__".
-When this prompt references a tool like "list_tasks", call "mcp__devmanager__list_tasks".
-This applies to ALL tool names mentioned in this prompt (e.g. create_task → mcp__devmanager__create_task).
+Tools are available via MCP with the prefix "mcp__openpoet__".
+When this prompt references a tool like "list_tasks", call "mcp__openpoet__list_tasks".
+This applies to ALL tool names mentioned in this prompt (e.g. create_task → mcp__openpoet__create_task).
 Do NOT call the same tool more than once with the same arguments. If you already received a result, use it.
 `)
 	} else {
@@ -173,12 +173,12 @@ When creating subtasks: first call = umbrella (parent), subsequent calls use par
 `)
 
 	if len(skills) > 0 {
-		sb.WriteString("\n## Current Skills in DevManager\n")
+		sb.WriteString("\n## Current Skills in OpenPoet\n")
 		for _, s := range skills {
 			sb.WriteString(fmt.Sprintf("- %s\n", s))
 		}
 	} else {
-		sb.WriteString("\n## Current Skills in DevManager\nNo skills configured yet.\n")
+		sb.WriteString("\n## Current Skills in OpenPoet\nNo skills configured yet.\n")
 	}
 
 	if len(projects) > 0 {
@@ -266,7 +266,7 @@ Respond ONLY with the Markdown content of the document, without code blocks wrap
 }
 
 // SkillGenerationPrompt returns the system prompt for generating a skill from a description.
-const SkillGenerationPrompt = `You are a skill generator for DevManager / Claude Code. A "skill" is a markdown document that contains instructions for Claude Code to follow.
+const SkillGenerationPrompt = `You are a skill generator for OpenPoet / Claude Code. A "skill" is a markdown document that contains instructions for Claude Code to follow.
 
 Given a user's description of what they want, generate a complete skill in markdown format.
 
@@ -288,7 +288,7 @@ Respond with ONLY a JSON object (no markdown code block):
 `
 
 // SkillValidationPrompt returns the system prompt for validating a skill.
-const SkillValidationPrompt = `You are a skill validator for DevManager / Claude Code. A "skill" is a markdown document with instructions for Claude Code.
+const SkillValidationPrompt = `You are a skill validator for OpenPoet / Claude Code. A "skill" is a markdown document with instructions for Claude Code.
 
 Validate the given skill content and provide feedback.
 

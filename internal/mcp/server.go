@@ -51,6 +51,55 @@ func NewRequestHandler(client *APIClient, sessionID, context, conversationID str
 	}
 }
 
+// fetchPolicy fetches the current effective tool policy from the OpenPoet API.
+// It resolves the global policy for the handler's context and any project-specific override.
+// Returns deny_all as a safe default on any error.
+func (h *RequestHandler) fetchPolicy() ToolPolicy {
+	if h.client == nil {
+		return h.policy
+	}
+
+	policy := ToolPolicy{Mode: "deny_all"}
+
+	// Determine which policy key to fetch based on context
+	policyKey := "session"
+	if h.context == "http" {
+		policyKey = "http"
+	} else if h.context == "chat" {
+		policyKey = "chat"
+	}
+
+	if data, err := h.client.Get("/api/config/tool-policies"); err == nil {
+		var policies map[string]string
+		if json.Unmarshal(data, &policies) == nil {
+			if policyStr, ok := policies[policyKey]; ok && policyStr != "" {
+				policy = ParsePolicy(policyStr)
+			}
+		}
+	}
+
+	// Per-project policy override (only when session is known)
+	if h.sessionID != "" {
+		if data, err := h.client.Get("/api/sessions/" + h.sessionID); err == nil {
+			var sess struct {
+				ProjectID int `json:"project_id"`
+			}
+			if json.Unmarshal(data, &sess) == nil && sess.ProjectID > 0 {
+				if data, err := h.client.Get(fmt.Sprintf("/api/projects/%d/tool-policy", sess.ProjectID)); err == nil {
+					var resp struct {
+						ToolPolicy string `json:"tool_policy"`
+					}
+					if json.Unmarshal(data, &resp) == nil && resp.ToolPolicy != "" {
+						policy = ParsePolicy(resp.ToolPolicy)
+					}
+				}
+			}
+		}
+	}
+
+	return policy
+}
+
 // Handle processes a single JSON-RPC request and returns the response.
 func (h *RequestHandler) Handle(req *jsonRPCRequest) *jsonRPCResponse {
 	switch req.Method {
@@ -64,13 +113,14 @@ func (h *RequestHandler) Handle(req *jsonRPCRequest) *jsonRPCResponse {
 					"tools": map[string]interface{}{},
 				},
 				"serverInfo": map[string]interface{}{
-					"name":    "devmanager",
+					"name":    "openpoet",
 					"version": "1.0.0",
 				},
 			},
 		}
 
 	case "tools/list":
+		h.policy = h.fetchPolicy()
 		tools := toolsDef(h.context)
 		tools = h.policy.FilterTools(tools)
 		return &jsonRPCResponse{
@@ -82,6 +132,7 @@ func (h *RequestHandler) Handle(req *jsonRPCRequest) *jsonRPCResponse {
 		}
 
 	case "tools/call":
+		h.policy = h.fetchPolicy()
 		return h.handleToolCall(req)
 
 	default:
@@ -162,43 +213,15 @@ func Serve(apiURL string) {
 	log.SetOutput(os.Stderr)
 	log.SetPrefix("[mcp] ")
 
-	sessionID := os.Getenv("DEVMANAGER_SESSION_ID")
-	context := os.Getenv("DEVMANAGER_CONTEXT")
-	conversationID := os.Getenv("DEVMANAGER_CONVERSATION_ID")
+	sessionID := os.Getenv("OPENPOET_SESSION_ID")
+	context := os.Getenv("OPENPOET_CONTEXT")
+	conversationID := os.Getenv("OPENPOET_CONVERSATION_ID")
 	client := NewAPIClient(apiURL)
 
-	// Fetch session tool policy from API. Default to deny_all for sessions.
-	policy := ToolPolicy{Mode: "deny_all"}
-	if data, err := client.Get("/api/config/tool-policies"); err == nil {
-		var policies map[string]string
-		if json.Unmarshal(data, &policies) == nil {
-			if policyStr, ok := policies["session"]; ok && policyStr != "" {
-				policy = ParsePolicy(policyStr)
-			}
-		}
-	}
-	// Per-project policy: if the project has an explicit policy, it overrides global entirely.
-	// If the project has no explicit policy (empty), it inherits the global policy.
-	if sessionID != "" {
-		if data, err := client.Get("/api/sessions/" + sessionID); err == nil {
-			var sess struct {
-				ProjectID int `json:"project_id"`
-			}
-			if json.Unmarshal(data, &sess) == nil && sess.ProjectID > 0 {
-				if data, err := client.Get(fmt.Sprintf("/api/projects/%d/tool-policy", sess.ProjectID)); err == nil {
-					var resp struct {
-						ToolPolicy string `json:"tool_policy"`
-					}
-					if json.Unmarshal(data, &resp) == nil && resp.ToolPolicy != "" {
-						// Project has an explicit policy — use it (overrides global)
-						policy = ParsePolicy(resp.ToolPolicy)
-					}
-					// else: project has no explicit policy — keep global (inherit)
-				}
-			}
-		}
-	}
-	handler := NewRequestHandler(client, sessionID, context, conversationID, policy)
+	// Start with deny_all as safe default. The handler dynamically fetches the
+	// current policy from the API on every tools/list and tools/call request,
+	// ensuring policy changes are reflected immediately in active sessions.
+	handler := NewRequestHandler(client, sessionID, context, conversationID, ToolPolicy{Mode: "deny_all"})
 
 	reader := bufio.NewReader(os.Stdin)
 	writer := os.Stdout

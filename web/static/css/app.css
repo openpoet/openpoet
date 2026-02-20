@@ -815,7 +815,7 @@ body {
     flex-direction: row; /* sidebar | main-area */
 }
 
-/* Hide main DevManager sidebar when terminal view is active on desktop */
+/* Hide main OpenPoet sidebar when terminal view is active on desktop */
 @media (min-width: 769px) {
     #app:has(.terminal-view.active) .sidebar {
         display: none;
@@ -4520,6 +4520,17 @@ body {
         background: var(--color-primary-hover);
         color: white;
         border-color: var(--color-primary-hover);
+    }
+}
+.btn-icon-round.danger-action {
+    color: var(--color-danger);
+    border-color: var(--color-danger);
+}
+@media (hover: hover) {
+    .btn-icon-round.danger-action:hover {
+        background: var(--color-danger);
+        color: white;
+        border-color: var(--color-danger);
     }
 }
 .btn-icon-round svg {

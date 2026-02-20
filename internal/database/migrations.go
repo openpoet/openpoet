@@ -233,7 +233,7 @@ func migrateV3(tx *sqlx.Tx) error {
 		`ALTER TABLE skills ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE skills ADD COLUMN sync_count INTEGER NOT NULL DEFAULT 0`,
 
-		// Track which skill files DevManager wrote to each project
+		// Track which skill files OpenPoet wrote to each project
 		`CREATE TABLE IF NOT EXISTS synced_skill_files (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			project_id INTEGER NOT NULL,

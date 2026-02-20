@@ -1,6 +1,6 @@
 {
-    "name": "DevManager - Claude Code Orchestrator",
-    "short_name": "DevManager",
+    "name": "OpenPoet - Claude Code Orchestrator",
+    "short_name": "OpenPoet",
     "description": "Manage and run Claude Code CLI across multiple projects",
     "start_url": "/",
     "display": "standalone",
