@@ -389,7 +389,7 @@ class FileBrowser {
             // Send to terminal using canonical sequence: \x15 separate, text, \r after 700ms
             // Capture target session ID NOW to prevent input going to a different session.
             if (window.terminalManager) {
-                const targetSessionId = window.terminalManager.activeSessionId;
+                const targetSessionId = sessionId;
                 if (targetSessionId) {
                     window.terminalManager.sendInputToSession(targetSessionId, '\x15');
                     window.terminalManager.sendInputToSession(targetSessionId, message);
