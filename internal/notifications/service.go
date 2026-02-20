@@ -2,8 +2,8 @@ package notifications
 
 import (
 	"context"
-	"devmanager/internal/database"
-	"devmanager/internal/websocket"
+	"openpoet/internal/database"
+	"openpoet/internal/websocket"
 	"log"
 	"sync"
 )

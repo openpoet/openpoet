@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"devmanager/internal/database"
-	"devmanager/internal/security"
+	"openpoet/internal/database"
+	"openpoet/internal/security"
 
 	"github.com/google/uuid"
 )

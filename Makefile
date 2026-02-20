@@ -1,9 +1,9 @@
 .PHONY: all build run clean test deps vendor-js sidecar-deps deploy deploy-status deploy-log
 
 # Variables
-BINARY_NAME=devmanager
+BINARY_NAME=openpoet
 BUILD_DIR=build
-MAIN_PATH=./cmd/devmanager
+MAIN_PATH=./cmd/openpoet
 
 # Default target
 all: deps vendor-js sidecar-deps build
@@ -88,7 +88,7 @@ clean:
 	@echo "Cleaning..."
 	rm -rf $(BUILD_DIR)
 	rm -f coverage.out coverage.html
-	rm -f devmanager.db
+	rm -f openpoet.db
 
 # Format code
 fmt:
@@ -136,7 +136,7 @@ website-dev:
 
 # Show help
 help:
-	@echo "DevManager Makefile"
+	@echo "OpenPoet Makefile"
 	@echo ""
 	@echo "Usage: make [target]"
 	@echo ""

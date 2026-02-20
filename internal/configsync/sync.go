@@ -2,7 +2,7 @@ package configsync
 
 import (
 	"context"
-	"devmanager/internal/database"
+	"openpoet/internal/database"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -275,7 +275,7 @@ func (cs *ConfigSyncer) getSkillsForProject(ctx context.Context, project *databa
 	return result, nil
 }
 
-// syncSkillsToLocal syncs skills to a local project, tracking which files DevManager manages.
+// syncSkillsToLocal syncs skills to a local project, tracking which files OpenPoet manages.
 // Skills are written as .claude/skills/<name>/SKILL.md with YAML frontmatter.
 func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string, project *database.Project) error {
 	projectID := project.ID
@@ -350,7 +350,7 @@ func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string,
 	return nil
 }
 
-// syncSkillsToRemote syncs skills to a remote project via SFTP, tracking which files DevManager manages.
+// syncSkillsToRemote syncs skills to a remote project via SFTP, tracking which files OpenPoet manages.
 // Skills are written as .claude/skills/<name>/SKILL.md with YAML frontmatter.
 func (cs *ConfigSyncer) syncSkillsToRemote(ctx context.Context, sftpClient *sftp.Client, skillsDir string, project *database.Project) error {
 	skills, err := cs.getSkillsForProject(ctx, project)
@@ -426,7 +426,7 @@ func buildSkillMD(name string, content string) string {
 	}
 
 	// Extract description from first markdown heading or first line
-	description := "DevManager managed skill: " + name
+	description := "OpenPoet managed skill: " + name
 	for _, line := range strings.Split(trimmed, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "# ") {
@@ -453,8 +453,8 @@ func buildSkillMD(name string, content string) string {
 	return sb.String()
 }
 
-// buildHooksConfig returns the hooks configuration that DevManager manages.
-// This is the only section DevManager writes to a project's settings.json.
+// buildHooksConfig returns the hooks configuration that OpenPoet manages.
+// This is the only section OpenPoet writes to a project's settings.json.
 func (cs *ConfigSyncer) buildHooksConfig() map[string]interface{} {
 	hookCommand := map[string]interface{}{
 		"type":    "command",
@@ -480,11 +480,11 @@ func (cs *ConfigSyncer) buildHooksConfig() map[string]interface{} {
 // syncBridgeScriptLocal copies bridge.sh to the project's .claude/hooks/ directory
 func (cs *ConfigSyncer) syncBridgeScriptLocal(hooksDir string) error {
 	bridgeScript := `#!/bin/bash
-# DevManager Hook Bridge Script
-# Receives hook event JSON on stdin, POSTs to DevManager API, returns response on stdout.
+# OpenPoet Hook Bridge Script
+# Receives hook event JSON on stdin, POSTs to OpenPoet API, returns response on stdout.
 
-HOOK_URL="${DEVMANAGER_HOOK_URL:-http://localhost:8080}"
-SESSION_ID="${DEVMANAGER_SESSION_ID}"
+HOOK_URL="${OPENPOET_HOOK_URL:-http://localhost:8080}"
+SESSION_ID="${OPENPOET_SESSION_ID}"
 INPUT=$(cat)
 
 EVENT=""
@@ -530,8 +530,8 @@ exit 0
 // syncBridgeScriptRemote copies bridge.sh to the remote project's .claude/hooks/ directory
 func (cs *ConfigSyncer) syncBridgeScriptRemote(sshClient *ssh.Client, sftpClient *sftp.Client, hooksDir string) error {
 	bridgeScript := `#!/bin/bash
-HOOK_URL="${DEVMANAGER_HOOK_URL:-http://localhost:8080}"
-SESSION_ID="${DEVMANAGER_SESSION_ID}"
+HOOK_URL="${OPENPOET_HOOK_URL:-http://localhost:8080}"
+SESSION_ID="${OPENPOET_SESSION_ID}"
 INPUT=$(cat)
 
 EVENT=""

@@ -43,7 +43,7 @@ func isRetryableOneShotError(err error) bool {
 // 2. INTERACTIVE (ConversationID > 0): Uses persistent Client per conversation
 //   - CLI subprocess stays alive across multiple messages
 //   - Context maintained in-memory (no disk I/O between messages)
-//   - MCP server with DevManager tools, budget control, session resume
+//   - MCP server with OpenPoet tools, budget control, session resume
 //   - Used for: AI assistant chat panel
 type GoSDKProvider struct {
 	apiURL       string
@@ -106,7 +106,7 @@ func (p *GoSDKProvider) Name() string {
 	return "gosdk"
 }
 
-// buildMCPServer creates an in-process MCP server with all DevManager tools.
+// buildMCPServer creates an in-process MCP server with all OpenPoet tools.
 // Only used for interactive mode (requires control protocol).
 func (p *GoSDKProvider) buildMCPServer(convID int64) *claudecode.McpSdkServerConfig {
 	if p.toolExecutor == nil {
@@ -134,7 +134,7 @@ func (p *GoSDKProvider) buildMCPServer(convID int64) *claudecode.McpSdkServerCon
 		))
 	}
 
-	return claudecode.CreateSDKMcpServer("devmanager", "1.0.0", tools...)
+	return claudecode.CreateSDKMcpServer("openpoet", "1.0.0", tools...)
 }
 
 // buildOneShotOptions creates SDK options for one-shot queries (no MCP, no budget).
@@ -177,7 +177,7 @@ func (p *GoSDKProvider) buildOneShotOptions(req *Request) []claudecode.Option {
 }
 
 // buildInteractiveOptions creates SDK options for persistent interactive clients.
-// Includes MCP server with DevManager tools, budget control, and tool whitelisting.
+// Includes MCP server with OpenPoet tools, budget control, and tool whitelisting.
 func (p *GoSDKProvider) buildInteractiveOptions(req *Request, convID int64) []claudecode.Option {
 	opts := []claudecode.Option{
 		claudecode.WithPermissionMode(claudecode.PermissionModeBypassPermissions),
@@ -203,14 +203,14 @@ func (p *GoSDKProvider) buildInteractiveOptions(req *Request, convID int64) []cl
 		opts = append(opts, claudecode.WithSystemPrompt(req.System))
 	}
 
-	// MCP server with DevManager tools — ONLY allow these, disable built-in tools.
+	// MCP server with OpenPoet tools — ONLY allow these, disable built-in tools.
 	// WithAllowedTools pre-approves MCP tools for auto-execution.
 	// WithDisallowedTools blocks all built-in Claude Code tools (Bash, Read, Write, etc.)
-	// so the AI assistant can only use DevManager's MCP tools.
+	// so the AI assistant can only use OpenPoet's MCP tools.
 	mcpServer := p.buildMCPServer(convID)
 	if mcpServer != nil {
-		opts = append(opts, claudecode.WithSdkMcpServer("devmanager", mcpServer))
-		opts = append(opts, claudecode.WithAllowedTools("mcp__devmanager__*"))
+		opts = append(opts, claudecode.WithSdkMcpServer("openpoet", mcpServer))
+		opts = append(opts, claudecode.WithAllowedTools("mcp__openpoet__*"))
 		opts = append(opts, claudecode.WithDisallowedTools(
 			"Bash", "Read", "Write", "Edit", "Glob", "Grep",
 			"WebFetch", "WebSearch", "Task", "NotebookEdit",

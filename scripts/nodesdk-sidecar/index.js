@@ -1,15 +1,15 @@
 /**
- * DevManager Node.js Agent SDK Sidecar
+ * OpenPoet Node.js Agent SDK Sidecar
  *
  * This is an HTTP server that wraps the official @anthropic-ai/claude-agent-sdk.
- * The DevManager Go backend communicates with this sidecar via HTTP to leverage
+ * The OpenPoet Go backend communicates with this sidecar via HTTP to leverage
  * the full Agent SDK capabilities (session management, tool execution, etc.).
  *
  * Usage: node index.js --port 9999 --api-url http://localhost:8080
  */
 import http from 'node:http';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { buildDevManagerTools } from './tools.js';
+import { buildOpenPoetTools } from './tools.js';
 
 // Parse CLI arguments
 const args = process.argv.slice(2);
@@ -45,7 +45,7 @@ function sendSSE(res, type, data) {
 
 /**
  * Handle POST /query — main chat endpoint.
- * Streams responses as SSE events compatible with DevManager's frontend.
+ * Streams responses as SSE events compatible with OpenPoet's frontend.
  */
 async function handleQuery(req, res) {
     let body;
@@ -78,14 +78,14 @@ async function handleQuery(req, res) {
         'Connection': 'keep-alive',
     });
 
-    // Build DevManager MCP tools for this conversation
-    const devmanagerMcp = buildDevManagerTools(API_URL, conversation_id);
+    // Build OpenPoet MCP tools for this conversation
+    const openpoetMcp = buildOpenPoetTools(API_URL, conversation_id);
 
     const options = {
         permissionMode: 'bypass_permissions',
         maxTurns: 15,
-        sdkMcpServers: { devmanager: devmanagerMcp },
-        allowedTools: ['mcp__devmanager__*'],
+        sdkMcpServers: { openpoet: openpoetMcp },
+        allowedTools: ['mcp__openpoet__*'],
     };
 
     if (system_prompt) options.systemPrompt = system_prompt;
@@ -220,7 +220,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '127.0.0.1', () => {
-    console.log(`[sidecar] DevManager Node.js Agent SDK sidecar listening on port ${PORT}`);
+    console.log(`[sidecar] OpenPoet Node.js Agent SDK sidecar listening on port ${PORT}`);
     console.log(`[sidecar] API URL: ${API_URL}`);
 });
 

@@ -17,10 +17,10 @@ import (
 	"sync"
 	"time"
 
-	"devmanager/internal/database"
-	"devmanager/internal/files"
-	"devmanager/internal/llm"
-	"devmanager/internal/mcp"
+	"openpoet/internal/database"
+	"openpoet/internal/files"
+	"openpoet/internal/llm"
+	"openpoet/internal/mcp"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -132,9 +132,7 @@ func (a *activeStreamInfo) closeAll() {
 type AIHandler struct {
 	api         *API
 	providerMgr *llm.ProviderManager
-
 	mu          sync.RWMutex
-	rateLimiter map[string][]time.Time // simple per-minute rate limiting
 
 	activeStreams   map[int64]*activeStreamInfo
 	activeStreamsMu sync.Mutex
@@ -160,7 +158,6 @@ func NewAIHandler(api *API, providerMgr *llm.ProviderManager) *AIHandler {
 	return &AIHandler{
 		api:          api,
 		providerMgr:  providerMgr,
-		rateLimiter:  make(map[string][]time.Time),
 		activeStreams: make(map[int64]*activeStreamInfo),
 	}
 }
@@ -316,31 +313,6 @@ func (h *AIHandler) HandleStopChat(w http.ResponseWriter, r *http.Request) {
 // getProviderForSlot returns the provider for the specified AI operation slot.
 func (h *AIHandler) getProviderForSlot(slot llm.Slot) llm.Provider {
 	return h.providerMgr.GetProvider(slot)
-}
-
-// checkRateLimit returns true if the request is within rate limit (20/min).
-func (h *AIHandler) checkRateLimit(key string) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	now := time.Now()
-	cutoff := now.Add(-1 * time.Minute)
-
-	// Clean old entries
-	times := h.rateLimiter[key]
-	var recent []time.Time
-	for _, t := range times {
-		if t.After(cutoff) {
-			recent = append(recent, t)
-		}
-	}
-
-	if len(recent) >= 20 {
-		return false
-	}
-
-	h.rateLimiter[key] = append(recent, now)
-	return true
 }
 
 // classifyAIError converts raw LLM errors into user-friendly messages.
@@ -675,11 +647,6 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	p := h.getProviderForSlot(llm.SlotChat)
 	if p == nil {
 		respondError(w, http.StatusServiceUnavailable, "AI not configured. Set an API key or install Claude Code CLI.")
-		return
-	}
-
-	if !h.checkRateLimit("chat") {
-		respondError(w, http.StatusTooManyRequests, "Rate limit exceeded. Max 20 requests per minute.")
 		return
 	}
 
@@ -1642,7 +1609,7 @@ func (h *AIHandler) handleToolLoop(
 }
 
 // ExecuteTool implements llm.ToolExecutor. It wraps the private executeTool method
-// so that SDK providers can call DevManager tools from their in-process MCP servers.
+// so that SDK providers can call OpenPoet tools from their in-process MCP servers.
 func (h *AIHandler) ExecuteTool(ctx context.Context, name string, input map[string]any, conversationID int64) (string, error) {
 	// Look up the current streaming message ID for this conversation
 	h.streamMessageIDsMu.Lock()
@@ -2629,7 +2596,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 }
 
 // HandleExecuteTool is an HTTP endpoint that Node.js SDK sidecar calls to execute
-// DevManager tools. It proxies tool calls to the existing executeTool implementation.
+// OpenPoet tools. It proxies tool calls to the existing executeTool implementation.
 func (h *AIHandler) HandleExecuteTool(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Name           string                 `json:"name"`
@@ -3097,10 +3064,10 @@ func (h *AIHandler) HandleInitiateSkillCustomization(w http.ResponseWriter, r *h
 	instructions := `IMPORTANT INSTRUCTIONS FOR THIS CONVERSATION:
 - Your goal is to help the user customize the skill content for their specific project.
 - You already have all the context you need: the skill content and the project memory doc are provided below.
-- DO NOT use tools like devmanager_list_project_files or devmanager_read_project_file to explore the project. You already have the project context.
-- When the user asks you to adapt/customize/create the skill, use the devmanager_create_skill tool to propose the adapted skill content.
+- DO NOT use tools like openpoet_list_project_files or openpoet_read_project_file to explore the project. You already have the project context.
+- When the user asks you to adapt/customize/create the skill, use the openpoet_create_skill tool to propose the adapted skill content.
 - The skill will NOT be created immediately — it requires user approval via a review card.
-- Call devmanager_create_skill with the adapted name, content, and category.
+- Call openpoet_create_skill with the adapted name, content, and category.
 - Keep the same markdown structure as the original skill but adapt the content for the specific project.
 - Be concise and direct. Propose the adapted content immediately when asked.
 - Respond in the same language the user uses (Portuguese or English).`
@@ -3242,11 +3209,6 @@ func (h *AIHandler) HandleGenerateSkill(w http.ResponseWriter, r *http.Request) 
 	p := h.getProviderForSlot(llm.SlotBackground)
 	if p == nil {
 		respondError(w, http.StatusServiceUnavailable, "AI not configured")
-		return
-	}
-
-	if !h.checkRateLimit("generate") {
-		respondError(w, http.StatusTooManyRequests, "Rate limit exceeded")
 		return
 	}
 
@@ -3493,6 +3455,38 @@ func extractSessionContext(cleanOutput []byte) string {
 	return sb.String()
 }
 
+// extractJSONObject extracts a JSON object from text that may contain markdown
+// code blocks, leading/trailing prose, or other wrapping. It finds the first '{'
+// and last '}' to isolate the JSON object.
+func extractJSONObject(text string) string {
+	text = strings.TrimSpace(text)
+	// Remove markdown code block if present
+	if strings.Contains(text, "```") {
+		lines := strings.Split(text, "\n")
+		var jsonLines []string
+		inBlock := false
+		for _, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "```") {
+				inBlock = !inBlock
+				continue
+			}
+			if inBlock {
+				jsonLines = append(jsonLines, line)
+			}
+		}
+		if len(jsonLines) > 0 {
+			text = strings.Join(jsonLines, "\n")
+		}
+	}
+	// Find first { and last } to extract the JSON object
+	start := strings.IndexRune(text, '{')
+	end := strings.LastIndex(text, "}")
+	if start >= 0 && end > start {
+		return text[start : end+1]
+	}
+	return text
+}
+
 // processCR splits carriage-return-separated segments into separate lines.
 // Terminal output often uses \r to overwrite lines (e.g., ghost text replaced by real input).
 // This ensures the real user input appears as its own line for extraction.
@@ -3520,11 +3514,6 @@ func (h *AIHandler) HandleSuggestTaskData(w http.ResponseWriter, r *http.Request
 	p := h.getProviderForSlot(llm.SlotBackground)
 	if p == nil {
 		respondError(w, http.StatusServiceUnavailable, "AI not configured")
-		return
-	}
-
-	if !h.checkRateLimit("suggest_task") {
-		respondError(w, http.StatusTooManyRequests, "Rate limit exceeded")
 		return
 	}
 
@@ -3674,13 +3663,8 @@ Rules:
 	// Parse JSON response
 	responseText := strings.TrimSpace(fullText.String())
 
-	// Strip markdown code blocks if present
-	if strings.HasPrefix(responseText, "```") {
-		lines := strings.Split(responseText, "\n")
-		if len(lines) > 2 {
-			responseText = strings.Join(lines[1:len(lines)-1], "\n")
-		}
-	}
+	// Extract JSON object from response (handles markdown code blocks, leading text, etc.)
+	responseText = extractJSONObject(responseText)
 
 	var result struct {
 		Title       string `json:"title"`
@@ -3689,6 +3673,7 @@ Rules:
 	}
 
 	if err := json.Unmarshal([]byte(responseText), &result); err != nil {
+		log.Printf("[AI-AUDIT] JSON parse FAILED subcategory=suggest_task session=%s error=%v response=%s", sessionID, err, fullText.String())
 		respondError(w, http.StatusInternalServerError, "Failed to parse AI response")
 		return
 	}
@@ -3707,11 +3692,6 @@ func (h *AIHandler) HandleValidateSkill(w http.ResponseWriter, r *http.Request) 
 	p := h.getProviderForSlot(llm.SlotBackground)
 	if p == nil {
 		respondError(w, http.StatusServiceUnavailable, "AI not configured")
-		return
-	}
-
-	if !h.checkRateLimit("validate") {
-		respondError(w, http.StatusTooManyRequests, "Rate limit exceeded")
 		return
 	}
 
@@ -3979,7 +3959,7 @@ func (h *AIHandler) EvaluateSession(ctx context.Context, sessionID string, trigg
 		allowedTypes["complete_task"] = true
 	}
 
-	prompt := fmt.Sprintf(`You are the DevManager AI Assistant evaluating a session that just %s.
+	prompt := fmt.Sprintf(`You are the OpenPoet AI Assistant evaluating a session that just %s.
 
 Project: %s (%s, %s)
 Session: %s (name: %s, status: %s)%s`, triggerDesc, project.Name, project.Type, project.Path, sess.ID[:8], sess.Name, sess.Status, linkedTaskInfo)
@@ -4065,12 +4045,7 @@ Instructions:
 	responseText := strings.TrimSpace(fullText.String())
 	log.Printf("[AI-Session] LLM response for session %s: %s", sessionID[:8], responseText)
 
-	if strings.HasPrefix(responseText, "```") {
-		lines := strings.Split(responseText, "\n")
-		if len(lines) > 2 {
-			responseText = strings.Join(lines[1:len(lines)-1], "\n")
-		}
-	}
+	responseText = extractJSONObject(responseText)
 
 	if err := json.Unmarshal([]byte(responseText), &result); err != nil {
 		log.Printf("[AI-Session] JSON parse FAILED for session %s: %v\nResponse: %s", sessionID, err, responseText)

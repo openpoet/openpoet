@@ -12,7 +12,7 @@ import (
 	"os"
 )
 
-var ErrInvalidKey = errors.New("encryption key must be set via DEVMANAGER_ENCRYPT_KEY environment variable")
+var ErrInvalidKey = errors.New("encryption key must be set via OPENPOET_ENCRYPT_KEY environment variable")
 
 type Encryptor struct {
 	key []byte
@@ -21,16 +21,16 @@ type Encryptor struct {
 func NewEncryptor(key string) (*Encryptor, error) {
 	if key == "" {
 		// Generate a random key and store it if not provided
-		key = os.Getenv("DEVMANAGER_ENCRYPT_KEY")
+		key = os.Getenv("OPENPOET_ENCRYPT_KEY")
 		if key == "" {
 			// For convenience, derive a key from hostname+username
-			// In production, users should set DEVMANAGER_ENCRYPT_KEY
+			// In production, users should set OPENPOET_ENCRYPT_KEY
 			hostname, _ := os.Hostname()
 			username := os.Getenv("USER")
 			if username == "" {
-				username = "devmanager"
+				username = "openpoet"
 			}
-			key = fmt.Sprintf("devmanager-%s-%s-default-key", hostname, username)
+			key = fmt.Sprintf("openpoet-%s-%s-default-key", hostname, username)
 		}
 	}
 

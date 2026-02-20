@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// APIClient is a simple HTTP client for calling the DevManager API.
+// APIClient is a simple HTTP client for calling the OpenPoet API.
 type APIClient struct {
 	baseURL string
 	client  *http.Client

@@ -1,11 +1,11 @@
 #!/bin/bash
-# DevManager Hook Bridge Script
-# Receives hook event JSON on stdin, POSTs to DevManager API, returns response on stdout.
-# Env: DEVMANAGER_HOOK_URL (e.g., http://localhost:8080)
-#      DEVMANAGER_SESSION_ID (set by DevManager when starting session)
+# OpenPoet Hook Bridge Script
+# Receives hook event JSON on stdin, POSTs to OpenPoet API, returns response on stdout.
+# Env: OPENPOET_HOOK_URL (e.g., http://localhost:8080)
+#      OPENPOET_SESSION_ID (set by OpenPoet when starting session)
 
-HOOK_URL="${DEVMANAGER_HOOK_URL:-http://localhost:8080}"
-SESSION_ID="${DEVMANAGER_SESSION_ID}"
+HOOK_URL="${OPENPOET_HOOK_URL:-http://localhost:8080}"
+SESSION_ID="${OPENPOET_SESSION_ID}"
 INPUT=$(cat)
 
 # Extract event name using basic string parsing (no jq dependency)

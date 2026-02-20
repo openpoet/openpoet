@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"devmanager/internal/llm"
+	"openpoet/internal/llm"
 )
 
 // ScenarioCategory groups scenarios by type.
@@ -137,7 +137,7 @@ func (r *BenchmarkRunner) Run(ctx context.Context) (*BenchmarkReport, error) {
 		Timestamp:  time.Now(),
 	}
 
-	fmt.Printf("\n  DevManager AI Benchmark\n")
+	fmt.Printf("\n  OpenPoet AI Benchmark\n")
 	fmt.Printf("  Model: %s\n", r.config.Model)
 	fmt.Printf("  Judge: %s\n", r.config.JudgeModel)
 	fmt.Printf("  Scenarios: %d | Runs per scenario: %d\n\n", len(scenarios), r.config.Runs)

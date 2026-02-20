@@ -261,7 +261,7 @@ class DocViewer {
             secondaryDiv.className = 'footer-secondary';
             for (const action of secondary) {
                 const btn = document.createElement('button');
-                btn.className = 'btn-icon-round' + (action.aiAction ? ' ai-action' : '');
+                btn.className = 'btn-icon-round' + (action.aiAction ? ' ai-action' : '') + (action.danger ? ' danger-action' : '');
                 btn.title = action.label;
                 btn.dataset.tooltip = action.label;
                 btn.innerHTML = (action.icon || '') + `<span class="icon-label">${this._escapeHtml(action.label)}</span>`;

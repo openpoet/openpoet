@@ -1,6 +1,6 @@
-module devmanager
+module openpoet
 
-go 1.22
+go 1.24
 
 require (
 	github.com/SherClockHolmes/webpush-go v1.3.0

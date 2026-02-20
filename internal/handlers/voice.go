@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"devmanager/internal/voice"
+	"openpoet/internal/voice"
 	"net/http"
 )
 

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"devmanager/internal/llm"
+	"openpoet/internal/llm"
 )
 
 // ValidatorFunc is a deterministic check on a model response.
@@ -241,7 +241,7 @@ func ValidateResponseLanguage(lang string) ValidatorFunc {
 
 // ──── LLM-as-Judge ────
 
-const judgeSystemPrompt = `You are an expert evaluator for an AI assistant called "DevManager AI".
+const judgeSystemPrompt = `You are an expert evaluator for an AI assistant called "OpenPoet AI".
 Your job is to score the assistant's response on 5 dimensions, each from 1 to 5.
 
 Respond with ONLY a valid JSON object (no markdown, no code blocks):
@@ -261,7 +261,7 @@ Scoring guide:
 - 2: Poor — significant issues, partially meets requirements
 - 1: Failed — does not meet requirements at all
 
-IMPORTANT context about DevManager AI:
+IMPORTANT context about OpenPoet AI:
 - It must be VERY brief (1-2 sentences max for most responses)
 - It must use the correct tools for each request
 - It must NOT announce plans before acting

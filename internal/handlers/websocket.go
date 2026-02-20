@@ -7,8 +7,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"devmanager/internal/notifications"
-	"devmanager/internal/websocket"
+	"openpoet/internal/notifications"
+	"openpoet/internal/websocket"
 )
 
 type WebSocketHandler struct {
@@ -175,7 +175,7 @@ func (h *WebSocketHandler) HandleTestPush(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	err := h.webpush.SendToAll(r.Context(), "DevManager Test", "Push notifications are working!", map[string]string{
+	err := h.webpush.SendToAll(r.Context(), "OpenPoet Test", "Push notifications are working!", map[string]string{
 		"type": "test",
 	})
 	if err != nil {

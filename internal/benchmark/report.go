@@ -14,7 +14,7 @@ func PrintReport(report *BenchmarkReport) {
 
 	fmt.Println()
 	printLine(w, "top")
-	printCenter(w, fmt.Sprintf("DevManager AI Benchmark — %s", report.Model))
+	printCenter(w, fmt.Sprintf("OpenPoet AI Benchmark — %s", report.Model))
 	printCenter(w, fmt.Sprintf("Judge: %s | %s", report.JudgeModel, report.Timestamp.Format("2006-01-02 15:04")))
 	printLine(w, "mid")
 

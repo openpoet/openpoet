@@ -1,5 +1,5 @@
 {
-    "name": "devmanager-nodesdk-sidecar",
+    "name": "openpoet-nodesdk-sidecar",
     "version": "1.0.0",
     "private": true,
     "type": "module",
