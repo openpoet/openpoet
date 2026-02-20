@@ -282,7 +282,6 @@ class OpenPoet {
                 break;
             case 'project-detail':
                 state.scrollTop = document.getElementById('project-detail-content')?.scrollTop || 0;
-                state.projectId = this._detailProject?.id;
                 break;
         }
         this._viewState[viewName] = state;
@@ -315,9 +314,6 @@ class OpenPoet {
                 this._skillFilterStatus = state.skillFilterStatus || '';
                 break;
             case 'project-detail':
-                if (state.projectId && (!this._detailProject || this._detailProject.id !== state.projectId)) {
-                    this.showProjectDetail(state.projectId);
-                }
                 break;
         }
     }
@@ -3271,6 +3267,7 @@ class OpenPoet {
                 window.terminalManager.switchToSession(sessionId);
             }
 
+            this.currentSession = sessionId;
             this.updateTabActiveState(sessionId);
             this._updateLinkTaskButton(sessionId);
             this.updateMobileSessionTrigger(sessionId);
