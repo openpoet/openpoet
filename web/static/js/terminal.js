@@ -43,7 +43,7 @@ class TerminalManager {
             return;
         }
 
-        const termTheme = window.devManagerTheme ? window.devManagerTheme.getTerminalTheme() : {
+        const termTheme = window.openPoetTheme ? window.openPoetTheme.getTerminalTheme() : {
             background: '#0f0f1a', foreground: '#e4e4e7', cursor: '#6366f1',
             selection: 'rgba(99, 102, 241, 0.3)', black: '#1a1a2e', red: '#ef4444',
             green: '#22c55e', yellow: '#f59e0b', blue: '#3b82f6', magenta: '#a855f7',
@@ -270,6 +270,8 @@ class TerminalManager {
                         terminal.write('\x1b[2J\x1b[H');
                         terminal.writeln('\x1b[33m--- Session History ---\x1b[0m');
                         terminal.write(text);
+                        // Ensure we land at the latest output after replaying history
+                        terminal.scrollToBottom();
                     } else {
                         console.log('Buffer is empty');
                     }
@@ -332,16 +334,22 @@ class TerminalManager {
 
         ws.onerror = (error) => {
             console.error(`WebSocket error for session ${sessionId}:`, error);
-            this.updateSessionStatus(sessionId, 'error');
+            // Don't update status here — onerror always fires before onclose,
+            // and onclose handles reconnection. Firing 'error' here would
+            // trigger auto-close before reconnection has a chance.
         };
 
         ws.onclose = () => {
             console.log(`WebSocket closed for session: ${sessionId}`);
             const termData = this.terminals.get(sessionId);
-            if (termData && termData.terminal) {
-                termData.terminal.writeln('\r\n\x1b[31mDisconnected\x1b[0m');
-            }
+            if (!termData) return;
+
+            // If this was an intentional disconnect (terminal disposed), don't reconnect
+            if (termData._intentionalDisconnect) return;
+
+            termData.terminal.writeln('\r\n\x1b[33mConnection lost, reconnecting...\x1b[0m');
             this.updateSessionStatus(sessionId, 'disconnected');
+            this._reconnect(sessionId);
         };
 
         // Handle terminal input (desktop only - mobile uses input bar)
@@ -349,6 +357,7 @@ class TerminalManager {
             terminal.onData((data) => {
                 if (ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'input', data: data }));
+                    this.clearScrollLock(termData);
                 }
             });
         }
@@ -359,6 +368,200 @@ class TerminalManager {
                 ws.send(JSON.stringify({ type: 'resize', data: { cols, rows } }));
             }
         });
+
+        // Desktop scroll system — mirrors the mobile approach.
+        // Mobile: pointer-events:none on .xterm-screen + custom touch handler
+        //         using terminal.scrollLines() at 60fps.
+        // Desktop: overflow-y:hidden on .xterm-viewport + custom wheel handler
+        //          using terminal.scrollLines().
+        // By disabling native CSS scroll on the viewport, xterm.js can no
+        // longer fight our scroll position through scrollTop adjustments after
+        // write processing.  All scrolling is programmatic, giving us full
+        // control — exactly like mobile.
+        if (window.innerWidth > 768) {
+            const viewportEl = terminal.element?.querySelector('.xterm-viewport');
+            if (viewportEl) {
+                viewportEl.style.overflowY = 'hidden';
+            }
+
+            termData._userScrolledUp = false;
+            termData._scrollLockY = null;
+            let _userInitiatedScroll = false;
+            let _restoringScroll = false;
+            let _wheelAccum = 0;
+
+            // Wheel handler — converts wheel deltas to scrollLines() calls
+            // (mirrors mobile's touchmove → scrollLines() pattern)
+            termData.container.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                let pixelDelta = e.deltaY;
+                if (e.deltaMode === 1) pixelDelta *= 17;       // line mode
+                else if (e.deltaMode === 2) pixelDelta *= terminal.rows * 17; // page mode
+
+                // Accumulate sub-line deltas for smooth trackpad scrolling
+                if ((_wheelAccum > 0 && pixelDelta < 0) || (_wheelAccum < 0 && pixelDelta > 0)) {
+                    _wheelAccum = 0; // direction changed
+                }
+                _wheelAccum += pixelDelta;
+                const lineHeight = 17;
+                const lines = Math.trunc(_wheelAccum / lineHeight);
+                if (lines !== 0) {
+                    _wheelAccum -= lines * lineHeight;
+                    _userInitiatedScroll = true;
+                    terminal.scrollLines(lines);
+                    _userInitiatedScroll = false; // safety: clear in case onScroll didn't fire
+                }
+            }, { passive: false });
+
+            // Keyboard scroll (Shift+PgUp/PgDn) — set flag so onScroll knows
+            terminal.attachCustomKeyEventHandler((domEvent) => {
+                if (domEvent.type === 'keydown' && domEvent.shiftKey &&
+                    (domEvent.key === 'PageUp' || domEvent.key === 'PageDown')) {
+                    _userInitiatedScroll = true;
+                    // Safety: clear if no scroll event fires (already at edge)
+                    requestAnimationFrame(() => { _userInitiatedScroll = false; });
+                }
+                return true; // always let xterm.js handle the key
+            });
+
+            // Central scroll state manager — fires on every viewportY change.
+            // Distinguishes user scroll (wheel/keyboard) from programmatic
+            // scroll (xterm.js cursor-follow after write).
+            terminal.onScroll(() => {
+                if (_restoringScroll) return;
+
+                const buf = terminal.buffer.active;
+
+                if (_userInitiatedScroll) {
+                    // User-initiated scroll — update lock state
+                    _userInitiatedScroll = false;
+                    if (buf.viewportY >= buf.baseY) {
+                        this.clearScrollLock(termData);
+                    } else {
+                        termData._userScrolledUp = true;
+                        termData._scrollLockY = buf.viewportY;
+                    }
+                    return;
+                }
+
+                // Programmatic scroll (xterm.js auto-follow after write)
+                if (!termData._userScrolledUp) return;
+                if (termData._scrollLockY == null) return;
+
+                // Buffer reset (TUI full redraw shrinks baseY) — release lock
+                if (termData._scrollLockY > buf.baseY) {
+                    this.clearScrollLock(termData);
+                    return;
+                }
+
+                // Restore the user's scroll position
+                if (buf.viewportY !== termData._scrollLockY) {
+                    _restoringScroll = true;
+                    terminal.scrollLines(termData._scrollLockY - buf.viewportY);
+                    _restoringScroll = false;
+                }
+            });
+        } else {
+            // Mobile — state tracked by touch handler, no onScroll guard needed
+            termData._userScrolledUp = false;
+            termData._scrollLockY = null;
+        }
+    }
+
+    // Reconnect a terminal WebSocket after a connection drop.
+    // Uses exponential backoff (1s, 2s, 4s, 8s, max 8s) up to 10 attempts.
+    _reconnect(sessionId) {
+        const termData = this.terminals.get(sessionId);
+        if (!termData || termData._intentionalDisconnect) return;
+
+        const maxAttempts = 10;
+        const attempt = (termData._reconnectAttempt || 0) + 1;
+        termData._reconnectAttempt = attempt;
+
+        if (attempt > maxAttempts) {
+            termData.terminal.writeln('\r\n\x1b[31mFailed to reconnect after multiple attempts.\x1b[0m');
+            this.updateSessionStatus(sessionId, 'error');
+            return;
+        }
+
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
+        console.log(`Reconnecting session ${sessionId} (attempt ${attempt}/${maxAttempts}) in ${delay}ms`);
+
+        termData._reconnectTimer = setTimeout(() => {
+            // Check again — session may have been closed by user during the wait
+            const td = this.terminals.get(sessionId);
+            if (!td || td._intentionalDisconnect) return;
+
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(`${protocol}//${window.location.host}/ws/session/${sessionId}`);
+
+            ws.onopen = async () => {
+                console.log(`Reconnected WebSocket for session: ${sessionId}`);
+                td.ws = ws;
+                td._reconnectAttempt = 0;
+                td.terminal.writeln('\r\n\x1b[32mReconnected\x1b[0m');
+                ws.send(JSON.stringify({ type: 'subscribe', channel: `session:${sessionId}` }));
+                this.updateSessionStatus(sessionId, 'running');
+            };
+
+            ws.onmessage = async (event) => {
+                let data = event.data;
+                if (typeof data === 'string' && data.includes('"_encrypted":true')) {
+                    try {
+                        const enc = JSON.parse(data);
+                        if (enc._encrypted && window.app && window.app._tunnelCryptoKey) {
+                            data = await window.app._decryptTunnelMessage(enc);
+                        }
+                    } catch (e) {}
+                }
+                const msg = JSON.parse(data);
+                if (msg.type === 'session_output' && msg.data) {
+                    td.terminal.write(msg.data);
+                } else if (msg.type === 'session_status') {
+                    if (msg.data.status === 'completed' || msg.data.status === 'error' || msg.data.status === 'stopped') {
+                        td.terminal.writeln(`\r\n\x1b[33mSession ${msg.data.status}\x1b[0m`);
+                        this.updateSessionStatus(sessionId, msg.data.status);
+                    }
+                } else if (msg.type && msg.type.startsWith('hook_')) {
+                    if (window.hookManager) {
+                        window.hookManager.handleMessage(msg);
+                    }
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error(`WebSocket reconnect error for session ${sessionId}:`, error);
+            };
+
+            ws.onclose = () => {
+                const td2 = this.terminals.get(sessionId);
+                if (!td2 || td2._intentionalDisconnect) return;
+                console.log(`WebSocket closed again for session ${sessionId}, retrying...`);
+                this._reconnect(sessionId);
+            };
+
+            // Re-bind terminal input to new WebSocket
+            if (window.innerWidth > 768) {
+                td.terminal.onData((data) => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'input', data: data }));
+                        this.clearScrollLock(td);
+                    }
+                });
+            }
+
+            td.terminal.onResize(({ cols, rows }) => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'resize', data: { cols, rows } }));
+                }
+            });
+        }, delay);
+    }
+
+    // Clear scroll lock state — resumes auto-scroll to bottom.
+    clearScrollLock(termData) {
+        termData._userScrolledUp = false;
+        termData._scrollLockY = null;
     }
 
     // Update session status and notify UI
@@ -402,6 +605,8 @@ class TerminalManager {
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
                 this.safeFit(termData);
+                this.clearScrollLock(termData);
+                termData.terminal.scrollToBottom();
                 if (window.innerWidth > 768) {
                     termData.terminal.focus();
                 }
@@ -423,6 +628,14 @@ class TerminalManager {
         }
 
         console.log(`Disconnecting session: ${sessionId}`);
+
+        // Mark as intentional so reconnect logic doesn't fire
+        termData._intentionalDisconnect = true;
+
+        // Cancel any pending reconnect timer
+        if (termData._reconnectTimer) {
+            clearTimeout(termData._reconnectTimer);
+        }
 
         // Remove resize observer
         if (termData.resizeObserver) {
@@ -500,6 +713,31 @@ class TerminalManager {
         }
     }
 
+    // Sync the xterm viewport's scroll area height with the actual buffer state.
+    // After repeated fit/resize operations, the .xterm-scroll-area height can
+    // drift from the real content height, preventing wheel scrolling from
+    // reaching the bottom even though scrollToBottom() (xterm.js internal) works.
+    syncViewport(termData) {
+        if (!termData?.terminal?.element) return;
+        const term = termData.terminal;
+        const viewportEl = term.element.querySelector('.xterm-viewport');
+        const scrollArea = term.element.querySelector('.xterm-scroll-area');
+        if (!viewportEl || !scrollArea) return;
+
+        const buf = term.buffer.active;
+        if (buf.baseY === 0) return; // Nothing in scrollback
+
+        // Cell height = visible viewport height / visible rows
+        const cellHeight = viewportEl.offsetHeight / term.rows;
+        const expectedHeight = Math.ceil((buf.baseY + term.rows) * cellHeight);
+        const currentHeight = parseInt(scrollArea.style.height, 10) || 0;
+
+        // Only fix if there's a meaningful drift (> 1 line)
+        if (Math.abs(expectedHeight - currentHeight) > cellHeight) {
+            scrollArea.style.height = expectedHeight + 'px';
+        }
+    }
+
     // Fit the terminal to its container, applying a safety margin on mobile.
     // On mobile browsers, sub-pixel font rendering can cause fitAddon to
     // calculate 1-2 more columns than actually fit visually. When the PTY
@@ -507,12 +745,30 @@ class TerminalManager {
     // wrap at the wrong position, causing garbled/duplicated lines.
     safeFit(termData) {
         if (!termData || !termData.fitAddon || !termData.terminal) return;
+        const term = termData.terminal;
+        const buf = term.buffer.active;
+        const wasAtBottom = buf.viewportY >= buf.baseY;
+        const prevViewportY = buf.viewportY;
         termData.fitAddon.fit();
+
         if (window.innerWidth <= 768) {
-            const term = termData.terminal;
             const safeCols = Math.max(20, term.cols - 1);
             if (safeCols !== term.cols) {
                 term.resize(safeCols, term.rows);
+            }
+        }
+
+        this.syncViewport(termData);
+
+        if (wasAtBottom) {
+            term.scrollToBottom();
+        } else {
+            const targetY = Math.min(prevViewportY, buf.baseY);
+            if (buf.viewportY !== targetY) {
+                term.scrollLines(targetY - buf.viewportY);
+            }
+            if (termData._userScrolledUp) {
+                termData._scrollLockY = buf.viewportY;
             }
         }
     }
@@ -654,8 +910,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (tm && tm.activeSessionId) {
                 const termData = tm.terminals.get(tm.activeSessionId);
                 if (termData && termData.terminal) {
-                    // Cancel any ongoing momentum
                     if (termData._cancelMomentum) termData._cancelMomentum();
+                    tm.syncViewport(termData);
+                    tm.clearScrollLock(termData);
                     termData.terminal.scrollToBottom();
                 }
             }

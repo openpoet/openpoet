@@ -1,6 +1,6 @@
-// Service Worker for DevManager PWA
+// Service Worker for OpenPoet PWA
 
-const CACHE_NAME = 'devmanager-__BUILD_VERSION__';
+const CACHE_NAME = 'openpoet-__BUILD_VERSION__';
 const OFFLINE_URL = '/';
 
 // Install event - activate immediately
@@ -12,20 +12,19 @@ self.addEventListener('install', (event) => {
     );
 });
 
-// Activate event - clean up old caches and notify clients
+// Activate event - clean up old caches and notify clients on genuine updates
 self.addEventListener('activate', (event) => {
     event.waitUntil(
         caches.keys()
             .then((cacheNames) => {
+                const oldCaches = cacheNames.filter((name) => name !== CACHE_NAME);
                 return Promise.all(
-                    cacheNames
-                        .filter((name) => name !== CACHE_NAME)
-                        .map((name) => caches.delete(name))
-                );
+                    oldCaches.map((name) => caches.delete(name))
+                ).then(() => oldCaches.length > 0);
             })
-            .then(() => self.clients.claim())
-            .then(() => {
-                // Notify all clients that a new version is active
+            .then((hadOldCaches) => self.clients.claim().then(() => hadOldCaches))
+            .then((hadOldCaches) => {
+                if (!hadOldCaches) return; // First install — nothing to announce
                 return self.clients.matchAll({ type: 'window' }).then((clients) => {
                     clients.forEach((client) => {
                         client.postMessage({
@@ -114,7 +113,7 @@ self.addEventListener('fetch', (event) => {
 
 // Push notification event
 self.addEventListener('push', (event) => {
-    let data = { title: 'DevManager', body: 'New notification' };
+    let data = { title: 'OpenPoet', body: 'New notification' };
 
     if (event.data) {
         try {

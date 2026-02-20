@@ -21,7 +21,7 @@ import (
 // NodeSDKProvider manages a Node.js sidecar process running the official
 // @anthropic-ai/claude-agent-sdk. Communication happens via HTTP.
 type NodeSDKProvider struct {
-	apiURL     string // DevManager API URL (for tool callbacks from sidecar)
+	apiURL     string // OpenPoet API URL (for tool callbacks from sidecar)
 	sidecarURL string // http://127.0.0.1:{port}
 	sidecarCmd *exec.Cmd
 	sessions   map[int64]string // conversationID -> sessionID
@@ -118,7 +118,7 @@ func (p *NodeSDKProvider) Start() error {
 		"--port", fmt.Sprintf("%d", p.port),
 		"--api-url", p.apiURL,
 	)
-	p.sidecarCmd.Stderr = os.Stderr // Pipe sidecar logs to DevManager stderr
+	p.sidecarCmd.Stderr = os.Stderr // Pipe sidecar logs to OpenPoet stderr
 
 	if err := p.sidecarCmd.Start(); err != nil {
 		return fmt.Errorf("failed to start sidecar: %w", err)
@@ -254,7 +254,7 @@ func (p *NodeSDKProvider) StreamMessage(ctx context.Context, req *Request, callb
 	return p.parseSSEStream(ctx, resp.Body, callback, convID)
 }
 
-// parseSSEStream reads SSE events from the sidecar and translates them to DevManager StreamEvents.
+// parseSSEStream reads SSE events from the sidecar and translates them to OpenPoet StreamEvents.
 func (p *NodeSDKProvider) parseSSEStream(ctx context.Context, reader io.Reader, callback StreamCallback, convID int64) (*Response, error) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 512*1024), 512*1024)

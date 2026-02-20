@@ -17,13 +17,13 @@ type Config struct {
 
 func Load() *Config {
 	cfg := &Config{
-		Bind:       getEnv("DEVMANAGER_BIND", "0.0.0.0"),
-		Port:       getEnvInt("DEVMANAGER_PORT", 8080),
-		DBPath:     getEnv("DEVMANAGER_DB", "devmanager.db"),
+		Bind:       getEnv("OPENPOET_BIND", "0.0.0.0"),
+		Port:       getEnvInt("OPENPOET_PORT", 8080),
+		DBPath:     getEnv("OPENPOET_DB", "openpoet.db"),
 		OpenAIKey:  getEnv("OPENAI_API_KEY", ""),
 		GroqKey:    getEnv("GROQ_API_KEY", ""),
-		VAPIDEmail: getEnv("VAPID_EMAIL", "admin@devmanager.minhapalavra.com.br"),
-		EncryptKey: getEnv("DEVMANAGER_ENCRYPT_KEY", ""),
+		VAPIDEmail: getEnv("VAPID_EMAIL", "admin@openpoet.minhapalavra.com.br"),
+		EncryptKey: getEnv("OPENPOET_ENCRYPT_KEY", ""),
 	}
 	return cfg
 }

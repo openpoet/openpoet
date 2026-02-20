@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"devmanager/internal/files"
+	"openpoet/internal/files"
 	"encoding/json"
 	"fmt"
 	"io"

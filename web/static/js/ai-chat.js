@@ -306,7 +306,7 @@ class AIChatManager {
                 </svg>
             </div>
             <h3>AI Assistant</h3>
-            <p>Ask me to create skills, manage MCP servers, or configure your DevManager.</p>
+            <p>Ask me to create skills, manage MCP servers, or configure your OpenPoet.</p>
             <div id="ai-chat-pending-suggestions"></div>
             <div class="ai-chat-suggestions">
                 <button class="ai-chat-suggestion" onclick="window.aiChat?.sendPreset('Create a skill for Python best practices')">Create a Python skill</button>
@@ -420,8 +420,14 @@ class AIChatManager {
             });
 
             if (!resp.ok) {
-                const err = await resp.json();
-                throw new Error(err.error || 'Request failed');
+                let errorMsg = 'Request failed';
+                try {
+                    const err = await resp.json();
+                    errorMsg = err.error || errorMsg;
+                } catch {
+                    try { errorMsg = await resp.text(); } catch {}
+                }
+                throw new Error(errorMsg);
             }
 
             // Read SSE stream

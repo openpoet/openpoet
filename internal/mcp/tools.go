@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"strings"
 
-	"devmanager/internal/llm"
+	"openpoet/internal/llm"
 )
 
 // MCPTool is a type alias for llm.MCPToolDef — the unified tool definition for MCP protocol.
 type MCPTool = llm.MCPToolDef
 
-// AllTools returns all MCP tool definitions (with devmanager_ prefix).
+// AllTools returns all MCP tool definitions (with openpoet_ prefix).
 // Used by the API to expose tool metadata and by session manager for policy checks.
 func AllTools() []MCPTool {
 	return llm.MCPTools("session")
@@ -23,7 +23,7 @@ func toolsDef(context string) []MCPTool {
 	return llm.MCPTools(context)
 }
 
-// executeTool runs a tool by name with the given arguments, calling the DevManager API.
+// executeTool runs a tool by name with the given arguments, calling the OpenPoet API.
 func executeTool(client *APIClient, name string, args json.RawMessage, sessionID, conversationID string) (string, error) {
 	var params map[string]interface{}
 	if len(args) > 0 {
@@ -36,14 +36,14 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 	}
 
 	switch name {
-	case "devmanager_list_skills":
+	case "openpoet_list_skills":
 		body, err := client.Get("/api/config/skills")
 		if err != nil {
 			return "", err
 		}
 		return formatSkillsList(body)
 
-	case "devmanager_create_skill":
+	case "openpoet_create_skill":
 		payload, _ := json.Marshal(params)
 		body, err := client.Post("/api/config/skills", string(payload))
 		if err != nil {
@@ -51,7 +51,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return fmt.Sprintf("Skill created: %s", string(body)), nil
 
-	case "devmanager_update_skill":
+	case "openpoet_update_skill":
 		id, ok := getID(params)
 		if !ok {
 			return "", fmt.Errorf("id is required")
@@ -64,7 +64,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return fmt.Sprintf("Skill updated: %s", string(body)), nil
 
-	case "devmanager_delete_skill":
+	case "openpoet_delete_skill":
 		id, ok := getID(params)
 		if !ok {
 			return "", fmt.Errorf("id is required")
@@ -75,21 +75,21 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return fmt.Sprintf("Skill %d deleted", id), nil
 
-	case "devmanager_list_projects":
+	case "openpoet_list_projects":
 		body, err := client.Get("/api/projects")
 		if err != nil {
 			return "", err
 		}
 		return formatProjectsList(body)
 
-	case "devmanager_list_mcp_servers":
+	case "openpoet_list_mcp_servers":
 		body, err := client.Get("/api/config/mcps")
 		if err != nil {
 			return "", err
 		}
 		return formatMCPsList(body)
 
-	case "devmanager_create_mcp_server":
+	case "openpoet_create_mcp_server":
 		normalizeMCPParams(params)
 		payload, _ := json.Marshal(params)
 		body, err := client.Post("/api/config/mcps", string(payload))
@@ -98,7 +98,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return fmt.Sprintf("MCP server created: %s", string(body)), nil
 
-	case "devmanager_update_mcp_server":
+	case "openpoet_update_mcp_server":
 		id, ok := getID(params)
 		if !ok {
 			return "", fmt.Errorf("id is required")
@@ -112,7 +112,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return fmt.Sprintf("MCP server updated: %s", string(body)), nil
 
-	case "devmanager_delete_mcp_server":
+	case "openpoet_delete_mcp_server":
 		id, ok := getID(params)
 		if !ok {
 			return "", fmt.Errorf("id is required")
@@ -123,7 +123,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return fmt.Sprintf("MCP server %d deleted", id), nil
 
-	case "devmanager_update_setting":
+	case "openpoet_update_setting":
 		payload, _ := json.Marshal(params)
 		_, err := client.Put("/api/config/settings", string(payload))
 		if err != nil {
@@ -132,14 +132,14 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		key, _ := params["key"].(string)
 		return fmt.Sprintf("Setting '%s' updated", key), nil
 
-	case "devmanager_sync_config":
+	case "openpoet_sync_config":
 		body, err := client.Post("/api/config/sync-all", "{}")
 		if err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("Config synced: %s", string(body)), nil
 
-	case "devmanager_list_project_files":
+	case "openpoet_list_project_files":
 		projectID, ok := getID(params)
 		if !ok {
 			// Try project_id key
@@ -159,7 +159,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return formatFileList(body)
 
-	case "devmanager_read_project_file":
+	case "openpoet_read_project_file":
 		projectID, ok := getID(params)
 		if !ok {
 			if v, exists := params["project_id"]; exists {
@@ -181,7 +181,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return formatFileContent(body)
 
-	case "devmanager_get_memory_doc":
+	case "openpoet_get_memory_doc":
 		projectID, ok := getID(params)
 		if !ok {
 			if v, exists := params["project_id"]; exists {
@@ -199,7 +199,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return formatMemoryDoc(body)
 
-	case "devmanager_list_tasks":
+	case "openpoet_list_tasks":
 		projectID := getProjectID(params)
 		if projectID == 0 {
 			return "", fmt.Errorf("project_id is required")
@@ -210,7 +210,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return formatTaskList(body)
 
-	case "devmanager_create_task":
+	case "openpoet_create_task":
 		projectID := getProjectID(params)
 		if projectID == 0 {
 			return "", fmt.Errorf("project_id is required")
@@ -223,7 +223,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return fmt.Sprintf("Task created: %s", string(body)), nil
 
-	case "devmanager_update_task":
+	case "openpoet_update_task":
 		projectID := getProjectID(params)
 		if projectID == 0 {
 			return "", fmt.Errorf("project_id is required")
@@ -241,7 +241,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return fmt.Sprintf("Task updated: %s", string(body)), nil
 
-	case "devmanager_delete_task":
+	case "openpoet_delete_task":
 		projectID := getProjectID(params)
 		if projectID == 0 {
 			return "", fmt.Errorf("project_id is required")
@@ -256,7 +256,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return fmt.Sprintf("Task %d deleted", taskID), nil
 
-	case "devmanager_get_task":
+	case "openpoet_get_task":
 		projectID := getProjectID(params)
 		if projectID == 0 {
 			return "", fmt.Errorf("project_id is required")
@@ -271,7 +271,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return formatTaskDetail(client, projectID, taskID, body)
 
-	case "devmanager_read_document":
+	case "openpoet_read_document":
 		docID, _ := params["document_id"].(string)
 		if docID == "" {
 			return "", fmt.Errorf("document_id is required")
@@ -306,7 +306,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return string(body), nil
 
-	case "devmanager_update_memory_doc":
+	case "openpoet_update_memory_doc":
 		projectID, ok := getID(params)
 		if !ok {
 			if v, exists := params["project_id"]; exists {
@@ -341,9 +341,9 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return "Change proposal created. The user must approve before the change is applied.", nil
 
-	case "devmanager_get_my_task":
+	case "openpoet_get_my_task":
 		if sessionID == "" {
-			return "Not running within a DevManager session (no session ID available).", nil
+			return "Not running within a OpenPoet session (no session ID available).", nil
 		}
 		body, err := client.Get(fmt.Sprintf("/api/sessions/%s/task", sessionID))
 		if err != nil {
@@ -363,9 +363,9 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		return fmt.Sprintf("Linked Task [%d]: %s\nStatus: %s | Priority: %s\nProject ID: %d\nDescription: %s",
 			task.ID, task.Title, task.Status, task.Priority, task.ProjectID, task.Description), nil
 
-	case "devmanager_get_session_info":
+	case "openpoet_get_session_info":
 		if sessionID == "" {
-			return "Not running within a DevManager session (no session ID available).", nil
+			return "Not running within a OpenPoet session (no session ID available).", nil
 		}
 		body, err := client.Get(fmt.Sprintf("/api/sessions/%s", sessionID))
 		if err != nil {
@@ -396,9 +396,9 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return result, nil
 
-	case "devmanager_request_task_evaluation":
+	case "openpoet_request_task_evaluation":
 		if sessionID == "" {
-			return "", fmt.Errorf("not running within a DevManager session (no session ID available)")
+			return "", fmt.Errorf("not running within a OpenPoet session (no session ID available)")
 		}
 		_, err := client.Post(fmt.Sprintf("/api/sessions/%s/evaluate", sessionID), "{}")
 		if err != nil {
@@ -408,15 +408,15 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 
 	// ---- Composite tools ----
 
-	case "devmanager_dashboard":
+	case "openpoet_dashboard":
 		return executeDashboard(client)
 
-	case "devmanager_batch":
+	case "openpoet_batch":
 		return executeBatch(client, args, sessionID, conversationID)
 
 	// ---- Session management tools ----
 
-	case "devmanager_start_session":
+	case "openpoet_start_session":
 		// Convert string IDs to numbers for API compatibility
 		if pid, ok := params["project_id"].(string); ok {
 			var id int64
@@ -443,7 +443,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return string(body), nil
 
-	case "devmanager_stop_session":
+	case "openpoet_stop_session":
 		sid, _ := params["session_id"].(string)
 		if sid == "" {
 			return "", fmt.Errorf("session_id is required")
@@ -454,14 +454,14 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return fmt.Sprintf("Session %s stopped", sid), nil
 
-	case "devmanager_list_sessions":
+	case "openpoet_list_sessions":
 		body, err := client.Get("/api/sessions")
 		if err != nil {
 			return "", err
 		}
 		return formatSessionsList(body, params)
 
-	case "devmanager_send_to_session":
+	case "openpoet_send_to_session":
 		sid, _ := params["session_id"].(string)
 		text, _ := params["text"].(string)
 		if sid == "" || text == "" {
@@ -474,7 +474,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return fmt.Sprintf("Sent to session %s: %s", sid[:8], truncate(text, 100)), nil
 
-	case "devmanager_create_document":
+	case "openpoet_create_document":
 		title, _ := params["title"].(string)
 		content, _ := params["content"].(string)
 		convID := conversationID
@@ -511,7 +511,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 	}
 }
 
-// executeDashboard returns a compact JSON summary of the entire DevManager state.
+// executeDashboard returns a compact JSON summary of the entire OpenPoet state.
 func executeDashboard(client *APIClient) (string, error) {
 	type projectSummary struct {
 		ID             int64            `json:"id"`
@@ -625,7 +625,7 @@ func executeBatch(client *APIClient, args json.RawMessage, sessionID, conversati
 	var results []map[string]interface{}
 	for _, call := range batchParams.Calls {
 		// Prevent recursion
-		if call.Tool == "devmanager_batch" {
+		if call.Tool == "openpoet_batch" {
 			results = append(results, map[string]interface{}{
 				"tool": call.Tool, "error": "cannot nest batch calls",
 			})
@@ -984,7 +984,7 @@ func formatTaskDetail(client *APIClient, projectID int64, taskID int64, taskBody
 				}
 				sb.WriteString(fmt.Sprintf("- %s %s (id: %s, status: %s)\n", icon, d.Title, d.ID, d.Status))
 			}
-			sb.WriteString("\nUse devmanager_read_document to read a document's content.\n")
+			sb.WriteString("\nUse openpoet_read_document to read a document's content.\n")
 		}
 	}
 

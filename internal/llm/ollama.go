@@ -48,6 +48,13 @@ func (p *OllamaProvider) StreamMessage(ctx context.Context, req *Request, callba
 	if maxTokens == 0 {
 		maxTokens = 4096
 	}
+	// Many Ollama models (e.g. glm-5, qwen3-coder) are reasoning models that
+	// count internal reasoning tokens towards max_tokens. A low budget like 256
+	// gets entirely consumed by reasoning, leaving zero tokens for actual content.
+	// Enforce a minimum so there is always room for the visible response.
+	if maxTokens < 1024 {
+		maxTokens = 1024
+	}
 
 	// Convert messages to OpenAI format
 	messages := convertMessagesToOpenAI(req.Messages)

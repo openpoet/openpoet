@@ -2,7 +2,7 @@ package files
 
 import (
 	"bufio"
-	"devmanager/internal/database"
+	"openpoet/internal/database"
 	"fmt"
 	"io"
 	"os"

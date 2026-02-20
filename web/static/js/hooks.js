@@ -4,8 +4,8 @@ class HookManager {
         this.pendingPermission = null; // { sessionId, event, timestamp }
         this.maxToolEventsPerSession = 50;
         this.panelVisible = false;
-        this.storageKeyEvents = 'devmanager_tool_events';
-        this.storageKeyDismissed = 'devmanager_dismissed_requests';
+        this.storageKeyEvents = 'openpoet_tool_events';
+        this.storageKeyDismissed = 'openpoet_dismissed_requests';
 
         // Load persisted state from localStorage
         this.toolEventsBySession = this._loadFromStorage(this.storageKeyEvents) || {};

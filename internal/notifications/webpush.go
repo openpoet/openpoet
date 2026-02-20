@@ -5,7 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"devmanager/internal/database"
+	"openpoet/internal/database"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"

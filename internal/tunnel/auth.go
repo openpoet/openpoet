@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"devmanager/internal/database"
+	"openpoet/internal/database"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -19,7 +19,7 @@ type DeviceClaims struct {
 }
 
 const (
-	sessionCookieName = "devmanager_session"
+	sessionCookieName = "openpoet_session"
 	sessionMaxAge     = 30 * 24 * time.Hour // 30 days
 )
 

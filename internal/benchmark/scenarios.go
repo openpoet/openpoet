@@ -1,6 +1,6 @@
 package benchmark
 
-import "devmanager/internal/llm"
+import "openpoet/internal/llm"
 
 // AllScenarios returns the complete set of benchmark scenarios.
 func AllScenarios() []Scenario {
@@ -93,7 +93,7 @@ func AllScenarios() []Scenario {
 			Category:    CategorySkills,
 			Description: "Model should explain skills without calling any tool",
 			Messages: []llm.Message{
-				llm.NewTextMessage("user", "What are skills in DevManager?"),
+				llm.NewTextMessage("user", "What are skills in OpenPoet?"),
 			},
 			Validators: []ValidatorFunc{
 				ValidateNoToolCalled(),

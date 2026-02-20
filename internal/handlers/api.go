@@ -4,16 +4,16 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
-	"devmanager/internal/database"
-	"devmanager/internal/files"
-	"devmanager/internal/configsync"
-	"devmanager/internal/llm"
-	"devmanager/internal/mcp"
-	"devmanager/internal/notifications"
-	"devmanager/internal/security"
-	"devmanager/internal/session"
-	"devmanager/internal/tunnel"
-	"devmanager/internal/websocket"
+	"openpoet/internal/database"
+	"openpoet/internal/files"
+	"openpoet/internal/configsync"
+	"openpoet/internal/llm"
+	"openpoet/internal/mcp"
+	"openpoet/internal/notifications"
+	"openpoet/internal/security"
+	"openpoet/internal/session"
+	"openpoet/internal/tunnel"
+	"openpoet/internal/websocket"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -609,6 +609,7 @@ func respondError(w http.ResponseWriter, status int, message string) {
 	respondJSON(w, status, map[string]string{"error": message})
 }
 
+
 // ============ Projects ============
 
 func (a *API) ListProjects(w http.ResponseWriter, r *http.Request) {
@@ -996,21 +997,21 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if linkedTask != nil {
-		input.EnvVars["DEVMANAGER_TASK_ID"] = fmt.Sprintf("%d", linkedTask.ID)
-		input.EnvVars["DEVMANAGER_TASK_TITLE"] = linkedTask.Title
+		input.EnvVars["OPENPOET_TASK_ID"] = fmt.Sprintf("%d", linkedTask.ID)
+		input.EnvVars["OPENPOET_TASK_TITLE"] = linkedTask.Title
 
 		// Build system prompt so Claude Code starts with full task context
 		description := linkedTask.Description
 		if description == "" {
 			description = "(no description provided)"
 		}
-		input.EnvVars["DEVMANAGER_APPEND_SYSTEM_PROMPT"] = fmt.Sprintf(
-			"You have been assigned the following task by DevManager:\n\n"+
+		input.EnvVars["OPENPOET_APPEND_SYSTEM_PROMPT"] = fmt.Sprintf(
+			"You have been assigned the following task by OpenPoet:\n\n"+
 				"Title: %s\n\n"+
 				"Description:\n%s\n\n"+
 				"IMPORTANT: Communicate with the user in the same language used in the task title and description above. "+
 				"If the task is written in Portuguese, respond in Portuguese. If in English, respond in English. Match the language naturally.\n\n"+
-				"You can use the devmanager_get_my_task MCP tool to fetch updated task details or the devmanager_request_task_evaluation tool when you believe you have completed significant work.",
+				"You can use the openpoet_get_my_task MCP tool to fetch updated task details or the openpoet_request_task_evaluation tool when you believe you have completed significant work.",
 			linkedTask.Title, description,
 		)
 	}
@@ -1202,21 +1203,21 @@ func (a *API) ReopenSession(w http.ResponseWriter, r *http.Request) {
 	envVars := make(map[string]string)
 	linkedTask, _ := a.db.GetTaskForSession(r.Context(), sessionID)
 	if linkedTask != nil {
-		envVars["DEVMANAGER_TASK_ID"] = fmt.Sprintf("%d", linkedTask.ID)
-		envVars["DEVMANAGER_TASK_TITLE"] = linkedTask.Title
+		envVars["OPENPOET_TASK_ID"] = fmt.Sprintf("%d", linkedTask.ID)
+		envVars["OPENPOET_TASK_TITLE"] = linkedTask.Title
 
 		description := linkedTask.Description
 		if description == "" {
 			description = "(no description provided)"
 		}
-		envVars["DEVMANAGER_APPEND_SYSTEM_PROMPT"] = fmt.Sprintf(
-			"You have been assigned the following task by DevManager:\n\n"+
+		envVars["OPENPOET_APPEND_SYSTEM_PROMPT"] = fmt.Sprintf(
+			"You have been assigned the following task by OpenPoet:\n\n"+
 				"Title: %s\n\n"+
 				"Description:\n%s\n\n"+
 				"IMPORTANT: This is a RESUMED session. You are continuing work from a previous conversation.\n\n"+
 				"IMPORTANT: Communicate with the user in the same language used in the task title and description above. "+
 				"If the task is written in Portuguese, respond in Portuguese. If in English, respond in English. Match the language naturally.\n\n"+
-				"You can use the devmanager_get_my_task MCP tool to fetch updated task details or the devmanager_request_task_evaluation tool when you believe you have completed significant work.",
+				"You can use the openpoet_get_my_task MCP tool to fetch updated task details or the openpoet_request_task_evaluation tool when you believe you have completed significant work.",
 			linkedTask.Title, description,
 		)
 	}
@@ -1439,7 +1440,7 @@ func (a *API) ExportSkills(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Disposition", "attachment; filename=devmanager-skills.json")
+	w.Header().Set("Content-Disposition", "attachment; filename=openpoet-skills.json")
 	json.NewEncoder(w).Encode(exported)
 }
 

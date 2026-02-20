@@ -12,9 +12,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"devmanager/internal/notifications"
-	"devmanager/internal/session"
-	"devmanager/internal/websocket"
+	"openpoet/internal/notifications"
+	"openpoet/internal/session"
+	"openpoet/internal/websocket"
 )
 
 // PermissionResponse is what the browser sends back when user clicks Allow/Deny/AllowAlways
@@ -824,7 +824,7 @@ func (h *HookHandler) triggerSessionEvaluation(sessionID, trigger string) (bool,
 	h.mu.Unlock()
 
 	if imagePrompt != "" {
-		hint := fmt.Sprintf("\n[DevManager context: User submitted input with image(s). User's text prompt: \"%s\"]\n", imagePrompt)
+		hint := fmt.Sprintf("\n[OpenPoet context: User submitted input with image(s). User's text prompt: \"%s\"]\n", imagePrompt)
 		output = append(output, []byte(hint)...)
 	}
 

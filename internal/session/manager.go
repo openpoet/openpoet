@@ -2,9 +2,9 @@ package session
 
 import (
 	"context"
-	"devmanager/internal/database"
-	"devmanager/internal/mcp"
-	"devmanager/internal/websocket"
+	"openpoet/internal/database"
+	"openpoet/internal/mcp"
+	"openpoet/internal/websocket"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -33,7 +33,7 @@ type TermSize struct {
 type Manager struct {
 	db         *database.DB
 	hub        *websocket.Hub
-	serverAddr string // DevManager server address (e.g. "localhost:8080")
+	serverAddr string // OpenPoet server address (e.g. "localhost:8080")
 
 	mu          sync.RWMutex
 	sessions    map[string]*runningSession
@@ -138,19 +138,19 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	if envVars == nil {
 		envVars = make(map[string]string)
 	}
-	envVars["DEVMANAGER_HOOK_URL"] = "http://" + m.serverAddr
-	envVars["DEVMANAGER_SESSION_ID"] = sessionID
+	envVars["OPENPOET_HOOK_URL"] = "http://" + m.serverAddr
+	envVars["OPENPOET_SESSION_ID"] = sessionID
 
 	// Inject OpenTelemetry env vars for Claude Code token tracking
 	envVars["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
 	envVars["OTEL_METRICS_EXPORTER"] = "otlp"
 	envVars["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/json"
 	envVars["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://" + m.serverAddr
-	envVars["OTEL_RESOURCE_ATTRIBUTES"] = "devmanager.session_id=" + sessionID
+	envVars["OTEL_RESOURCE_ATTRIBUTES"] = "openpoet.session_id=" + sessionID
 	envVars["OTEL_METRIC_EXPORT_INTERVAL"] = "10000" // 10 seconds for faster feedback
 
 	// Build MCP config for --mcp-config CLI flag (additive, preserves project's existing MCPs)
-	// Use --session-id so Claude Code conversation ID matches DevManager session ID.
+	// Use --session-id so Claude Code conversation ID matches OpenPoet session ID.
 	// This allows --resume to restore the exact conversation when reopening.
 	cliArgs := []string{"--session-id", sessionID}
 	if mcpJSON := m.buildMCPConfigJSON(ctx, project, sessionID); mcpJSON != "" {
@@ -158,9 +158,9 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	}
 
 	// Inject task system prompt if present (set by API handler when session starts from a task)
-	if prompt, ok := envVars["DEVMANAGER_APPEND_SYSTEM_PROMPT"]; ok && prompt != "" {
+	if prompt, ok := envVars["OPENPOET_APPEND_SYSTEM_PROMPT"]; ok && prompt != "" {
 		cliArgs = append(cliArgs, "--append-system-prompt", prompt)
-		delete(envVars, "DEVMANAGER_APPEND_SYSTEM_PROMPT") // don't leak as env var
+		delete(envVars, "OPENPOET_APPEND_SYSTEM_PROMPT") // don't leak as env var
 	}
 
 	// Create runner based on project type
@@ -248,15 +248,15 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	if envVars == nil {
 		envVars = make(map[string]string)
 	}
-	envVars["DEVMANAGER_HOOK_URL"] = "http://" + m.serverAddr
-	envVars["DEVMANAGER_SESSION_ID"] = sessionID
+	envVars["OPENPOET_HOOK_URL"] = "http://" + m.serverAddr
+	envVars["OPENPOET_SESSION_ID"] = sessionID
 
 	// Inject OpenTelemetry env vars for Claude Code token tracking
 	envVars["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
 	envVars["OTEL_METRICS_EXPORTER"] = "otlp"
 	envVars["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/json"
 	envVars["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://" + m.serverAddr
-	envVars["OTEL_RESOURCE_ATTRIBUTES"] = "devmanager.session_id=" + sessionID
+	envVars["OTEL_RESOURCE_ATTRIBUTES"] = "openpoet.session_id=" + sessionID
 	envVars["OTEL_METRIC_EXPORT_INTERVAL"] = "10000"
 
 	// Build CLI args - resume the specific conversation by session ID.
@@ -271,9 +271,9 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	}
 
 	// Inject task system prompt if present
-	if prompt, ok := envVars["DEVMANAGER_APPEND_SYSTEM_PROMPT"]; ok && prompt != "" {
+	if prompt, ok := envVars["OPENPOET_APPEND_SYSTEM_PROMPT"]; ok && prompt != "" {
 		cliArgs = append(cliArgs, "--append-system-prompt", prompt)
-		delete(envVars, "DEVMANAGER_APPEND_SYSTEM_PROMPT")
+		delete(envVars, "OPENPOET_APPEND_SYSTEM_PROMPT")
 	}
 
 	// Create runner based on project type
@@ -567,8 +567,8 @@ func (m *Manager) checkForNotificationTriggers(sessionID string, data []byte) {
 }
 
 // buildMCPConfigJSON builds a JSON string for the --mcp-config CLI flag.
-// It includes user-configured MCP servers from the DB plus DevManager's own MCP server.
-// DevManager's MCP server is only included if the effective tool policy allows at least one tool.
+// It includes user-configured MCP servers from the DB plus OpenPoet's own MCP server.
+// OpenPoet's MCP server is only included if the effective tool policy allows at least one tool.
 func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Project, sessionID string) string {
 	mcpServers := make(map[string]interface{})
 
@@ -595,23 +595,26 @@ func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Proj
 		mcpServers[server.Name] = serverConfig
 	}
 
-	// Resolve effective tool policy for the project to decide whether to inject DevManager MCP.
+	// Resolve effective tool policy for the project to decide whether to inject OpenPoet MCP.
 	// If the project has an explicit policy, it overrides the global policy entirely.
 	// If the project has no explicit policy, the global session policy is inherited.
-	shouldInjectDevManager := false
+	shouldInjectOpenPoet := false
 	if m.serverAddr != "" {
 		globalPolicy := mcp.ToolPolicy{Mode: "deny_all"}
-		if policyStr, _ := m.db.GetSetting(ctx, "mcp_tool_policy_session"); policyStr != "" {
-			globalPolicy = mcp.ParsePolicy(policyStr)
+		globalPolicyStr, _ := m.db.GetSetting(ctx, "mcp_tool_policy_session")
+		if globalPolicyStr != "" {
+			globalPolicy = mcp.ParsePolicy(globalPolicyStr)
 		}
 		effectivePolicy := mcp.ResolveProjectPolicy(globalPolicy, project.ToolPolicy)
-		shouldInjectDevManager = effectivePolicy.HasTools(mcp.AllTools())
+		shouldInjectOpenPoet = effectivePolicy.HasTools(mcp.AllTools())
+		log.Printf("[MCP inject] project=%d globalPolicy=%q projectPolicy=%q effectiveMode=%s inject=%v",
+			project.ID, globalPolicyStr, project.ToolPolicy, effectivePolicy.Mode, shouldInjectOpenPoet)
 	}
 
-	if shouldInjectDevManager {
+	if shouldInjectOpenPoet {
 		execPath, err := os.Executable()
 		if err == nil {
-			mcpServers["devmanager"] = map[string]interface{}{
+			mcpServers["openpoet"] = map[string]interface{}{
 				"command": execPath,
 				"args":    []string{"mcp-serve", "--session-id", sessionID, "--api-url", "http://" + m.serverAddr},
 			}
@@ -675,18 +678,18 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	if envVars == nil {
 		envVars = make(map[string]string)
 	}
-	envVars["DEVMANAGER_HOOK_URL"] = "http://" + m.serverAddr
-	envVars["DEVMANAGER_SESSION_ID"] = sessionID
+	envVars["OPENPOET_HOOK_URL"] = "http://" + m.serverAddr
+	envVars["OPENPOET_SESSION_ID"] = sessionID
 
 	// Inject OpenTelemetry env vars for Claude Code token tracking
 	envVars["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
 	envVars["OTEL_METRICS_EXPORTER"] = "otlp"
 	envVars["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/json"
 	envVars["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://" + m.serverAddr
-	envVars["OTEL_RESOURCE_ATTRIBUTES"] = "devmanager.session_id=" + sessionID
+	envVars["OTEL_RESOURCE_ATTRIBUTES"] = "openpoet.session_id=" + sessionID
 	envVars["OTEL_METRIC_EXPORT_INTERVAL"] = "10000" // 10 seconds for faster feedback
 
-	// Use --session-id so Claude Code conversation ID matches DevManager session ID.
+	// Use --session-id so Claude Code conversation ID matches OpenPoet session ID.
 	// This allows --resume to restore the exact conversation when reopening.
 	cliArgs := []string{"--session-id", sessionID}
 	if mcpJSON := m.buildMCPConfigJSON(ctx, project, sessionID); mcpJSON != "" {
@@ -694,9 +697,9 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	}
 
 	// Inject task system prompt if present (set by API handler when session starts from a task)
-	if prompt, ok := envVars["DEVMANAGER_APPEND_SYSTEM_PROMPT"]; ok && prompt != "" {
+	if prompt, ok := envVars["OPENPOET_APPEND_SYSTEM_PROMPT"]; ok && prompt != "" {
 		cliArgs = append(cliArgs, "--append-system-prompt", prompt)
-		delete(envVars, "DEVMANAGER_APPEND_SYSTEM_PROMPT") // don't leak as env var
+		delete(envVars, "OPENPOET_APPEND_SYSTEM_PROMPT") // don't leak as env var
 	}
 
 	// Create output buffer (1MB max)
