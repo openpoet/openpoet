@@ -15,8 +15,6 @@ node_modules/
 
 # Screenshots / test files
 *.png
-hello.txt
-test.txt
 
 # IDE / Editor
 .idea/
