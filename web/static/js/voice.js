@@ -183,17 +183,32 @@ class VoiceInput {
 
         const audioBlob = new Blob(this.audioChunks, { type: this.getSupportedMimeType() });
 
-        // Create form data
-        const formData = new FormData();
-        formData.append('audio', audioBlob, 'recording.webm');
-
         try {
             app.showToast('Info', 'Transcribing...', 'info');
 
-            const response = await fetch('/api/voice/transcribe', {
-                method: 'POST',
-                body: formData
-            });
+            // Detect relay: binary multipart data gets corrupted through the
+            // tunnel JSON serialization, so send base64-encoded JSON instead.
+            const isTunnel = window.location.hostname !== 'localhost'
+                && window.location.hostname !== '127.0.0.1'
+                && !window.location.hostname.match(/^(10|192\.168|172\.(1[6-9]|2\d|3[01]))\./);
+
+            let response;
+            if (isTunnel) {
+                const arrayBuf = await audioBlob.arrayBuffer();
+                const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuf)));
+                response = await fetch('/api/voice/transcribe', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ audio: base64, filename: 'recording.webm' })
+                });
+            } else {
+                const formData = new FormData();
+                formData.append('audio', audioBlob, 'recording.webm');
+                response = await fetch('/api/voice/transcribe', {
+                    method: 'POST',
+                    body: formData
+                });
+            }
 
             if (!response.ok) {
                 const error = await response.json();

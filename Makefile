@@ -15,14 +15,6 @@ build:
 	go build -ldflags "-X main.BuildVersion=$$(git rev-parse --short HEAD) -X main.DefaultRelayURL=$(RELAY_URL)" -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
 	@echo "Built: $(BUILD_DIR)/$(BINARY_NAME)"
 
-# Build the relay server (local + Linux amd64 for VPS)
-build-relay:
-	@echo "Building relay server..."
-	@mkdir -p $(BUILD_DIR)
-	go build -o $(BUILD_DIR)/relay ./cmd/relay
-	GOOS=linux GOARCH=amd64 go build -o $(BUILD_DIR)/relay-linux-amd64 ./cmd/relay
-	@echo "Built: $(BUILD_DIR)/relay (local) + $(BUILD_DIR)/relay-linux-amd64 (VPS)"
-
 # Build for multiple platforms
 build-all: deps vendor-js
 	@echo "Building for multiple platforms..."
@@ -129,11 +121,6 @@ deploy-status:
 deploy-log:
 	@./scripts/deploy.sh --log
 
-# Start website dev server
-website-dev:
-	@echo "Starting website dev server on :8000..."
-	cd website && python3 -m http.server 8000
-
 # Show help
 help:
 	@echo "OpenPoet Makefile"
@@ -155,7 +142,6 @@ help:
 	@echo "  fmt          Format code"
 	@echo "  lint         Lint code"
 	@echo "  icons        Generate PWA icons"
-	@echo "  build-relay  Build the relay server"
 	@echo "  deploy       Deploy to production (port 8081)"
 	@echo "  deploy-status Show last deploy status"
 	@echo "  deploy-log   Show recent deploy log"

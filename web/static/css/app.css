@@ -7,7 +7,7 @@
     --color-border: #3b4261;
     --color-text: #c0caf5;
     --color-text-secondary: #a9b1d6;
-    --color-text-muted: #565f89;
+    --color-text-muted: #6e78a8;
     --color-primary: #7aa2f7;
     --color-primary-hover: #89b0fc;
     --color-primary-active: #6a92e7;
@@ -24,20 +24,20 @@
     --color-danger-rgb: 247, 118, 142;
     --color-info: #7dcfff;
     --color-info-rgb: 125, 207, 255;
-    --color-muted-rgb: 86, 95, 137;
+    --color-muted-rgb: 110, 120, 168;
 
     /* Tab sidebar */
     --color-tab-sidebar-bg: #16161e;
     --color-tab-border: #3b4261;
     --color-tab-header-text: #a9b1d6;
-    --color-tab-text: #565f89;
+    --color-tab-text: #6e78a8;
     --color-tab-text-active: #c0caf5;
     --color-tab-hover-bg: #24283b;
     --color-tab-active-bg: #3b4261;
     --color-tab-accent: #7aa2f7;
     --color-tab-group-bg: #24283b;
-    --color-tab-group-text: #565f89;
-    --color-tab-group-toggle: #565f89;
+    --color-tab-group-text: #6e78a8;
+    --color-tab-group-toggle: #6e78a8;
     --color-tab-input-bg: #3b4261;
     --color-tab-input-border: #414868;
 
@@ -48,7 +48,7 @@
     --color-status-running: #9ece6a;
     --color-status-disconnected: #e0af68;
     --color-status-error: #f7768e;
-    --color-status-stopped: #565f89;
+    --color-status-stopped: #6e78a8;
 
     /* Overlay */
     --color-overlay-bg: rgba(22, 22, 30, 0.7);
@@ -1662,7 +1662,7 @@ body {
 
 .hook-permission-tool-label {
     font-size: 13px;
-    color: var(--color-text-muted);
+    color: var(--color-text-secondary);
 }
 
 .hook-permission-tool-name {
@@ -1677,7 +1677,7 @@ body {
 
 .hook-detail-label {
     font-size: 12px;
-    color: var(--color-text-muted);
+    color: var(--color-text-secondary);
     margin-bottom: 4px;
     margin-top: 12px;
 }
@@ -2346,7 +2346,7 @@ body {
 .tool-panel-section-label {
     font-size: 11px;
     font-weight: 600;
-    color: var(--color-text-muted);
+    color: var(--color-text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     padding: 8px 4px 4px;
@@ -3196,7 +3196,7 @@ body {
 }
 .token-usage-stat .label {
     font-size: 10px;
-    color: var(--color-text-muted);
+    color: var(--color-text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }
@@ -3224,7 +3224,7 @@ body {
     text-align: left;
     padding: 6px 8px;
     font-weight: 500;
-    color: var(--color-text-muted);
+    color: var(--color-text-secondary);
     border-bottom: 1px solid var(--color-border);
     font-size: 10px;
     text-transform: uppercase;
@@ -3911,7 +3911,7 @@ body {
 }
 .confirm-modal-message {
     font-size: 13px;
-    color: var(--color-text-muted);
+    color: var(--color-text-secondary);
     margin-bottom: 20px;
     line-height: 1.5;
 }
@@ -3992,7 +3992,7 @@ body {
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    color: var(--color-text-muted);
+    color: var(--color-text-secondary);
     margin-bottom: 12px;
     padding-bottom: 8px;
     border-bottom: 1px solid var(--color-border);
@@ -4010,7 +4010,7 @@ body {
 }
 
 .project-detail-label {
-    color: var(--color-text-muted);
+    color: var(--color-text-secondary);
     font-size: 13px;
     min-width: 120px;
     flex-shrink: 0;

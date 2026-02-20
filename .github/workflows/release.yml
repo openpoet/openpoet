@@ -8,38 +8,6 @@ permissions:
   contents: write
 
 jobs:
-  build-relay:
-    name: Build relay (linux)
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Build relay
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-        run: |
-          mkdir -p dist
-          go build -ldflags "-s -w" -o dist/relay-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/relay
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: relay-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/relay-*
-
   build-openpoet:
     name: Build openpoet (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ubuntu-latest
@@ -102,7 +70,7 @@ jobs:
 
   upload-assets:
     name: Upload release assets
-    needs: [build-relay, build-openpoet]
+    needs: [build-openpoet]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
