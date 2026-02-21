@@ -1,4 +1,4 @@
-.PHONY: all build run clean test deps vendor-js deploy deploy-status deploy-log
+.PHONY: all build run clean test deps vendor-js
 
 # Variables
 BINARY_NAME=openpoet
@@ -86,30 +86,27 @@ lint:
 
 # Generate PWA icons (requires ImageMagick)
 icons:
-	@echo "Generating PWA icons..."
-	@if command -v convert &> /dev/null; then \
-		convert -background none -size 192x192 web/static/favicon.svg web/static/icon-192.png; \
-		convert -background none -size 512x512 web/static/favicon.svg web/static/icon-512.png; \
-		echo "Icons generated."; \
-	else \
-		echo "ImageMagick not installed, skipping icon generation."; \
+	@if ! command -v magick &> /dev/null; then \
+		echo "Error: ImageMagick is not installed."; \
+		echo "  Install with: brew install imagemagick"; \
+		exit 1; \
 	fi
+	@if [ ! -f web/static/favicon.svg ]; then \
+		echo "Error: Source file web/static/favicon.svg not found."; \
+		exit 1; \
+	fi
+	@echo "Generating PWA icons from web/static/favicon.svg..."
+	@magick -background none -size 192x192 web/static/favicon.svg web/static/icon-192.png && \
+		echo "  Created web/static/icon-192.png" || \
+		{ echo "Error: Failed to generate icon-192.png"; exit 1; }
+	@magick -background none -size 512x512 web/static/favicon.svg web/static/icon-512.png && \
+		echo "  Created web/static/icon-512.png" || \
+		{ echo "Error: Failed to generate icon-512.png"; exit 1; }
+	@echo "Done."
 
 # Install development tools
 tools:
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-
-# Deploy to production (port 8081) — survives caller disconnection
-deploy:
-	@./scripts/deploy.sh
-
-# Check last deploy status
-deploy-status:
-	@./scripts/deploy.sh --status
-
-# Show recent deploy log
-deploy-log:
-	@./scripts/deploy.sh --log
 
 # Show help
 help:
@@ -131,8 +128,5 @@ help:
 	@echo "  fmt          Format code"
 	@echo "  lint         Lint code"
 	@echo "  icons        Generate PWA icons"
-	@echo "  deploy       Deploy to production (port 8081)"
-	@echo "  deploy-status Show last deploy status"
-	@echo "  deploy-log   Show recent deploy log"
 	@echo "  tools        Install development tools"
 	@echo "  help         Show this help"
