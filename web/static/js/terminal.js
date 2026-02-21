@@ -22,6 +22,29 @@ class TerminalManager {
         return container;
     }
 
+    showConnectingOverlay(sessionId) {
+        const container = document.getElementById(`terminal-container-${sessionId}`);
+        if (!container) return;
+        const overlay = document.createElement('div');
+        overlay.className = 'terminal-connecting-overlay';
+        overlay.id = `terminal-connecting-${sessionId}`;
+        overlay.innerHTML = `
+            <div class="terminal-connecting-box">
+                <div class="terminal-connecting-spinner"></div>
+                <div class="terminal-connecting-text">Starting session...</div>
+                <div class="terminal-connecting-sub">Establishing connection</div>
+            </div>`;
+        container.appendChild(overlay);
+    }
+
+    dismissConnectingOverlay(sessionId) {
+        const overlay = document.getElementById(`terminal-connecting-${sessionId}`);
+        if (overlay) {
+            overlay.classList.add('fade-out');
+            setTimeout(() => overlay.remove(), 300);
+        }
+    }
+
     // Connect to a session (create new terminal if doesn't exist)
     async connect(sessionId, sessionName) {
         console.log('TerminalManager.connect called with:', sessionId, sessionName);
@@ -71,6 +94,10 @@ class TerminalManager {
 
         // Open terminal in container
         terminal.open(container);
+
+        // Show connecting overlay (dismissed on buffer fetch, first output, or timeout)
+        this.showConnectingOverlay(sessionId);
+        setTimeout(() => this.dismissConnectingOverlay(sessionId), 10000);
 
         // Create WebSocket connection
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -282,6 +309,11 @@ class TerminalManager {
                 console.error('Failed to fetch session output buffer:', err);
             }
 
+            // Buffer fetch done (or failed) — dismiss the connecting overlay.
+            // Previously the overlay only dismissed on the first session_output
+            // WebSocket message, which never arrives if the session is idle.
+            this.dismissConnectingOverlay(sessionId);
+
             // Recover pending hook state from backend
             try {
                 const hookResp = await fetch(`/api/hooks/pending/${sessionId}`);
@@ -318,9 +350,11 @@ class TerminalManager {
 
             const msg = JSON.parse(data);
             if (msg.type === 'session_output' && msg.data) {
+                this.dismissConnectingOverlay(sessionId);
                 terminal.write(msg.data);
             } else if (msg.type === 'session_status') {
                 if (msg.data.status === 'completed' || msg.data.status === 'error' || msg.data.status === 'stopped') {
+                    this.dismissConnectingOverlay(sessionId);
                     terminal.writeln(`\r\n\x1b[33mSession ${msg.data.status}\x1b[0m`);
                     this.updateSessionStatus(sessionId, msg.data.status);
                 }
@@ -413,15 +447,45 @@ class TerminalManager {
                 }
             }, { passive: false });
 
-            // Keyboard scroll (Shift+PgUp/PgDn) — set flag so onScroll knows
+            // Custom key handler: scroll, copy/paste (Windows/Linux fix)
             terminal.attachCustomKeyEventHandler((domEvent) => {
+                // Scroll: Shift+PgUp/PgDn
                 if (domEvent.type === 'keydown' && domEvent.shiftKey &&
                     (domEvent.key === 'PageUp' || domEvent.key === 'PageDown')) {
                     _userInitiatedScroll = true;
-                    // Safety: clear if no scroll event fires (already at edge)
                     requestAnimationFrame(() => { _userInitiatedScroll = false; });
                 }
-                return true; // always let xterm.js handle the key
+
+                // Copy: Ctrl+C with selection → copy instead of interrupt (fixes Windows)
+                if (domEvent.type === 'keydown' && domEvent.ctrlKey && !domEvent.shiftKey &&
+                    domEvent.key === 'c' && terminal.hasSelection()) {
+                    navigator.clipboard.writeText(terminal.getSelection());
+                    terminal.clearSelection();
+                    return false; // prevent xterm from sending \x03
+                }
+
+                // Copy: Ctrl+Shift+C always copies (Linux terminal convention)
+                if (domEvent.type === 'keydown' && domEvent.ctrlKey && domEvent.shiftKey &&
+                    domEvent.key === 'C') {
+                    if (terminal.hasSelection()) {
+                        navigator.clipboard.writeText(terminal.getSelection());
+                        terminal.clearSelection();
+                    }
+                    return false;
+                }
+
+                // Paste: Ctrl+Shift+V (Linux terminal convention)
+                if (domEvent.type === 'keydown' && domEvent.ctrlKey && domEvent.shiftKey &&
+                    domEvent.key === 'V') {
+                    navigator.clipboard.readText().then(text => {
+                        if (text && window.terminalManager) {
+                            window.terminalManager.paste(text);
+                        }
+                    });
+                    return false;
+                }
+
+                return true;
             });
 
             // Central scroll state manager — fires on every viewportY change.
