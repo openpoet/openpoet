@@ -104,11 +104,16 @@ brews:
     license: "MIT"
     install: |
       bin.install "openpoet"
+    custom_block: |
+      def post_uninstall
+        rm_rf "#{Dir.home}/.openpoet"
+      end
     caveats: |
       OpenPoet is ready to use! Start it with:
         openpoet
 
       The web UI will be available at http://localhost:8080
+      Data is stored in ~/.openpoet/
 
       Note: Node.js 18+ is required for the Claude Agent SDK provider.
       The sidecar scripts are embedded in the binary and auto-extracted on first run.

@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 )
 
@@ -15,11 +16,21 @@ type Config struct {
 	EncryptKey string
 }
 
+func defaultDBPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "openpoet.db"
+	}
+	dir := filepath.Join(home, ".openpoet")
+	os.MkdirAll(dir, 0755)
+	return filepath.Join(dir, "openpoet.db")
+}
+
 func Load() *Config {
 	cfg := &Config{
 		Bind:       getEnv("OPENPOET_BIND", "localhost"),
 		Port:       getEnvInt("OPENPOET_PORT", 8080),
-		DBPath:     getEnv("OPENPOET_DB", "openpoet.db"),
+		DBPath:     getEnv("OPENPOET_DB", defaultDBPath()),
 		OpenAIKey:  getEnv("OPENAI_API_KEY", ""),
 		GroqKey:    getEnv("GROQ_API_KEY", ""),
 		VAPIDEmail: getEnv("VAPID_EMAIL", "admin@openpoet.minhapalavra.com.br"),
