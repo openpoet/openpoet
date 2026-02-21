@@ -606,9 +606,14 @@ func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Proj
 			globalPolicy = mcp.ParsePolicy(globalPolicyStr)
 		}
 		effectivePolicy := mcp.ResolveProjectPolicy(globalPolicy, project.ToolPolicy)
+		// If the project has shares configured, auto-allow the share tools in the policy.
+		shares, sharesErr := m.db.ListProjectShares(ctx, project.ID)
+		if sharesErr == nil && len(shares) > 0 {
+			effectivePolicy = effectivePolicy.AllowTools(mcp.ShareToolNames)
+		}
 		shouldInjectOpenPoet = effectivePolicy.HasTools(mcp.AllTools())
-		log.Printf("[MCP inject] project=%d globalPolicy=%q projectPolicy=%q effectiveMode=%s inject=%v",
-			project.ID, globalPolicyStr, project.ToolPolicy, effectivePolicy.Mode, shouldInjectOpenPoet)
+		log.Printf("[MCP inject] project=%d globalPolicy=%q projectPolicy=%q effectiveMode=%s shares=%d inject=%v",
+			project.ID, globalPolicyStr, project.ToolPolicy, effectivePolicy.Mode, len(shares), shouldInjectOpenPoet)
 	}
 
 	if shouldInjectOpenPoet {
