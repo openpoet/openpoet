@@ -1071,6 +1071,50 @@ body {
     display: block; /* Show active terminal */
 }
 
+/* Terminal connecting overlay */
+.terminal-connecting-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-terminal-bg, #0f0f1a);
+    transition: opacity 0.3s ease;
+}
+
+.terminal-connecting-overlay.fade-out {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.terminal-connecting-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+}
+
+.terminal-connecting-spinner {
+    width: 36px;
+    height: 36px;
+    border: 3px solid var(--color-border);
+    border-top-color: var(--color-primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+.terminal-connecting-text {
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--color-text);
+}
+
+.terminal-connecting-sub {
+    font-size: 13px;
+    color: var(--color-text-muted);
+}
+
 /* Scroll navigation buttons (visible on both desktop and mobile) */
 .mobile-scroll-nav {
     display: flex;
@@ -1370,6 +1414,10 @@ body {
 
 .toast-info {
     border-left: 3px solid var(--color-info);
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
 }
 
 .toast-message {

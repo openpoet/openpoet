@@ -750,13 +750,13 @@ class OpenPoet {
         try {
             const payload = { project_id: projectId };
             if (taskId) payload.task_id = taskId;
+
             const session = await this.api('POST', '/sessions', payload);
 
             // Mark this session as recently created (protect from restoreTabsFromStorage)
             this.recentlyCreatedSessions.add(session.id);
             setTimeout(() => this.recentlyCreatedSessions.delete(session.id), 5000);
 
-            this.showToast('Success', taskId ? 'Session started from task' : 'Session started', 'success');
             this.openTerminal(session.id, session, session.name);
         } catch (error) {
             this._showApiError(error);
@@ -1473,6 +1473,18 @@ class OpenPoet {
             <div class="project-detail-card">
                 <div class="project-detail-section">
                     <div class="project-detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                        <span>Shared File Access</span>
+                        <span id="project-shares-summary" style="font-size: 11px; color: var(--color-text-muted);"></span>
+                    </div>
+                    <div id="project-shares-list" class="project-tools-list">
+                        <div class="meta-empty">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="project-detail-card">
+                <div class="project-detail-section">
+                    <div class="project-detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
                         <span>Memory Doc</span>
                         <button class="meta-ai-btn" onclick="app.editMemoryDocWithAI(${project.id})" title="Edit with AI">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1523,6 +1535,7 @@ class OpenPoet {
         this.loadMemoryDoc(project.id);
         this.loadProjectTools(project.id);
         this.loadProjectSkills(project.id);
+        this.loadProjectShares(project.id);
         this.loadProjectTasks(project.id);
         this.loadProjectTokenUsage(project.id, 30);
 
@@ -2014,6 +2027,92 @@ class OpenPoet {
     }
 
     // --- End Project Skills ---
+
+    // --- Project Shares ---
+
+    async loadProjectShares(projectId) {
+        const container = document.getElementById('project-shares-list');
+        const summaryEl = document.getElementById('project-shares-summary');
+        if (!container) return;
+
+        try {
+            const shares = await this.api('GET', `/projects/${projectId}/shares`);
+
+            if (summaryEl) {
+                summaryEl.textContent = shares.length ? `${shares.length} project(s)` : 'None';
+            }
+
+            if (shares.length === 0) {
+                container.innerHTML = `
+                    <div class="meta-empty">No shared projects. Sessions can't read files from other projects.</div>
+                    <button class="btn btn-sm btn-secondary" style="margin-top: 8px;"
+                        onclick="app.showSharesModal(${projectId})" title="Configure shared file access">Configure Shared Access</button>
+                `;
+            } else {
+                const tags = shares.map(s =>
+                    `<span class="badge badge-outline" style="margin: 2px 4px;" title="${this.escapeHtml(s.path)}">${this.escapeHtml(s.name)}</span>`
+                ).join('');
+                container.innerHTML = `
+                    <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px;">${tags}</div>
+                    <button class="btn btn-sm btn-secondary" onclick="app.showSharesModal(${projectId})" title="Configure shared file access">Configure</button>
+                `;
+            }
+        } catch (e) {
+            container.innerHTML = '<div class="meta-empty">Failed to load shared projects.</div>';
+        }
+    }
+
+    async showSharesModal(projectId) {
+        const shares = await this.api('GET', `/projects/${projectId}/shares`);
+        const sharedIds = new Set(shares.map(s => s.project_id));
+        const otherProjects = this.projects.filter(p => p.id !== projectId);
+
+        if (otherProjects.length === 0) {
+            this.showToast('Info', 'No other projects available to share with.', 'info');
+            return;
+        }
+
+        const content = `
+            <p style="font-size: 12px; color: var(--color-text-muted); margin-bottom: 12px;">
+                Select projects whose files this project's sessions can read.
+            </p>
+            <div class="project-tools-grid">
+                ${otherProjects.map(p => {
+                    const checked = sharedIds.has(p.id) ? 'checked' : '';
+                    return `<label class="tp-tool-item" title="${this.escapeHtml(p.path)}">
+                        <input type="checkbox" data-share-project-id="${p.id}" ${checked}>
+                        <span class="tp-tool-name">${this.escapeHtml(p.name)}</span>
+                        <span class="tp-tool-desc">${this.escapeHtml(p.type)}</span>
+                    </label>`;
+                }).join('')}
+            </div>
+        `;
+
+        const actions = `
+            <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="app.saveProjectShares(${projectId})">Save</button>
+        `;
+
+        this.showModal('Shared File Access', content, actions);
+    }
+
+    async saveProjectShares(projectId) {
+        const checkboxes = document.querySelectorAll('#modal-container input[data-share-project-id]');
+        const sharedIds = Array.from(checkboxes)
+            .filter(cb => cb.checked)
+            .map(cb => parseInt(cb.dataset.shareProjectId));
+
+        try {
+            await this.api('PUT', `/projects/${projectId}/shares`, { shared_project_ids: sharedIds });
+            this.hideModal();
+            this.showToast('Success', 'Shared access updated', 'success');
+            this.loadProjectShares(projectId);
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    // --- End Project Shares ---
 
     async loadProjectTokenUsage(projectId, days = 30) {
         const container = document.getElementById('project-token-usage');
@@ -4370,8 +4469,11 @@ class OpenPoet {
                         </select>
                     </div>
                     <div class="form-group">
-                        <label class="form-label">Credential (Password or Key)</label>
-                        <textarea class="form-textarea" name="ssh_credential" placeholder="Enter password or paste private key"></textarea>
+                        <label class="form-label">
+                            Credential (Password or Key)
+                            ${isEdit && project?.has_credential ? '<span style="color: var(--color-success, #3fb950); font-size: 12px; margin-left: 8px;">&#10003; Credential stored</span>' : ''}
+                        </label>
+                        <textarea class="form-textarea" name="ssh_credential" placeholder="${isEdit && project?.has_credential ? 'Leave empty to keep existing credential, or paste new one to replace' : 'Enter password or paste private key'}"></textarea>
                     </div>
                 </div>
             </form>
@@ -4485,6 +4587,10 @@ class OpenPoet {
     async saveProject(projectId) {
         const form = document.getElementById('project-form');
         const formData = new FormData(form);
+        const credentialFromFormData = formData.get('ssh_credential');
+        const credentialFromDOM = document.querySelector('#project-form textarea[name="ssh_credential"]')?.value;
+        const ssh_credential = credentialFromFormData || credentialFromDOM || '';
+        console.log('[saveProject] credential from FormData:', credentialFromFormData?.length || 0, 'from DOM:', credentialFromDOM?.length || 0);
         const data = {
             name: formData.get('name'),
             path: formData.get('path'),
@@ -4493,7 +4599,7 @@ class OpenPoet {
             ssh_port: parseInt(formData.get('ssh_port')) || 22,
             ssh_user: formData.get('ssh_user'),
             ssh_auth_type: formData.get('ssh_auth_type'),
-            ssh_credential: formData.get('ssh_credential'),
+            ssh_credential,
             tool_policy: formData.get('tool_policy') || ''
         };
 
@@ -7605,7 +7711,6 @@ class OpenPoet {
             this.recentlyCreatedSessions.add(session.id);
             setTimeout(() => this.recentlyCreatedSessions.delete(session.id), 5000);
 
-            this.showToast('Success', 'Session started from task', 'success');
             this.openTerminal(session.id, session, session.name);
         } catch (e) {
             this.showToast('Error', e.message, 'error');
