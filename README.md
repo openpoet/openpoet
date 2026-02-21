@@ -7,7 +7,7 @@ Orchestrate Claude Code sessions across multiple projects from a single web inte
 ### Homebrew (macOS and Linux)
 
 ```bash
-brew install openpoet/openpoet
+brew install openpoet/tap/openpoet
 ```
 
 ### winget (Windows)

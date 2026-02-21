@@ -17,7 +17,7 @@ type Config struct {
 
 func Load() *Config {
 	cfg := &Config{
-		Bind:       getEnv("OPENPOET_BIND", "0.0.0.0"),
+		Bind:       getEnv("OPENPOET_BIND", "localhost"),
 		Port:       getEnvInt("OPENPOET_PORT", 8080),
 		DBPath:     getEnv("OPENPOET_DB", "openpoet.db"),
 		OpenAIKey:  getEnv("OPENAI_API_KEY", ""),

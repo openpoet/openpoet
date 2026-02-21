@@ -75,7 +75,7 @@ release:
 
     **macOS / Linux (Homebrew):**
     ```bash
-    brew install openpoet/openpoet
+    brew install openpoet/tap/openpoet
     ```
 
     **macOS / Linux (script):**
@@ -96,7 +96,7 @@ release:
 brews:
   - repository:
       owner: openpoet
-      name: homebrew-openpoet
+      name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Formula
     homepage: "https://github.com/openpoet/openpoet"

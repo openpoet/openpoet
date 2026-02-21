@@ -119,7 +119,7 @@ func main() {
 	}
 
 	// Parse command line flags
-	bind := flag.String("bind", "", "Address to bind (default: 0.0.0.0)")
+	bind := flag.String("bind", "", "Address to bind (default: localhost, use 0.0.0.0 for all interfaces)")
 	port := flag.Int("port", 0, "Port to listen on (default: 8080)")
 	dbPath := flag.String("db", "", "Database path (default: openpoet.db)")
 	openaiKey := flag.String("openai-key", "", "OpenAI API key for voice transcription")
