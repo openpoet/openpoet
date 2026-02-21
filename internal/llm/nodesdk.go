@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"math/rand"
 	"net/http"
@@ -16,7 +17,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	sidecar "openpoet/scripts/nodesdk-sidecar"
 )
+
+// BuildVersion is set by main at startup to enable version-aware sidecar extraction.
+var BuildVersion = "dev"
+
+// sidecarFiles lists the files embedded in the sidecar package.
+var sidecarFiles = []string{"index.js", "tools.js", "package.json", "package-lock.json"}
 
 // NodeSDKProvider manages a Node.js sidecar process running the official
 // @anthropic-ai/claude-agent-sdk. Communication happens via HTTP.
@@ -45,39 +54,120 @@ func (p *NodeSDKProvider) Name() string {
 	return "nodesdk"
 }
 
-// sidecarDir returns the path to the sidecar scripts directory.
-func (p *NodeSDKProvider) sidecarDir() string {
-	// Look for the sidecar relative to the executable
+// ensureSidecar ensures the sidecar files are extracted and up-to-date.
+// It returns the path to the directory containing the sidecar scripts.
+func (p *NodeSDKProvider) ensureSidecar() (string, error) {
 	exePath, err := os.Executable()
 	if err != nil {
-		return "scripts/nodesdk-sidecar"
+		return "", fmt.Errorf("cannot determine executable path: %w", err)
 	}
-	dir := filepath.Dir(exePath)
-	// Try: same dir as executable -> ../scripts/nodesdk-sidecar -> ./scripts/nodesdk-sidecar
+	exeDir := filepath.Dir(exePath)
+
+	// Candidate directories in priority order:
+	// 1. {exe_dir}/sidecar/ — next to the binary (manual install, Scoop, extracted archive)
+	// 2. ~/.openpoet/sidecar/ — fallback when exe dir is read-only (Homebrew /usr/local/bin)
+	// 3. Legacy: scripts/nodesdk-sidecar/ — development mode (relative to CWD)
 	candidates := []string{
-		filepath.Join(dir, "scripts", "nodesdk-sidecar"),
-		filepath.Join(dir, "..", "scripts", "nodesdk-sidecar"),
-		"scripts/nodesdk-sidecar",
+		filepath.Join(exeDir, "sidecar"),
 	}
-	for _, c := range candidates {
-		if _, err := os.Stat(filepath.Join(c, "index.js")); err == nil {
-			return c
+
+	// Add home-based fallback
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".openpoet", "sidecar"))
+	}
+
+	// Check if any candidate already has a valid, up-to-date sidecar
+	for _, dir := range candidates {
+		if isValidSidecar(dir) && isSidecarCurrent(dir) {
+			return dir, nil
 		}
 	}
-	return "scripts/nodesdk-sidecar"
+
+	// Check legacy development path (scripts/nodesdk-sidecar relative to exe or CWD)
+	legacyCandidates := []string{
+		filepath.Join(exeDir, "scripts", "nodesdk-sidecar"),
+		filepath.Join(exeDir, "..", "scripts", "nodesdk-sidecar"),
+		"scripts/nodesdk-sidecar",
+	}
+	for _, c := range legacyCandidates {
+		if isValidSidecar(c) {
+			return c, nil
+		}
+	}
+
+	// Extract from embedded FS to the first writable candidate
+	for _, dir := range candidates {
+		if err := extractSidecar(dir); err == nil {
+			log.Printf("[NodeSDK] Sidecar extracted to %s", dir)
+			return dir, nil
+		}
+	}
+
+	return "", fmt.Errorf("failed to extract sidecar files; ensure the directory next to the openpoet binary is writable, or that ~/.openpoet/ is accessible")
+}
+
+// isValidSidecar checks whether a directory contains the required sidecar files.
+func isValidSidecar(dir string) bool {
+	for _, f := range sidecarFiles {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// isSidecarCurrent checks if the extracted sidecar matches the current build version.
+func isSidecarCurrent(dir string) bool {
+	versionFile := filepath.Join(dir, ".version")
+	data, err := os.ReadFile(versionFile)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(data)) == BuildVersion
+}
+
+// extractSidecar writes the embedded sidecar files to the given directory.
+func extractSidecar(dir string) error {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("cannot create sidecar directory %s: %w", dir, err)
+	}
+
+	for _, name := range sidecarFiles {
+		data, err := fs.ReadFile(sidecar.FS, name)
+		if err != nil {
+			return fmt.Errorf("cannot read embedded file %s: %w", name, err)
+		}
+		dst := filepath.Join(dir, name)
+		if err := os.WriteFile(dst, data, 0644); err != nil {
+			return fmt.Errorf("cannot write %s: %w", dst, err)
+		}
+	}
+
+	// Write version marker
+	versionFile := filepath.Join(dir, ".version")
+	if err := os.WriteFile(versionFile, []byte(BuildVersion), 0644); err != nil {
+		return fmt.Errorf("cannot write version marker: %w", err)
+	}
+
+	// Force npm install on next start by removing stale node_modules
+	nodeModules := filepath.Join(dir, "node_modules")
+	if _, err := os.Stat(nodeModules); err == nil {
+		os.RemoveAll(nodeModules)
+	}
+
+	return nil
 }
 
 // ensureDependencies runs npm install if node_modules is missing.
-func (p *NodeSDKProvider) ensureDependencies() error {
-	dir := p.sidecarDir()
+func (p *NodeSDKProvider) ensureDependencies(dir string) error {
 	nodeModules := filepath.Join(dir, "node_modules")
 	if _, err := os.Stat(nodeModules); err == nil {
 		return nil // already installed
 	}
-	log.Printf("[NodeSDK] Installing sidecar dependencies...")
+	log.Printf("[NodeSDK] Installing sidecar dependencies in %s...", dir)
 	npmPath, err := exec.LookPath("npm")
 	if err != nil {
-		return fmt.Errorf("npm not found in PATH: %w", err)
+		return fmt.Errorf("npm not found in PATH — install Node.js 18+ from https://nodejs.org: %w", err)
 	}
 	cmd := exec.Command(npmPath, "install", "--production")
 	cmd.Dir = dir
@@ -98,21 +188,26 @@ func (p *NodeSDKProvider) Start() error {
 	// Find node
 	nodePath, err := exec.LookPath("node")
 	if err != nil {
-		return fmt.Errorf("node not found in PATH: %w", err)
+		return fmt.Errorf(
+			"Node.js is required for the Claude Agent SDK provider.\n" +
+				"Install Node.js 18+ from https://nodejs.org and restart OpenPoet.",
+		)
+	}
+
+	// Ensure sidecar files are extracted
+	dir, err := p.ensureSidecar()
+	if err != nil {
+		return fmt.Errorf("sidecar setup: %w", err)
 	}
 
 	// Ensure npm dependencies are installed
-	if err := p.ensureDependencies(); err != nil {
+	if err := p.ensureDependencies(dir); err != nil {
 		return fmt.Errorf("sidecar dependencies: %w", err)
 	}
 
 	// Allocate a random port
 	p.port = 10000 + rand.Intn(50000)
-	sidecarPath := filepath.Join(p.sidecarDir(), "index.js")
-
-	if _, err := os.Stat(sidecarPath); err != nil {
-		return fmt.Errorf("sidecar script not found at %s: %w", sidecarPath, err)
-	}
+	sidecarPath := filepath.Join(dir, "index.js")
 
 	p.sidecarCmd = exec.Command(nodePath, sidecarPath,
 		"--port", fmt.Sprintf("%d", p.port),

@@ -1,4 +1,4 @@
-.PHONY: all build run clean test deps vendor-js sidecar-deps deploy deploy-status deploy-log
+.PHONY: all build run clean test deps vendor-js deploy deploy-status deploy-log
 
 # Variables
 BINARY_NAME=openpoet
@@ -6,7 +6,7 @@ BUILD_DIR=build
 MAIN_PATH=./cmd/openpoet
 
 # Default target
-all: deps vendor-js sidecar-deps build
+all: deps vendor-js build
 
 # Build the binary
 build:
@@ -53,16 +53,6 @@ vendor-js:
 		echo "Vendor libraries downloaded."; \
 	else \
 		echo "Vendor libraries already exist."; \
-	fi
-
-# Install Node.js sidecar dependencies (for nodesdk provider)
-sidecar-deps:
-	@echo "Installing Node.js sidecar dependencies..."
-	@if [ -f scripts/nodesdk-sidecar/package.json ]; then \
-		cd scripts/nodesdk-sidecar && npm install --silent; \
-		echo "Sidecar dependencies installed."; \
-	else \
-		echo "Sidecar package.json not found, skipping."; \
 	fi
 
 # Run tests
@@ -135,7 +125,6 @@ help:
 	@echo "  dev          Run in development mode"
 	@echo "  deps         Download Go dependencies"
 	@echo "  vendor-js    Download vendor JavaScript libraries"
-	@echo "  sidecar-deps Install Node.js sidecar dependencies"
 	@echo "  test         Run tests"
 	@echo "  test-coverage Run tests with coverage"
 	@echo "  clean        Remove build artifacts"
