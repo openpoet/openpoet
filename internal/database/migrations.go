@@ -47,6 +47,7 @@ var migrations = []Migration{
 	{Version: 29, Description: "tasks: remove blocked status from CHECK constraint", Up: migrateV29},
 	{Version: 30, Description: "ai: add ai_configs and ai_config_assignments tables for multi-provider support", Up: migrateV30},
 	{Version: 31, Description: "tunnel: add paired_devices table for remote access authentication", Up: migrateV31},
+	{Version: 32, Description: "shares: add project_shares table for cross-project file read access", Up: migrateV32},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -910,4 +911,25 @@ func migrateV31(tx *sqlx.Tx) error {
 		revoked INTEGER DEFAULT 0
 	)`)
 	return err
+}
+
+func migrateV32(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS project_shares (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			shared_project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(project_id, shared_project_id),
+			CHECK(project_id != shared_project_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_shares_project ON project_shares(project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_shares_shared ON project_shares(shared_project_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV32 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
 }

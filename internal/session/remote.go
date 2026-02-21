@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -123,7 +122,8 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 
 	// Build command with exported environment variables and directory change
 	// Using 'export' so env vars are inherited by claude and its child processes (bridge.sh)
-	cmd := ""
+	// Prepend common binary paths so tools like claude are found in non-interactive SSH sessions
+	cmd := "export PATH=$HOME/.local/bin:$HOME/.nvm/current/bin:/usr/local/bin:$PATH && "
 	for k, v := range r.envVars {
 		cmd += fmt.Sprintf("export %s=%s && ", k, shellQuote(v))
 	}
@@ -163,7 +163,9 @@ func (r *RemoteRunner) buildSSHConfig() (*ssh.ClientConfig, error) {
 	var authMethods []ssh.AuthMethod
 
 	if authType == "password" {
-		// Decrypt password
+		if !r.project.SSHCredentialEncrypted.Valid || r.project.SSHCredentialEncrypted.String == "" {
+			return nil, fmt.Errorf("SSH password not configured for project %q — edit the project and enter a password", r.project.Name)
+		}
 		password, err := r.decryptFunc(
 			r.project.SSHCredentialEncrypted.String,
 			r.project.SSHCredentialIV.String,
@@ -173,7 +175,9 @@ func (r *RemoteRunner) buildSSHConfig() (*ssh.ClientConfig, error) {
 		}
 		authMethods = append(authMethods, ssh.Password(password))
 	} else if authType == "key" || authType == "key_passphrase" {
-		// Decrypt key
+		if !r.project.SSHCredentialEncrypted.Valid || r.project.SSHCredentialEncrypted.String == "" {
+			return nil, fmt.Errorf("SSH private key not configured for project %q — edit the project and paste your private key", r.project.Name)
+		}
 		keyData, err := r.decryptFunc(
 			r.project.SSHCredentialEncrypted.String,
 			r.project.SSHCredentialIV.String,
@@ -184,8 +188,6 @@ func (r *RemoteRunner) buildSSHConfig() (*ssh.ClientConfig, error) {
 
 		var signer ssh.Signer
 		if authType == "key_passphrase" {
-			// Key has passphrase - for now we don't support this
-			// Would need to store passphrase separately
 			signer, err = ssh.ParsePrivateKey([]byte(keyData))
 		} else {
 			signer, err = ssh.ParsePrivateKey([]byte(keyData))
@@ -194,35 +196,6 @@ func (r *RemoteRunner) buildSSHConfig() (*ssh.ClientConfig, error) {
 			return nil, fmt.Errorf("failed to parse private key: %w", err)
 		}
 		authMethods = append(authMethods, ssh.PublicKeys(signer))
-	} else if authType == "" {
-		// Try SSH agent
-		if agentConn := os.Getenv("SSH_AUTH_SOCK"); agentConn != "" {
-			conn, err := net.Dial("unix", agentConn)
-			if err == nil {
-				agentClient := ssh.PublicKeysCallback(func() ([]ssh.Signer, error) {
-					// This is a simplified version - in practice you'd use the agent package
-					return nil, fmt.Errorf("agent not fully implemented")
-				})
-				authMethods = append(authMethods, agentClient)
-				_ = conn // Keep connection reference
-			}
-		}
-
-		// Try default keys
-		homeDir, _ := os.UserHomeDir()
-		keyPaths := []string{
-			homeDir + "/.ssh/id_rsa",
-			homeDir + "/.ssh/id_ed25519",
-			homeDir + "/.ssh/id_ecdsa",
-		}
-		for _, keyPath := range keyPaths {
-			if keyData, err := os.ReadFile(keyPath); err == nil {
-				if signer, err := ssh.ParsePrivateKey(keyData); err == nil {
-					authMethods = append(authMethods, ssh.PublicKeys(signer))
-					break
-				}
-			}
-		}
 	}
 
 	if len(authMethods) == 0 {
