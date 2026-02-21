@@ -16,7 +16,7 @@ package.json
 package-lock.json
 
 # Screenshots / test files
-*.png
+#*.png
 
 # IDE / Editor
 .idea/
