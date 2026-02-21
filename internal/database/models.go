@@ -16,6 +16,7 @@ type Project struct {
 	SSHAuthType            sql.NullString `db:"ssh_auth_type" json:"ssh_auth_type,omitempty"` // 'password', 'key', 'key_passphrase'
 	SSHCredentialEncrypted sql.NullString `db:"ssh_credential_encrypted" json:"-"`
 	SSHCredentialIV        sql.NullString `db:"ssh_credential_iv" json:"-"`
+	HasCredential          bool           `db:"-" json:"has_credential"`
 	ToolPolicy             string         `db:"tool_policy" json:"tool_policy,omitempty"`  // JSON ToolPolicy
 	SkillPolicy            string         `db:"skill_policy" json:"skill_policy,omitempty"` // '' = inherit global, 'custom' = per-project
 	ConfigSyncedAt         sql.NullTime   `db:"config_synced_at" json:"config_synced_at,omitempty"`
@@ -97,6 +98,13 @@ type ProjectSkill struct {
 	SyncCount int       `db:"sync_count" json:"sync_count"`
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+}
+
+type ProjectShare struct {
+	ID              int64     `db:"id" json:"id"`
+	ProjectID       int64     `db:"project_id" json:"project_id"`
+	SharedProjectID int64     `db:"shared_project_id" json:"shared_project_id"`
+	CreatedAt       time.Time `db:"created_at" json:"created_at"`
 }
 
 type MCPServer struct {

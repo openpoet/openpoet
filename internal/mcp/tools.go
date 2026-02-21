@@ -181,6 +181,79 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return formatFileContent(body)
 
+	// ---- Shared project file access tools ----
+
+	case "openpoet_list_shared_projects":
+		if sessionID == "" {
+			return "", fmt.Errorf("not running within an OpenPoet session")
+		}
+		projectID, err := getSessionProjectID(client, sessionID)
+		if err != nil {
+			return "", err
+		}
+		body, err := client.Get(fmt.Sprintf("/api/projects/%d/shares", projectID))
+		if err != nil {
+			return "", err
+		}
+		var projects []struct {
+			ProjectID int64  `json:"project_id"`
+			Name      string `json:"name"`
+			Path      string `json:"path"`
+			Type      string `json:"type"`
+		}
+		if err := json.Unmarshal(body, &projects); err != nil {
+			return string(body), nil
+		}
+		if len(projects) == 0 {
+			return "No shared projects configured. Ask the user to configure cross-project file access in the OpenPoet project settings.", nil
+		}
+		result := "Shared projects (read access):\n"
+		for _, p := range projects {
+			result += fmt.Sprintf("- [%d] %s (%s: %s)\n", p.ProjectID, p.Name, p.Type, p.Path)
+		}
+		return result, nil
+
+	case "openpoet_list_shared_files":
+		if sessionID == "" {
+			return "", fmt.Errorf("not running within an OpenPoet session")
+		}
+		targetID := getProjectID(params)
+		if targetID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		if err := verifyShareAccess(client, sessionID, targetID); err != nil {
+			return "", err
+		}
+		path, _ := params["path"].(string)
+		endpoint := fmt.Sprintf("/api/projects/%d/files?path=%s", targetID, path)
+		body, err := client.Get(endpoint)
+		if err != nil {
+			return "", err
+		}
+		return formatFileList(body)
+
+	case "openpoet_read_shared_file":
+		if sessionID == "" {
+			return "", fmt.Errorf("not running within an OpenPoet session")
+		}
+		targetID := getProjectID(params)
+		if targetID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		path, _ := params["path"].(string)
+		if path == "" {
+			return "", fmt.Errorf("path is required")
+		}
+		if err := verifyShareAccess(client, sessionID, targetID); err != nil {
+			return "", err
+		}
+		endpoint := fmt.Sprintf("/api/projects/%d/files/view/%s", targetID, path)
+		body, err := client.Get(endpoint)
+		if err != nil {
+			return "", err
+		}
+		return formatFileContent(body)
+
 	case "openpoet_get_memory_doc":
 		projectID, ok := getID(params)
 		if !ok {
@@ -1104,4 +1177,43 @@ func formatMCPsList(body []byte) (string, error) {
 		result += fmt.Sprintf("- [%d] %s: %s (%s)\n", m.ID, m.Name, m.Command, status)
 	}
 	return result, nil
+}
+
+// getSessionProjectID fetches the project ID for the given session.
+func getSessionProjectID(client *APIClient, sessionID string) (int64, error) {
+	body, err := client.Get(fmt.Sprintf("/api/sessions/%s", sessionID))
+	if err != nil {
+		return 0, fmt.Errorf("failed to get session info: %w", err)
+	}
+	var sess struct {
+		ProjectID int64 `json:"project_id"`
+	}
+	if err := json.Unmarshal(body, &sess); err != nil {
+		return 0, fmt.Errorf("failed to parse session: %w", err)
+	}
+	return sess.ProjectID, nil
+}
+
+// verifyShareAccess checks that the session's project has share access to the target project.
+func verifyShareAccess(client *APIClient, sessionID string, targetProjectID int64) error {
+	projectID, err := getSessionProjectID(client, sessionID)
+	if err != nil {
+		return err
+	}
+	body, err := client.Get(fmt.Sprintf("/api/projects/%d/shares", projectID))
+	if err != nil {
+		return fmt.Errorf("failed to get shares: %w", err)
+	}
+	var shares []struct {
+		ProjectID int64 `json:"project_id"`
+	}
+	if err := json.Unmarshal(body, &shares); err != nil {
+		return fmt.Errorf("failed to parse shares: %w", err)
+	}
+	for _, s := range shares {
+		if s.ProjectID == targetProjectID {
+			return nil
+		}
+	}
+	return fmt.Errorf("project %d is not in this project's shared access list", targetProjectID)
 }

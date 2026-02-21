@@ -592,6 +592,10 @@ func main() {
 		r.Put("/projects/{id}/tool-policy", api.UpdateProjectToolPolicy)
 		r.Get("/projects/{id}/tools", api.GetResolvedProjectTools)
 
+		// Project Shares
+		r.Get("/projects/{id}/shares", api.GetProjectShares)
+		r.Put("/projects/{id}/shares", api.UpdateProjectShares)
+
 		// Project Skills
 		r.Get("/projects/{id}/skills", api.GetProjectSkills)
 		r.Put("/projects/{id}/skill-config", api.SaveProjectSkillConfig)

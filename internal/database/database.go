@@ -51,18 +51,23 @@ func (d *DB) CreateProject(ctx context.Context, p *Project) error {
 func (d *DB) GetProject(ctx context.Context, id int64) (*Project, error) {
 	var p Project
 	err := d.GetContext(ctx, &p, "SELECT * FROM projects WHERE id = ?", id)
+	p.HasCredential = p.SSHCredentialEncrypted.Valid && p.SSHCredentialEncrypted.String != ""
 	return &p, err
 }
 
 func (d *DB) GetProjectByName(ctx context.Context, name string) (*Project, error) {
 	var p Project
 	err := d.GetContext(ctx, &p, "SELECT * FROM projects WHERE name = ?", name)
+	p.HasCredential = p.SSHCredentialEncrypted.Valid && p.SSHCredentialEncrypted.String != ""
 	return &p, err
 }
 
 func (d *DB) ListProjects(ctx context.Context) ([]Project, error) {
 	var projects []Project
 	err := d.SelectContext(ctx, &projects, "SELECT * FROM projects ORDER BY name")
+	for i := range projects {
+		projects[i].HasCredential = projects[i].SSHCredentialEncrypted.Valid && projects[i].SSHCredentialEncrypted.String != ""
+	}
 	return projects, err
 }
 
@@ -80,6 +85,48 @@ func (d *DB) UpdateProjectConfigSyncedAt(ctx context.Context, id int64) error {
 func (d *DB) DeleteProject(ctx context.Context, id int64) error {
 	_, err := d.ExecContext(ctx, "DELETE FROM projects WHERE id = ?", id)
 	return err
+}
+
+// Project share operations
+
+func (d *DB) ListProjectShares(ctx context.Context, projectID int64) ([]ProjectShare, error) {
+	var shares []ProjectShare
+	err := d.SelectContext(ctx, &shares,
+		"SELECT * FROM project_shares WHERE project_id = ? ORDER BY created_at", projectID)
+	return shares, err
+}
+
+func (d *DB) ReplaceProjectShares(ctx context.Context, projectID int64, sharedProjectIDs []int64) error {
+	tx, err := d.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM project_shares WHERE project_id = ?", projectID); err != nil {
+		return err
+	}
+
+	for _, sharedID := range sharedProjectIDs {
+		if sharedID == projectID {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO project_shares (project_id, shared_project_id) VALUES (?, ?)",
+			projectID, sharedID); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (d *DB) HasProjectShare(ctx context.Context, projectID, sharedProjectID int64) (bool, error) {
+	var count int
+	err := d.GetContext(ctx, &count,
+		"SELECT COUNT(*) FROM project_shares WHERE project_id = ? AND shared_project_id = ?",
+		projectID, sharedProjectID)
+	return count > 0, err
 }
 
 // Session operations

@@ -639,6 +639,7 @@ func (a *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if input.Type == "remote" {
+		log.Printf("[API] CreateProject: ssh_auth_type=%q credential_len=%d", input.SSHAuthType, len(input.SSHCredential))
 		project.SSHHost = sql.NullString{String: input.SSHHost, Valid: input.SSHHost != ""}
 		project.SSHPort = sql.NullInt64{Int64: int64(input.SSHPort), Valid: input.SSHPort > 0}
 		project.SSHUser = sql.NullString{String: input.SSHUser, Valid: input.SSHUser != ""}
@@ -705,6 +706,7 @@ func (a *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	project.ToolPolicy = input.ToolPolicy
 
 	if input.Type == "remote" {
+		log.Printf("[API] UpdateProject: id=%d ssh_auth_type=%q credential_len=%d", id, input.SSHAuthType, len(input.SSHCredential))
 		project.SSHHost = sql.NullString{String: input.SSHHost, Valid: input.SSHHost != ""}
 		project.SSHPort = sql.NullInt64{Int64: int64(input.SSHPort), Valid: input.SSHPort > 0}
 		project.SSHUser = sql.NullString{String: input.SSHUser, Valid: input.SSHUser != ""}
@@ -3254,6 +3256,69 @@ func (a *API) UpdateProjectToolPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// --- Project Shares ---
+
+// GetProjectShares returns the list of projects that a given project has read access to.
+func (a *API) GetProjectShares(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	shares, err := a.db.ListProjectShares(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	type shareInfo struct {
+		ProjectID int64  `json:"project_id"`
+		Name      string `json:"name"`
+		Path      string `json:"path"`
+		Type      string `json:"type"`
+	}
+	result := []shareInfo{}
+	for _, s := range shares {
+		p, err := a.db.GetProject(r.Context(), s.SharedProjectID)
+		if err != nil {
+			continue
+		}
+		result = append(result, shareInfo{
+			ProjectID: p.ID,
+			Name:      p.Name,
+			Path:      p.Path,
+			Type:      p.Type,
+		})
+	}
+
+	respondJSON(w, http.StatusOK, result)
+}
+
+// UpdateProjectShares replaces the sharing relationships for a project.
+func (a *API) UpdateProjectShares(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	var input struct {
+		SharedProjectIDs []int64 `json:"shared_project_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if err := a.db.ReplaceProjectShares(r.Context(), id, input.SharedProjectIDs); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // --- Project Skills ---

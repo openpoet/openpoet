@@ -322,6 +322,50 @@ func AllToolDefs() []ToolDef {
 
 		},
 
+		// ──── Shared project file access (session-only) ────
+
+		{
+			Name:           "list_shared_projects",
+			MCPName:        "openpoet_list_shared_projects",
+			Description:    "List projects that this session has read access to. Returns project IDs, names, paths, and types.",
+			MCPDescription: "List projects that this session's project has been granted read access to.",
+			InputSchema: ToolDefinitionInput{
+				Type:       "object",
+				Properties: map[string]ToolPropertySchema{},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:           "list_shared_files",
+			MCPName:        "openpoet_list_shared_files",
+			Description:    "List files and directories in a shared project. Requires the target project to be in this project's shared access list.",
+			MCPDescription: "List files in a shared project directory. Requires share access. Use path parameter to navigate subdirectories.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The shared project's ID (number)"},
+					"path":       {Type: "string", Description: "Relative path within the shared project (empty for root)"},
+				},
+				Required: []string{"project_id"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:           "read_shared_file",
+			MCPName:        "openpoet_read_shared_file",
+			Description:    "Read a file from a shared project. Requires the target project to be in this project's shared access list. Max 2MB, text files only.",
+			MCPDescription: "Read a text file from a shared project. Requires share access. Max 2MB.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The shared project's ID (number)"},
+					"path":       {Type: "string", Description: "Relative path to the file within the shared project"},
+				},
+				Required: []string{"project_id", "path"},
+			},
+			Context: ToolContextSession,
+		},
+
 		// ──── Chat-only tools ────
 
 		{
