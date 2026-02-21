@@ -1,89 +1,33 @@
 name: Release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: write
 
 jobs:
-  build-openpoet:
-    name: Build openpoet (${{ matrix.goos }}/${{ matrix.goarch }})
+  release:
+    name: Release
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            suffix: ""
-          - goos: linux
-            goarch: arm64
-            suffix: ""
-          - goos: darwin
-            goarch: amd64
-            suffix: ""
-          - goos: darwin
-            goarch: arm64
-            suffix: ""
-          - goos: windows
-            goarch: amd64
-            suffix: ".exe"
-          - goos: windows
-            goarch: arm64
-            suffix: ".exe"
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
-      - uses: actions/setup-node@v4
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
         with:
-          node-version: 20
-
-      - name: Download vendor JS
-        run: make vendor-js
-
-      - name: Install sidecar deps
-        run: make sidecar-deps
-
-      - name: Build openpoet
+          version: "~> v2"
+          args: release --clean
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          mkdir -p dist
-          go build \
-            -ldflags "-s -w -X main.BuildVersion=${VERSION}" \
-            -o dist/openpoet-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} \
-            ./cmd/openpoet
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: openpoet-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/openpoet-*
-
-  upload-assets:
-    name: Upload release assets
-    needs: [build-openpoet]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Upload to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
-            artifacts/* \
-            --repo "${{ github.repository }}" \
-            --clobber
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

@@ -1,0 +1,17 @@
+name: Publish to winget
+
+on:
+  release:
+    types: [released]
+
+jobs:
+  winget:
+    name: Submit to winget-pkgs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit package to winget
+        uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: openpoet.openpoet
+          installers-regex: '_windows_.*\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}

@@ -617,7 +617,7 @@ func (h *AIHandler) HandleTestConnection(w http.ResponseWriter, r *http.Request)
 	case "nodesdk":
 		if _, err := exec.LookPath("node"); err != nil {
 			result["configured"] = false
-			result["error"] = "Node.js not found. Install Node.js 18+ to use the Node SDK provider."
+			result["error"] = "Node.js is required for the Claude Agent SDK provider. Install Node.js 18+ from https://nodejs.org and restart OpenPoet."
 			break
 		}
 

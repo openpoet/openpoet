@@ -1,0 +1,117 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: openpoet
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: openpoet
+    main: ./cmd/openpoet
+    binary: openpoet
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.BuildVersion={{.Version}}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "^style:"
+  groups:
+    - title: Features
+      regexp: '^feat'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^fix'
+      order: 1
+    - title: Others
+      order: 999
+
+release:
+  github:
+    owner: openpoet
+    name: openpoet
+  draft: false
+  prerelease: auto
+  name_template: "v{{.Version}}"
+  header: |
+    ## OpenPoet v{{.Version}}
+
+    ### Install
+
+    **macOS / Linux (Homebrew):**
+    ```bash
+    brew install openpoet/openpoet
+    ```
+
+    **macOS / Linux (script):**
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/openpoet/openpoet/main/install.sh | sh
+    ```
+
+    **Windows (winget):**
+    ```powershell
+    winget install openpoet
+    ```
+  footer: |
+    ---
+    **Full Changelog**: https://github.com/openpoet/openpoet/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+    > **Note**: Node.js 18+ is required for the Claude Agent SDK provider. The sidecar scripts are embedded in the binary and extracted automatically on first run.
+
+brews:
+  - repository:
+      owner: openpoet
+      name: homebrew-openpoet
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/openpoet/openpoet"
+    description: "Orchestrate Claude Code sessions across multiple projects"
+    license: "MIT"
+    install: |
+      bin.install "openpoet"
+    caveats: |
+      OpenPoet is ready to use! Start it with:
+        openpoet
+
+      The web UI will be available at http://localhost:8080
+
+      Note: Node.js 18+ is required for the Claude Agent SDK provider.
+      The sidecar scripts are embedded in the binary and auto-extracted on first run.
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/openpoet version")
+
