@@ -12,6 +12,8 @@
 
 # Node
 node_modules/
+package.json
+package-lock.json
 
 # Screenshots / test files
 *.png
@@ -25,9 +27,13 @@ node_modules/
 
 # Claude Code
 .claude/
+CLAUDE.md
 
 # Playwright MCP
 .playwright-mcp/
+
+# Scripts
+.scripts/
 
 # Run configs
 .run/
