@@ -107,6 +107,48 @@ func (p ToolPolicy) FilterTools(tools []MCPTool) []MCPTool {
 	return filtered
 }
 
+// ShareToolNames are the MCP tool names for cross-project file access.
+// These are auto-allowed when the project has shares configured.
+var ShareToolNames = []string{
+	"openpoet_list_shared_projects",
+	"openpoet_list_shared_files",
+	"openpoet_read_shared_file",
+}
+
+// AllowTools returns a copy of the policy with the given tools explicitly allowed.
+// For "deny_all": adds them to the Allowed list.
+// For "allow_all"/"custom": removes them from the Denied list.
+func (p ToolPolicy) AllowTools(names []string) ToolPolicy {
+	result := ToolPolicy{Mode: p.Mode}
+	switch p.Mode {
+	case "deny_all":
+		allowed := make(map[string]bool)
+		for _, a := range p.Allowed {
+			allowed[a] = true
+		}
+		for _, n := range names {
+			allowed[n] = true
+		}
+		result.Allowed = make([]string, 0, len(allowed))
+		for name := range allowed {
+			result.Allowed = append(result.Allowed, name)
+		}
+		result.Denied = append([]string{}, p.Denied...)
+	default: // "allow_all", "custom", ""
+		result.Allowed = append([]string{}, p.Allowed...)
+		remove := make(map[string]bool)
+		for _, n := range names {
+			remove[n] = true
+		}
+		for _, d := range p.Denied {
+			if !remove[d] {
+				result.Denied = append(result.Denied, d)
+			}
+		}
+	}
+	return result
+}
+
 // FilterLLMTools filters LLM tool definitions (used by AI chat).
 // Takes tool name extractor to work with different tool struct types.
 func FilterByPolicy(policy ToolPolicy, names []string) []string {

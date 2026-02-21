@@ -93,6 +93,13 @@ func (h *RequestHandler) fetchPolicy() ToolPolicy {
 						policy = ParsePolicy(resp.ToolPolicy)
 					}
 				}
+				// Auto-allow share tools if project has shares configured
+				if data, err := h.client.Get(fmt.Sprintf("/api/projects/%d/shares", sess.ProjectID)); err == nil {
+					var shares []json.RawMessage
+					if json.Unmarshal(data, &shares) == nil && len(shares) > 0 {
+						policy = policy.AllowTools(ShareToolNames)
+					}
+				}
 			}
 		}
 	}
