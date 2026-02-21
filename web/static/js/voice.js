@@ -195,7 +195,12 @@ class VoiceInput {
             let response;
             if (isTunnel) {
                 const arrayBuf = await audioBlob.arrayBuffer();
-                const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuf)));
+                const bytes = new Uint8Array(arrayBuf);
+                let binary = '';
+                for (let i = 0; i < bytes.length; i += 8192) {
+                    binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+                }
+                const base64 = btoa(binary);
                 response = await fetch('/api/voice/transcribe', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
