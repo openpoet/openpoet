@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 
 	"openpoet/internal/llm"
@@ -75,12 +76,124 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return fmt.Sprintf("Skill %d deleted", id), nil
 
+	case "openpoet_get_skill":
+		id, ok := getID(params)
+		if !ok {
+			return "", fmt.Errorf("id is required")
+		}
+		body, err := client.Get(fmt.Sprintf("/api/config/skills/%d", id))
+		if err != nil {
+			return "", err
+		}
+		return string(body), nil
+
+	case "openpoet_create_project_skill":
+		projectID := getProjectID(params)
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		delete(params, "project_id")
+		payload, _ := json.Marshal(params)
+		body, err := client.Post(fmt.Sprintf("/api/projects/%d/skills", projectID), string(payload))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Project skill created: %s", string(body)), nil
+
+	case "openpoet_update_project_skill":
+		projectID := getProjectID(params)
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		id, ok := getID(params)
+		if !ok {
+			return "", fmt.Errorf("id is required")
+		}
+		delete(params, "project_id")
+		delete(params, "id")
+		payload, _ := json.Marshal(params)
+		body, err := client.Put(fmt.Sprintf("/api/projects/%d/skills/%d", projectID, id), string(payload))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Project skill updated: %s", string(body)), nil
+
+	case "openpoet_delete_project_skill":
+		projectID := getProjectID(params)
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		id, ok := getID(params)
+		if !ok {
+			return "", fmt.Errorf("id is required")
+		}
+		_, err := client.Delete(fmt.Sprintf("/api/projects/%d/skills/%d", projectID, id))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Project skill %d deleted", id), nil
+
+	case "openpoet_get_project_skill":
+		projectID := getProjectID(params)
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		id, ok := getID(params)
+		if !ok {
+			return "", fmt.Errorf("id is required")
+		}
+		// Use the list endpoint and find the specific skill
+		body, err := client.Get(fmt.Sprintf("/api/projects/%d/skills", projectID))
+		if err != nil {
+			return "", err
+		}
+		var data struct {
+			ProjectSkills []struct {
+				ID       int64  `json:"id"`
+				Name     string `json:"name"`
+				Content  string `json:"content"`
+				Category string `json:"category"`
+				Enabled  bool   `json:"enabled"`
+			} `json:"project_skills"`
+		}
+		if err := json.Unmarshal(body, &data); err != nil {
+			return string(body), nil
+		}
+		for _, ps := range data.ProjectSkills {
+			if ps.ID == id {
+				return fmt.Sprintf("Name: %s\nCategory: %s\nEnabled: %v\n---\n%s", ps.Name, ps.Category, ps.Enabled, ps.Content), nil
+			}
+		}
+		return "", fmt.Errorf("project skill %d not found", id)
+
+	case "openpoet_list_project_skills":
+		projectID := getProjectID(params)
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		body, err := client.Get(fmt.Sprintf("/api/projects/%d/skills", projectID))
+		if err != nil {
+			return "", err
+		}
+		return formatProjectSkillsList(body)
+
 	case "openpoet_list_projects":
 		body, err := client.Get("/api/projects")
 		if err != nil {
 			return "", err
 		}
 		return formatProjectsList(body)
+
+	case "openpoet_get_mcp_server":
+		id, ok := getID(params)
+		if !ok {
+			return "", fmt.Errorf("id is required")
+		}
+		body, err := client.Get(fmt.Sprintf("/api/config/mcps/%d", id))
+		if err != nil {
+			return "", err
+		}
+		return string(body), nil
 
 	case "openpoet_list_mcp_servers":
 		body, err := client.Get("/api/config/mcps")
@@ -122,6 +235,80 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 			return "", err
 		}
 		return fmt.Sprintf("MCP server %d deleted", id), nil
+
+	case "openpoet_create_project_mcp_server":
+		projectID := getProjectID(params)
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		delete(params, "project_id")
+		normalizeMCPParams(params)
+		payload, _ := json.Marshal(params)
+		body, err := client.Post(fmt.Sprintf("/api/projects/%d/mcp-servers", projectID), string(payload))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Project MCP server created: %s", string(body)), nil
+
+	case "openpoet_update_project_mcp_server":
+		projectID := getProjectID(params)
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		id, ok := getID(params)
+		if !ok {
+			return "", fmt.Errorf("id is required")
+		}
+		delete(params, "project_id")
+		delete(params, "id")
+		normalizeMCPParams(params)
+		payload, _ := json.Marshal(params)
+		body, err := client.Put(fmt.Sprintf("/api/projects/%d/mcp-servers/%d", projectID, id), string(payload))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Project MCP server updated: %s", string(body)), nil
+
+	case "openpoet_delete_project_mcp_server":
+		projectID := getProjectID(params)
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		id, ok := getID(params)
+		if !ok {
+			return "", fmt.Errorf("id is required")
+		}
+		_, err := client.Delete(fmt.Sprintf("/api/projects/%d/mcp-servers/%d", projectID, id))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Project MCP server %d deleted", id), nil
+
+	case "openpoet_get_project_mcp_server":
+		projectID := getProjectID(params)
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		id, ok := getID(params)
+		if !ok {
+			return "", fmt.Errorf("id is required")
+		}
+		body, err := client.Get(fmt.Sprintf("/api/projects/%d/mcp-servers/%d", projectID, id))
+		if err != nil {
+			return "", err
+		}
+		return string(body), nil
+
+	case "openpoet_list_project_mcp_servers":
+		projectID := getProjectID(params)
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		body, err := client.Get(fmt.Sprintf("/api/projects/%d/mcp-servers", projectID))
+		if err != nil {
+			return "", err
+		}
+		return formatProjectMCPServersList(body)
 
 	case "openpoet_update_setting":
 		payload, _ := json.Marshal(params)
@@ -253,6 +440,103 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 			return "", err
 		}
 		return formatFileContent(body)
+
+	case "openpoet_copy_shared_file":
+		if sessionID == "" {
+			return "", fmt.Errorf("not running within an OpenPoet session")
+		}
+		targetID := getProjectID(params)
+		if targetID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		srcPath, _ := params["src_path"].(string)
+		if srcPath == "" {
+			return "", fmt.Errorf("src_path is required")
+		}
+		destPath, _ := params["dest_path"].(string)
+		if destPath == "" {
+			return "", fmt.Errorf("dest_path is required")
+		}
+		if err := verifyShareAccess(client, sessionID, targetID); err != nil {
+			return "", err
+		}
+		ownProjectID, err := getSessionProjectID(client, sessionID)
+		if err != nil {
+			return "", err
+		}
+		// Download raw bytes from shared project
+		data, err := client.Get(fmt.Sprintf("/api/projects/%d/files/raw/%s", targetID, srcPath))
+		if err != nil {
+			return "", fmt.Errorf("failed to read source file: %w", err)
+		}
+		// Upload raw bytes to own project
+		if _, err := client.PostRaw(fmt.Sprintf("/api/projects/%d/files/raw?path=%s", ownProjectID, destPath), data); err != nil {
+			return "", fmt.Errorf("failed to write file: %w", err)
+		}
+		return fmt.Sprintf("Copied %s (%s) → %s", srcPath, formatSize(int64(len(data))), destPath), nil
+
+	case "openpoet_copy_shared_folder":
+		if sessionID == "" {
+			return "", fmt.Errorf("not running within an OpenPoet session")
+		}
+		targetID := getProjectID(params)
+		if targetID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		srcPath, _ := params["src_path"].(string)
+		destPath, _ := params["dest_path"].(string)
+		if destPath == "" {
+			return "", fmt.Errorf("dest_path is required")
+		}
+		if err := verifyShareAccess(client, sessionID, targetID); err != nil {
+			return "", err
+		}
+		ownProjectID, err := getSessionProjectID(client, sessionID)
+		if err != nil {
+			return "", err
+		}
+		// Recursively collect all files
+		filePaths, err := collectSharedFiles(client, targetID, srcPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to list source folder: %w", err)
+		}
+		if len(filePaths) == 0 {
+			return "Source folder is empty or does not exist.", nil
+		}
+		// Copy each file
+		copied := 0
+		var totalSize int64
+		var errors []string
+		for _, fp := range filePaths {
+			// Download raw bytes from shared project
+			data, err := client.Get(fmt.Sprintf("/api/projects/%d/files/raw/%s", targetID, fp))
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("%s: %v", fp, err))
+				continue
+			}
+			// Compute destination: replace srcPath prefix with destPath
+			relPath := fp
+			if srcPath != "" {
+				relPath = strings.TrimPrefix(fp, srcPath)
+				relPath = strings.TrimPrefix(relPath, "/")
+			}
+			fileDest := path.Join(destPath, relPath)
+			// Upload raw bytes to own project
+			if _, err := client.PostRaw(fmt.Sprintf("/api/projects/%d/files/raw?path=%s", ownProjectID, fileDest), data); err != nil {
+				errors = append(errors, fmt.Sprintf("%s: write error: %v", fp, err))
+				continue
+			}
+			copied++
+			totalSize += int64(len(data))
+		}
+		result := fmt.Sprintf("Copied %d files (%s) to %s", copied, formatSize(totalSize), destPath)
+		if len(errors) > 0 {
+			result += fmt.Sprintf("\n%d errors:\n", len(errors))
+			for _, e := range errors {
+				result += fmt.Sprintf("  - %s\n", e)
+			}
+		}
+		return result, nil
 
 	case "openpoet_get_memory_doc":
 		projectID, ok := getID(params)
@@ -806,6 +1090,97 @@ func formatSkillsList(body []byte) (string, error) {
 	return result, nil
 }
 
+func formatProjectSkillsList(body []byte) (string, error) {
+	var data struct {
+		SkillPolicy   string `json:"skill_policy"`
+		GlobalSkills  []struct {
+			ID             int64  `json:"id"`
+			Name           string `json:"name"`
+			Category       string `json:"category"`
+			ProjectEnabled bool   `json:"project_enabled"`
+		} `json:"global_skills"`
+		ProjectSkills []struct {
+			ID       int64  `json:"id"`
+			Name     string `json:"name"`
+			Category string `json:"category"`
+			Enabled  bool   `json:"enabled"`
+		} `json:"project_skills"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return string(body), nil
+	}
+	var result strings.Builder
+	if len(data.GlobalSkills) > 0 {
+		result.WriteString("Global skills:\n")
+		for _, s := range data.GlobalSkills {
+			status := "enabled"
+			if !s.ProjectEnabled {
+				status = "disabled"
+			}
+			result.WriteString(fmt.Sprintf("- [%d] %s (%s, %s)\n", s.ID, s.Name, s.Category, status))
+		}
+	}
+	if len(data.ProjectSkills) > 0 {
+		result.WriteString("\nProject-specific skills:\n")
+		for _, ps := range data.ProjectSkills {
+			status := "enabled"
+			if !ps.Enabled {
+				status = "disabled"
+			}
+			result.WriteString(fmt.Sprintf("- [%d] %s (%s, %s)\n", ps.ID, ps.Name, ps.Category, status))
+		}
+	}
+	if len(data.GlobalSkills) == 0 && len(data.ProjectSkills) == 0 {
+		return "No skills found for this project.", nil
+	}
+	return result.String(), nil
+}
+
+func formatProjectMCPServersList(body []byte) (string, error) {
+	var data struct {
+		GlobalMCPServers  []struct {
+			ID      int64  `json:"id"`
+			Name    string `json:"name"`
+			Command string `json:"command"`
+			Enabled bool   `json:"enabled"`
+		} `json:"global_mcp_servers"`
+		ProjectMCPServers []struct {
+			ID      int64  `json:"id"`
+			Name    string `json:"name"`
+			Command string `json:"command"`
+			Enabled bool   `json:"enabled"`
+		} `json:"project_mcp_servers"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return string(body), nil
+	}
+	var result strings.Builder
+	if len(data.GlobalMCPServers) > 0 {
+		result.WriteString("Global MCP servers:\n")
+		for _, m := range data.GlobalMCPServers {
+			status := "enabled"
+			if !m.Enabled {
+				status = "disabled"
+			}
+			result.WriteString(fmt.Sprintf("- [%d] %s: %s (%s)\n", m.ID, m.Name, m.Command, status))
+		}
+	}
+	if len(data.ProjectMCPServers) > 0 {
+		result.WriteString("\nProject-specific MCP servers:\n")
+		for _, m := range data.ProjectMCPServers {
+			status := "enabled"
+			if !m.Enabled {
+				status = "disabled"
+			}
+			result.WriteString(fmt.Sprintf("- [%d] %s: %s (%s)\n", m.ID, m.Name, m.Command, status))
+		}
+	}
+	if len(data.GlobalMCPServers) == 0 && len(data.ProjectMCPServers) == 0 {
+		return "No MCP servers found for this project.", nil
+	}
+	return result.String(), nil
+}
+
 // formatProjectsList formats the projects JSON response into readable text.
 func formatProjectsList(body []byte) (string, error) {
 	var projects []struct {
@@ -1216,4 +1591,42 @@ func verifyShareAccess(client *APIClient, sessionID string, targetProjectID int6
 		}
 	}
 	return fmt.Errorf("project %d is not in this project's shared access list", targetProjectID)
+}
+
+// collectSharedFiles recursively lists all file paths under a directory in a shared project.
+func collectSharedFiles(client *APIClient, projectID int64, dirPath string) ([]string, error) {
+	endpoint := fmt.Sprintf("/api/projects/%d/files?path=%s", projectID, dirPath)
+	body, err := client.Get(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	var entries []struct {
+		Name  string `json:"name"`
+		Path  string `json:"path"`
+		IsDir bool   `json:"is_dir"`
+	}
+	if err := json.Unmarshal(body, &entries); err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, e := range entries {
+		fullPath := e.Path
+		if fullPath == "" {
+			if dirPath != "" {
+				fullPath = dirPath + "/" + e.Name
+			} else {
+				fullPath = e.Name
+			}
+		}
+		if e.IsDir {
+			sub, err := collectSharedFiles(client, projectID, fullPath)
+			if err != nil {
+				continue // skip unreadable subdirectories
+			}
+			files = append(files, sub...)
+		} else {
+			files = append(files, fullPath)
+		}
+	}
+	return files, nil
 }

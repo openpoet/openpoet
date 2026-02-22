@@ -1,0 +1,73 @@
+<svg viewBox="-20 -30 180 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="mascot-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7dd3fc" />
+      <stop offset="50%" stop-color="#bae6fd" />
+      <stop offset="100%" stop-color="#38bdf8" />
+    </linearGradient>
+  </defs>
+
+  <!-- Left arm holding parchment -->
+  <g style="transform-origin: 22px 82px">
+    <path d="M22 82 Q10 86 4 94" stroke="url(#mascot-grad)" stroke-width="6" stroke-linecap="round" fill="none" />
+    <circle cx="4" cy="94" r="3.5" fill="url(#mascot-grad)" />
+    <rect x="-14" y="80" width="22" height="30" rx="1" fill="#d4c5a0" opacity="0.8" transform="rotate(10 -3 95)" />
+    <rect x="-12" y="82" width="18" height="26" rx="1" fill="#e8dcc0" opacity="0.7" transform="rotate(10 -3 95)" />
+    <line x1="-9" y1="88" x2="2" y2="87" stroke="#b8a878" stroke-width="0.8" opacity="0.5" />
+    <line x1="-9" y1="92" x2="2" y2="91" stroke="#b8a878" stroke-width="0.8" opacity="0.5" />
+    <line x1="-9" y1="96" x2="2" y2="95" stroke="#b8a878" stroke-width="0.8" opacity="0.5" />
+    <line x1="-9" y1="100" x2="-2" y2="99" stroke="#b8a878" stroke-width="0.8" opacity="0.5" />
+  </g>
+
+  <!-- Right arm + feather quill -->
+  <g style="transform-origin: 100px 80px">
+    <path d="M100 80 Q112 84 122 88" stroke="url(#mascot-grad)" stroke-width="6" stroke-linecap="round" fill="none" />
+    <circle cx="122" cy="88" r="3.5" fill="url(#mascot-grad)" />
+    <g transform="rotate(-25, 122, 88)">
+      <path d="M122 91 L120.5 98 L123.5 98 Z" fill="#a08030" />
+      <circle cx="122" cy="98" r="1.2" fill="#38bdf8" opacity="0.8" />
+      <line x1="122" y1="88" x2="122" y2="52" stroke="#c9a84c" stroke-width="2.5" stroke-linecap="round" />
+      <line x1="122.3" y1="86" x2="122.3" y2="54" stroke="#dab85e" stroke-width="0.8" opacity="0.5" />
+      <ellipse cx="122" cy="52" rx="3" ry="2" fill="#c9a84c" stroke="#a08030" stroke-width="0.5" />
+      <path d="M122 50 Q128 36 129 22 Q129 14 128 8 Q126 2 124 4 Q126 0 122 -2 Q120 -4 118 -2 Q114 0 116 4 Q114 2 112 8 Q111 14 111 22 Q112 36 122 50" fill="#b4d8ea" opacity="0.85" />
+      <line x1="122" y1="50" x2="122" y2="-2" stroke="#85b5c8" stroke-width="0.8" opacity="0.5" />
+      <path d="M129 18 Q131 16 130 14" stroke="#bae6fd" stroke-width="0.6" fill="none" opacity="0.4" />
+      <path d="M111 12 Q109 10 110 8" stroke="#bae6fd" stroke-width="0.6" fill="none" opacity="0.4" />
+      <path d="M128 26 Q130 25 129 23" stroke="#bae6fd" stroke-width="0.5" fill="none" opacity="0.3" />
+      <path d="M128 10 Q125 22 123 36" stroke="#7dd3fc" stroke-width="0.4" fill="none" opacity="0.3" />
+      <path d="M113 10 Q117 22 120 36" stroke="#7dd3fc" stroke-width="0.4" fill="none" opacity="0.3" />
+    </g>
+  </g>
+
+  <!-- Body -->
+  <rect x="20" y="30" width="80" height="80" rx="22" fill="url(#mascot-grad)" />
+
+  <!-- Mouth: terminal -->
+  <text x="36" y="82" font-family="'JetBrains Mono','Fira Code',monospace" font-size="11" font-weight="700" fill="#0a0a1a">&gt;_____</text>
+  <rect x="78" y="73" width="7" height="9" fill="#0a0a1a" />
+
+  <!-- Eyes -->
+  <circle cx="50" cy="58" r="5" fill="#0a0a1a" />
+  <circle cx="74" cy="58" r="5" fill="#0a0a1a" />
+  <circle cx="51" cy="57" r="2" fill="#e0f2fe" />
+  <circle cx="75" cy="57" r="2" fill="#e0f2fe" />
+
+  <!-- Feet -->
+  <rect x="38" y="108" width="12" height="6" rx="3" fill="url(#mascot-grad)" />
+  <rect x="68" y="108" width="12" height="6" rx="3" fill="url(#mascot-grad)" />
+
+  <!-- Beret -->
+  <ellipse cx="60" cy="32" rx="32" ry="8" fill="#0f1e2a" />
+  <ellipse cx="55" cy="30" rx="28" ry="14" fill="#1a2e3a" />
+  <circle cx="55" cy="20" r="4" fill="#2a3e4a" />
+
+  <!-- Round glasses -->
+  <circle cx="50" cy="58" r="8" stroke="#e0f2fe" stroke-width="1.5" fill="none" opacity="0.8" />
+  <circle cx="74" cy="58" r="8" stroke="#e0f2fe" stroke-width="1.5" fill="none" opacity="0.8" />
+  <line x1="58" y1="58" x2="66" y2="58" stroke="#e0f2fe" stroke-width="1.5" opacity="0.8" />
+
+  <!-- Scarf -->
+  <path d="M28 105 Q40 108 50 105 Q60 102 72 105 Q82 108 92 105" stroke="#38bdf8" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.7" />
+  <path d="M33 108 Q36 120 40 130" stroke="#38bdf8" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.6" />
+  <path d="M38 108 Q42 118 46 128" stroke="#7dd3fc" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.5" />
+</svg>

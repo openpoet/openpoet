@@ -113,6 +113,8 @@ var ShareToolNames = []string{
 	"openpoet_list_shared_projects",
 	"openpoet_list_shared_files",
 	"openpoet_read_shared_file",
+	"openpoet_copy_shared_file",
+	"openpoet_copy_shared_folder",
 }
 
 // AllowTools returns a copy of the policy with the given tools explicitly allowed.

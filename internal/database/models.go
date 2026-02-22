@@ -118,6 +118,18 @@ type MCPServer struct {
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
 }
 
+type ProjectMCPServer struct {
+	ID        int64     `db:"id" json:"id"`
+	ProjectID int64     `db:"project_id" json:"project_id"`
+	Name      string    `db:"name" json:"name"`
+	Command   string    `db:"command" json:"command"`
+	Args      string    `db:"args" json:"args"` // JSON array
+	Env       string    `db:"env" json:"env"`   // JSON object
+	Enabled   bool      `db:"enabled" json:"enabled"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+}
+
 type Setting struct {
 	Key   string `db:"key" json:"key"`
 	Value string `db:"value" json:"value"` // JSON

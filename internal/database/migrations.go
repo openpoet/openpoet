@@ -48,6 +48,7 @@ var migrations = []Migration{
 	{Version: 30, Description: "ai: add ai_configs and ai_config_assignments tables for multi-provider support", Up: migrateV30},
 	{Version: 31, Description: "tunnel: add paired_devices table for remote access authentication", Up: migrateV31},
 	{Version: 32, Description: "shares: add project_shares table for cross-project file read access", Up: migrateV32},
+	{Version: 33, Description: "mcp: add project_mcp_servers table for per-project MCP server configurations", Up: migrateV33},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -911,6 +912,31 @@ func migrateV31(tx *sqlx.Tx) error {
 		revoked INTEGER DEFAULT 0
 	)`)
 	return err
+}
+
+func migrateV33(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS project_mcp_servers (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			command TEXT NOT NULL,
+			args TEXT NOT NULL DEFAULT '[]',
+			env TEXT NOT NULL DEFAULT '{}',
+			enabled BOOLEAN NOT NULL DEFAULT 1,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(project_id, name),
+			FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_mcp_servers_project ON project_mcp_servers(project_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV33 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
 }
 
 func migrateV32(tx *sqlx.Tx) error {

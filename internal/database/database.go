@@ -457,6 +457,58 @@ func (d *DB) DeleteMCPServer(ctx context.Context, id int64) error {
 	return err
 }
 
+// Project MCP Server operations
+
+func (d *DB) CreateProjectMCPServer(ctx context.Context, m *ProjectMCPServer) error {
+	query := `INSERT INTO project_mcp_servers (project_id, name, command, args, env, enabled) VALUES (?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, m.ProjectID, m.Name, m.Command, m.Args, m.Env, m.Enabled)
+	if err != nil {
+		return err
+	}
+	m.ID, _ = result.LastInsertId()
+	fresh, err := d.GetProjectMCPServer(ctx, m.ID)
+	if err == nil {
+		*m = *fresh
+	}
+	return nil
+}
+
+func (d *DB) GetProjectMCPServer(ctx context.Context, id int64) (*ProjectMCPServer, error) {
+	var m ProjectMCPServer
+	err := d.GetContext(ctx, &m, "SELECT * FROM project_mcp_servers WHERE id = ?", id)
+	return &m, err
+}
+
+func (d *DB) ListProjectMCPServers(ctx context.Context, projectID int64) ([]ProjectMCPServer, error) {
+	var servers []ProjectMCPServer
+	err := d.SelectContext(ctx, &servers, "SELECT * FROM project_mcp_servers WHERE project_id = ? ORDER BY name", projectID)
+	return servers, err
+}
+
+func (d *DB) ListEnabledProjectMCPServers(ctx context.Context, projectID int64) ([]ProjectMCPServer, error) {
+	var servers []ProjectMCPServer
+	err := d.SelectContext(ctx, &servers, "SELECT * FROM project_mcp_servers WHERE project_id = ? AND enabled = 1 ORDER BY name", projectID)
+	return servers, err
+}
+
+func (d *DB) UpdateProjectMCPServer(ctx context.Context, m *ProjectMCPServer) error {
+	query := `UPDATE project_mcp_servers SET name=?, command=?, args=?, env=?, enabled=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, m.Name, m.Command, m.Args, m.Env, m.Enabled, time.Now(), m.ID)
+	if err != nil {
+		return err
+	}
+	fresh, err := d.GetProjectMCPServer(ctx, m.ID)
+	if err == nil {
+		*m = *fresh
+	}
+	return nil
+}
+
+func (d *DB) DeleteProjectMCPServer(ctx context.Context, id int64) error {
+	_, err := d.ExecContext(ctx, "DELETE FROM project_mcp_servers WHERE id = ?", id)
+	return err
+}
+
 // AI Config operations
 
 func (d *DB) CreateAIConfig(ctx context.Context, c *AIConfig) error {
