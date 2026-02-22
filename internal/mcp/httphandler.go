@@ -87,7 +87,16 @@ func (h *HTTPHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 		sessID := generateSessionID()
 		policy := h.getPolicy()
 		client := NewAPIClient(h.apiURL)
-		handler = NewRequestHandler(client, "", "http", "", policy)
+
+		// If session_id is provided via query param, this is a remote Claude Code
+		// session connecting through the reverse tunnel. Use "session" context so
+		// the correct tool policy (mcp_tool_policy_session) is applied.
+		openpoetSessionID := r.URL.Query().Get("session_id")
+		mcpContext := "http"
+		if openpoetSessionID != "" {
+			mcpContext = "session"
+		}
+		handler = NewRequestHandler(client, openpoetSessionID, mcpContext, "", policy)
 
 		h.mu.Lock()
 		h.sessions[sessID] = &httpSession{
