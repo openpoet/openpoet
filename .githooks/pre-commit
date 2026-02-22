@@ -1,10 +1,16 @@
 #!/bin/sh
 
-# Pre-commit hook: format Go files and run go vet
+# Pre-commit hook: check formatting and run go vet
 
-echo "Running gofmt..."
-gofmt -w .
-git add -u
+echo "Checking gofmt..."
+UNFORMATTED=$(gofmt -l .)
+if [ -n "$UNFORMATTED" ]; then
+    echo "The following files are not formatted:"
+    echo "$UNFORMATTED"
+    echo ""
+    echo "Run 'make format' to fix. Commit aborted."
+    exit 1
+fi
 
 echo "Running go vet..."
 go vet ./...
