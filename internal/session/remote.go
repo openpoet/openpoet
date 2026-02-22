@@ -280,10 +280,10 @@ func (r *RemoteRunner) setupReverseTunnel(client *ssh.Client) {
 	}()
 }
 
-// rewriteMCPConfigForRemote replaces the openpoet subprocess MCP entry with a
-// URL-based (Streamable HTTP) entry pointing through the reverse tunnel. The
-// subprocess approach doesn't work on remote machines because the openpoet binary
-// isn't installed there and the API URL points to localhost.
+// rewriteMCPConfigForRemote replaces the openpoet subprocess MCP entry with an
+// HTTP-based entry pointing through the reverse tunnel. The subprocess approach
+// doesn't work on remote machines because the openpoet binary isn't installed
+// there and the API URL points to localhost.
 func (r *RemoteRunner) rewriteMCPConfigForRemote() {
 	if r.tunnelListener == nil {
 		log.Printf("[remote] MCP rewrite: no tunnel, skipping")
@@ -322,13 +322,15 @@ func (r *RemoteRunner) rewriteMCPConfigForRemote() {
 			}
 		}
 
-		// Replace subprocess with URL-based transport through the tunnel
+		// Replace subprocess with HTTP transport through the tunnel.
+		// Claude Code requires "type":"http" alongside "url".
 		mcpURL := fmt.Sprintf("http://%s/mcp", tunnelAddr)
 		if sessionID != "" {
 			mcpURL += "?session_id=" + sessionID
 		}
 		servers["openpoet"] = map[string]interface{}{
-			"url": mcpURL,
+			"type": "http",
+			"url":  mcpURL,
 		}
 
 		newJSON, err := json.Marshal(config)
@@ -338,7 +340,7 @@ func (r *RemoteRunner) rewriteMCPConfigForRemote() {
 		}
 
 		r.cliArgs[i+1] = string(newJSON)
-		log.Printf("[remote] MCP rewrite: openpoet -> URL %s", mcpURL)
+		log.Printf("[remote] MCP rewrite: openpoet -> HTTP %s", mcpURL)
 		return
 	}
 }
