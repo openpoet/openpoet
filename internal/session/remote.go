@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -75,6 +76,9 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 	log.Printf("[remote] Setting up reverse tunnel, envVars before: OPENPOET_HOOK_URL=%s", r.envVars["OPENPOET_HOOK_URL"])
 	r.setupReverseTunnel(client)
 	log.Printf("[remote] After tunnel setup, envVars: OPENPOET_HOOK_URL=%s", r.envVars["OPENPOET_HOOK_URL"])
+
+	// Rewrite OpenPoet MCP from subprocess to URL-based transport via tunnel
+	r.rewriteMCPConfigForRemote()
 
 	// Create session
 	session, err := client.NewSession()
@@ -274,6 +278,69 @@ func (r *RemoteRunner) setupReverseTunnel(client *ssh.Client) {
 			}(remoteConn, connID)
 		}
 	}()
+}
+
+// rewriteMCPConfigForRemote replaces the openpoet subprocess MCP entry with a
+// URL-based (Streamable HTTP) entry pointing through the reverse tunnel. The
+// subprocess approach doesn't work on remote machines because the openpoet binary
+// isn't installed there and the API URL points to localhost.
+func (r *RemoteRunner) rewriteMCPConfigForRemote() {
+	if r.tunnelListener == nil {
+		log.Printf("[remote] MCP rewrite: no tunnel, skipping")
+		return
+	}
+
+	tunnelAddr := r.tunnelListener.Addr().String()
+
+	// Find --mcp-config in cliArgs
+	for i, arg := range r.cliArgs {
+		if arg != "--mcp-config" || i+1 >= len(r.cliArgs) {
+			continue
+		}
+
+		var config map[string]interface{}
+		if err := json.Unmarshal([]byte(r.cliArgs[i+1]), &config); err != nil {
+			log.Printf("[remote] MCP rewrite: failed to parse config: %v", err)
+			return
+		}
+
+		servers, ok := config["mcpServers"].(map[string]interface{})
+		if !ok {
+			return
+		}
+
+		if _, hasOpenPoet := servers["openpoet"]; !hasOpenPoet {
+			return
+		}
+
+		// Extract session_id from cliArgs (--session-id <id>)
+		sessionID := ""
+		for j, a := range r.cliArgs {
+			if a == "--session-id" && j+1 < len(r.cliArgs) {
+				sessionID = r.cliArgs[j+1]
+				break
+			}
+		}
+
+		// Replace subprocess with URL-based transport through the tunnel
+		mcpURL := fmt.Sprintf("http://%s/mcp", tunnelAddr)
+		if sessionID != "" {
+			mcpURL += "?session_id=" + sessionID
+		}
+		servers["openpoet"] = map[string]interface{}{
+			"url": mcpURL,
+		}
+
+		newJSON, err := json.Marshal(config)
+		if err != nil {
+			log.Printf("[remote] MCP rewrite: failed to marshal: %v", err)
+			return
+		}
+
+		r.cliArgs[i+1] = string(newJSON)
+		log.Printf("[remote] MCP rewrite: openpoet -> URL %s", mcpURL)
+		return
+	}
 }
 
 func (r *RemoteRunner) readOutput(reader io.Reader) {

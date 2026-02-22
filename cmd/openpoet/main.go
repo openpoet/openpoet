@@ -362,27 +362,17 @@ func main() {
 	// Wire OTEL handler into API for live session metrics
 	api.SetOTELHandler(otelHandler)
 
-	// Determine if MCP HTTP endpoint should be enabled
-	mcpHTTPEnabled := *mcpHTTP
-	if !mcpHTTPEnabled {
-		if v, _ := db.GetSetting(ctx, "mcp_http_enabled"); v == "true" {
-			mcpHTTPEnabled = true
-		}
-	}
-
-	// Initialize MCP HTTP handler if enabled
-	var mcpHandler *mcp.HTTPHandler
-	if mcpHTTPEnabled {
-		mcpHandler = mcp.NewHTTPHandler(
-			fmt.Sprintf("http://localhost:%d", cfg.Port),
-			func() string { key, _ := db.GetSetting(context.Background(), "mcp_api_key"); return key },
-			func() mcp.ToolPolicy {
-				policyStr, _ := db.GetSetting(context.Background(), "mcp_tool_policy_http")
-				return mcp.ParsePolicy(policyStr)
-			},
-		)
-		log.Printf("MCP HTTP endpoint enabled at /mcp")
-	}
+	// Initialize MCP HTTP handler (always enabled — auth middleware protects it).
+	// The --mcp-http flag and mcp_http_enabled setting are kept for backward compatibility.
+	mcpHandler := mcp.NewHTTPHandler(
+		fmt.Sprintf("http://localhost:%d", cfg.Port),
+		func() string { key, _ := db.GetSetting(context.Background(), "mcp_api_key"); return key },
+		func() mcp.ToolPolicy {
+			policyStr, _ := db.GetSetting(context.Background(), "mcp_tool_policy_http")
+			return mcp.ParsePolicy(policyStr)
+		},
+	)
+	_ = *mcpHTTP // kept for backward compatibility
 
 	// Set up router
 	r := chi.NewRouter()
@@ -430,10 +420,8 @@ func main() {
 	// Tunnel auth middleware (only activates for tunnel-originated requests)
 	r.Use(tunnel.AuthMiddleware(db, []byte(jwtSecret)))
 
-	// MCP HTTP endpoint (if enabled)
-	if mcpHandler != nil {
-		r.Handle("/mcp", mcpHandler)
-	}
+	// MCP HTTP endpoint (always registered, auth-protected)
+	r.Handle("/mcp", mcpHandler)
 
 	// API routes
 	// DEBUG: Client error reporting endpoint
