@@ -2,11 +2,11 @@ package configsync
 
 import (
 	"context"
-	"openpoet/internal/database"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"openpoet/internal/database"
 	"os"
 	"path/filepath"
 	"strings"

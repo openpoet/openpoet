@@ -10,14 +10,14 @@ type TokenPricing struct {
 // Prices are in USD per million tokens.
 var modelPricing = map[string]TokenPricing{
 	// Claude 4.x / 4.5 / 4.6
-	"claude-sonnet-4-5-20250929":  {InputPerMillion: 3.0, OutputPerMillion: 15.0},
-	"claude-haiku-4-5-20251001":   {InputPerMillion: 0.80, OutputPerMillion: 4.0},
-	"claude-opus-4-20250514":      {InputPerMillion: 15.0, OutputPerMillion: 75.0},
-	"claude-opus-4-6":             {InputPerMillion: 15.0, OutputPerMillion: 75.0},
+	"claude-sonnet-4-5-20250929": {InputPerMillion: 3.0, OutputPerMillion: 15.0},
+	"claude-haiku-4-5-20251001":  {InputPerMillion: 0.80, OutputPerMillion: 4.0},
+	"claude-opus-4-20250514":     {InputPerMillion: 15.0, OutputPerMillion: 75.0},
+	"claude-opus-4-6":            {InputPerMillion: 15.0, OutputPerMillion: 75.0},
 
 	// Claude 3.5
-	"claude-3-5-sonnet-20241022":  {InputPerMillion: 3.0, OutputPerMillion: 15.0},
-	"claude-3-5-haiku-20241022":   {InputPerMillion: 0.80, OutputPerMillion: 4.0},
+	"claude-3-5-sonnet-20241022": {InputPerMillion: 3.0, OutputPerMillion: 15.0},
+	"claude-3-5-haiku-20241022":  {InputPerMillion: 0.80, OutputPerMillion: 4.0},
 }
 
 // defaultPricing is used when the model is not found in the pricing map.

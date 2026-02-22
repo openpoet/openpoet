@@ -12,9 +12,9 @@ import (
 )
 
 type WebSocketHandler struct {
-	hub          *websocket.Hub
-	api          *API
-	webpush      *notifications.WebPushService
+	hub     *websocket.Hub
+	api     *API
+	webpush *notifications.WebPushService
 }
 
 func NewWebSocketHandler(hub *websocket.Hub, api *API, webpush *notifications.WebPushService) *WebSocketHandler {

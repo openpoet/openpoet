@@ -5,11 +5,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"openpoet/internal/database"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
+	"openpoet/internal/database"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 )

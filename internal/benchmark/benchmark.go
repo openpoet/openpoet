@@ -45,17 +45,17 @@ type ToolCallRecord struct {
 
 // ScenarioResult holds the outcome of running one scenario.
 type ScenarioResult struct {
-	ScenarioID   string           `json:"scenario_id"`
-	ScenarioName string           `json:"scenario_name"`
-	Category     ScenarioCategory `json:"category"`
-	ToolCalls    []ToolCallRecord `json:"tool_calls"`
-	TextResponse string           `json:"text_response"`
+	ScenarioID   string            `json:"scenario_id"`
+	ScenarioName string            `json:"scenario_name"`
+	Category     ScenarioCategory  `json:"category"`
+	ToolCalls    []ToolCallRecord  `json:"tool_calls"`
+	TextResponse string            `json:"text_response"`
 	Validators   []ValidatorResult `json:"validators"`
-	JudgeScores  JudgeScores      `json:"judge_scores"`
-	OverallScore float64          `json:"overall_score"`
-	Cost         float64          `json:"cost_usd"`
-	Latency      time.Duration    `json:"latency_ms"`
-	Error        string           `json:"error,omitempty"`
+	JudgeScores  JudgeScores       `json:"judge_scores"`
+	OverallScore float64           `json:"overall_score"`
+	Cost         float64           `json:"cost_usd"`
+	Latency      time.Duration     `json:"latency_ms"`
+	Error        string            `json:"error,omitempty"`
 }
 
 // JudgeScores holds the LLM-as-Judge evaluation scores.
@@ -75,14 +75,14 @@ func (j JudgeScores) Average() float64 {
 
 // BenchmarkReport is the complete output of a benchmark run.
 type BenchmarkReport struct {
-	Model          string                          `json:"model"`
-	JudgeModel     string                          `json:"judge_model"`
-	Timestamp      time.Time                       `json:"timestamp"`
-	Scenarios      []ScenarioResult                `json:"scenarios"`
-	CategoryScores map[ScenarioCategory]float64    `json:"category_scores"`
-	OverallScore   float64                         `json:"overall_score"`
-	TotalCost      float64                         `json:"total_cost_usd"`
-	TotalDuration  time.Duration                   `json:"total_duration_ms"`
+	Model          string                       `json:"model"`
+	JudgeModel     string                       `json:"judge_model"`
+	Timestamp      time.Time                    `json:"timestamp"`
+	Scenarios      []ScenarioResult             `json:"scenarios"`
+	CategoryScores map[ScenarioCategory]float64 `json:"category_scores"`
+	OverallScore   float64                      `json:"overall_score"`
+	TotalCost      float64                      `json:"total_cost_usd"`
+	TotalDuration  time.Duration                `json:"total_duration_ms"`
 }
 
 // RunConfig holds CLI configuration for a benchmark run.

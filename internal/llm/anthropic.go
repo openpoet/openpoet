@@ -113,10 +113,10 @@ func parseSSEStream(r io.Reader, callback StreamCallback) (*Response, error) {
 	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
 
 	var (
-		result     Response
-		eventType  string
-		blocks     []ContentBlock
-		curBlockIdx int = -1
+		result       Response
+		eventType    string
+		blocks       []ContentBlock
+		curBlockIdx  int = -1
 		inputJSONBuf strings.Builder
 	)
 

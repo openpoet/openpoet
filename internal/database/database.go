@@ -998,9 +998,9 @@ func (d *DB) UpdateTaskStatus(ctx context.Context, id int64, status string) erro
 
 	// Get task info
 	var task struct {
-		ProjectID int64  `db:"project_id"`
+		ProjectID int64         `db:"project_id"`
 		ParentID  sql.NullInt64 `db:"parent_id"`
-		OldStatus string `db:"status"`
+		OldStatus string        `db:"status"`
 	}
 	if err := tx.GetContext(ctx, &task, "SELECT project_id, parent_id, status FROM project_tasks WHERE id=?", id); err != nil {
 		return err
@@ -1680,38 +1680,38 @@ type TokenUsageSummary struct {
 // TokenUsageBySource holds per-source summary.
 type TokenUsageBySource struct {
 	Source            string  `db:"source" json:"source"`
-	TotalInputTokens  int64  `db:"total_input" json:"total_input_tokens"`
-	TotalOutputTokens int64  `db:"total_output" json:"total_output_tokens"`
+	TotalInputTokens  int64   `db:"total_input" json:"total_input_tokens"`
+	TotalOutputTokens int64   `db:"total_output" json:"total_output_tokens"`
 	TotalCostUSD      float64 `db:"total_cost" json:"total_cost_usd"`
-	TotalRequests     int64  `db:"total_requests" json:"total_requests"`
+	TotalRequests     int64   `db:"total_requests" json:"total_requests"`
 }
 
 // TokenUsageByModel holds per-model summary (aggregated across all sources).
 type TokenUsageByModel struct {
 	Model             string  `db:"model" json:"model"`
-	TotalInputTokens  int64  `db:"total_input" json:"total_input_tokens"`
-	TotalOutputTokens int64  `db:"total_output" json:"total_output_tokens"`
+	TotalInputTokens  int64   `db:"total_input" json:"total_input_tokens"`
+	TotalOutputTokens int64   `db:"total_output" json:"total_output_tokens"`
 	TotalCostUSD      float64 `db:"total_cost" json:"total_cost_usd"`
-	TotalRequests     int64  `db:"total_requests" json:"total_requests"`
+	TotalRequests     int64   `db:"total_requests" json:"total_requests"`
 }
 
 // TokenUsageDaily holds daily aggregated data.
 type TokenUsageDaily struct {
 	Date              string  `db:"date" json:"date"`
-	TotalInputTokens  int64  `db:"total_input" json:"total_input_tokens"`
-	TotalOutputTokens int64  `db:"total_output" json:"total_output_tokens"`
+	TotalInputTokens  int64   `db:"total_input" json:"total_input_tokens"`
+	TotalOutputTokens int64   `db:"total_output" json:"total_output_tokens"`
 	TotalCostUSD      float64 `db:"total_cost" json:"total_cost_usd"`
-	TotalRequests     int64  `db:"total_requests" json:"total_requests"`
+	TotalRequests     int64   `db:"total_requests" json:"total_requests"`
 }
 
 // TokenUsageByProject holds per-project summary.
 type TokenUsageByProject struct {
 	ProjectID         int64   `db:"project_id" json:"project_id"`
 	ProjectName       string  `db:"project_name" json:"project_name"`
-	TotalInputTokens  int64  `db:"total_input" json:"total_input_tokens"`
-	TotalOutputTokens int64  `db:"total_output" json:"total_output_tokens"`
+	TotalInputTokens  int64   `db:"total_input" json:"total_input_tokens"`
+	TotalOutputTokens int64   `db:"total_output" json:"total_output_tokens"`
 	TotalCostUSD      float64 `db:"total_cost" json:"total_cost_usd"`
-	TotalRequests     int64  `db:"total_requests" json:"total_requests"`
+	TotalRequests     int64   `db:"total_requests" json:"total_requests"`
 }
 
 // TokenUsageByProjectModel holds per-project per-model breakdown.
@@ -1719,10 +1719,10 @@ type TokenUsageByProjectModel struct {
 	ProjectID         int64   `db:"project_id" json:"project_id"`
 	ProjectName       string  `db:"project_name" json:"project_name"`
 	Model             string  `db:"model" json:"model"`
-	TotalInputTokens  int64  `db:"total_input" json:"total_input_tokens"`
-	TotalOutputTokens int64  `db:"total_output" json:"total_output_tokens"`
+	TotalInputTokens  int64   `db:"total_input" json:"total_input_tokens"`
+	TotalOutputTokens int64   `db:"total_output" json:"total_output_tokens"`
 	TotalCostUSD      float64 `db:"total_cost" json:"total_cost_usd"`
-	TotalRequests     int64  `db:"total_requests" json:"total_requests"`
+	TotalRequests     int64   `db:"total_requests" json:"total_requests"`
 }
 
 // GetTokenUsageSummary returns aggregated token usage, optionally filtered by project.

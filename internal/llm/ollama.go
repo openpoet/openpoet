@@ -96,7 +96,7 @@ func (p *OllamaProvider) StreamMessage(ctx context.Context, req *Request, callba
 
 	var response Response
 	var contentText strings.Builder
-	toolCalls := make(map[int]*ContentBlock)     // index -> tool call block
+	toolCalls := make(map[int]*ContentBlock)       // index -> tool call block
 	toolArgsJSON := make(map[int]*strings.Builder) // index -> accumulated JSON
 
 	for {

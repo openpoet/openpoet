@@ -2,9 +2,9 @@ package files
 
 import (
 	"bufio"
-	"openpoet/internal/database"
 	"fmt"
 	"io"
+	"openpoet/internal/database"
 	"os"
 	"path/filepath"
 	"regexp"

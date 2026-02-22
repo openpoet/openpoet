@@ -418,4 +418,3 @@ func extractJSON(text string) string {
 	}
 	return text
 }
-

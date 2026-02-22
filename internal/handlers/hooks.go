@@ -22,7 +22,7 @@ type PermissionResponse struct {
 	Behavior              string            `json:"behavior"` // "allow", "allowAlways", "deny", or "passthrough"
 	Message               string            `json:"message,omitempty"`
 	ToolName              string            `json:"tool_name,omitempty"`
-	Answers               map[string]string `json:"answers,omitempty"`               // For AskUserQuestion responses
+	Answers               map[string]string `json:"answers,omitempty"`                // For AskUserQuestion responses
 	PermissionSuggestions []interface{}     `json:"permission_suggestions,omitempty"` // From hook input, for allowAlways
 }
 
@@ -83,18 +83,18 @@ type HookHandler struct {
 	HasRecentSuggestions func(sessionID string) bool
 
 	mu                sync.Mutex
-	pending           map[string]*pendingPermission  // sessionID -> pending permission
-	alwaysAllow       map[string]map[string]bool     // sessionID -> toolName -> true
-	toolEvents        map[string][]toolEventEntry    // sessionID -> recent tool events buffer
-	lastPushSent      map[string]time.Time           // sessionID -> last push timestamp (for rate-limiting)
-	userStopped       map[string]bool                // sessionID -> true if user explicitly stopped
-	lastEvaluation    map[string]time.Time           // sessionID -> last evaluation timestamp (3-min cooldown)
+	pending           map[string]*pendingPermission     // sessionID -> pending permission
+	alwaysAllow       map[string]map[string]bool        // sessionID -> toolName -> true
+	toolEvents        map[string][]toolEventEntry       // sessionID -> recent tool events buffer
+	lastPushSent      map[string]time.Time              // sessionID -> last push timestamp (for rate-limiting)
+	userStopped       map[string]bool                   // sessionID -> true if user explicitly stopped
+	lastEvaluation    map[string]time.Time              // sessionID -> last evaluation timestamp (3-min cooldown)
 	taskNotifs        map[string]map[string]interface{} // sessionID -> task notification data (pending until user responds)
-	lastActivityTouch map[string]time.Time           // sessionID -> last DB touch for activity debounce
-	sessionMode       map[string]string              // sessionID -> "plan_mode" | "executing" | "idle"
-	modeIdleTimers    map[string]*time.Timer         // sessionID -> inactivity timer that sets mode to idle
-	imagePromptMeta   map[string]string              // sessionID -> user's text prompt when images were included
-	evalTimers        map[string]*time.Timer         // sessionID -> debounced evaluation timer
+	lastActivityTouch map[string]time.Time              // sessionID -> last DB touch for activity debounce
+	sessionMode       map[string]string                 // sessionID -> "plan_mode" | "executing" | "idle"
+	modeIdleTimers    map[string]*time.Timer            // sessionID -> inactivity timer that sets mode to idle
+	imagePromptMeta   map[string]string                 // sessionID -> user's text prompt when images were included
+	evalTimers        map[string]*time.Timer            // sessionID -> debounced evaluation timer
 }
 
 // NewHookHandler creates a new hook handler

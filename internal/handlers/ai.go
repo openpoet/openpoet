@@ -156,8 +156,8 @@ type AIHandler struct {
 // NewAIHandler creates a new AI handler.
 func NewAIHandler(api *API, providerMgr *llm.ProviderManager) *AIHandler {
 	return &AIHandler{
-		api:          api,
-		providerMgr:  providerMgr,
+		api:           api,
+		providerMgr:   providerMgr,
 		activeStreams: make(map[int64]*activeStreamInfo),
 	}
 }
@@ -1088,7 +1088,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			}
 			var parentActions []indexedAction
 			childActions := map[int][]indexedAction{} // parent sort_order -> children
-			var otherActions []indexedAction           // update, delete actions
+			var otherActions []indexedAction          // update, delete actions
 
 			for i, a := range actions {
 				switch a.Action {
@@ -5216,7 +5216,7 @@ func (h *AIHandler) broadcastVerificationError(task *database.ProjectTask, reaso
 	h.api.hub.BroadcastStateUpdate("verification_error", map[string]interface{}{
 		"task_id":    task.ID,
 		"project_id": task.ProjectID,
-		"error":     reason,
+		"error":      reason,
 	})
 }
 
