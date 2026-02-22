@@ -2,12 +2,12 @@ package session
 
 import (
 	"context"
-	"openpoet/internal/database"
-	"openpoet/internal/mcp"
-	"openpoet/internal/websocket"
 	"encoding/json"
 	"fmt"
 	"log"
+	"openpoet/internal/database"
+	"openpoet/internal/mcp"
+	"openpoet/internal/websocket"
 	"os"
 	"path/filepath"
 	"strings"

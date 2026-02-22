@@ -2,11 +2,11 @@ package session
 
 import (
 	"context"
-	"openpoet/internal/database"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"openpoet/internal/database"
 	"strings"
 	"sync"
 	"time"
@@ -21,15 +21,15 @@ type RemoteRunner struct {
 	decryptFunc   func(string, string) (string, error)
 	cliArgs       []string
 
-	mu              sync.Mutex
-	client          *ssh.Client
-	session         *ssh.Session
-	stdin           io.WriteCloser
-	tunnelListener  net.Listener
-	ctx             context.Context
-	cancel          context.CancelFunc
-	done            chan struct{}
-	waitErr         error
+	mu             sync.Mutex
+	client         *ssh.Client
+	session        *ssh.Session
+	stdin          io.WriteCloser
+	tunnelListener net.Listener
+	ctx            context.Context
+	cancel         context.CancelFunc
+	done           chan struct{}
+	waitErr        error
 }
 
 func NewRemoteRunner(
@@ -389,7 +389,7 @@ func ValidateConnection(project *database.Project, decryptFunc func(string, stri
 }
 
 // shellQuote wraps a string in single quotes for safe use in shell commands.
-// Internal single quotes are escaped using the '\'' idiom.
+// Internal single quotes are escaped using the '\” idiom.
 func shellQuote(s string) string {
 	return "'" + strings.Replace(s, "'", `'\''`, -1) + "'"
 }

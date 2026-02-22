@@ -14,9 +14,9 @@ import (
 // The phone browser detects this format and decrypts using the shared key.
 type EncryptedMessage struct {
 	Encrypted  bool   `json:"_encrypted"`
-	Data       string `json:"data"`       // base64-encoded AES-256-GCM ciphertext
-	IV         string `json:"iv"`         // base64-encoded nonce
-	OrigIsText bool   `json:"_is_text"`   // whether the original frame was text
+	Data       string `json:"data"`     // base64-encoded AES-256-GCM ciphertext
+	IV         string `json:"iv"`       // base64-encoded nonce
+	OrigIsText bool   `json:"_is_text"` // whether the original frame was text
 }
 
 // EncryptFrame encrypts a WebSocket frame using AES-256-GCM.

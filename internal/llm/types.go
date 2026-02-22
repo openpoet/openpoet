@@ -132,7 +132,7 @@ type Request struct {
 // Response is the output of a non-streaming provider call.
 type Response struct {
 	Content    []ContentBlock
-	StopReason string  // "end_turn", "tool_use", "max_tokens"
+	StopReason string // "end_turn", "tool_use", "max_tokens"
 	Usage      Usage
 	Model      string  // model used (populated by provider)
 	SessionID  string  // SDK session ID for resume (populated by SDK providers)

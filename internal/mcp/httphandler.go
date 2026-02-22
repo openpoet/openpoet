@@ -26,9 +26,9 @@ type HTTPHandler struct {
 }
 
 type httpSession struct {
-	id        string
-	handler   *RequestHandler
-	lastUsed  time.Time
+	id       string
+	handler  *RequestHandler
+	lastUsed time.Time
 }
 
 // NewHTTPHandler creates a new MCP HTTP transport handler.

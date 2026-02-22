@@ -10,9 +10,9 @@ import (
 // All providers support tools (via native API or MCP).
 //
 // When forMCP is true (GoSDK/session providers), the prompt adapts for the MCP context:
-// - Removes the "Available Tools" section (Claude CLI already provides tool descriptions)
-// - Adds a tool naming convention note so the model maps prompt references (e.g. "list_tasks")
-//   to actual MCP tool names (e.g. "mcp__openpoet__list_tasks")
+//   - Removes the "Available Tools" section (Claude CLI already provides tool descriptions)
+//   - Adds a tool naming convention note so the model maps prompt references (e.g. "list_tasks")
+//     to actual MCP tool names (e.g. "mcp__openpoet__list_tasks")
 func ChatSystemPrompt(skills []string, projects []string, mcps []string, forMCP ...bool) string {
 	isMCP := len(forMCP) > 0 && forMCP[0]
 	var sb strings.Builder
@@ -219,7 +219,6 @@ This conversation was initiated proactively by you (the AI assistant). The user 
 Continue the conversation naturally. The user may want to discuss, modify, accept, or dismiss your suggestion. Be helpful and concise.
 `
 }
-
 
 // VerificationDocPrompt builds the prompt for generating a task verification document.
 func VerificationDocPrompt(taskTitle, taskDescription, projectName string, sessionSummaries []string, historyEntries []string) string {

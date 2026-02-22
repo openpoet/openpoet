@@ -17,7 +17,7 @@ type Project struct {
 	SSHCredentialEncrypted sql.NullString `db:"ssh_credential_encrypted" json:"-"`
 	SSHCredentialIV        sql.NullString `db:"ssh_credential_iv" json:"-"`
 	HasCredential          bool           `db:"-" json:"has_credential"`
-	ToolPolicy             string         `db:"tool_policy" json:"tool_policy,omitempty"`  // JSON ToolPolicy
+	ToolPolicy             string         `db:"tool_policy" json:"tool_policy,omitempty"`   // JSON ToolPolicy
 	SkillPolicy            string         `db:"skill_policy" json:"skill_policy,omitempty"` // '' = inherit global, 'custom' = per-project
 	ConfigSyncedAt         sql.NullTime   `db:"config_synced_at" json:"config_synced_at,omitempty"`
 	CreatedAt              time.Time      `db:"created_at" json:"created_at"`
@@ -38,12 +38,12 @@ type ProjectInput struct {
 }
 
 type Session struct {
-	ID        string        `db:"id" json:"id"`
-	ProjectID int64         `db:"project_id" json:"project_id"`
-	Status    string        `db:"status" json:"status"` // 'starting', 'running', 'stopped', 'error', 'completed'
-	PID       sql.NullInt64 `db:"pid" json:"pid,omitempty"`
-	Name      string        `db:"name" json:"name"`
-	TaskID    sql.NullInt64 `db:"task_id" json:"task_id,omitempty"`
+	ID             string        `db:"id" json:"id"`
+	ProjectID      int64         `db:"project_id" json:"project_id"`
+	Status         string        `db:"status" json:"status"` // 'starting', 'running', 'stopped', 'error', 'completed'
+	PID            sql.NullInt64 `db:"pid" json:"pid,omitempty"`
+	Name           string        `db:"name" json:"name"`
+	TaskID         sql.NullInt64 `db:"task_id" json:"task_id,omitempty"`
 	StartTime      time.Time     `db:"start_time" json:"start_time"`
 	EndTime        sql.NullTime  `db:"end_time" json:"end_time,omitempty"`
 	LastActivityAt sql.NullTime  `db:"last_activity_at" json:"last_activity_at,omitempty"`
@@ -64,11 +64,11 @@ type Skill struct {
 }
 
 type SyncedSkillFile struct {
-	ID        int64        `db:"id" json:"id"`
-	ProjectID int64        `db:"project_id" json:"project_id"`
+	ID        int64         `db:"id" json:"id"`
+	ProjectID int64         `db:"project_id" json:"project_id"`
 	SkillID   sql.NullInt64 `db:"skill_id" json:"skill_id,omitempty"`
-	FileName  string       `db:"file_name" json:"file_name"`
-	SyncedAt  time.Time    `db:"synced_at" json:"synced_at"`
+	FileName  string        `db:"file_name" json:"file_name"`
+	SyncedAt  time.Time     `db:"synced_at" json:"synced_at"`
 }
 
 type SkillVersion struct {
@@ -157,9 +157,9 @@ type Notification struct {
 type AIConversation struct {
 	ID               int64     `db:"id" json:"id"`
 	Title            string    `db:"title" json:"title"`
-	Source           string    `db:"source" json:"source"`                      // 'user' or 'ai'
-	ProactiveLevel   string    `db:"proactive_level" json:"proactive_level"`    // 'critical', 'standard', 'subtle', or ''
-	ProactiveType    string    `db:"proactive_type" json:"proactive_type"`      // 'task_suggestion', 'memory_doc_update', 'insight', 'alert', or ''
+	Source           string    `db:"source" json:"source"`                       // 'user' or 'ai'
+	ProactiveLevel   string    `db:"proactive_level" json:"proactive_level"`     // 'critical', 'standard', 'subtle', or ''
+	ProactiveType    string    `db:"proactive_type" json:"proactive_type"`       // 'task_suggestion', 'memory_doc_update', 'insight', 'alert', or ''
 	ProactiveContext string    `db:"proactive_context" json:"proactive_context"` // JSON context for system prompt
 	IsRead           bool      `db:"is_read" json:"is_read"`
 	SessionID        string    `db:"session_id" json:"session_id"` // Claude Code session ID for resume across restarts
@@ -173,8 +173,8 @@ type AIMessage struct {
 	Role           string    `db:"role" json:"role"` // 'user', 'assistant'
 	Content        string    `db:"content" json:"content"`
 	ToolCalls      string    `db:"tool_calls" json:"tool_calls"` // JSON array
-	Status         string    `db:"status" json:"status"`           // 'streaming', 'completed', 'error'
-	ErrorInfo      string    `db:"error_info" json:"error_info"`   // error description when status='error'
+	Status         string    `db:"status" json:"status"`         // 'streaming', 'completed', 'error'
+	ErrorInfo      string    `db:"error_info" json:"error_info"` // error description when status='error'
 	CreatedAt      time.Time `db:"created_at" json:"created_at"`
 }
 
@@ -192,20 +192,20 @@ type TempDocument struct {
 }
 
 type ProjectTask struct {
-	ID          int64        `db:"id" json:"id"`
-	ProjectID   int64        `db:"project_id" json:"project_id"`
-	ParentID    sql.NullInt64 `db:"parent_id" json:"parent_id,omitempty"`
-	Title       string       `db:"title" json:"title"`
-	Description string       `db:"description" json:"description"`
-	Status      string       `db:"status" json:"status"`       // 'todo', 'in_progress', 'awaiting_approval', 'done'
-	Priority    string       `db:"priority" json:"priority"`   // 'low', 'medium', 'high', 'urgent'
-	DueDate     sql.NullTime `db:"due_date" json:"due_date,omitempty"`
-	SortOrder       int          `db:"sort_order" json:"sort_order"`
-	GlobalSortOrder int          `db:"global_sort_order" json:"global_sort_order"`
-	DueNotified        bool         `db:"due_notified" json:"due_notified"`
-	VerificationDocID  string       `db:"verification_doc_id" json:"verification_doc_id"`
-	CreatedAt   time.Time    `db:"created_at" json:"created_at"`
-	UpdatedAt   time.Time    `db:"updated_at" json:"updated_at"`
+	ID                int64         `db:"id" json:"id"`
+	ProjectID         int64         `db:"project_id" json:"project_id"`
+	ParentID          sql.NullInt64 `db:"parent_id" json:"parent_id,omitempty"`
+	Title             string        `db:"title" json:"title"`
+	Description       string        `db:"description" json:"description"`
+	Status            string        `db:"status" json:"status"`     // 'todo', 'in_progress', 'awaiting_approval', 'done'
+	Priority          string        `db:"priority" json:"priority"` // 'low', 'medium', 'high', 'urgent'
+	DueDate           sql.NullTime  `db:"due_date" json:"due_date,omitempty"`
+	SortOrder         int           `db:"sort_order" json:"sort_order"`
+	GlobalSortOrder   int           `db:"global_sort_order" json:"global_sort_order"`
+	DueNotified       bool          `db:"due_notified" json:"due_notified"`
+	VerificationDocID string        `db:"verification_doc_id" json:"verification_doc_id"`
+	CreatedAt         time.Time     `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time     `db:"updated_at" json:"updated_at"`
 }
 
 type TaskHistory struct {
