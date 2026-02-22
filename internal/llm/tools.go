@@ -78,12 +78,100 @@ func AllToolDefs() []ToolDef {
 			Context: ToolContextBoth,
 		},
 		{
+			Name:           "get_skill",
+			Description:    "Get the full content of a skill by ID. Returns name, content, category, and enabled status.",
+			MCPDescription: "Get a skill's full content by ID.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"id": {Type: "string", Description: "The skill ID (number)"},
+				},
+				Required: []string{"id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
 			Name:           "list_skills",
 			Description:    "List all skills in OpenPoet.",
 			MCPDescription: "List all skills in OpenPoet. Skills are markdown instruction templates stored in the database.",
 			InputSchema: ToolDefinitionInput{
 				Type:       "object",
 				Properties: map[string]ToolPropertySchema{},
+			},
+			Context: ToolContextBoth,
+		},
+
+		// ──── Project-scoped skill tools ────
+
+		{
+			Name:        "create_project_skill",
+			Description: "Create a project-specific skill. Unlike global skills, project skills only apply to the specified project.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"name":       {Type: "string", Description: "Unique name within the project. MUST be lowercase with hyphens, no spaces (e.g. 'python-best-practices'). Max 64 chars."},
+					"content":    {Type: "string", Description: "Markdown content with instructions. Do NOT include YAML frontmatter (---) — it is auto-generated."},
+					"category":   {Type: "string", Description: "Category label (e.g. coding, testing, deployment, documentation, workflow)"},
+				},
+				Required: []string{"project_id", "name", "content"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "update_project_skill",
+			Description: "Update an existing project-specific skill by ID.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"id":         {Type: "string", Description: "The project skill ID (number)"},
+					"name":       {Type: "string", Description: "New name for the skill"},
+					"content":    {Type: "string", Description: "New markdown content"},
+					"category":   {Type: "string", Description: "New category label"},
+					"enabled":    {Type: "boolean", Description: "Whether the skill is enabled"},
+				},
+				Required: []string{"project_id", "id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "delete_project_skill",
+			Description: "Delete a project-specific skill by ID.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"id":         {Type: "string", Description: "The project skill ID (number)"},
+				},
+				Required: []string{"project_id", "id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:           "get_project_skill",
+			Description:    "Get the full content of a project-specific skill by ID.",
+			MCPDescription: "Get a project skill's full content by ID.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"id":         {Type: "string", Description: "The project skill ID (number)"},
+				},
+				Required: []string{"project_id", "id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:           "list_project_skills",
+			Description:    "List all skills for a project, including both global skills (with project-specific enabled state) and project-specific skills.",
+			MCPDescription: "List all skills for a project. Returns global skills with project-level overrides and project-specific skills.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+				},
+				Required: []string{"project_id"},
 			},
 			Context: ToolContextBoth,
 		},
@@ -99,12 +187,102 @@ func AllToolDefs() []ToolDef {
 
 		},
 		{
+			Name:           "get_mcp_server",
+			Description:    "Get the full details of a global MCP server by ID. Returns name, command, args, env, and enabled status.",
+			MCPDescription: "Get a global MCP server's full details by ID.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"id": {Type: "string", Description: "The MCP server ID (number)"},
+				},
+				Required: []string{"id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
 			Name:           "list_mcp_servers",
 			Description:    "List all MCP servers in OpenPoet.",
 			MCPDescription: "List all MCP server configurations in OpenPoet.",
 			InputSchema: ToolDefinitionInput{
 				Type:       "object",
 				Properties: map[string]ToolPropertySchema{},
+			},
+			Context: ToolContextBoth,
+		},
+
+		// ──── Project-scoped MCP server tools ────
+
+		{
+			Name:        "create_project_mcp_server",
+			Description: "Create a project-specific MCP server configuration. Unlike global MCP servers, project MCP servers only apply to sessions of the specified project. If a project server has the same name as a global one, it overrides the global for that project.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"name":       {Type: "string", Description: "Name of the MCP server"},
+					"command":    {Type: "string", Description: "Command to run the server"},
+					"args":       {Type: "string", Description: "JSON array of arguments (e.g. '[\"--port\", \"3000\"]'). Can also be passed as a native array."},
+					"env":        {Type: "string", Description: "JSON object of environment variables (e.g. '{\"KEY\": \"value\"}'). Can also be passed as a native object."},
+				},
+				Required: []string{"project_id", "name", "command"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "update_project_mcp_server",
+			Description: "Update an existing project-specific MCP server configuration by ID.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"id":         {Type: "string", Description: "The project MCP server ID (number)"},
+					"name":       {Type: "string", Description: "New name"},
+					"command":    {Type: "string", Description: "New command"},
+					"args":       {Type: "string", Description: "JSON array of arguments. Can also be passed as a native array."},
+					"env":        {Type: "string", Description: "JSON object of environment variables. Can also be passed as a native object."},
+					"enabled":    {Type: "boolean", Description: "Whether the MCP server is enabled"},
+				},
+				Required: []string{"project_id", "id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "delete_project_mcp_server",
+			Description: "Delete a project-specific MCP server configuration by ID.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"id":         {Type: "string", Description: "The project MCP server ID (number)"},
+				},
+				Required: []string{"project_id", "id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:           "get_project_mcp_server",
+			Description:    "Get the full details of a project-specific MCP server by ID.",
+			MCPDescription: "Get a project MCP server's full details by ID.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"id":         {Type: "string", Description: "The project MCP server ID (number)"},
+				},
+				Required: []string{"project_id", "id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:           "list_project_mcp_servers",
+			Description:    "List all MCP servers for a project, including both global MCP servers and project-specific ones.",
+			MCPDescription: "List all MCP server configurations for a project. Returns global servers and project-specific servers.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+				},
+				Required: []string{"project_id"},
 			},
 			Context: ToolContextBoth,
 		},
@@ -362,6 +540,38 @@ func AllToolDefs() []ToolDef {
 					"path":       {Type: "string", Description: "Relative path to the file within the shared project"},
 				},
 				Required: []string{"project_id", "path"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:           "copy_shared_file",
+			MCPName:        "openpoet_copy_shared_file",
+			Description:    "Copy a single file from a shared project into the current project. Reads from the source and writes to the destination path.",
+			MCPDescription: "Copy a file from a shared project to the current project. Requires share access.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The shared project's ID (number)"},
+					"src_path":   {Type: "string", Description: "Relative path to the file in the shared project"},
+					"dest_path":  {Type: "string", Description: "Relative path where the file should be written in the current project"},
+				},
+				Required: []string{"project_id", "src_path", "dest_path"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:           "copy_shared_folder",
+			MCPName:        "openpoet_copy_shared_folder",
+			Description:    "Recursively copy an entire folder from a shared project into the current project. Copies all files preserving directory structure.",
+			MCPDescription: "Copy a folder from a shared project to the current project. Requires share access. Copies all files recursively.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The shared project's ID (number)"},
+					"src_path":   {Type: "string", Description: "Relative path to the folder in the shared project (empty for root)"},
+					"dest_path":  {Type: "string", Description: "Relative path where the folder should be written in the current project"},
+				},
+				Required: []string{"project_id", "src_path", "dest_path"},
 			},
 			Context: ToolContextSession,
 		},

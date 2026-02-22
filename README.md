@@ -1,6 +1,12 @@
+<p align="center">
+  <img src="mascot.svg" alt="OpenPoet Mascot" width="200" />
+</p>
+
 # OpenPoet
 
 Orchestrate Claude Code sessions across multiple projects from a single web interface.
+
+**[openpoet.ai](https://openpoet.ai)**
 
 ## Install
 

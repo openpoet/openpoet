@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"openpoet/internal/files"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"openpoet/internal/files"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -482,6 +483,156 @@ func (h *FileHandler) ViewProjectFile(w http.ResponseWriter, r *http.Request) {
 			"mod_time":  fileInfo.ModTime,
 		})
 	}
+}
+
+// WriteProjectFile writes content to a file in a project (used by MCP copy tools).
+func (h *FileHandler) WriteProjectFile(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(chi.URLParam(r, "id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	var req struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Path == "" {
+		respondError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	// Reject path traversal
+	if strings.Contains(req.Path, "..") {
+		respondError(w, http.StatusBadRequest, "path must not contain '..'")
+		return
+	}
+
+	project, err := h.api.db.GetProject(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	data := []byte(req.Content)
+
+	if project.Type == "local" {
+		fm := files.NewLocalFileManager(project.Path)
+		if err := fm.Write(req.Path, data); err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	} else {
+		fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
+		if err := fm.Write(req.Path, data); err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"path": req.Path,
+		"size": len(data),
+	})
+}
+
+// DownloadProjectFile streams raw file bytes from a project (no session required).
+// Used by MCP copy tools to transfer files including binary ones.
+func (h *FileHandler) DownloadProjectFile(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(chi.URLParam(r, "id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+	filePath := chi.URLParam(r, "*")
+
+	project, err := h.api.db.GetProject(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	if project.Type == "local" {
+		fm := files.NewLocalFileManager(project.Path)
+		reader, fileInfo, err := fm.ReadStream(filePath)
+		if err != nil {
+			respondError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		defer reader.Close()
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", fileInfo.Size))
+		io.Copy(w, reader)
+	} else {
+		fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
+		file, fileInfo, sshClient, sftpClient, err := fm.ReadStream(filePath)
+		if err != nil {
+			respondError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		defer file.Close()
+		defer sftpClient.Close()
+		defer sshClient.Close()
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", fileInfo.Size))
+		io.Copy(w, file)
+	}
+}
+
+// UploadProjectFile writes raw bytes to a file in a project (no session required).
+// Path is passed as a query parameter. Used by MCP copy tools.
+func (h *FileHandler) UploadProjectFile(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(chi.URLParam(r, "id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	filePath := r.URL.Query().Get("path")
+	if filePath == "" {
+		respondError(w, http.StatusBadRequest, "path query parameter is required")
+		return
+	}
+	if strings.Contains(filePath, "..") {
+		respondError(w, http.StatusBadRequest, "path must not contain '..'")
+		return
+	}
+
+	project, err := h.api.db.GetProject(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	data, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024)) // 10MB limit
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to read request body")
+		return
+	}
+
+	if project.Type == "local" {
+		fm := files.NewLocalFileManager(project.Path)
+		if err := fm.Write(filePath, data); err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	} else {
+		fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
+		if err := fm.Write(filePath, data); err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"path": filePath,
+		"size": len(data),
+	})
 }
 
 func parseID(s string) (int64, error) {

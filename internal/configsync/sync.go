@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,6 +76,9 @@ func (cs *ConfigSyncer) syncToLocal(ctx context.Context, project *database.Proje
 	}
 	cs.reportProgress(project.ID, "hooks", "done", "Hook scripts synced")
 
+	// Auto-detect: import skills from disk before pushing DB skills
+	cs.importSkillsFromDisk(ctx, skillsDir, project)
+
 	// Sync skills with smart tracking
 	cs.reportProgress(project.ID, "skills", "running", "Syncing skills...")
 	if err := cs.syncSkillsToLocal(ctx, skillsDir, project); err != nil {
@@ -83,8 +87,10 @@ func (cs *ConfigSyncer) syncToLocal(ctx context.Context, project *database.Proje
 	}
 	cs.reportProgress(project.ID, "skills", "done", "Skills synced")
 
+	// Auto-detect: import MCP servers from .mcp.json
+	cs.importMCPsFromDisk(ctx, projectPath, project)
+
 	// MCP servers are passed via --mcp-config CLI flag at session start.
-	// No file writing needed — this preserves any MCPs the user configured manually in the project.
 	cs.reportProgress(project.ID, "mcps", "done", "MCP servers configured via CLI flag at session start")
 
 	// Sync hooks into settings.json (merge, preserving user's other settings)
@@ -159,6 +165,9 @@ func (cs *ConfigSyncer) syncToRemote(ctx context.Context, project *database.Proj
 	}
 	cs.reportProgress(project.ID, "hooks", "done", "Hook scripts synced")
 
+	// Auto-detect: import skills from remote before pushing DB skills
+	cs.importSkillsFromRemote(ctx, sftpClient, skillsDir, project)
+
 	// Sync skills with smart tracking
 	cs.reportProgress(project.ID, "skills", "running", "Syncing skills to remote...")
 	if err := cs.syncSkillsToRemote(ctx, sftpClient, skillsDir, project); err != nil {
@@ -167,8 +176,10 @@ func (cs *ConfigSyncer) syncToRemote(ctx context.Context, project *database.Proj
 	}
 	cs.reportProgress(project.ID, "skills", "done", "Skills synced")
 
+	// Auto-detect: import MCP servers from remote .mcp.json
+	cs.importMCPsFromRemote(ctx, sftpClient, project.Path, project)
+
 	// MCP servers are passed via --mcp-config CLI flag at session start.
-	// No file writing needed — this preserves any MCPs the user configured manually in the project.
 	cs.reportProgress(project.ID, "mcps", "done", "MCP servers configured via CLI flag at session start")
 
 	// Sync hooks into settings.json (merge, preserving user's other settings)
@@ -413,6 +424,376 @@ func (cs *ConfigSyncer) syncSkillsToRemote(ctx context.Context, sftpClient *sftp
 		}
 	}
 
+	return nil
+}
+
+// ──── Auto-detection: import from disk ────
+
+// parseSkillMD parses a SKILL.md file and extracts the name, content body, and category.
+// It is the inverse of buildSkillMD. If the file has YAML frontmatter, name is extracted
+// from it (fallback to dirName). The content returned is the raw file content as-is
+// (including frontmatter if present), suitable for storing in the database.
+func parseSkillMD(raw string, dirName string) (name, content, category string) {
+	trimmed := strings.TrimSpace(raw)
+	name = dirName // default
+
+	if !strings.HasPrefix(trimmed, "---") {
+		// No frontmatter — use content as-is
+		return name, trimmed, ""
+	}
+
+	// Find closing ---
+	rest := trimmed[3:] // skip opening ---
+	idx := strings.Index(rest, "\n---")
+	if idx < 0 {
+		return name, trimmed, ""
+	}
+
+	frontmatter := rest[:idx]
+
+	// Parse frontmatter lines for name and description
+	for _, line := range strings.Split(frontmatter, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "name:") {
+			v := strings.TrimSpace(strings.TrimPrefix(line, "name:"))
+			if v != "" {
+				name = v
+			}
+		}
+		if strings.HasPrefix(line, "description:") {
+			category = strings.TrimSpace(strings.TrimPrefix(line, "description:"))
+			if len(category) > 64 {
+				category = category[:64]
+			}
+		}
+	}
+
+	// Store the full raw content (with frontmatter) so buildSkillMD preserves it on re-sync
+	return name, trimmed, category
+}
+
+// importSkillsFromDisk scans .claude/skills/ for SKILL.md files not already tracked
+// by OpenPoet and imports them as project-scoped skills.
+func (cs *ConfigSyncer) importSkillsFromDisk(ctx context.Context, skillsDir string, project *database.Project) error {
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		return nil // directory doesn't exist yet, nothing to import
+	}
+
+	// Build set of already-tracked file names
+	syncedFiles, _ := cs.db.ListSyncedSkillFiles(ctx, project.ID)
+	trackedDirs := make(map[string]bool)
+	for _, sf := range syncedFiles {
+		dirName := sf.FileName
+		if strings.HasSuffix(dirName, "/SKILL.md") {
+			dirName = strings.TrimSuffix(dirName, "/SKILL.md")
+		}
+		trackedDirs[dirName] = true
+	}
+
+	// Build set of existing project skill names
+	existingSkills, _ := cs.db.ListProjectSkills(ctx, project.ID)
+	existingNames := make(map[string]bool)
+	for _, ps := range existingSkills {
+		existingNames[ps.Name] = true
+	}
+
+	// Also build set of global skill names to avoid importing duplicates
+	globalSkills, _ := cs.db.ListSkills(ctx)
+	globalNames := make(map[string]bool)
+	for _, s := range globalSkills {
+		globalNames[s.Name] = true
+	}
+
+	imported := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dirName := entry.Name()
+
+		// Skip if already tracked by OpenPoet
+		if trackedDirs[dirName] {
+			continue
+		}
+
+		// Check if SKILL.md exists
+		skillPath := filepath.Join(skillsDir, dirName, "SKILL.md")
+		raw, err := os.ReadFile(skillPath)
+		if err != nil {
+			continue // no SKILL.md in this dir
+		}
+
+		name, content, category := parseSkillMD(string(raw), dirName)
+
+		// Skip if already exists as project skill or global skill
+		if existingNames[name] || globalNames[name] {
+			continue
+		}
+
+		ps := &database.ProjectSkill{
+			ProjectID: project.ID,
+			Name:      name,
+			Content:   content,
+			Enabled:   true,
+			Category:  category,
+		}
+		if err := cs.db.CreateProjectSkill(ctx, ps); err != nil {
+			log.Printf("[configsync] failed to import skill '%s' for project %d: %v", name, project.ID, err)
+			continue
+		}
+		existingNames[name] = true
+		imported++
+		log.Printf("[configsync] imported skill '%s' from disk for project %d (ID: %d)", name, project.ID, ps.ID)
+	}
+
+	if imported > 0 {
+		cs.reportProgress(project.ID, "skills_import", "done", fmt.Sprintf("Imported %d skill(s) from disk", imported))
+	}
+	return nil
+}
+
+// importMCPsFromDisk reads .mcp.json from the project root and imports
+// any MCP servers not already in the database as project-scoped servers.
+func (cs *ConfigSyncer) importMCPsFromDisk(ctx context.Context, projectPath string, project *database.Project) error {
+	mcpPath := filepath.Join(projectPath, ".mcp.json")
+	raw, err := os.ReadFile(mcpPath)
+	if err != nil {
+		return nil // file doesn't exist, nothing to import
+	}
+
+	var mcpConfig struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(raw, &mcpConfig); err != nil {
+		log.Printf("[configsync] failed to parse .mcp.json for project %d: %v", project.ID, err)
+		return nil
+	}
+
+	if len(mcpConfig.MCPServers) == 0 {
+		return nil
+	}
+
+	// Build set of existing project MCP server names
+	existing, _ := cs.db.ListProjectMCPServers(ctx, project.ID)
+	existingNames := make(map[string]bool)
+	for _, m := range existing {
+		existingNames[m.Name] = true
+	}
+
+	// Also check global MCP servers
+	globalServers, _ := cs.db.ListMCPServers(ctx)
+	globalNames := make(map[string]bool)
+	for _, m := range globalServers {
+		globalNames[m.Name] = true
+	}
+
+	imported := 0
+	for name, rawServer := range mcpConfig.MCPServers {
+		if existingNames[name] || globalNames[name] {
+			continue
+		}
+
+		var server struct {
+			Command string            `json:"command"`
+			Args    []string          `json:"args"`
+			Env     map[string]string `json:"env"`
+		}
+		if err := json.Unmarshal(rawServer, &server); err != nil {
+			log.Printf("[configsync] failed to parse MCP server '%s': %v", name, err)
+			continue
+		}
+		if server.Command == "" {
+			continue
+		}
+
+		argsJSON, _ := json.Marshal(server.Args)
+		if server.Args == nil {
+			argsJSON = []byte("[]")
+		}
+		envJSON, _ := json.Marshal(server.Env)
+		if server.Env == nil {
+			envJSON = []byte("{}")
+		}
+
+		m := &database.ProjectMCPServer{
+			ProjectID: project.ID,
+			Name:      name,
+			Command:   server.Command,
+			Args:      string(argsJSON),
+			Env:       string(envJSON),
+			Enabled:   true,
+		}
+		if err := cs.db.CreateProjectMCPServer(ctx, m); err != nil {
+			log.Printf("[configsync] failed to import MCP server '%s' for project %d: %v", name, project.ID, err)
+			continue
+		}
+		existingNames[name] = true
+		imported++
+		log.Printf("[configsync] imported MCP server '%s' from .mcp.json for project %d (ID: %d)", name, project.ID, m.ID)
+	}
+
+	if imported > 0 {
+		cs.reportProgress(project.ID, "mcps_import", "done", fmt.Sprintf("Imported %d MCP server(s) from .mcp.json", imported))
+	}
+	return nil
+}
+
+// importSkillsFromRemote scans .claude/skills/ on a remote project via SFTP
+// and imports untracked SKILL.md files as project-scoped skills.
+func (cs *ConfigSyncer) importSkillsFromRemote(ctx context.Context, sftpClient *sftp.Client, skillsDir string, project *database.Project) error {
+	entries, err := sftpClient.ReadDir(skillsDir)
+	if err != nil {
+		return nil // directory doesn't exist yet
+	}
+
+	// Build set of already-tracked dirs
+	syncedFiles, _ := cs.db.ListSyncedSkillFiles(ctx, project.ID)
+	trackedDirs := make(map[string]bool)
+	for _, sf := range syncedFiles {
+		dirName := sf.FileName
+		if strings.HasSuffix(dirName, "/SKILL.md") {
+			dirName = strings.TrimSuffix(dirName, "/SKILL.md")
+		}
+		trackedDirs[dirName] = true
+	}
+
+	// Build existing name sets
+	existingSkills, _ := cs.db.ListProjectSkills(ctx, project.ID)
+	existingNames := make(map[string]bool)
+	for _, ps := range existingSkills {
+		existingNames[ps.Name] = true
+	}
+	globalSkills, _ := cs.db.ListSkills(ctx)
+	globalNames := make(map[string]bool)
+	for _, s := range globalSkills {
+		globalNames[s.Name] = true
+	}
+
+	imported := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dirName := entry.Name()
+		if trackedDirs[dirName] {
+			continue
+		}
+
+		skillPath := filepath.Join(skillsDir, dirName, "SKILL.md")
+		f, err := sftpClient.Open(skillPath)
+		if err != nil {
+			continue
+		}
+		raw, err := io.ReadAll(f)
+		f.Close()
+		if err != nil {
+			continue
+		}
+
+		name, content, category := parseSkillMD(string(raw), dirName)
+		if existingNames[name] || globalNames[name] {
+			continue
+		}
+
+		ps := &database.ProjectSkill{
+			ProjectID: project.ID,
+			Name:      name,
+			Content:   content,
+			Enabled:   true,
+			Category:  category,
+		}
+		if err := cs.db.CreateProjectSkill(ctx, ps); err != nil {
+			continue
+		}
+		existingNames[name] = true
+		imported++
+		log.Printf("[configsync] imported skill '%s' from remote for project %d", name, project.ID)
+	}
+
+	if imported > 0 {
+		cs.reportProgress(project.ID, "skills_import", "done", fmt.Sprintf("Imported %d skill(s) from remote", imported))
+	}
+	return nil
+}
+
+// importMCPsFromRemote reads .mcp.json from a remote project via SFTP
+// and imports untracked MCP servers as project-scoped servers.
+func (cs *ConfigSyncer) importMCPsFromRemote(ctx context.Context, sftpClient *sftp.Client, projectPath string, project *database.Project) error {
+	mcpPath := filepath.Join(projectPath, ".mcp.json")
+	f, err := sftpClient.Open(mcpPath)
+	if err != nil {
+		return nil
+	}
+	raw, err := io.ReadAll(f)
+	f.Close()
+	if err != nil {
+		return nil
+	}
+
+	var mcpConfig struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(raw, &mcpConfig); err != nil {
+		return nil
+	}
+	if len(mcpConfig.MCPServers) == 0 {
+		return nil
+	}
+
+	existing, _ := cs.db.ListProjectMCPServers(ctx, project.ID)
+	existingNames := make(map[string]bool)
+	for _, m := range existing {
+		existingNames[m.Name] = true
+	}
+	globalServers, _ := cs.db.ListMCPServers(ctx)
+	globalNames := make(map[string]bool)
+	for _, m := range globalServers {
+		globalNames[m.Name] = true
+	}
+
+	imported := 0
+	for name, rawServer := range mcpConfig.MCPServers {
+		if existingNames[name] || globalNames[name] {
+			continue
+		}
+
+		var server struct {
+			Command string            `json:"command"`
+			Args    []string          `json:"args"`
+			Env     map[string]string `json:"env"`
+		}
+		if err := json.Unmarshal(rawServer, &server); err != nil || server.Command == "" {
+			continue
+		}
+
+		argsJSON, _ := json.Marshal(server.Args)
+		if server.Args == nil {
+			argsJSON = []byte("[]")
+		}
+		envJSON, _ := json.Marshal(server.Env)
+		if server.Env == nil {
+			envJSON = []byte("{}")
+		}
+
+		m := &database.ProjectMCPServer{
+			ProjectID: project.ID,
+			Name:      name,
+			Command:   server.Command,
+			Args:      string(argsJSON),
+			Env:       string(envJSON),
+			Enabled:   true,
+		}
+		if err := cs.db.CreateProjectMCPServer(ctx, m); err != nil {
+			continue
+		}
+		existingNames[name] = true
+		imported++
+	}
+
+	if imported > 0 {
+		cs.reportProgress(project.ID, "mcps_import", "done", fmt.Sprintf("Imported %d MCP server(s) from remote .mcp.json", imported))
+	}
 	return nil
 }
 

@@ -1758,6 +1758,22 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		h.api.hub.BroadcastStateUpdate("skill", map[string]interface{}{"action": "deleted", "id": id})
 		return fmt.Sprintf("Skill '%s' deleted", name), nil
 
+	case "get_skill":
+		id, err := parseIDParam(input, "id")
+		if err != nil {
+			return "", err
+		}
+		skill, err := h.api.db.GetSkill(ctx, id)
+		if err != nil {
+			return "", fmt.Errorf("skill not found")
+		}
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Name: %s\n", skill.Name))
+		sb.WriteString(fmt.Sprintf("Category: %s\n", skill.Category))
+		sb.WriteString(fmt.Sprintf("Enabled: %v\n", skill.Enabled))
+		sb.WriteString(fmt.Sprintf("---\n%s", skill.Content))
+		return sb.String(), nil
+
 	case "list_skills":
 		skills, err := h.api.db.ListSkills(ctx)
 		if err != nil {
@@ -1776,6 +1792,168 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		}
 		return sb.String(), nil
 
+	case "create_project_skill":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		skillName, _ := input["name"].(string)
+		content, _ := input["content"].(string)
+		category, _ := input["category"].(string)
+
+		if skillName == "" || content == "" {
+			return "", fmt.Errorf("name and content are required")
+		}
+
+		ps := &database.ProjectSkill{
+			ProjectID: projectID,
+			Name:      skillName,
+			Content:   content,
+			Enabled:   true,
+			Category:  category,
+		}
+		if err := h.api.db.CreateProjectSkill(ctx, ps); err != nil {
+			return "", err
+		}
+
+		h.api.hub.BroadcastStateUpdate("project_skill", map[string]interface{}{
+			"action": "created", "project_id": projectID, "skill": ps,
+		})
+		return fmt.Sprintf("Project skill '%s' created (ID: %d) for project %d", skillName, ps.ID, projectID), nil
+
+	case "update_project_skill":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		id, err := parseIDParam(input, "id")
+		if err != nil {
+			return "", fmt.Errorf("invalid project skill ID")
+		}
+
+		ps, err := h.api.db.GetProjectSkill(ctx, id)
+		if err != nil {
+			return "", fmt.Errorf("project skill not found")
+		}
+		if ps.ProjectID != projectID {
+			return "", fmt.Errorf("project skill not found in this project")
+		}
+
+		if n, ok := input["name"].(string); ok && n != "" {
+			ps.Name = n
+		}
+		if c, ok := input["content"].(string); ok && c != "" {
+			ps.Content = c
+		}
+		if cat, ok := input["category"].(string); ok {
+			ps.Category = cat
+		}
+		if enabled, ok := input["enabled"].(bool); ok {
+			ps.Enabled = enabled
+		}
+
+		if err := h.api.db.UpdateProjectSkill(ctx, ps); err != nil {
+			return "", err
+		}
+
+		h.api.hub.BroadcastStateUpdate("project_skill", map[string]interface{}{
+			"action": "updated", "project_id": projectID, "skill": ps,
+		})
+		return fmt.Sprintf("Project skill '%s' updated", ps.Name), nil
+
+	case "delete_project_skill":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		id, err := parseIDParam(input, "id")
+		if err != nil {
+			return "", fmt.Errorf("invalid project skill ID")
+		}
+
+		ps, err := h.api.db.GetProjectSkill(ctx, id)
+		if err != nil {
+			return "", fmt.Errorf("project skill not found")
+		}
+		if ps.ProjectID != projectID {
+			return "", fmt.Errorf("project skill not found in this project")
+		}
+		name := ps.Name
+
+		if err := h.api.db.DeleteProjectSkill(ctx, id); err != nil {
+			return "", err
+		}
+
+		h.api.hub.BroadcastStateUpdate("project_skill", map[string]interface{}{
+			"action": "deleted", "project_id": projectID, "id": id,
+		})
+		return fmt.Sprintf("Project skill '%s' deleted", name), nil
+
+	case "get_project_skill":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		id, err := parseIDParam(input, "id")
+		if err != nil {
+			return "", fmt.Errorf("invalid project skill ID")
+		}
+		ps, err := h.api.db.GetProjectSkill(ctx, id)
+		if err != nil {
+			return "", fmt.Errorf("project skill not found")
+		}
+		if ps.ProjectID != projectID {
+			return "", fmt.Errorf("project skill not found in this project")
+		}
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Name: %s\n", ps.Name))
+		sb.WriteString(fmt.Sprintf("Category: %s\n", ps.Category))
+		sb.WriteString(fmt.Sprintf("Enabled: %v\n", ps.Enabled))
+		sb.WriteString(fmt.Sprintf("---\n%s", ps.Content))
+		return sb.String(), nil
+
+	case "list_project_skills":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+
+		globalSkills, err := h.api.db.ListSkills(ctx)
+		if err != nil {
+			return "", err
+		}
+
+		projectSkills, err := h.api.db.ListProjectSkills(ctx, projectID)
+		if err != nil {
+			return "", err
+		}
+
+		var sb strings.Builder
+		if len(globalSkills) > 0 {
+			sb.WriteString("Global skills:\n")
+			for _, s := range globalSkills {
+				status := "enabled"
+				if !s.Enabled {
+					status = "disabled"
+				}
+				sb.WriteString(fmt.Sprintf("- [%d] %s (%s, %s)\n", s.ID, s.Name, s.Category, status))
+			}
+		}
+		if len(projectSkills) > 0 {
+			sb.WriteString("\nProject-specific skills:\n")
+			for _, ps := range projectSkills {
+				status := "enabled"
+				if !ps.Enabled {
+					status = "disabled"
+				}
+				sb.WriteString(fmt.Sprintf("- [%d] %s (%s, %s)\n", ps.ID, ps.Name, ps.Category, status))
+			}
+		}
+		if sb.Len() == 0 {
+			return "No skills found for this project.", nil
+		}
+		return sb.String(), nil
+
 	case "list_projects":
 		projects, err := h.api.db.ListProjects(ctx)
 		if err != nil {
@@ -1788,6 +1966,23 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		for _, p := range projects {
 			sb.WriteString(fmt.Sprintf("- [%d] %s (%s: %s)\n", p.ID, p.Name, p.Type, p.Path))
 		}
+		return sb.String(), nil
+
+	case "get_mcp_server":
+		id, err := parseIDParam(input, "id")
+		if err != nil {
+			return "", err
+		}
+		m, err := h.api.db.GetMCPServer(ctx, id)
+		if err != nil {
+			return "", fmt.Errorf("MCP server not found")
+		}
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Name: %s\n", m.Name))
+		sb.WriteString(fmt.Sprintf("Command: %s\n", m.Command))
+		sb.WriteString(fmt.Sprintf("Args: %s\n", m.Args))
+		sb.WriteString(fmt.Sprintf("Env: %s\n", m.Env))
+		sb.WriteString(fmt.Sprintf("Enabled: %v\n", m.Enabled))
 		return sb.String(), nil
 
 	case "list_mcp_servers":
@@ -1837,6 +2032,181 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 
 		h.api.hub.BroadcastStateUpdate("mcp", map[string]interface{}{"action": "created", "mcp": mcp})
 		return fmt.Sprintf("MCP server '%s' created (ID: %d)", mcpName, mcp.ID), nil
+
+	case "create_project_mcp_server":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		mcpName, _ := input["name"].(string)
+		command, _ := input["command"].(string)
+		args, _ := input["args"].(string)
+		env, _ := input["env"].(string)
+
+		if mcpName == "" || command == "" {
+			return "", fmt.Errorf("name and command are required")
+		}
+		if args == "" {
+			args = "[]"
+		}
+		if env == "" {
+			env = "{}"
+		}
+
+		m := &database.ProjectMCPServer{
+			ProjectID: projectID,
+			Name:      mcpName,
+			Command:   command,
+			Args:      args,
+			Env:       env,
+			Enabled:   true,
+		}
+		if err := h.api.db.CreateProjectMCPServer(ctx, m); err != nil {
+			return "", err
+		}
+
+		h.api.hub.BroadcastStateUpdate("project_mcp", map[string]interface{}{
+			"action": "created", "project_id": projectID, "mcp": m,
+		})
+		return fmt.Sprintf("Project MCP server '%s' created (ID: %d) for project %d", mcpName, m.ID, projectID), nil
+
+	case "update_project_mcp_server":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		id, err := parseIDParam(input, "id")
+		if err != nil {
+			return "", fmt.Errorf("invalid project MCP server ID")
+		}
+
+		m, err := h.api.db.GetProjectMCPServer(ctx, id)
+		if err != nil {
+			return "", fmt.Errorf("project MCP server not found")
+		}
+		if m.ProjectID != projectID {
+			return "", fmt.Errorf("project MCP server not found in this project")
+		}
+
+		if n, ok := input["name"].(string); ok && n != "" {
+			m.Name = n
+		}
+		if c, ok := input["command"].(string); ok && c != "" {
+			m.Command = c
+		}
+		if a, ok := input["args"].(string); ok {
+			m.Args = a
+		}
+		if e, ok := input["env"].(string); ok {
+			m.Env = e
+		}
+		if enabled, ok := input["enabled"].(bool); ok {
+			m.Enabled = enabled
+		}
+
+		if err := h.api.db.UpdateProjectMCPServer(ctx, m); err != nil {
+			return "", err
+		}
+
+		h.api.hub.BroadcastStateUpdate("project_mcp", map[string]interface{}{
+			"action": "updated", "project_id": projectID, "mcp": m,
+		})
+		return fmt.Sprintf("Project MCP server '%s' updated", m.Name), nil
+
+	case "delete_project_mcp_server":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		id, err := parseIDParam(input, "id")
+		if err != nil {
+			return "", fmt.Errorf("invalid project MCP server ID")
+		}
+
+		m, err := h.api.db.GetProjectMCPServer(ctx, id)
+		if err != nil {
+			return "", fmt.Errorf("project MCP server not found")
+		}
+		if m.ProjectID != projectID {
+			return "", fmt.Errorf("project MCP server not found in this project")
+		}
+		name := m.Name
+
+		if err := h.api.db.DeleteProjectMCPServer(ctx, id); err != nil {
+			return "", err
+		}
+
+		h.api.hub.BroadcastStateUpdate("project_mcp", map[string]interface{}{
+			"action": "deleted", "project_id": projectID, "id": id,
+		})
+		return fmt.Sprintf("Project MCP server '%s' deleted", name), nil
+
+	case "get_project_mcp_server":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		id, err := parseIDParam(input, "id")
+		if err != nil {
+			return "", err
+		}
+		m, err := h.api.db.GetProjectMCPServer(ctx, id)
+		if err != nil {
+			return "", fmt.Errorf("project MCP server not found")
+		}
+		if m.ProjectID != projectID {
+			return "", fmt.Errorf("project MCP server not found")
+		}
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Name: %s\n", m.Name))
+		sb.WriteString(fmt.Sprintf("Command: %s\n", m.Command))
+		sb.WriteString(fmt.Sprintf("Args: %s\n", m.Args))
+		sb.WriteString(fmt.Sprintf("Env: %s\n", m.Env))
+		sb.WriteString(fmt.Sprintf("Enabled: %v\n", m.Enabled))
+		sb.WriteString(fmt.Sprintf("ProjectID: %d\n", m.ProjectID))
+		return sb.String(), nil
+
+	case "list_project_mcp_servers":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+
+		globalServers, err := h.api.db.ListMCPServers(ctx)
+		if err != nil {
+			return "", err
+		}
+
+		projectServers, err := h.api.db.ListProjectMCPServers(ctx, projectID)
+		if err != nil {
+			return "", err
+		}
+
+		var sb strings.Builder
+		if len(globalServers) > 0 {
+			sb.WriteString("Global MCP servers:\n")
+			for _, m := range globalServers {
+				status := "enabled"
+				if !m.Enabled {
+					status = "disabled"
+				}
+				sb.WriteString(fmt.Sprintf("- [%d] %s: %s (%s)\n", m.ID, m.Name, m.Command, status))
+			}
+		}
+		if len(projectServers) > 0 {
+			sb.WriteString("\nProject-specific MCP servers:\n")
+			for _, m := range projectServers {
+				status := "enabled"
+				if !m.Enabled {
+					status = "disabled"
+				}
+				sb.WriteString(fmt.Sprintf("- [%d] %s: %s (%s)\n", m.ID, m.Name, m.Command, status))
+			}
+		}
+		if sb.Len() == 0 {
+			return "No MCP servers found for this project.", nil
+		}
+		return sb.String(), nil
 
 	case "update_setting":
 		key, _ := input["key"].(string)

@@ -504,6 +504,9 @@ func main() {
 
 		r.Get("/projects/{id}/files", fileHandler.ListProjectFiles)
 		r.Get("/projects/{id}/files/view/*", fileHandler.ViewProjectFile)
+		r.Post("/projects/{id}/files/write", fileHandler.WriteProjectFile)
+		r.Get("/projects/{id}/files/raw/*", fileHandler.DownloadProjectFile)
+		r.Post("/projects/{id}/files/raw", fileHandler.UploadProjectFile)
 
 		// Sessions
 		r.Get("/sessions", api.ListSessions)
@@ -611,6 +614,13 @@ func main() {
 		r.Post("/projects/{id}/skills", api.CreateProjectSkillHandler)
 		r.Put("/projects/{id}/skills/{skillId}", api.UpdateProjectSkillHandler)
 		r.Delete("/projects/{id}/skills/{skillId}", api.DeleteProjectSkillHandler)
+
+		// Project MCP Servers
+		r.Get("/projects/{id}/mcp-servers", api.GetProjectMCPServers)
+		r.Get("/projects/{id}/mcp-servers/{mcpId}", api.GetProjectMCPServerHandler)
+		r.Post("/projects/{id}/mcp-servers", api.CreateProjectMCPServerHandler)
+		r.Put("/projects/{id}/mcp-servers/{mcpId}", api.UpdateProjectMCPServerHandler)
+		r.Delete("/projects/{id}/mcp-servers/{mcpId}", api.DeleteProjectMCPServerHandler)
 
 		// Voice
 		r.Post("/voice/transcribe", voiceHandler.Transcribe)
