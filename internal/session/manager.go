@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ type Manager struct {
 	db         *database.DB
 	hub        *websocket.Hub
 	serverAddr string // OpenPoet server address (e.g. "localhost:8080")
+	execPath   string // Resolved path to this binary (for MCP subprocess)
 
 	mu          sync.RWMutex
 	sessions    map[string]*runningSession
@@ -109,10 +111,25 @@ func NewManager(db *database.DB, hub *websocket.Hub, serverAddr string) *Manager
 	if strings.HasPrefix(clientAddr, "0.0.0.0:") {
 		clientAddr = "localhost:" + strings.TrimPrefix(clientAddr, "0.0.0.0:")
 	}
+
+	// Resolve executable path once at startup while the binary is guaranteed to exist.
+	// os.Executable() may return a stale path if the binary was started from a temp
+	// directory that is later cleaned up (e.g. during deployment).
+	execPath, err := os.Executable()
+	if err == nil {
+		if resolved, err := filepath.EvalSymlinks(execPath); err == nil {
+			execPath = resolved
+		}
+	}
+	if execPath != "" {
+		log.Printf("[Session] Resolved executable path: %s", execPath)
+	}
+
 	return &Manager{
 		db:          db,
 		hub:         hub,
 		serverAddr:  clientAddr,
+		execPath:    execPath,
 		sessions:    make(map[string]*runningSession),
 		clientSizes: make(map[string]map[string]TermSize),
 	}
@@ -595,6 +612,29 @@ func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Proj
 		mcpServers[server.Name] = serverConfig
 	}
 
+	// Add project-specific MCP servers (override global if same name)
+	projectServers, err := m.db.ListEnabledProjectMCPServers(ctx, project.ID)
+	if err != nil {
+		log.Printf("Warning: failed to list project MCP servers: %v", err)
+	}
+	for _, server := range projectServers {
+		var args []string
+		var env map[string]string
+		json.Unmarshal([]byte(server.Args), &args)
+		json.Unmarshal([]byte(server.Env), &env)
+
+		serverConfig := map[string]interface{}{
+			"command": server.Command,
+		}
+		if len(args) > 0 {
+			serverConfig["args"] = args
+		}
+		if len(env) > 0 {
+			serverConfig["env"] = env
+		}
+		mcpServers[server.Name] = serverConfig
+	}
+
 	// Resolve effective tool policy for the project to decide whether to inject OpenPoet MCP.
 	// If the project has an explicit policy, it overrides the global policy entirely.
 	// If the project has no explicit policy, the global session policy is inherited.
@@ -616,13 +656,10 @@ func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Proj
 			project.ID, globalPolicyStr, project.ToolPolicy, effectivePolicy.Mode, len(shares), shouldInjectOpenPoet)
 	}
 
-	if shouldInjectOpenPoet {
-		execPath, err := os.Executable()
-		if err == nil {
-			mcpServers["openpoet"] = map[string]interface{}{
-				"command": execPath,
-				"args":    []string{"mcp-serve", "--session-id", sessionID, "--api-url", "http://" + m.serverAddr},
-			}
+	if shouldInjectOpenPoet && m.execPath != "" {
+		mcpServers["openpoet"] = map[string]interface{}{
+			"command": m.execPath,
+			"args":    []string{"mcp-serve", "--session-id", sessionID, "--api-url", "http://" + m.serverAddr},
 		}
 	}
 

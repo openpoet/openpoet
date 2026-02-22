@@ -555,6 +555,11 @@ class OpenPoet {
                     this.loadProjectSkills(this._detailProject.id);
                 }
                 break;
+            case 'project_mcp':
+                if (this.currentView === 'project-detail' && this._detailProject && data.data?.project_id === this._detailProject.id) {
+                    this.loadProjectMCPServers(this._detailProject.id);
+                }
+                break;
         }
     }
 
@@ -1473,6 +1478,18 @@ class OpenPoet {
             <div class="project-detail-card">
                 <div class="project-detail-section">
                     <div class="project-detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                        <span>Project MCP Servers</span>
+                        <span id="project-mcps-summary" style="font-size: 11px; color: var(--color-text-muted);"></span>
+                    </div>
+                    <div id="project-mcps-list" class="project-tools-list">
+                        <div class="meta-empty">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="project-detail-card">
+                <div class="project-detail-section">
+                    <div class="project-detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
                         <span>Shared File Access</span>
                         <span id="project-shares-summary" style="font-size: 11px; color: var(--color-text-muted);"></span>
                     </div>
@@ -1535,6 +1552,7 @@ class OpenPoet {
         this.loadMemoryDoc(project.id);
         this.loadProjectTools(project.id);
         this.loadProjectSkills(project.id);
+        this.loadProjectMCPServers(project.id);
         this.loadProjectShares(project.id);
         this.loadProjectTasks(project.id);
         this.loadProjectTokenUsage(project.id, 30);
@@ -2027,6 +2045,138 @@ class OpenPoet {
     }
 
     // --- End Project Skills ---
+
+    // --- Project MCP Servers ---
+
+    async loadProjectMCPServers(projectId) {
+        const container = document.getElementById('project-mcps-list');
+        const summaryEl = document.getElementById('project-mcps-summary');
+        if (!container) return;
+
+        try {
+            const data = await this.api('GET', `/projects/${projectId}/mcp-servers`);
+            const { project_mcp_servers } = data;
+            const servers = project_mcp_servers || [];
+
+            if (summaryEl) {
+                const enabled = servers.filter(m => m.enabled).length;
+                summaryEl.textContent = servers.length ? `${enabled} active` : 'None';
+            }
+
+            container.innerHTML = `
+                <div style="font-size: 11px; color: var(--color-text-muted); margin-bottom: 8px;">
+                    Project-specific MCP servers are injected into sessions for this project only. They override global servers with the same name.
+                </div>
+                <div id="project-mcps-items">
+                    ${servers.length ? servers.map(m => `
+                        <div class="tp-tool-item" style="justify-content: space-between;">
+                            <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0;">
+                                <input type="checkbox" ${m.enabled ? 'checked' : ''} onchange="app.toggleProjectMCPServer(${projectId}, ${m.id}, this.checked)">
+                                <span class="tp-tool-name" style="cursor:pointer;" onclick="app.showProjectMCPServerModal(${projectId}, ${m.id})">${this.escapeHtml(m.name)}</span>
+                                <span class="tp-tool-desc" style="flex:1;"><code style="font-size:11px;">${this.escapeHtml(m.command)}</code></span>
+                            </div>
+                            <div style="display:flex;gap:4px;flex-shrink:0;">
+                                <button class="btn btn-sm btn-secondary" onclick="app.showProjectMCPServerModal(${projectId}, ${m.id})" title="Edit">Edit</button>
+                                <button class="btn btn-sm btn-danger" onclick="app.deleteProjectMCPServer(${projectId}, ${m.id}, '${this.escapeHtml(m.name)}')" title="Delete">Del</button>
+                            </div>
+                        </div>
+                    `).join('') : '<div class="meta-empty">No project-specific MCP servers.</div>'}
+                </div>
+                <button class="btn btn-sm btn-secondary" style="margin-top: 8px;" onclick="app.showProjectMCPServerModal(${projectId})">+ Add MCP Server</button>
+            `;
+        } catch (e) {
+            container.innerHTML = '<div class="meta-empty">Failed to load MCP servers.</div>';
+        }
+    }
+
+    async showProjectMCPServerModal(projectId, mcpId) {
+        let mcp = null;
+        if (mcpId) {
+            const data = await this.api('GET', `/projects/${projectId}/mcp-servers`);
+            mcp = (data.project_mcp_servers || []).find(m => m.id === mcpId);
+        }
+
+        const isEdit = !!mcp;
+        const title = isEdit ? 'Edit Project MCP Server' : 'New Project MCP Server';
+
+        const content = `
+            <form id="project-mcp-form">
+                <div class="form-group">
+                    <label class="form-label">Name</label>
+                    <input type="text" class="form-input" name="name" value="${this.escapeHtml(mcp?.name || '')}" required placeholder="e.g. my-mcp-server">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Command</label>
+                    <input type="text" class="form-input" name="command" value="${this.escapeHtml(mcp?.command || '')}" required placeholder="e.g. npx @modelcontextprotocol/server">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Arguments (JSON array)</label>
+                    <input type="text" class="form-input" name="args" value="${this.escapeHtml(mcp?.args || '[]')}">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Environment (JSON object)</label>
+                    <input type="text" class="form-input" name="env" value="${this.escapeHtml(mcp?.env || '{}')}">
+                </div>
+            </form>
+        `;
+
+        const actions = `
+            <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="app.saveProjectMCPServer(${projectId}, ${mcpId || 'null'})">${isEdit ? 'Save' : 'Create'}</button>
+        `;
+
+        this.showModal(title, content, actions);
+    }
+
+    async saveProjectMCPServer(projectId, mcpId) {
+        const form = document.getElementById('project-mcp-form');
+        const data = {
+            name: form.querySelector('input[name="name"]').value.trim(),
+            command: form.querySelector('input[name="command"]').value.trim(),
+            args: form.querySelector('input[name="args"]').value || '[]',
+            env: form.querySelector('input[name="env"]').value || '{}'
+        };
+
+        if (!data.name || !data.command) {
+            this.showToast('Error', 'Name and command are required', 'error');
+            return;
+        }
+
+        try {
+            if (mcpId) {
+                await this.api('PUT', `/projects/${projectId}/mcp-servers/${mcpId}`, data);
+            } else {
+                await this.api('POST', `/projects/${projectId}/mcp-servers`, data);
+            }
+            this.hideModal();
+            this.showToast('Success', mcpId ? 'MCP server updated' : 'MCP server created', 'success');
+            this.loadProjectMCPServers(projectId);
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    async toggleProjectMCPServer(projectId, mcpId, enabled) {
+        try {
+            await this.api('PUT', `/projects/${projectId}/mcp-servers/${mcpId}`, { enabled });
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+            this.loadProjectMCPServers(projectId);
+        }
+    }
+
+    async deleteProjectMCPServer(projectId, mcpId, name) {
+        if (!confirm(`Delete project MCP server "${name}"?`)) return;
+        try {
+            await this.api('DELETE', `/projects/${projectId}/mcp-servers/${mcpId}`);
+            this.showToast('Success', 'MCP server deleted', 'success');
+            this.loadProjectMCPServers(projectId);
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    // --- End Project MCP Servers ---
 
     // --- Project Shares ---
 
@@ -4165,16 +4315,9 @@ class OpenPoet {
                         <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">Paired Devices</div>
                         <div id="tunnel-devices-list"></div>
                     </div>
-                    <details style="margin-top: 12px;">
-                        <summary style="cursor: pointer; font-size: 12px; color: var(--text-secondary, #999);">Advanced</summary>
-                        <div style="margin-top: 8px;">
-                            <div class="form-group" style="margin-bottom: 8px;">
-                                <label class="form-label">Relay URL (leave empty for default)</label>
-                                <input type="text" class="form-input" id="tunnel-relay-url" placeholder="Default relay URL">
-                            </div>
-                            <button class="btn btn-sm" onclick="app.saveTunnelSettings()">Save</button>
-                        </div>
-                    </details>
+                    <div id="tunnel-relay-info" style="margin-top: 12px; font-size: 11px; color: var(--color-text-secondary, #999);">
+                        Relay: <span id="tunnel-relay-url-display" style="font-family: monospace;"></span>
+                    </div>
                 </div>
             </div>
             <div class="card" style="margin-bottom: 16px;">
@@ -4341,13 +4484,7 @@ class OpenPoet {
                     }
                 }
             }
-            // Populate tunnel settings
-            if (this.settings) {
-                const relayURL = document.getElementById('tunnel-relay-url');
-                if (relayURL && this.settings.tunnel_relay_url) {
-                    relayURL.value = this.settings.tunnel_relay_url;
-                }
-            }
+            // Relay URL display is populated by loadTunnelStatus()
 
             this.loadTunnelStatus();
             this.loadMCPAPIKeyStatus();
@@ -5802,26 +5939,15 @@ class OpenPoet {
             this.loadTunnelDevices();
         }
 
-        // Set default relay URL placeholder in advanced section
-        const relayInput = document.getElementById('tunnel-relay-url');
-        if (relayInput && data.default_relay_url) {
-            relayInput.placeholder = data.default_relay_url || 'Default relay URL';
+        // Show hard-coded relay URL
+        const relayDisplay = document.getElementById('tunnel-relay-url-display');
+        if (relayDisplay && data.default_relay_url) {
+            relayDisplay.textContent = data.default_relay_url;
+        } else if (relayDisplay) {
+            relayDisplay.textContent = '(not configured)';
         }
     }
 
-    async saveTunnelSettings() {
-        const relayURL = document.getElementById('tunnel-relay-url')?.value;
-
-        const settings = {};
-        if (relayURL !== undefined) settings.tunnel_relay_url = relayURL;
-
-        try {
-            await this.api('PUT', '/config/settings', settings);
-            this.showToast('Success', 'Relay URL saved.', 'success');
-        } catch (error) {
-            this._showApiError(error);
-        }
-    }
 
     async toggleTunnel() {
         try {

@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -76,6 +77,23 @@ func (c *APIClient) Put(path string, jsonBody string) ([]byte, error) {
 	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("PUT %s: status %d: %s", path, resp.StatusCode, string(body))
+	}
+	return body, nil
+}
+
+// PostRaw performs a POST request with raw bytes and returns the response body.
+func (c *APIClient) PostRaw(path string, data []byte) ([]byte, error) {
+	resp, err := c.client.Post(c.baseURL+path, "application/octet-stream", bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("POST %s: status %d: %s", path, resp.StatusCode, string(body))
 	}
 	return body, nil
 }

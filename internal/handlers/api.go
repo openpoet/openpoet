@@ -3609,6 +3609,234 @@ func (a *API) DeleteProjectSkillHandler(w http.ResponseWriter, r *http.Request) 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+// ============ Project MCP Servers ============
+
+// GetProjectMCPServers returns global MCP servers + project-specific MCP servers.
+func (a *API) GetProjectMCPServers(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	ctx := r.Context()
+	if _, err := a.db.GetProject(ctx, projectID); err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	globalServers, err := a.db.ListMCPServers(ctx)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	projectServers, err := a.db.ListProjectMCPServers(ctx, projectID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"global_mcp_servers":  globalServers,
+		"project_mcp_servers": projectServers,
+	})
+}
+
+// CreateProjectMCPServerHandler creates a project-specific MCP server.
+func (a *API) CreateProjectMCPServerHandler(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	ctx := r.Context()
+	if _, err := a.db.GetProject(ctx, projectID); err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	var input struct {
+		Name    string `json:"name"`
+		Command string `json:"command"`
+		Args    string `json:"args"`
+		Env     string `json:"env"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if input.Name == "" || input.Command == "" {
+		respondError(w, http.StatusBadRequest, "name and command are required")
+		return
+	}
+	if input.Args == "" {
+		input.Args = "[]"
+	}
+	if input.Env == "" {
+		input.Env = "{}"
+	}
+
+	m := &database.ProjectMCPServer{
+		ProjectID: projectID,
+		Name:      input.Name,
+		Command:   input.Command,
+		Args:      input.Args,
+		Env:       input.Env,
+		Enabled:   true,
+	}
+
+	if err := a.db.CreateProjectMCPServer(ctx, m); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			respondError(w, http.StatusConflict, "A project MCP server with this name already exists")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("project_mcp", map[string]interface{}{
+		"action": "created", "project_id": projectID, "mcp": m,
+	})
+
+	respondJSON(w, http.StatusCreated, m)
+}
+
+// GetProjectMCPServerHandler returns a single project-specific MCP server.
+func (a *API) GetProjectMCPServerHandler(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	mcpID, err := strconv.ParseInt(chi.URLParam(r, "mcpId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid MCP server ID")
+		return
+	}
+
+	m, err := a.db.GetProjectMCPServer(r.Context(), mcpID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project MCP server not found")
+		return
+	}
+	if m.ProjectID != projectID {
+		respondError(w, http.StatusNotFound, "Project MCP server not found")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, m)
+}
+
+// UpdateProjectMCPServerHandler updates a project-specific MCP server.
+func (a *API) UpdateProjectMCPServerHandler(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	mcpID, err := strconv.ParseInt(chi.URLParam(r, "mcpId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid MCP server ID")
+		return
+	}
+
+	ctx := r.Context()
+	m, err := a.db.GetProjectMCPServer(ctx, mcpID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project MCP server not found")
+		return
+	}
+	if m.ProjectID != projectID {
+		respondError(w, http.StatusNotFound, "Project MCP server not found")
+		return
+	}
+
+	var input struct {
+		Name    *string `json:"name"`
+		Command *string `json:"command"`
+		Args    *string `json:"args"`
+		Env     *string `json:"env"`
+		Enabled *bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if input.Name != nil {
+		m.Name = *input.Name
+	}
+	if input.Command != nil {
+		m.Command = *input.Command
+	}
+	if input.Args != nil {
+		m.Args = *input.Args
+	}
+	if input.Env != nil {
+		m.Env = *input.Env
+	}
+	if input.Enabled != nil {
+		m.Enabled = *input.Enabled
+	}
+
+	if err := a.db.UpdateProjectMCPServer(ctx, m); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			respondError(w, http.StatusConflict, "A project MCP server with this name already exists")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("project_mcp", map[string]interface{}{
+		"action": "updated", "project_id": projectID, "mcp": m,
+	})
+
+	respondJSON(w, http.StatusOK, m)
+}
+
+// DeleteProjectMCPServerHandler deletes a project-specific MCP server.
+func (a *API) DeleteProjectMCPServerHandler(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	mcpID, err := strconv.ParseInt(chi.URLParam(r, "mcpId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid MCP server ID")
+		return
+	}
+
+	ctx := r.Context()
+	m, err := a.db.GetProjectMCPServer(ctx, mcpID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project MCP server not found")
+		return
+	}
+	if m.ProjectID != projectID {
+		respondError(w, http.StatusNotFound, "Project MCP server not found")
+		return
+	}
+
+	if err := a.db.DeleteProjectMCPServer(ctx, mcpID); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("project_mcp", map[string]interface{}{
+		"action": "deleted", "project_id": projectID, "id": mcpID,
+	})
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 // GetResolvedTools returns the effective list of tools available for a given context.
 // For sessions: GET /api/sessions/{id}/tools
 // For projects: GET /api/projects/{id}/tools
@@ -4002,13 +4230,10 @@ func (a *API) createAndConnectTunnel(ctx context.Context) (*tunnel.Client, error
 		return nil, fmt.Errorf("tunnel dependencies not configured")
 	}
 
-	// Read relay URL from DB, fall back to build-time default
-	relayURL, _ := a.db.GetSetting(ctx, "tunnel_relay_url")
+	// Use build-time relay URL (hard-coded into binary)
+	relayURL := DefaultRelayURL
 	if relayURL == "" {
-		relayURL = DefaultRelayURL
-	}
-	if relayURL == "" {
-		return nil, fmt.Errorf("no relay URL configured")
+		return nil, fmt.Errorf("no relay URL configured (not set at build time)")
 	}
 
 	// Read token from DB (decrypted)
