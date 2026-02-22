@@ -1,4 +1,4 @@
-.PHONY: all build run clean test deps vendor-js setup
+.PHONY: all build run clean test deps vendor-js setup format
 
 # Variables
 BINARY_NAME=openpoet
@@ -76,6 +76,11 @@ clean:
 fmt:
 	go fmt ./...
 
+# Format Go files and stage changes
+format:
+	gofmt -w .
+	git add -u
+
 # Lint code
 lint:
 	@if command -v golangci-lint &> /dev/null; then \
@@ -130,7 +135,8 @@ help:
 	@echo "  test         Run tests"
 	@echo "  test-coverage Run tests with coverage"
 	@echo "  clean        Remove build artifacts"
-	@echo "  fmt          Format code"
+	@echo "  fmt          Format code (go fmt)"
+	@echo "  format       Format Go files and stage changes"
 	@echo "  lint         Lint code"
 	@echo "  icons        Generate PWA icons"
 	@echo "  setup        Configure git hooks"
