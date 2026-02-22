@@ -1,12 +1,18 @@
 <p align="center">
-  <img src="mascot.svg" alt="OpenPoet Mascot" width="200" />
+  <a href="https://openpoet.ai" target="_blank">
+    <img src="mascot.svg" alt="OpenPoet Mascot" width="200" />
+  </a>
 </p>
 
-# OpenPoet
+<h1 align="center">OpenPoet</h1>
 
-Orchestrate Claude Code sessions across multiple projects from a single web interface.
+<p align="center">
+  Orchestrate Claude Code sessions across multiple projects from a single web interface.
+</p>
 
-**[openpoet.ai](https://openpoet.ai)**
+<p align="center">
+  <a href="https://openpoet.ai" target="_blank"><strong>openpoet.ai</strong></a>
+</p>
 
 ## Install
 
