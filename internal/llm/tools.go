@@ -20,7 +20,7 @@ type ToolDef struct {
 	MCPDescription string              // Override description for MCP context (if empty, uses Description)
 	InputSchema    ToolDefinitionInput // Typed Go schema (single source of truth)
 	Context        ToolContext         // Where this tool is available
-	ChatOnly bool // If true, filtered out from MCP sessions (only available in MCP context "chat")
+	ChatOnly       bool                // If true, filtered out from MCP sessions (only available in MCP context "chat")
 }
 
 // MCPToolDef is the MCP protocol format with JSON raw schema.
@@ -183,8 +183,7 @@ func AllToolDefs() []ToolDef {
 				Type:       "object",
 				Properties: map[string]ToolPropertySchema{},
 			},
-			Context:      ToolContextBoth,
-
+			Context: ToolContextBoth,
 		},
 		{
 			Name:           "get_mcp_server",
@@ -364,8 +363,7 @@ func AllToolDefs() []ToolDef {
 				},
 				Required: []string{"project_id"},
 			},
-			Context:      ToolContextBoth,
-
+			Context: ToolContextBoth,
 		},
 		{
 			Name:           "get_task",
@@ -399,8 +397,7 @@ func AllToolDefs() []ToolDef {
 				},
 				Required: []string{"project_id", "title"},
 			},
-			Context:      ToolContextBoth,
-
+			Context: ToolContextBoth,
 		},
 		{
 			Name:           "update_task",
@@ -419,8 +416,7 @@ func AllToolDefs() []ToolDef {
 				},
 				Required: []string{"project_id", "task_id"},
 			},
-			Context:      ToolContextBoth,
-
+			Context: ToolContextBoth,
 		},
 		{
 			Name:           "delete_task",
@@ -478,8 +474,7 @@ func AllToolDefs() []ToolDef {
 				},
 				Required: []string{"project_id"},
 			},
-			Context:      ToolContextBoth,
-
+			Context: ToolContextBoth,
 		},
 		{
 			Name:           "read_file",
@@ -496,8 +491,7 @@ func AllToolDefs() []ToolDef {
 				},
 				Required: []string{"project_id", "path"},
 			},
-			Context:      ToolContextBoth,
-
+			Context: ToolContextBoth,
 		},
 
 		// ──── Shared project file access (session-only) ────
@@ -589,8 +583,7 @@ func AllToolDefs() []ToolDef {
 				},
 				Required: []string{"project_id", "pattern"},
 			},
-			Context:      ToolContextChat,
-
+			Context: ToolContextChat,
 		},
 		{
 			Name:        "grep_content",
@@ -605,8 +598,7 @@ func AllToolDefs() []ToolDef {
 				},
 				Required: []string{"project_id", "pattern"},
 			},
-			Context:      ToolContextChat,
-
+			Context: ToolContextChat,
 		},
 		{
 			Name:        "get_task_report",
@@ -618,8 +610,7 @@ func AllToolDefs() []ToolDef {
 				},
 				Required: []string{"project_id"},
 			},
-			Context:      ToolContextChat,
-
+			Context: ToolContextChat,
 		},
 		// ──── Session-only tools ────
 

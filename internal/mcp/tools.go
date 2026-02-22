@@ -871,11 +871,11 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 // executeDashboard returns a compact JSON summary of the entire OpenPoet state.
 func executeDashboard(client *APIClient) (string, error) {
 	type projectSummary struct {
-		ID             int64            `json:"id"`
-		Name           string           `json:"name"`
-		Type           string           `json:"type"`
-		Tasks          map[string]int   `json:"tasks"`
-		ActiveSessions int              `json:"active_sessions"`
+		ID             int64          `json:"id"`
+		Name           string         `json:"name"`
+		Type           string         `json:"type"`
+		Tasks          map[string]int `json:"tasks"`
+		ActiveSessions int            `json:"active_sessions"`
 	}
 
 	// Fetch projects
@@ -921,7 +921,7 @@ func executeDashboard(client *APIClient) (string, error) {
 	for _, p := range projects {
 		tasksBody, _ := client.Get(fmt.Sprintf("/api/projects/%d/tasks", p.ID))
 		var tasks []struct {
-			ID       int64  `json:"id"`
+			ID       int64 `json:"id"`
 			ParentID *struct {
 				Int64 int64 `json:"Int64"`
 				Valid bool  `json:"Valid"`
@@ -1092,8 +1092,8 @@ func formatSkillsList(body []byte) (string, error) {
 
 func formatProjectSkillsList(body []byte) (string, error) {
 	var data struct {
-		SkillPolicy   string `json:"skill_policy"`
-		GlobalSkills  []struct {
+		SkillPolicy  string `json:"skill_policy"`
+		GlobalSkills []struct {
 			ID             int64  `json:"id"`
 			Name           string `json:"name"`
 			Category       string `json:"category"`
@@ -1138,7 +1138,7 @@ func formatProjectSkillsList(body []byte) (string, error) {
 
 func formatProjectMCPServersList(body []byte) (string, error) {
 	var data struct {
-		GlobalMCPServers  []struct {
+		GlobalMCPServers []struct {
 			ID      int64  `json:"id"`
 			Name    string `json:"name"`
 			Command string `json:"command"`
@@ -1303,7 +1303,7 @@ func getTaskID(params map[string]interface{}) (int64, bool) {
 // formatTaskList formats the tasks JSON response into readable text.
 func formatTaskList(body []byte) (string, error) {
 	var tasks []struct {
-		ID       int64  `json:"id"`
+		ID       int64 `json:"id"`
 		ParentID *struct {
 			Int64 int64 `json:"Int64"`
 			Valid bool  `json:"Valid"`

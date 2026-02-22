@@ -3,11 +3,11 @@ package handlers
 import (
 	"context"
 	"database/sql"
-	"openpoet/internal/database"
-	"openpoet/internal/llm"
 	"encoding/json"
 	"log"
 	"net/http"
+	"openpoet/internal/database"
+	"openpoet/internal/llm"
 	"strconv"
 	"sync"
 )
@@ -262,8 +262,8 @@ type otlpScopeMetric struct {
 }
 
 type otlpMetric struct {
-	Name  string    `json:"name"`
-	Sum   *otlpSum  `json:"sum,omitempty"`
+	Name  string     `json:"name"`
+	Sum   *otlpSum   `json:"sum,omitempty"`
 	Gauge *otlpGauge `json:"gauge,omitempty"`
 }
 
@@ -310,7 +310,7 @@ func (dp otlpDataPoint) AsDouble() float64 {
 }
 
 type otlpAttribute struct {
-	Key   string         `json:"key"`
+	Key   string        `json:"key"`
 	Value otlpAttrValue `json:"value"`
 }
 

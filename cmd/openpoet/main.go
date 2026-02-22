@@ -19,10 +19,10 @@ import (
 
 	"openpoet/internal/benchmark"
 	"openpoet/internal/config"
+	"openpoet/internal/configsync"
 	"openpoet/internal/database"
 	"openpoet/internal/handlers"
 	"openpoet/internal/llm"
-	"openpoet/internal/configsync"
 	"openpoet/internal/mcp"
 	"openpoet/internal/notifications"
 	"openpoet/internal/security"
@@ -354,7 +354,7 @@ func main() {
 			api.RecordTaskHistory(ctx, task.ID, task.ProjectID, "plan_updated", map[string]interface{}{
 				"plan_length":     len(planContent),
 				"old_plan_length": oldPlanLen,
-				"is_rewrite":     oldPlanLen > 0,
+				"is_rewrite":      oldPlanLen > 0,
 			}, "system", sessionID)
 		}
 	}

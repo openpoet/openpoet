@@ -1,0 +1,14 @@
+#!/bin/sh
+
+# Pre-commit hook: format Go files and run go vet
+
+echo "Running gofmt..."
+gofmt -w .
+git add -u
+
+echo "Running go vet..."
+go vet ./...
+if [ $? -ne 0 ]; then
+    echo "go vet failed. Commit aborted."
+    exit 1
+fi

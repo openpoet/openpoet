@@ -72,7 +72,7 @@ type WSOpenData struct {
 
 // WSDataPayload carries WebSocket frame data.
 type WSDataPayload struct {
-	Data   string `json:"data"`             // base64-encoded binary data
+	Data   string `json:"data"`              // base64-encoded binary data
 	IsText bool   `json:"is_text,omitempty"` // true if text frame, false if binary
 }
 

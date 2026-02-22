@@ -352,7 +352,6 @@ func (h *FileHandler) ViewFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-
 // ListProjectFiles lists files in a project directory (read-only, no session required).
 func (h *FileHandler) ListProjectFiles(w http.ResponseWriter, r *http.Request) {
 	id, err := parseID(chi.URLParam(r, "id"))

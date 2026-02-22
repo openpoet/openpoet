@@ -2,9 +2,9 @@ package notifications
 
 import (
 	"context"
+	"log"
 	"openpoet/internal/database"
 	"openpoet/internal/websocket"
-	"log"
 	"sync"
 )
 

@@ -4,9 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"openpoet/internal/configsync"
 	"openpoet/internal/database"
 	"openpoet/internal/files"
-	"openpoet/internal/configsync"
 	"openpoet/internal/llm"
 	"openpoet/internal/mcp"
 	"openpoet/internal/notifications"
@@ -14,11 +19,6 @@ import (
 	"openpoet/internal/session"
 	"openpoet/internal/tunnel"
 	"openpoet/internal/websocket"
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"log"
-	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -101,7 +101,7 @@ type pendingSkillProposal struct {
 	SkillName string `json:"skill_name"`
 	Content   string `json:"content"`
 	Category  string `json:"category"`
-	Action    string `json:"action"` // "create" or "update"
+	Action    string `json:"action"`             // "create" or "update"
 	SkillID   int64  `json:"skill_id,omitempty"` // for updates
 }
 
@@ -465,9 +465,9 @@ func (a *API) ApproveSkillProposal(w http.ResponseWriter, r *http.Request) {
 		}
 		a.hub.BroadcastStateUpdate("project_skill", map[string]interface{}{"action": "created", "project_id": pending.ProjectID, "skill": ps})
 		respondJSON(w, http.StatusOK, map[string]interface{}{
-			"status":  "approved",
-			"action":  "created",
-			"skill":   ps,
+			"status": "approved",
+			"action": "created",
+			"skill":  ps,
 		})
 
 	case "update":
@@ -608,7 +608,6 @@ func respondJSON(w http.ResponseWriter, status int, data interface{}) {
 func respondError(w http.ResponseWriter, status int, message string) {
 	respondJSON(w, status, map[string]string{"error": message})
 }
-
 
 // ============ Projects ============
 
@@ -2984,7 +2983,7 @@ func (a *API) ListTaskDocuments(w http.ResponseWriter, r *http.Request) {
 	type docEntry struct {
 		ID        string    `json:"id"`
 		Title     string    `json:"title"`
-		Type      string    `json:"type"`   // "document" or "plan"
+		Type      string    `json:"type"` // "document" or "plan"
 		Status    string    `json:"status"`
 		CreatedAt time.Time `json:"created_at"`
 	}

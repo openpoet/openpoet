@@ -1,4 +1,4 @@
-.PHONY: all build run clean test deps vendor-js
+.PHONY: all build run clean test deps vendor-js setup
 
 # Variables
 BINARY_NAME=openpoet
@@ -104,6 +104,11 @@ icons:
 		{ echo "Error: Failed to generate icon-512.png"; exit 1; }
 	@echo "Done."
 
+# Setup git hooks
+setup:
+	git config core.hooksPath .githooks
+	@echo "Git hooks configured."
+
 # Install development tools
 tools:
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
@@ -128,5 +133,6 @@ help:
 	@echo "  fmt          Format code"
 	@echo "  lint         Lint code"
 	@echo "  icons        Generate PWA icons"
+	@echo "  setup        Configure git hooks"
 	@echo "  tools        Install development tools"
 	@echo "  help         Show this help"
