@@ -4315,6 +4315,11 @@ class OpenPoet {
                         <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">Paired Devices</div>
                         <div id="tunnel-devices-list"></div>
                     </div>
+                    <div id="tunnel-relay-override-banner" style="display: none; margin-top: 12px; padding: 8px 12px; background: var(--color-warning-bg, #3d2e00); border: 1px solid var(--color-warning-border, #d29922); border-radius: 6px; font-size: 12px; color: var(--color-warning-text, #e3b341);">
+                        ⚠ Custom relay server via <code>OPENPOET_RELAY_URL</code>:<br>
+                        <span id="tunnel-relay-override-url" style="font-family: monospace; font-weight: 600;"></span><br>
+                        <span style="font-size: 11px; opacity: 0.8;">Built-in default: <span id="tunnel-relay-builtin-url" style="font-family: monospace;"></span></span>
+                    </div>
                     <div id="tunnel-relay-info" style="margin-top: 12px; font-size: 11px; color: var(--color-text-secondary, #999);">
                         Relay: <span id="tunnel-relay-url-display" style="font-family: monospace;"></span>
                     </div>
@@ -5939,12 +5944,24 @@ class OpenPoet {
             this.loadTunnelDevices();
         }
 
-        // Show hard-coded relay URL
+        // Show relay URL and override banner
         const relayDisplay = document.getElementById('tunnel-relay-url-display');
-        if (relayDisplay && data.default_relay_url) {
-            relayDisplay.textContent = data.default_relay_url;
-        } else if (relayDisplay) {
-            relayDisplay.textContent = '(not configured)';
+        const overrideBanner = document.getElementById('tunnel-relay-override-banner');
+        const relayInfo = document.getElementById('tunnel-relay-info');
+
+        if (data.relay_overridden && overrideBanner) {
+            overrideBanner.style.display = 'block';
+            document.getElementById('tunnel-relay-override-url').textContent = data.default_relay_url;
+            document.getElementById('tunnel-relay-builtin-url').textContent = data.builtin_relay_url || '(none)';
+            if (relayInfo) relayInfo.style.display = 'none';
+        } else {
+            if (overrideBanner) overrideBanner.style.display = 'none';
+            if (relayInfo) relayInfo.style.display = '';
+            if (relayDisplay && data.default_relay_url) {
+                relayDisplay.textContent = data.default_relay_url;
+            } else if (relayDisplay) {
+                relayDisplay.textContent = '(not configured)';
+            }
         }
     }
 

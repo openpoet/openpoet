@@ -19,6 +19,7 @@ import (
 	"openpoet/internal/session"
 	"openpoet/internal/tunnel"
 	"openpoet/internal/websocket"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -4140,12 +4141,24 @@ func (a *API) GetTunnelStatus(w http.ResponseWriter, r *http.Request) {
 		hasToken = true
 	}
 
+	// Effective relay URL: env var > build-time default
+	envRelayURL := os.Getenv("OPENPOET_RELAY_URL")
+	effectiveRelayURL := envRelayURL
+	if effectiveRelayURL == "" {
+		effectiveRelayURL = DefaultRelayURL
+	}
+
+	// relay_overridden is true when env var is set and differs from build-time default
+	relayOverridden := envRelayURL != "" && envRelayURL != DefaultRelayURL
+
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"status":            status,
 		"url":               url,
 		"subdomain":         subdomain,
 		"device_count":      deviceCount,
-		"default_relay_url": DefaultRelayURL,
+		"default_relay_url": effectiveRelayURL,
+		"builtin_relay_url": DefaultRelayURL,
+		"relay_overridden":  relayOverridden,
 		"has_token":         hasToken,
 	})
 }
@@ -4229,10 +4242,13 @@ func (a *API) createAndConnectTunnel(ctx context.Context) (*tunnel.Client, error
 		return nil, fmt.Errorf("tunnel dependencies not configured")
 	}
 
-	// Use build-time relay URL (hard-coded into binary)
-	relayURL := DefaultRelayURL
+	// Relay URL: env var > build-time default (not user-configurable from UI)
+	relayURL := os.Getenv("OPENPOET_RELAY_URL")
 	if relayURL == "" {
-		return nil, fmt.Errorf("no relay URL configured (not set at build time)")
+		relayURL = DefaultRelayURL
+	}
+	if relayURL == "" {
+		return nil, fmt.Errorf("no relay URL configured (set OPENPOET_RELAY_URL or build with -ldflags)")
 	}
 
 	// Read token from DB (decrypted)
