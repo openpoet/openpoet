@@ -23,6 +23,7 @@ builds:
     ldflags:
       - -s -w
       - -X main.BuildVersion={{.Version}}
+      - -X main.DefaultRelayURL={{ .Env.RELAY_URL }}
 
 archives:
   - id: default
