@@ -22,12 +22,6 @@
 brew install openpoet/tap/openpoet
 ```
 
-### winget (Windows)
-
-```powershell
-winget install openpoet
-```
-
 ### Shell script (macOS and Linux)
 
 ```bash

@@ -12,7 +12,7 @@ all: deps vendor-js build
 build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
-	go build -ldflags "-X main.BuildVersion=$$(git rev-parse --short HEAD) -X main.DefaultRelayURL=$(RELAY_URL)" -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
+	go build -ldflags "-X main.BuildVersion=$$(git rev-parse --short HEAD) -X main.DefaultRelayURL=$(RELAY_URL) -X main.DebugDefault=true" -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
 	@echo "Built: $(BUILD_DIR)/$(BINARY_NAME)"
 
 # Build for multiple platforms

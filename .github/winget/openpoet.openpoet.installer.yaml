@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
+
+PackageIdentifier: openpoet.openpoet
+PackageVersion: 0.1.6
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+- RelativeFilePath: openpoet.exe
+  PortableCommandAlias: openpoet
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/openpoet/openpoet/releases/download/v0.1.6/openpoet_0.1.6_windows_amd64.zip
+  InstallerSha256: 9B411AB06FD04404739A7316193186F1D347E38A1CE6BBDD6258648FB122E1F4
+- Architecture: arm64
+  InstallerUrl: https://github.com/openpoet/openpoet/releases/download/v0.1.6/openpoet_0.1.6_windows_arm64.zip
+  InstallerSha256: FC583E32F6854DF1A6430554BC186E545C3D46E10663391C676F1675CA40BD75
+ManifestType: installer
+ManifestVersion: 1.9.0

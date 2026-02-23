@@ -33,7 +33,7 @@ detect_os() {
     case "$(uname -s)" in
         Linux*)  echo "linux" ;;
         Darwin*) echo "darwin" ;;
-        MINGW*|MSYS*|CYGWIN*) error "On Windows, use: winget install openpoet" ;;
+        MINGW*|MSYS*|CYGWIN*) error "On Windows, download the .zip from https://github.com/openpoet/openpoet/releases" ;;
         *)       error "Unsupported operating system: $(uname -s)" ;;
     esac
 }

@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
+
+PackageIdentifier: openpoet.openpoet
+PackageVersion: 0.1.6
+PackageLocale: en-US
+Publisher: openpoet
+PublisherUrl: https://github.com/openpoet
+PublisherSupportUrl: https://github.com/openpoet/openpoet/issues
+PackageName: openpoet
+PackageUrl: https://github.com/openpoet/openpoet
+License: MIT
+LicenseUrl: https://github.com/openpoet/openpoet/blob/main/LICENSE
+ShortDescription: A web application that orchestrates Claude Code sessions across multiple projects.
+Tags:
+- cli
+- developer-tools
+- ai
+- claude
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0
