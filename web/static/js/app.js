@@ -22,6 +22,10 @@ class OpenPoet {
         // View state preservation (scroll, filters, tabs)
         this._viewState = {};
 
+        // All-tasks view mode: 'grouped' (default) or 'flat'
+        this._allTasksViewMode = localStorage.getItem('openpoet-tasks-view-mode') || 'grouped';
+        this._collapsedProjectGroups = new Set();
+
         // Update banner guard (initialized before init() to prevent race with SW message listener)
         this._updateBannerShown = false;
 
@@ -272,6 +276,7 @@ class OpenPoet {
                 state.filterPriority = document.getElementById('filter-priority')?.value || '';
                 state.filterProject = document.getElementById('filter-project')?.value || '';
                 state.filterSearch = document.getElementById('filter-search')?.value || '';
+                state.viewMode = this._allTasksViewMode;
                 break;
             case 'config':
                 state.scrollTop = document.getElementById('config-content')?.scrollTop || 0;
@@ -301,6 +306,15 @@ class OpenPoet {
                 const projectEl = document.getElementById('filter-project');
                 if (projectEl) projectEl.value = state.filterProject || '';
                 this._pendingFilterProject = state.filterProject || '';
+                if (state.viewMode) {
+                    this._allTasksViewMode = state.viewMode;
+                    const toggleContainer = document.getElementById('view-mode-toggle');
+                    if (toggleContainer) {
+                        toggleContainer.querySelectorAll('.view-mode-btn').forEach(b =>
+                            b.classList.toggle('active', b.dataset.mode === this._allTasksViewMode)
+                        );
+                    }
+                }
                 break;
             }
             case 'config':
@@ -2858,30 +2872,61 @@ class OpenPoet {
 
     async stopSession(sessionId) {
         console.log('stopSession called with:', sessionId);
-        try {
-            await this.api('DELETE', `/sessions/${sessionId}`);
-            this.showToast('Success', 'Session stopped', 'success');
 
-            // Remove tab
-            const tabElement = document.querySelector(`.terminal-tab[data-session-id="${sessionId}"]`);
-            if (tabElement) tabElement.remove();
-            this.openTabs.delete(sessionId);
-            window.terminalManager.disconnect(sessionId);
-            this.saveTabsToStorage();
+        const doStop = async () => {
+            try {
+                await this.api('DELETE', `/sessions/${sessionId}`);
+                this.showToast('Success', 'Session stopped', 'success');
 
-            // Switch to next active session if available, otherwise show empty state
-            if (this.openTabs.size > 0) {
-                const nextSessionId = Array.from(this.openTabs.keys())[0];
-                this.openTerminal(nextSessionId);
-            } else {
-                this._showSessionsEmptyState();
+                // Remove tab
+                const tabElement = document.querySelector(`.terminal-tab[data-session-id="${sessionId}"]`);
+                if (tabElement) tabElement.remove();
+                this.openTabs.delete(sessionId);
+                window.terminalManager.disconnect(sessionId);
+                this.saveTabsToStorage();
+
+                // Switch to next active session if available, otherwise show empty state
+                if (this.openTabs.size > 0) {
+                    const nextSessionId = Array.from(this.openTabs.keys())[0];
+                    this.openTerminal(nextSessionId);
+                } else {
+                    this._showSessionsEmptyState();
+                }
+
+                await this.loadSessions();
+            } catch (error) {
+                console.error('stopSession error:', error);
+                this._showApiError(error);
             }
+        };
 
-            await this.loadSessions();
-        } catch (error) {
-            console.error('stopSession error:', error);
-            this._showApiError(error);
+        // Check if session has a linked in_progress task
+        try {
+            const task = await this.api('GET', `/sessions/${sessionId}/task`);
+            if (task && task.status === 'in_progress') {
+                showConfirmModal(
+                    'Update Task Status',
+                    `The task "<strong>${task.title}</strong>" is currently in progress. Would you like to change its status to <strong>Awaiting Approval</strong>?`,
+                    async () => {
+                        try {
+                            await this.api('PATCH', `/projects/${task.project_id}/tasks/${task.id}/status`, { status: 'awaiting_approval' });
+                            this.showToast('Success', 'Task moved to Awaiting Approval', 'success');
+                        } catch (err) {
+                            console.error('Failed to update task status:', err);
+                            this.showToast('Error', 'Failed to update task status', 'error');
+                        }
+                        await doStop();
+                    },
+                    'Yes, update status',
+                    doStop
+                );
+                return;
+            }
+        } catch {
+            // No linked task or fetch failed — proceed normally
         }
+
+        await doStop();
     }
 
     // ==================== SESSION TOOLS ====================
@@ -7906,20 +7951,100 @@ class OpenPoet {
                 children[pid].push(t);
             });
 
-            // Separate active and done top-level tasks
-            const activeTopLevel = topLevel.filter(t => t.status !== 'done');
-            const doneTopLevel = topLevel.filter(t => t.status === 'done');
-
-            // Render active tasks with sequential global numbering
             let html = '';
-            const renderedIds = new Set();
-            let globalOrder = 1;
-            for (const task of activeTopLevel) {
+
+            if (this._allTasksViewMode === 'grouped') {
+                html = this._renderGroupedTasks(tasks, topLevel, children, projectMap);
+            } else {
+                html = this._renderFlatTasks(tasks, topLevel, children, projectMap);
+            }
+
+            container.innerHTML = html;
+            container.classList.toggle('grouped-view', this._allTasksViewMode === 'grouped');
+
+            if (this._allTasksViewMode === 'grouped') {
+                this._setupGroupedDragAndDrop(container);
+            } else {
+                this.setupAllTasksDragAndDrop(container);
+            }
+
+            this._restoreScrollTop('all-tasks-list', this._viewState['tasks']?.scrollTop);
+        } catch (e) {
+            container.innerHTML = '<div class="empty-state">Failed to load tasks.</div>';
+        }
+    }
+
+    _renderFlatTasks(tasks, topLevel, children, projectMap) {
+        const activeTopLevel = topLevel.filter(t => t.status !== 'done');
+        const doneTopLevel = topLevel.filter(t => t.status === 'done');
+
+        let html = '';
+        const renderedIds = new Set();
+        let globalOrder = 1;
+        for (const task of activeTopLevel) {
+            const projectName = projectMap[task.project_id] || `Project #${task.project_id}`;
+            const kids = children[task.id] || [];
+            const hasKids = kids.length > 0;
+            const currentOrder = globalOrder++;
+            html += this.renderAllTaskCard(task, projectName, hasKids, 0, 0, currentOrder, kids);
+            renderedIds.add(task.id);
+            if (hasKids) {
+                const collapsed = this._collapsedTasks?.has(task.id) ? ' collapsed' : '';
+                html += `<div class="task-subtasks all-tasks-subtasks${collapsed}" data-parent-id="${task.id}">`;
+                let subOrder = 1;
+                for (const sub of children[task.id]) {
+                    const subProjectName = projectMap[sub.project_id] || `Project #${sub.project_id}`;
+                    const subIdx = sub.status === 'done' ? 0 : subOrder++;
+                    html += this.renderAllTaskCard(sub, subProjectName, false, subIdx, currentOrder);
+                    renderedIds.add(sub.id);
+                }
+                html += '</div>';
+            }
+        }
+
+        // Render any orphan subtasks whose parent wasn't in the filtered results
+        for (const task of tasks) {
+            if (!renderedIds.has(task.id) && task.status !== 'done') {
+                const projectName = projectMap[task.project_id] || `Project #${task.project_id}`;
+                html += this.renderAllTaskCard(task, projectName, false, 0, 0, globalOrder++);
+                renderedIds.add(task.id);
+            }
+        }
+
+        // Done section at the bottom
+        const allDone = [...doneTopLevel];
+        doneTopLevel.forEach(t => {
+            renderedIds.add(t.id);
+            (children[t.id] || []).forEach(c => renderedIds.add(c.id));
+        });
+        for (const task of tasks) {
+            if (!renderedIds.has(task.id) && task.status === 'done') {
+                allDone.push(task);
+            }
+        }
+        allDone.sort((a, b) => {
+            const aKids = children[a.id] || [];
+            const bKids = children[b.id] || [];
+            const aMax = Math.max(new Date(a.updated_at), ...aKids.map(k => new Date(k.updated_at)));
+            const bMax = Math.max(new Date(b.updated_at), ...bKids.map(k => new Date(k.updated_at)));
+            return bMax - aMax;
+        });
+        if (allDone.length > 0) {
+            const doneCollapsed = this._doneCollapsed ? ' collapsed' : '';
+            const doneCount = allDone.filter(t => !children[t.id]?.length).length;
+            html += `
+                <div class="done-section">
+                    <div class="done-section-header" onclick="app.toggleDoneSection()">
+                        <svg class="done-section-chevron${this._doneCollapsed ? ' collapsed' : ''}" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                        <span class="done-section-title">Completed</span>
+                        <span class="done-section-count">${doneCount}</span>
+                    </div>
+                    <div class="done-section-body${doneCollapsed}">`;
+            for (const task of allDone) {
                 const projectName = projectMap[task.project_id] || `Project #${task.project_id}`;
                 const kids = children[task.id] || [];
                 const hasKids = kids.length > 0;
-                const currentOrder = globalOrder++;
-                html += this.renderAllTaskCard(task, projectName, hasKids, 0, 0, currentOrder, kids);
+                html += this.renderAllTaskCard(task, projectName, hasKids, 0, 0, 0, kids);
                 renderedIds.add(task.id);
                 if (hasKids) {
                     const collapsed = this._collapsedTasks?.has(task.id) ? ' collapsed' : '';
@@ -7927,68 +8052,120 @@ class OpenPoet {
                     let subOrder = 1;
                     for (const sub of children[task.id]) {
                         const subProjectName = projectMap[sub.project_id] || `Project #${sub.project_id}`;
-                        const subIdx = sub.status === 'done' ? 0 : subOrder++;
-                        html += this.renderAllTaskCard(sub, subProjectName, false, subIdx, currentOrder);
+                        html += this.renderAllTaskCard(sub, subProjectName, false, subOrder++);
                         renderedIds.add(sub.id);
                     }
                     html += '</div>';
                 }
             }
+            html += `
+                    </div>
+                </div>`;
+        }
+        return html;
+    }
 
-            // Render any orphan subtasks whose parent wasn't in the filtered results
-            for (const task of tasks) {
-                if (!renderedIds.has(task.id) && task.status !== 'done') {
-                    const projectName = projectMap[task.project_id] || `Project #${task.project_id}`;
-                    html += this.renderAllTaskCard(task, projectName, false, 0, 0, globalOrder++);
-                    renderedIds.add(task.id);
-                }
-            }
+    _renderGroupedTasks(tasks, topLevel, children, projectMap) {
+        const statusFilter = document.getElementById('filter-status')?.value || '';
+        // Group top-level tasks by project_id
+        const projectGroups = {};
+        for (const task of topLevel) {
+            const pid = task.project_id;
+            if (!projectGroups[pid]) projectGroups[pid] = [];
+            projectGroups[pid].push(task);
+        }
 
-            // Done section at the bottom (includes done top-level and orphan done subtasks)
-            const allDone = [...doneTopLevel];
-            doneTopLevel.forEach(t => {
-                renderedIds.add(t.id);
-                // Mark children of done parents so they don't appear as standalone items
-                (children[t.id] || []).forEach(c => renderedIds.add(c.id));
-            });
-            for (const task of tasks) {
-                if (!renderedIds.has(task.id) && task.status === 'done') {
-                    allDone.push(task);
-                }
+        // Also handle orphan subtasks (parent filtered out) — add to their project group
+        const topLevelIds = new Set(topLevel.map(t => t.id));
+        tasks.filter(t => t.parent_id?.Valid).forEach(t => {
+            const parentId = t.parent_id.Int64;
+            if (!topLevelIds.has(parentId)) {
+                const pid = t.project_id;
+                if (!projectGroups[pid]) projectGroups[pid] = [];
+                projectGroups[pid].push(t);
             }
-            // Sort done tasks by most recent updated_at (considering subtasks)
-            allDone.sort((a, b) => {
+        });
+
+        // Sort project groups alphabetically by project name
+        const sortedProjectIds = Object.keys(projectGroups).sort((a, b) => {
+            const nameA = (projectMap[a] || '').toLowerCase();
+            const nameB = (projectMap[b] || '').toLowerCase();
+            return nameA.localeCompare(nameB);
+        });
+
+        let html = '';
+
+        for (const pid of sortedProjectIds) {
+            const groupTasks = projectGroups[pid];
+            const projectName = projectMap[pid] || `Project #${pid}`;
+            const projectId = parseInt(pid);
+
+            const activeTasks = groupTasks.filter(t => t.status !== 'done');
+            const doneTasks = groupTasks.filter(t => t.status === 'done');
+
+            if (activeTasks.length === 0 && (statusFilter !== 'done' || doneTasks.length === 0)) continue;
+
+            // Sort done tasks by most recent updated_at
+            doneTasks.sort((a, b) => {
                 const aKids = children[a.id] || [];
                 const bKids = children[b.id] || [];
                 const aMax = Math.max(new Date(a.updated_at), ...aKids.map(k => new Date(k.updated_at)));
                 const bMax = Math.max(new Date(b.updated_at), ...bKids.map(k => new Date(k.updated_at)));
                 return bMax - aMax;
             });
-            if (allDone.length > 0) {
+
+            const isCollapsed = this._collapsedProjectGroups.has(projectId);
+            const activeCount = activeTasks.length;
+            const doneCount = doneTasks.length;
+
+            html += `
+            <div class="project-group" data-project-id="${pid}">
+                <div class="project-group-header" onclick="app.toggleProjectGroup(${pid})">
+                    <svg class="project-group-chevron${isCollapsed ? ' collapsed' : ''}" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                    <span class="project-group-name">${this.escapeHtml(projectName)}</span>
+                    <span class="project-group-count">${activeCount}</span>
+                    ${doneCount > 0 ? `<span class="project-group-done-count">${doneCount} done</span>` : ''}
+                </div>
+                <div class="project-group-body${isCollapsed ? ' collapsed' : ''}">`;
+
+            // Render active tasks using project-scope renderTaskCard (uses task.sort_order)
+            for (const task of activeTasks) {
+                const kids = children[task.id] || [];
+                const hasKids = kids.length > 0;
+                html += this.renderTaskCard(task, projectId, hasKids, 0, 0, kids);
+                if (hasKids) {
+                    const collapsed = this._collapsedTasks?.has(task.id) ? ' collapsed' : '';
+                    html += `<div class="task-subtasks${collapsed}" data-parent-id="${task.id}">`;
+                    let subOrder = 1;
+                    for (const sub of children[task.id]) {
+                        const subIdx = sub.status === 'done' ? 0 : subOrder++;
+                        html += this.renderTaskCard(sub, projectId, false, subIdx, task.sort_order);
+                    }
+                    html += '</div>';
+                }
+            }
+
+            // Done section per project group
+            if (doneTasks.length > 0) {
                 const doneCollapsed = this._doneCollapsed ? ' collapsed' : '';
-                const doneCount = allDone.filter(t => !children[t.id]?.length).length;
                 html += `
                     <div class="done-section">
                         <div class="done-section-header" onclick="app.toggleDoneSection()">
                             <svg class="done-section-chevron${this._doneCollapsed ? ' collapsed' : ''}" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
                             <span class="done-section-title">Completed</span>
-                            <span class="done-section-count">${doneCount}</span>
+                            <span class="done-section-count">${doneTasks.length}</span>
                         </div>
                         <div class="done-section-body${doneCollapsed}">`;
-                for (const task of allDone) {
-                    const projectName = projectMap[task.project_id] || `Project #${task.project_id}`;
+                for (const task of doneTasks) {
                     const kids = children[task.id] || [];
                     const hasKids = kids.length > 0;
-                    html += this.renderAllTaskCard(task, projectName, hasKids, 0, 0, 0, kids);
-                    renderedIds.add(task.id);
+                    html += this.renderTaskCard(task, projectId, hasKids, 0, 0, kids);
                     if (hasKids) {
                         const collapsed = this._collapsedTasks?.has(task.id) ? ' collapsed' : '';
-                        html += `<div class="task-subtasks all-tasks-subtasks${collapsed}" data-parent-id="${task.id}">`;
+                        html += `<div class="task-subtasks${collapsed}" data-parent-id="${task.id}">`;
                         let subOrder = 1;
                         for (const sub of children[task.id]) {
-                            const subProjectName = projectMap[sub.project_id] || `Project #${sub.project_id}`;
-                            html += this.renderAllTaskCard(sub, subProjectName, false, subOrder++);
-                            renderedIds.add(sub.id);
+                            html += this.renderTaskCard(sub, projectId, false, subOrder++);
                         }
                         html += '</div>';
                     }
@@ -7998,12 +8175,65 @@ class OpenPoet {
                     </div>`;
             }
 
-            container.innerHTML = html;
-            this.setupAllTasksDragAndDrop(container);
-            this._restoreScrollTop('all-tasks-list', this._viewState['tasks']?.scrollTop);
-        } catch (e) {
-            container.innerHTML = '<div class="empty-state">Failed to load tasks.</div>';
+            html += `</div></div>`; // close .project-group-body and .project-group
         }
+
+        return html;
+    }
+
+    toggleProjectGroup(projectId) {
+        const pid = parseInt(projectId);
+        const group = document.querySelector(`.project-group[data-project-id="${pid}"]`);
+        if (!group) return;
+        const body = group.querySelector('.project-group-body');
+        const chevron = group.querySelector('.project-group-chevron');
+
+        if (this._collapsedProjectGroups.has(pid)) {
+            this._collapsedProjectGroups.delete(pid);
+            if (body) body.classList.remove('collapsed');
+            if (chevron) chevron.classList.remove('collapsed');
+        } else {
+            this._collapsedProjectGroups.add(pid);
+            if (body) body.classList.add('collapsed');
+            if (chevron) chevron.classList.add('collapsed');
+        }
+    }
+
+    _setupGroupedDragAndDrop(container) {
+        this._destroySortables();
+        container.querySelectorAll('.project-group-body').forEach(groupBody => {
+            const pid = parseInt(groupBody.closest('.project-group').dataset.projectId);
+            if (!pid) return;
+
+            const sortableOpts = {
+                group: { name: `tasks-${pid}`, pull: false, put: false },
+                animation: 150,
+                handle: '.task-drag-handle',
+                draggable: '.task-card',
+                ghostClass: 'sortable-ghost',
+                chosenClass: 'sortable-chosen',
+                dragClass: 'sortable-drag',
+                delay: 150,
+                delayOnTouchOnly: true,
+                touchStartThreshold: 5,
+                forceFallback: true,
+                fallbackOnBody: true,
+                swapThreshold: 0.65,
+                scrollSensitivity: 60,
+                scrollSpeed: 12,
+                filter: '.btn-add-task, .task-subtasks, .task-indent-dropzone, .done-section',
+                onStart: (evt) => this._onDragStart(evt, groupBody, pid),
+                onEnd: (evt) => this._onDragEnd(evt, groupBody, pid),
+            };
+
+            const root = new Sortable(groupBody, sortableOpts);
+            this._sortableInstances.push(root);
+
+            // Sortable on each subtask container within this group
+            groupBody.querySelectorAll('.task-subtasks').forEach(sc => {
+                this._initSubtaskSortable(sc, groupBody, pid);
+            });
+        });
     }
 
     renderAllTaskCard(task, projectName, hasChildren = false, subIndex = 0, parentOrder = 0, overrideOrder = 0, childrenList = []) {
@@ -8190,6 +8420,22 @@ class OpenPoet {
             const el = document.getElementById(id);
             if (el) el.addEventListener('change', () => this.loadAllTasks());
         });
+
+        // View mode toggle (grouped vs flat)
+        const toggleContainer = document.getElementById('view-mode-toggle');
+        if (toggleContainer) {
+            toggleContainer.querySelectorAll('.view-mode-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.mode === this._allTasksViewMode);
+                btn.addEventListener('click', () => {
+                    this._allTasksViewMode = btn.dataset.mode;
+                    localStorage.setItem('openpoet-tasks-view-mode', this._allTasksViewMode);
+                    toggleContainer.querySelectorAll('.view-mode-btn').forEach(b =>
+                        b.classList.toggle('active', b.dataset.mode === this._allTasksViewMode)
+                    );
+                    this.loadAllTasks();
+                });
+            });
+        }
     }
 
     filterByStatus(status) {
@@ -8549,7 +8795,7 @@ class OpenPoet {
 }
 
 // Global confirm modal - replaces native confirm() across the entire system
-function showConfirmModal(title, message, onConfirm, confirmLabel = 'Confirm') {
+function showConfirmModal(title, message, onConfirm, confirmLabel = 'Confirm', onCancel = null) {
     document.querySelector('.confirm-modal-overlay')?.remove();
 
     const overlay = document.createElement('div');
@@ -8565,12 +8811,18 @@ function showConfirmModal(title, message, onConfirm, confirmLabel = 'Confirm') {
         </div>
     `;
 
-    overlay.querySelector('.confirm-modal-cancel').addEventListener('click', () => overlay.remove());
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-    overlay.querySelector('.confirm-modal-confirm').addEventListener('click', async () => {
+    const dismiss = async (confirmed) => {
         overlay.remove();
-        await onConfirm();
-    });
+        if (confirmed) {
+            await onConfirm();
+        } else if (onCancel) {
+            await onCancel();
+        }
+    };
+
+    overlay.querySelector('.confirm-modal-cancel').addEventListener('click', () => dismiss(false));
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) dismiss(false); });
+    overlay.querySelector('.confirm-modal-confirm').addEventListener('click', () => dismiss(true));
 
     document.body.appendChild(overlay);
 }

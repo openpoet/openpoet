@@ -169,8 +169,16 @@
                             <option value="">All Projects</option>
                         </select>
                     </div>
-                    <div class="filter-group">
+                    <div class="filter-group filter-group-search">
                         <input type="search" id="filter-search" class="filter-search" placeholder="Search tasks..." autocomplete="off">
+                        <div class="view-mode-toggle" id="view-mode-toggle">
+                            <button class="view-mode-btn" data-mode="grouped" title="Group by project">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                            </button>
+                            <button class="view-mode-btn" data-mode="flat" title="Flat list">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+                            </button>
+                        </div>
                     </div>
                 </div>
                 <div id="all-tasks-list" class="all-tasks-list"></div>
