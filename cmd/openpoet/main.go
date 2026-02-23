@@ -760,6 +760,15 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	// Check for port conflicts before binding.
+	// macOS allows 0.0.0.0 and 127.0.0.1 to coexist on the same port,
+	// which silently shadows traffic. Probe the port to detect this.
+	probeAddr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
+	if conn, err := net.DialTimeout("tcp", probeAddr, 200*time.Millisecond); err == nil {
+		conn.Close()
+		log.Fatalf("Port %d is already in use by another process", cfg.Port)
+	}
+
 	// Bind listener on the main goroutine so port conflicts fail immediately
 	ln, err := net.Listen("tcp", cfg.Address())
 	if err != nil {
