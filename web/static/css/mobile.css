@@ -1406,9 +1406,42 @@
 
     .filter-search {
         min-width: 0;
-        width: 100%;
+        flex: 1;
         font-size: 13px;
         padding: 8px 10px;
+    }
+
+    .filter-group-search {
+        flex-wrap: nowrap;
+    }
+
+    .view-mode-toggle {
+        flex-shrink: 0;
+    }
+
+    .view-mode-btn {
+        padding: 8px 12px;
+        min-width: 36px;
+        min-height: 36px;
+    }
+
+    .project-group {
+        margin-bottom: 6px;
+        border-radius: 8px;
+    }
+
+    .project-group-header {
+        padding: 8px 10px;
+        gap: 6px;
+    }
+
+    .project-group-name {
+        font-size: 12px;
+    }
+
+    .project-group-body {
+        padding: 4px;
+        gap: 2px;
     }
 
     .all-tasks-stat-cards {

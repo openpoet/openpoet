@@ -5402,6 +5402,11 @@ body {
     align-items: center;
 }
 
+.filter-group-search {
+    flex: 1;
+    min-width: 0;
+}
+
 .filter-select {
     background: var(--color-bg);
     border: 1px solid var(--color-border);
@@ -5440,6 +5445,129 @@ body {
 
 .filter-search::placeholder {
     color: var(--color-text-muted, #666);
+}
+
+/* ============ View Mode Toggle ============ */
+.view-mode-toggle {
+    display: inline-flex;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.view-mode-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 10px;
+    background: var(--color-bg);
+    border: none;
+    color: var(--color-text-secondary, #888);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.view-mode-btn:first-child {
+    border-right: 1px solid var(--color-border);
+}
+
+.view-mode-btn:hover {
+    background: rgba(99, 102, 241, 0.08);
+}
+
+.view-mode-btn.active {
+    background: rgba(99, 102, 241, 0.15);
+    color: var(--color-primary);
+}
+
+/* ============ Project Group (Grouped View) ============ */
+.project-group {
+    margin-bottom: 8px;
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--color-surface);
+    flex-shrink: 0;
+}
+
+.project-group-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--color-border);
+    background: rgba(99, 102, 241, 0.04);
+    transition: background 0.15s;
+    user-select: none;
+}
+
+.project-group-header:hover {
+    background: rgba(99, 102, 241, 0.08);
+}
+
+.project-group-chevron {
+    transition: transform 0.2s;
+    color: var(--color-text-secondary, #888);
+    flex-shrink: 0;
+}
+
+.project-group-chevron.collapsed {
+    transform: rotate(-90deg);
+}
+
+.project-group-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text);
+}
+
+.project-group-count {
+    font-size: 11px;
+    background: rgba(99, 102, 241, 0.15);
+    color: var(--color-primary);
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-weight: 600;
+}
+
+.project-group-done-count {
+    font-size: 10px;
+    color: var(--color-text-muted, #666);
+    margin-left: auto;
+}
+
+.project-group-body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px;
+}
+
+.project-group-body.collapsed {
+    display: none;
+}
+
+.project-group-body .done-section {
+    margin-top: 4px;
+    border-top: 1px solid var(--color-border);
+    padding-top: 4px;
+}
+
+.project-group-body .task-card {
+    border-radius: 6px;
+}
+
+/* Hide project badge in grouped view (redundant with group header) */
+.grouped-view .task-project-badge {
+    display: none;
+}
+
+/* In grouped view, use block layout instead of flex to avoid
+   mobile browser issues with flex-shrink inside scroll containers */
+.all-tasks-list.grouped-view {
+    display: block;
 }
 
 .all-tasks-list {
