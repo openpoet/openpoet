@@ -583,34 +583,66 @@ class OpenPoet {
             status.classList.toggle('connected', connected);
             status.querySelector('.status-text').textContent = connected ? 'Connected' : 'Disconnected';
         }
+        window.networkFeedback?.onWebSocketChange(connected);
     }
 
     // API calls
-    async api(method, path, data = null) {
-        const options = {
-            method,
-            headers: { 'Content-Type': 'application/json' }
-        };
-        if (data) options.body = JSON.stringify(data);
+    async api(method, path, data = null, opts = {}) {
+        const nf = window.networkFeedback;
+        const silent = opts.silent === true;
+        const timeout = opts.timeout || 30000;
 
-        const response = await fetch(`/api${path}`, options);
-        if (!response.ok) {
-            let errorMsg = 'Request failed';
-            let retryAfter = null;
-            try {
-                const error = await response.json();
-                errorMsg = error.error || errorMsg;
-                retryAfter = error.retry_after || null;
-            } catch {
-                try { errorMsg = await response.text(); } catch {}
+        if (!silent && nf) nf.requestStarted();
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+        try {
+            const options = {
+                method,
+                headers: { 'Content-Type': 'application/json' },
+                signal: controller.signal,
+            };
+            if (data) options.body = JSON.stringify(data);
+
+            const response = await fetch(`/api${path}`, options);
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+                let errorMsg = 'Request failed';
+                let retryAfter = null;
+                try {
+                    const error = await response.json();
+                    errorMsg = error.error || errorMsg;
+                    retryAfter = error.retry_after || null;
+                } catch {
+                    try { errorMsg = await response.text(); } catch {}
+                }
+                const err = new Error(errorMsg);
+                err.status = response.status;
+                err.retryAfter = retryAfter;
+                throw err;
             }
-            const err = new Error(errorMsg);
-            err.status = response.status;
-            err.retryAfter = retryAfter;
+            if (response.status === 204) return null;
+            return response.json();
+        } catch (err) {
+            clearTimeout(timeoutId);
+            if (err.name === 'AbortError') {
+                const timeoutErr = new Error('Request timed out. Check your connection and try again.');
+                timeoutErr.status = 0;
+                timeoutErr.isTimeout = true;
+                throw timeoutErr;
+            }
+            if (err instanceof TypeError && err.message.includes('fetch')) {
+                const netErr = new Error('Network error. Check your connection.');
+                netErr.status = 0;
+                netErr.isNetworkError = true;
+                throw netErr;
+            }
             throw err;
+        } finally {
+            if (!silent && nf) nf.requestFinished();
         }
-        if (response.status === 204) return null;
-        return response.json();
     }
 
     // Load initial data
@@ -1687,7 +1719,7 @@ class OpenPoet {
                     </div>
                 </div>
                 <div class="project-tools-actions" id="project-tools-actions" style="display:none;">
-                    <button class="btn btn-sm btn-primary" onclick="app.saveProjectToolsFromDetail(${projectId})">Save</button>
+                    <button class="btn btn-sm btn-primary" onclick="withLoading(this, () => app.saveProjectToolsFromDetail(${projectId}))">Save</button>
                     <button class="btn btn-sm btn-secondary" onclick="app.loadProjectTools(${projectId})">Cancel</button>
                     <span style="font-size: 11px; color: var(--color-text-muted);" id="project-tools-dirty">Unsaved changes</span>
                 </div>
@@ -1825,7 +1857,7 @@ class OpenPoet {
                     ` : '<div class="meta-empty" style="margin: 4px 0;">No global skills configured.</div>'}
                 </div>
                 <div class="project-tools-actions" id="project-skills-actions" style="display:none;">
-                    <button class="btn btn-sm btn-primary" onclick="app.saveProjectSkillConfig(${projectId})">Save</button>
+                    <button class="btn btn-sm btn-primary" onclick="withLoading(this, () => app.saveProjectSkillConfig(${projectId}))">Save</button>
                     <button class="btn btn-sm btn-secondary" onclick="app.loadProjectSkills(${projectId})">Cancel</button>
                     <span style="font-size: 11px; color: var(--color-text-muted);">Unsaved changes</span>
                 </div>
@@ -1956,7 +1988,7 @@ class OpenPoet {
                 </div>
                 <div class="modal-footer">
                     <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
-                    <button class="btn btn-primary" onclick="app.saveProjectSkill(${projectId}, ${skillId || 'null'})">${isEdit ? 'Save' : 'Create'}</button>
+                    <button class="btn btn-primary" onclick="withLoading(this, () => app.saveProjectSkill(${projectId}, ${skillId || 'null'}))">${isEdit ? 'Save' : 'Create'}</button>
                 </div>
             </div>
         `;
@@ -2136,7 +2168,7 @@ class OpenPoet {
 
         const actions = `
             <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
-            <button class="btn btn-primary" onclick="app.saveProjectMCPServer(${projectId}, ${mcpId || 'null'})">${isEdit ? 'Save' : 'Create'}</button>
+            <button class="btn btn-primary" onclick="withLoading(this, () => app.saveProjectMCPServer(${projectId}, ${mcpId || 'null'}))">${isEdit ? 'Save' : 'Create'}</button>
         `;
 
         this.showModal(title, content, actions);
@@ -2254,7 +2286,7 @@ class OpenPoet {
 
         const actions = `
             <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
-            <button class="btn btn-primary" onclick="app.saveProjectShares(${projectId})">Save</button>
+            <button class="btn btn-primary" onclick="withLoading(this, () => app.saveProjectShares(${projectId}))">Save</button>
         `;
 
         this.showModal('Shared File Access', content, actions);
@@ -3530,10 +3562,20 @@ class OpenPoet {
         const currentStatus = tab?.querySelector('.terminal-tab-status')?.dataset.status || 'running';
         statusDot.dataset.status = currentStatus;
 
-        // Session name
+        // Session labels (project + name)
+        const labelsDiv = document.createElement('div');
+        labelsDiv.className = 'mobile-session-item-labels';
+
+        const projectSpan = document.createElement('span');
+        projectSpan.className = 'mobile-session-item-project';
+        projectSpan.textContent = sessionData.projectName || '';
+
         const nameSpan = document.createElement('span');
         nameSpan.className = 'mobile-session-item-name';
         nameSpan.textContent = sessionData.sessionName;
+
+        labelsDiv.appendChild(projectSpan);
+        labelsDiv.appendChild(nameSpan);
 
         // Close button
         const closeBtn = document.createElement('div');
@@ -3576,21 +3618,25 @@ class OpenPoet {
         });
 
         itemDiv.appendChild(statusDot);
-        itemDiv.appendChild(nameSpan);
+        itemDiv.appendChild(labelsDiv);
         itemDiv.appendChild(closeBtn);
 
         return itemDiv;
     }
 
     updateMobileSessionTrigger(sessionId) {
-        const trigger = document.getElementById('mobile-session-name');
+        const nameEl = document.getElementById('mobile-session-name');
+        const projectEl = document.getElementById('mobile-session-project');
         const statusDot = document.querySelector('.mobile-session-status');
 
-        if (!trigger || !statusDot) return;
+        if (!nameEl || !statusDot) return;
 
         const tabData = this.openTabs.get(sessionId);
         if (tabData) {
-            trigger.textContent = tabData.sessionName;
+            nameEl.textContent = tabData.sessionName;
+            if (projectEl) {
+                projectEl.textContent = tabData.projectName || '';
+            }
 
             // Update status
             const tab = document.querySelector(`.terminal-tab[data-session-id="${sessionId}"]`);
@@ -4471,7 +4517,7 @@ class OpenPoet {
                             <button class="btn btn-danger btn-sm" onclick="app.revokeMCPAPIKey()">Revoke</button>
                         </div>
                     </div>
-                    <button class="btn btn-primary btn-sm" onclick="app.saveMCPHTTPSettings()">Save</button>
+                    <button class="btn btn-primary btn-sm" onclick="withLoading(this, () => app.saveMCPHTTPSettings())">Save</button>
                 </div>
             </div>
             <div class="card" style="margin-top: 16px;">
@@ -4668,7 +4714,7 @@ class OpenPoet {
         const actions = `
             <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
             ${isEdit ? `<button class="btn btn-danger" onclick="app.deleteProject(${project.id})">Delete</button>` : ''}
-            <button class="btn btn-primary" onclick="app.saveProject(${project?.id || 'null'})">${isEdit ? 'Save' : 'Create'}</button>
+            <button class="btn btn-primary" onclick="withLoading(this, () => app.saveProject(${project?.id || 'null'}))">${isEdit ? 'Save' : 'Create'}</button>
         `;
 
         this.showModal(isEdit ? 'Edit Project' : 'New Project', content, actions);
@@ -5461,7 +5507,7 @@ class OpenPoet {
 
         const actions = `
             <button class="btn btn-secondary" onclick="app.closeSkillModal()">Cancel</button>
-            <button class="btn btn-primary" onclick="app.saveSkill(${skill?.id || 'null'})">${isEdit ? 'Save' : 'Create'}</button>
+            <button class="btn btn-primary" onclick="withLoading(this, () => app.saveSkill(${skill?.id || 'null'}))">${isEdit ? 'Save' : 'Create'}</button>
         `;
 
         this.showModal(isEdit ? 'Edit Skill' : 'New Skill', content, actions);
@@ -5741,7 +5787,7 @@ class OpenPoet {
 
         const actions = `
             <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
-            <button class="btn btn-primary" onclick="app.saveMCP(${mcp?.id || 'null'})">${isEdit ? 'Save' : 'Create'}</button>
+            <button class="btn btn-primary" onclick="withLoading(this, () => app.saveMCP(${mcp?.id || 'null'}))">${isEdit ? 'Save' : 'Create'}</button>
         `;
 
         this.showModal(isEdit ? 'Edit MCP Server' : 'New MCP Server', content, actions);
