@@ -337,9 +337,31 @@
         background-color: var(--color-status-stopped);
     }
 
-    /* Session name */
-    #mobile-session-name {
+    /* Two-line label container */
+    .mobile-session-labels {
         flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        line-height: 1.2;
+    }
+
+    /* Project name (top line, subtle) */
+    .mobile-session-project {
+        font-size: 10px;
+        font-weight: 400;
+        color: var(--color-text-tertiary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        letter-spacing: 0.02em;
+    }
+
+    /* Session name (bottom line, prominent) */
+    #mobile-session-name {
+        font-size: 13px;
+        font-weight: 500;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -466,7 +488,7 @@
         height: 8px;
         border-radius: 50%;
         flex-shrink: 0;
-        margin-top: 5px;
+        margin-top: 14px;
     }
 
     .mobile-session-item-status[data-status="running"] {
@@ -485,9 +507,28 @@
         background-color: var(--color-status-stopped);
     }
 
+    /* Session item labels container */
+    .mobile-session-item-labels {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+    }
+
+    /* Session item project name */
+    .mobile-session-item-project {
+        font-size: 10px;
+        font-weight: 400;
+        color: var(--color-text-tertiary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        letter-spacing: 0.02em;
+    }
+
     /* Session item name - show full name with wrap in dropdown */
     .mobile-session-item-name {
-        flex: 1;
         font-size: 13px;
         color: var(--color-text);
         word-break: break-word;
@@ -1527,5 +1568,11 @@
     @keyframes popupFadeIn {
         from { opacity: 0; transform: translateY(4px); }
         to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Network feedback adjustments */
+    .network-status-banner {
+        font-size: 12px;
+        padding: 5px 12px;
     }
 }

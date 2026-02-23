@@ -17,6 +17,10 @@
     <link rel="stylesheet" href="/static/css/themes.css?v=__BUILD_VERSION__">
 </head>
 <body>
+    <!-- Network Feedback -->
+    <div id="network-activity-bar" class="network-activity-bar"></div>
+    <div id="network-status-banner" class="network-status-banner"></div>
+
     <div id="app">
         <!-- Sidebar -->
         <aside id="sidebar" class="sidebar">
@@ -213,7 +217,10 @@
                             <div id="mobile-session-dropdown" class="mobile-session-dropdown">
                                 <button id="mobile-session-trigger" class="mobile-session-trigger">
                                     <span class="mobile-session-status"></span>
-                                    <span id="mobile-session-name">Session</span>
+                                    <span class="mobile-session-labels">
+                                        <span id="mobile-session-project" class="mobile-session-project"></span>
+                                        <span id="mobile-session-name">Session</span>
+                                    </span>
                                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <polyline points="6 9 12 15 18 9"></polyline>
                                     </svg>
@@ -1170,6 +1177,7 @@
     <script src="/static/vendor/xterm-addon-web-links.js"></script>
     <script src="/static/js/theme.js?v=__BUILD_VERSION__"></script>
     <script src="/static/js/longpress-tooltip.js?v=__BUILD_VERSION__"></script>
+    <script src="/static/js/network-feedback.js?v=__BUILD_VERSION__"></script>
     <script src="/static/js/app.js?v=__BUILD_VERSION__"></script>
     <script src="/static/js/terminal.js?v=__BUILD_VERSION__"></script>
     <script src="/static/js/hooks.js?v=__BUILD_VERSION__"></script>
