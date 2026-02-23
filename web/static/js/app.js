@@ -587,12 +587,9 @@ class OpenPoet {
     }
 
     // API calls
+    // Activity bar tracking is handled by the global fetch() interceptor in network-feedback.js.
     async api(method, path, data = null, opts = {}) {
-        const nf = window.networkFeedback;
-        const silent = opts.silent === true;
         const timeout = opts.timeout || 30000;
-
-        if (!silent && nf) nf.requestStarted();
 
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeout);
@@ -640,8 +637,6 @@ class OpenPoet {
                 throw netErr;
             }
             throw err;
-        } finally {
-            if (!silent && nf) nf.requestFinished();
         }
     }
 
@@ -4470,10 +4465,14 @@ class OpenPoet {
                 <div class="card-body">
                     <div class="form-group">
                         <label class="form-label">Provider</label>
-                        <select class="form-input" id="whisper-provider">
-                            <option value="openai">OpenAI Whisper</option>
-                            <option value="groq">Groq Whisper (Faster)</option>
+                        <select class="form-input" id="whisper-provider" onchange="app.updateWhisperModels()">
+                            <option value="openai">OpenAI</option>
+                            <option value="groq">Groq (Faster)</option>
                         </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Model</label>
+                        <select class="form-input" id="whisper-model"></select>
                     </div>
                     <div class="form-group">
                         <label class="form-label">OpenAI API Key</label>
@@ -4549,6 +4548,7 @@ class OpenPoet {
                 if (providerSelect && this.settings.whisper_provider) {
                     providerSelect.value = this.settings.whisper_provider;
                 }
+                this.updateWhisperModels();
                 const mcpHttpCheckbox = document.getElementById('mcp-http-enabled');
                 if (mcpHttpCheckbox) {
                     mcpHttpCheckbox.checked = this.settings.mcp_http_enabled === 'true';
@@ -6171,13 +6171,47 @@ class OpenPoet {
         }
     }
 
+    updateWhisperModels() {
+        const provider = document.getElementById('whisper-provider')?.value;
+        const modelSelect = document.getElementById('whisper-model');
+        if (!modelSelect) return;
+
+        const models = {
+            openai: [
+                { value: 'gpt-4o-mini-transcribe', label: 'GPT-4o Mini Transcribe (Recommended)' },
+                { value: 'gpt-4o-transcribe', label: 'GPT-4o Transcribe (Best quality)' },
+                { value: 'whisper-1', label: 'Whisper-1 (Legacy)' },
+            ],
+            groq: [
+                { value: 'whisper-large-v3-turbo', label: 'Whisper Large v3 Turbo (Default)' },
+                { value: 'whisper-large-v3', label: 'Whisper Large v3 (Most accurate)' },
+                { value: 'distil-whisper-large-v3-en', label: 'Distil Whisper EN (English only, fastest)' },
+            ]
+        };
+
+        const options = models[provider] || models.openai;
+        modelSelect.innerHTML = options.map(m =>
+            `<option value="${m.value}">${m.label}</option>`
+        ).join('');
+
+        // Restore saved model if it matches this provider
+        if (this.settings?.whisper_model) {
+            const saved = this.settings.whisper_model;
+            if ([...modelSelect.options].some(o => o.value === saved)) {
+                modelSelect.value = saved;
+            }
+        }
+    }
+
     async saveWhisperSettings() {
         const provider = document.getElementById('whisper-provider').value;
+        const model = document.getElementById('whisper-model').value;
         const openaiKey = document.getElementById('openai-key').value;
         const groqKey = document.getElementById('groq-key').value;
 
         const settings = {
-            whisper_provider: provider
+            whisper_provider: provider,
+            whisper_model: model,
         };
         if (openaiKey) settings.openai_api_key = openaiKey;
         if (groqKey) settings.groq_api_key = groqKey;
