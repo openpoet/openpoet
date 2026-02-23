@@ -36,7 +36,8 @@ import (
 
 // Build-time variables injected via -ldflags
 var BuildVersion = "dev"
-var DefaultRelayURL = "" // e.g., "wss://tunnel-connect.openpoet.ai/"
+var DefaultRelayURL = ""   // e.g., "wss://tunnel-connect.openpoet.ai/"
+var DebugDefault = "false" // Overridden to "true" via ldflags in dev builds
 
 // debugResponseWriter wraps http.ResponseWriter to capture status and size for logging
 type debugResponseWriter struct {
@@ -125,7 +126,12 @@ func main() {
 	dbPath := flag.String("db", "", "Database path (default: openpoet.db)")
 	openaiKey := flag.String("openai-key", "", "OpenAI API key for voice transcription")
 	mcpHTTP := flag.Bool("mcp-http", false, "Enable MCP HTTP endpoint at /mcp")
+	debugFlag := flag.Bool("debug", DebugDefault == "true", "Enable debug logging")
 	flag.Parse()
+
+	if *debugFlag {
+		log.Printf("Debug mode enabled (pass -debug=false to disable)")
+	}
 
 	// Load configuration
 	cfg := config.Load()
@@ -385,24 +391,26 @@ func main() {
 	r.Use(middleware.RealIP)
 
 	// DEBUG: Log static file requests with Content-Type and User-Agent
-	r.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			path := r.URL.RequestURI()
-			if strings.HasPrefix(path, "/static/") || path == "/sw.js" || path == "/" || path == "/manifest.json" {
-				ua := r.Header.Get("User-Agent")
-				log.Printf("[DEBUG-REQ] %s %s UA=%s", r.Method, path, ua)
+	if *debugFlag {
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				path := r.URL.RequestURI()
+				if strings.HasPrefix(path, "/static/") || path == "/sw.js" || path == "/" || path == "/manifest.json" {
+					ua := r.Header.Get("User-Agent")
+					log.Printf("[DEBUG-REQ] %s %s UA=%s", r.Method, path, ua)
 
-				// Wrap response writer to capture Content-Type
-				dw := &debugResponseWriter{ResponseWriter: w, path: path}
-				next.ServeHTTP(dw, r)
+					// Wrap response writer to capture Content-Type
+					dw := &debugResponseWriter{ResponseWriter: w, path: path}
+					next.ServeHTTP(dw, r)
 
-				ct := w.Header().Get("Content-Type")
-				log.Printf("[DEBUG-RES] %s Content-Type=%s Status=%d Size=%d", path, ct, dw.statusCode, dw.bytesWritten)
-				return
-			}
-			next.ServeHTTP(w, r)
+					ct := w.Header().Get("Content-Type")
+					log.Printf("[DEBUG-RES] %s Content-Type=%s Status=%d Size=%d", path, ct, dw.statusCode, dw.bytesWritten)
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
 		})
-	})
+	}
 
 	// CORS for development
 	r.Use(func(next http.Handler) http.Handler {
@@ -426,19 +434,21 @@ func main() {
 
 	// API routes
 	// DEBUG: Client error reporting endpoint
-	r.Post("/api/debug/client-error", func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Error string `json:"error"`
-			UA    string `json:"ua"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "bad request", 400)
-			return
-		}
-		log.Printf("[CLIENT-ERROR] UA=%s\n%s", body.UA, body.Error)
-		w.WriteHeader(200)
-		w.Write([]byte(`{"ok":true}`))
-	})
+	if *debugFlag {
+		r.Post("/api/debug/client-error", func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Error string `json:"error"`
+				UA    string `json:"ua"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "bad request", 400)
+				return
+			}
+			log.Printf("[CLIENT-ERROR] UA=%s\n%s", body.UA, body.Error)
+			w.WriteHeader(200)
+			w.Write([]byte(`{"ok":true}`))
+		})
+	}
 
 	r.Route("/api", func(r chi.Router) {
 		// Version
@@ -490,6 +500,10 @@ func main() {
 		r.Get("/tasks/session-summary", api.GetAllTaskSessionSummary)
 		r.Get("/tasks", api.ListAllTasks)
 		r.Put("/tasks/reorder", api.ReorderAllTasks)
+
+		// Directory browser (for project creation/editing)
+		r.Get("/browse", api.BrowseDirectory)
+		r.Post("/browse/remote", api.BrowseRemoteDirectory)
 
 		r.Get("/projects/{id}/files", fileHandler.ListProjectFiles)
 		r.Get("/projects/{id}/files/view/*", fileHandler.ViewProjectFile)

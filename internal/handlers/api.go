@@ -19,7 +19,9 @@ import (
 	"openpoet/internal/session"
 	"openpoet/internal/tunnel"
 	"openpoet/internal/websocket"
+	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -609,6 +611,31 @@ func respondError(w http.ResponseWriter, status int, message string) {
 	respondJSON(w, status, map[string]string{"error": message})
 }
 
+// validateProjectPath checks that a project path is non-empty and, for local
+// projects, that the directory exists on the filesystem.
+func validateProjectPath(path, projectType string) string {
+	if strings.TrimSpace(path) == "" {
+		return "Path is required"
+	}
+	if projectType != "remote" {
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return fmt.Sprintf("Invalid path: %s", err.Error())
+		}
+		info, err := os.Stat(absPath)
+		if os.IsNotExist(err) {
+			return fmt.Sprintf("Directory does not exist: %s", absPath)
+		}
+		if err != nil {
+			return fmt.Sprintf("Cannot access path: %s", err.Error())
+		}
+		if !info.IsDir() {
+			return fmt.Sprintf("Path is not a directory: %s", absPath)
+		}
+	}
+	return ""
+}
+
 // ============ Projects ============
 
 func (a *API) ListProjects(w http.ResponseWriter, r *http.Request) {
@@ -628,6 +655,18 @@ func (a *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
+	}
+
+	// Validate path
+	input.Path = strings.TrimSpace(input.Path)
+	if errMsg := validateProjectPath(input.Path, input.Type); errMsg != "" {
+		respondError(w, http.StatusBadRequest, errMsg)
+		return
+	}
+	if input.Type != "remote" {
+		if abs, err := filepath.Abs(input.Path); err == nil {
+			input.Path = abs
+		}
 	}
 
 	project := &database.Project{
@@ -699,6 +738,18 @@ func (a *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate path
+	input.Path = strings.TrimSpace(input.Path)
+	if errMsg := validateProjectPath(input.Path, input.Type); errMsg != "" {
+		respondError(w, http.StatusBadRequest, errMsg)
+		return
+	}
+	if input.Type != "remote" {
+		if abs, err := filepath.Abs(input.Path); err == nil {
+			input.Path = abs
+		}
+	}
+
 	project.Name = input.Name
 	project.Path = input.Path
 	project.Type = input.Type
@@ -768,11 +819,21 @@ func (a *API) DuplicateProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Apply overrides
-	if overrides.Path != "" {
-		clone.Path = overrides.Path
-	}
 	if overrides.Type != "" {
 		clone.Type = overrides.Type
+	}
+	if overrides.Path != "" {
+		overrides.Path = strings.TrimSpace(overrides.Path)
+		if errMsg := validateProjectPath(overrides.Path, clone.Type); errMsg != "" {
+			respondError(w, http.StatusBadRequest, errMsg)
+			return
+		}
+		if clone.Type != "remote" {
+			if abs, err := filepath.Abs(overrides.Path); err == nil {
+				overrides.Path = abs
+			}
+		}
+		clone.Path = overrides.Path
 	}
 	if overrides.SSHHost != "" {
 		clone.SSHHost = sql.NullString{String: overrides.SSHHost, Valid: true}
@@ -804,6 +865,134 @@ func (a *API) DuplicateProject(w http.ResponseWriter, r *http.Request) {
 
 	a.hub.BroadcastStateUpdate("project", map[string]interface{}{"action": "created", "project": clone})
 	respondJSON(w, http.StatusCreated, clone)
+}
+
+// BrowseDirectory lists directories at a given local filesystem path.
+// Used by the project creation form to pick a working directory.
+func (a *API) BrowseDirectory(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			path = "/"
+		} else {
+			path = home
+		}
+	}
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, fmt.Sprintf("Invalid path: %s", err.Error()))
+		return
+	}
+
+	entries, err := os.ReadDir(absPath)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, fmt.Sprintf("Cannot read directory: %s", err.Error()))
+		return
+	}
+
+	var dirs []files.FileInfo
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		// Skip hidden directories
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		dirs = append(dirs, files.FileInfo{
+			Name:    entry.Name(),
+			Path:    filepath.Join(absPath, entry.Name()),
+			Size:    info.Size(),
+			IsDir:   true,
+			ModTime: info.ModTime(),
+			Mode:    info.Mode().String(),
+		})
+	}
+
+	sort.Slice(dirs, func(i, j int) bool {
+		return strings.ToLower(dirs[i].Name) < strings.ToLower(dirs[j].Name)
+	})
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"current": absPath,
+		"entries": dirs,
+	})
+}
+
+// BrowseRemoteDirectory lists directories on a remote server via SSH/SFTP.
+// Used by the project creation form to pick a working directory on a remote host.
+func (a *API) BrowseRemoteDirectory(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		SSHHost       string `json:"ssh_host"`
+		SSHPort       int    `json:"ssh_port"`
+		SSHUser       string `json:"ssh_user"`
+		SSHAuthType   string `json:"ssh_auth_type"`
+		SSHCredential string `json:"ssh_credential"`
+		Path          string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if input.SSHHost == "" || input.SSHUser == "" {
+		respondError(w, http.StatusBadRequest, "SSH host and user are required")
+		return
+	}
+	if input.SSHPort <= 0 {
+		input.SSHPort = 22
+	}
+	if input.Path == "" {
+		input.Path = "/"
+	}
+
+	// Build a temporary project struct for the remote file manager
+	tmpProject := &database.Project{
+		Path:        input.Path,
+		Type:        "remote",
+		SSHHost:     sql.NullString{String: input.SSHHost, Valid: true},
+		SSHPort:     sql.NullInt64{Int64: int64(input.SSHPort), Valid: true},
+		SSHUser:     sql.NullString{String: input.SSHUser, Valid: true},
+		SSHAuthType: sql.NullString{String: input.SSHAuthType, Valid: input.SSHAuthType != ""},
+	}
+
+	// Encrypt credential temporarily if provided
+	if input.SSHCredential != "" {
+		encrypted, iv, err := a.encryptor.Encrypt(input.SSHCredential)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to process credentials")
+			return
+		}
+		tmpProject.SSHCredentialEncrypted = sql.NullString{String: encrypted, Valid: true}
+		tmpProject.SSHCredentialIV = sql.NullString{String: iv, Valid: true}
+	}
+
+	fm := files.NewRemoteFileManager(tmpProject, a.DecryptFunc())
+	fileList, err := fm.List("")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, fmt.Sprintf("Cannot browse remote directory: %s", err.Error()))
+		return
+	}
+
+	// Filter to directories only
+	var dirs []files.FileInfo
+	for _, f := range fileList {
+		if f.IsDir {
+			f.Path = filepath.Join(input.Path, f.Name)
+			dirs = append(dirs, f)
+		}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"current": input.Path,
+		"entries": dirs,
+	})
 }
 
 func (a *API) DeleteProject(w http.ResponseWriter, r *http.Request) {
