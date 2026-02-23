@@ -4831,7 +4831,7 @@ class OpenPoet {
             }
             this.showToast('Rate Limited', msg, 'warning');
         } else {
-            this._showApiError(error);
+            this.showToast('Error', error.message || 'Request failed', 'error');
         }
     }
 
