@@ -703,7 +703,7 @@ class OpenPoet {
                 <div class="card-header">
                     <div>
                         <div class="card-title">${this.escapeHtml(project.name)}</div>
-                        <div class="card-subtitle">${this.escapeHtml(project.path)}</div>
+                        <div class="card-subtitle" title="${this.escapeHtml(project.path)}">${this.escapeHtml(project.path)}</div>
                     </div>
                     <span class="badge badge-${project.type}">${project.type}</span>
                 </div>
@@ -4584,6 +4584,7 @@ class OpenPoet {
 
     showProjectModal(project = null) {
         const isEdit = project && project.id;
+        this._browseEditProjectId = project?.id || null;
         const content = `
             <form id="project-form">
                 <div class="form-group">
@@ -4592,7 +4593,10 @@ class OpenPoet {
                 </div>
                 <div class="form-group">
                     <label class="form-label">Path</label>
-                    <input type="text" class="form-input" name="path" value="${project?.path || ''}" required>
+                    <div style="display: flex; gap: 8px;">
+                        <input type="text" class="form-input" name="path" value="${project?.path || ''}" required style="flex: 1;">
+                        <button type="button" class="btn btn-secondary" onclick="app.browseDirectory()" title="Browse directories">Browse</button>
+                    </div>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Type</label>
@@ -4767,15 +4771,29 @@ class OpenPoet {
     }
 
     async saveProject(projectId) {
+        this._clearFieldErrors();
         const form = document.getElementById('project-form');
         const formData = new FormData(form);
         const credentialFromFormData = formData.get('ssh_credential');
         const credentialFromDOM = document.querySelector('#project-form textarea[name="ssh_credential"]')?.value;
         const ssh_credential = credentialFromFormData || credentialFromDOM || '';
         console.log('[saveProject] credential from FormData:', credentialFromFormData?.length || 0, 'from DOM:', credentialFromDOM?.length || 0);
+
+        const name = (formData.get('name') || '').trim();
+        const path = (formData.get('path') || '').trim();
+
+        if (!name) {
+            this._showFieldError('name', 'Name is required');
+            return;
+        }
+        if (!path) {
+            this._showFieldError('path', 'Path is required');
+            return;
+        }
+
         const data = {
-            name: formData.get('name'),
-            path: formData.get('path'),
+            name,
+            path,
             type: formData.get('type'),
             ssh_host: formData.get('ssh_host'),
             ssh_port: parseInt(formData.get('ssh_port')) || 22,
@@ -4795,8 +4813,257 @@ class OpenPoet {
             this.showToast('Success', 'Project saved', 'success');
             this.loadProjects();
         } catch (error) {
-            this._showApiError(error);
+            const msg = error?.message || error?.error || String(error);
+            if (msg.toLowerCase().includes('path') || msg.toLowerCase().includes('directory')) {
+                this._showFieldError('path', msg);
+            } else {
+                this._showApiError(error);
+            }
         }
+    }
+
+    _showFieldError(fieldName, message) {
+        const existing = document.querySelector(`#project-form .field-error[data-field="${fieldName}"]`);
+        if (existing) existing.remove();
+
+        const field = document.querySelector(`#project-form [name="${fieldName}"]`);
+        if (!field) return;
+
+        field.style.borderColor = 'var(--color-danger)';
+
+        const errorEl = document.createElement('div');
+        errorEl.className = 'field-error';
+        errorEl.dataset.field = fieldName;
+        errorEl.textContent = message;
+        errorEl.style.cssText = 'color: var(--color-danger); font-size: 12px; margin-top: 4px;';
+
+        // Insert after the field's parent container (handles the flex wrapper for path)
+        const container = field.closest('.form-group');
+        if (container) {
+            container.appendChild(errorEl);
+        } else {
+            field.parentNode.insertBefore(errorEl, field.nextSibling);
+        }
+
+        field.focus();
+
+        const clearError = () => {
+            field.style.borderColor = '';
+            errorEl.remove();
+            field.removeEventListener('input', clearError);
+        };
+        field.addEventListener('input', clearError);
+    }
+
+    _clearFieldErrors() {
+        document.querySelectorAll('#project-form .field-error').forEach(el => el.remove());
+        document.querySelectorAll('#project-form .form-input, #project-form .form-select, #project-form .form-textarea')
+            .forEach(el => el.style.borderColor = '');
+    }
+
+    async browseDirectory() {
+        const form = document.getElementById('project-form');
+        if (!form) return;
+
+        const projectType = form.querySelector('[name="type"]')?.value || 'local';
+        const currentPath = form.querySelector('[name="path"]')?.value?.trim() || '';
+
+        // Save all form state so we can restore it after the picker closes
+        this._savedProjectForm = {
+            id: this._browseEditProjectId || null,
+            name: form.querySelector('[name="name"]')?.value || '',
+            path: currentPath,
+            type: projectType,
+            tool_policy: form.querySelector('[name="tool_policy"]')?.value || '',
+            ssh_host: form.querySelector('[name="ssh_host"]')?.value || '',
+            ssh_port: form.querySelector('[name="ssh_port"]')?.value || '22',
+            ssh_user: form.querySelector('[name="ssh_user"]')?.value || '',
+            ssh_auth_type: form.querySelector('[name="ssh_auth_type"]')?.value || 'password',
+            ssh_credential: form.querySelector('[name="ssh_credential"]')?.value || ''
+        };
+
+        this._browseProjectType = projectType;
+        this._browseSSHData = null;
+
+        if (projectType === 'remote') {
+            this._browseSSHData = {
+                ssh_host: this._savedProjectForm.ssh_host,
+                ssh_port: parseInt(this._savedProjectForm.ssh_port) || 22,
+                ssh_user: this._savedProjectForm.ssh_user,
+                ssh_auth_type: this._savedProjectForm.ssh_auth_type,
+                ssh_credential: this._savedProjectForm.ssh_credential
+            };
+            if (!this._browseSSHData.ssh_host || !this._browseSSHData.ssh_user) {
+                this._showFieldError('ssh_host', 'Fill in SSH host and user before browsing');
+                return;
+            }
+        }
+
+        this._showDirectoryPicker(currentPath || null);
+    }
+
+    async _showDirectoryPicker(startPath) {
+        const content = `
+            <div id="dir-picker">
+                <div style="display: flex; gap: 8px; margin-bottom: 12px; align-items: center;">
+                    <input type="text" class="form-input" id="dir-picker-path" placeholder="/" style="flex: 1; font-family: monospace; font-size: 13px;">
+                    <button class="btn btn-secondary btn-sm" onclick="app._browseToPath()" title="Go to path">Go</button>
+                </div>
+                <div id="dir-picker-list" style="max-height: 350px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 6px;">
+                    <div style="padding: 16px; color: var(--color-text-muted);">Loading...</div>
+                </div>
+                <div id="dir-picker-error" style="color: var(--color-danger); font-size: 12px; margin-top: 8px; display: none;"></div>
+            </div>
+        `;
+
+        const actions = `
+            <button class="btn btn-secondary" onclick="app._closeDirPicker()">Cancel</button>
+            <button class="btn btn-primary" onclick="app._selectDirectory()">Select this directory</button>
+        `;
+
+        this.showModal('Browse Directory', content, actions);
+        this._loadDirectoryListing(startPath);
+    }
+
+    async _loadDirectoryListing(path) {
+        const listEl = document.getElementById('dir-picker-list');
+        const pathEl = document.getElementById('dir-picker-path');
+        const errorEl = document.getElementById('dir-picker-error');
+        if (!listEl) return;
+
+        listEl.innerHTML = '<div style="padding: 16px; color: var(--color-text-muted);">Loading...</div>';
+        if (errorEl) errorEl.style.display = 'none';
+
+        try {
+            let data;
+            if (this._browseProjectType === 'remote') {
+                const body = { ...this._browseSSHData, path: path || '/' };
+                const resp = await fetch('/api/browse/remote', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    throw new Error(err.error || 'Failed to browse remote directory');
+                }
+                data = await resp.json();
+            } else {
+                const queryPath = path ? `?path=${encodeURIComponent(path)}` : '';
+                const resp = await fetch(`/api/browse${queryPath}`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    throw new Error(err.error || 'Failed to browse directory');
+                }
+                data = await resp.json();
+            }
+
+            this._browseCurrentPath = data.current;
+            if (pathEl) pathEl.value = data.current;
+
+            let html = '';
+
+            // Parent directory
+            const parent = data.current.split('/').slice(0, -1).join('/') || '/';
+            if (data.current !== '/') {
+                html += `
+                    <div class="file-item directory" onclick="app._loadDirectoryListing('${this._escapeAttr(parent)}')" style="padding: 8px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--color-border);">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="15 18 9 12 15 6"></polyline>
+                        </svg>
+                        <span style="color: var(--color-text-muted);">..</span>
+                    </div>
+                `;
+            }
+
+            const entries = data.entries || [];
+            if (entries.length === 0 && data.current === '/') {
+                html += '<div style="padding: 16px; color: var(--color-text-muted);">No subdirectories</div>';
+            }
+
+            for (const entry of entries) {
+                html += `
+                    <div class="file-item directory" onclick="app._loadDirectoryListing('${this._escapeAttr(entry.path)}')" style="padding: 8px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--color-border);">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary)" stroke-width="2">
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                        <span>${this.escapeHtml(entry.name)}</span>
+                    </div>
+                `;
+            }
+
+            if (entries.length === 0 && data.current !== '/') {
+                html += '<div style="padding: 16px; color: var(--color-text-muted);">No subdirectories</div>';
+            }
+
+            listEl.innerHTML = html;
+        } catch (error) {
+            listEl.innerHTML = '';
+            if (errorEl) {
+                errorEl.textContent = error.message;
+                errorEl.style.display = '';
+            }
+        }
+    }
+
+    _browseToPath() {
+        const pathEl = document.getElementById('dir-picker-path');
+        if (pathEl && pathEl.value.trim()) {
+            this._loadDirectoryListing(pathEl.value.trim());
+        }
+    }
+
+    _selectDirectory() {
+        const path = this._browseCurrentPath;
+        if (!path) return;
+
+        // Update the saved form state with the selected path
+        if (this._savedProjectForm) {
+            this._savedProjectForm.path = path;
+        }
+        this._restoreProjectForm();
+    }
+
+    _closeDirPicker() {
+        this._restoreProjectForm();
+    }
+
+    _restoreProjectForm() {
+        const saved = this._savedProjectForm;
+        if (!saved) {
+            this.hideModal();
+            return;
+        }
+
+        // Re-render the project modal with a fake project object containing saved values
+        const fakeProject = {
+            id: saved.id,
+            name: saved.name,
+            path: saved.path,
+            type: saved.type,
+            tool_policy: saved.tool_policy,
+            ssh_host: { String: saved.ssh_host },
+            ssh_port: { Int64: parseInt(saved.ssh_port) || 22 },
+            ssh_user: { String: saved.ssh_user },
+            ssh_auth_type: { String: saved.ssh_auth_type },
+            has_credential: !!saved.ssh_credential
+        };
+        this._browseEditProjectId = saved.id;
+        this.showProjectModal(fakeProject);
+
+        // Restore the SSH credential field (not part of the project object display)
+        setTimeout(() => {
+            const credField = document.querySelector('#project-form textarea[name="ssh_credential"]');
+            if (credField && saved.ssh_credential) {
+                credField.value = saved.ssh_credential;
+            }
+        }, 10);
+
+        this._savedProjectForm = null;
+    }
+
+    _escapeAttr(str) {
+        return str.replace(/'/g, "\\'").replace(/"/g, '&quot;');
     }
 
     deleteProject(projectId) {
