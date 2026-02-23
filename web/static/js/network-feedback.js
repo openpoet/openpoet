@@ -7,7 +7,7 @@
  *   3. withLoading() — utility to add loading state to buttons during async operations
  *
  * Integration:
- *   - app.api() calls requestStarted()/requestFinished() to drive the activity bar
+ *   - Global fetch() interceptor automatically tracks ALL network requests
  *   - app.updateConnectionStatus() calls onWebSocketChange() to drive the banner
  *   - Online/offline browser events are listened to automatically
  */
@@ -149,3 +149,23 @@ window.withLoading = withLoading;
 
 // Initialize on DOM ready (script loaded before app.js, elements already in DOM)
 window.networkFeedback = new NetworkFeedback();
+
+// ---- Global fetch() interceptor ----
+// Wraps window.fetch so ALL network requests (not just api()) drive the activity bar.
+// Skips static assets, manifest, and service worker fetches.
+(function() {
+    const _originalFetch = window.fetch;
+    window.fetch = function(input, init) {
+        const url = typeof input === 'string' ? input : (input?.url || '');
+        // Skip static assets — these are page loads, not user-initiated operations
+        if (url.includes('/static/') || url.includes('/sw.js') || url.includes('/manifest.json') || url.includes('/favicon')) {
+            return _originalFetch.apply(this, arguments);
+        }
+        const nf = window.networkFeedback;
+        if (nf) nf.requestStarted();
+        return _originalFetch.apply(this, arguments).then(
+            response => { if (nf) nf.requestFinished(); return response; },
+            error    => { if (nf) nf.requestFinished(); throw error; }
+        );
+    };
+})();
