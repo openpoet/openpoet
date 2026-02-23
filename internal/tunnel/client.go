@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -20,7 +21,7 @@ const TunnelHeader = "X-Tunnel-Request"
 
 // Client connects to a relay server and forwards requests to the local OpenPoet.
 type Client struct {
-	relayURL  string // wss://relay.example.com/tunnel/connect
+	relayURL  string // wss://tunnel-connect.relay.example.com/
 	authToken string
 	localAddr string // localhost:8080
 
@@ -51,7 +52,11 @@ type Client struct {
 }
 
 // NewClient creates a new tunnel client.
+// The relayURL must use wss:// — plaintext ws:// is rejected.
 func NewClient(relayURL, authToken, localAddr string) *Client {
+	if !strings.HasPrefix(relayURL, "wss://") {
+		log.Printf("[TUNNEL] WARNING: relay URL must use wss://, got: %s", relayURL)
+	}
 	return &Client{
 		relayURL:  relayURL,
 		authToken: authToken,
@@ -60,6 +65,12 @@ func NewClient(relayURL, authToken, localAddr string) *Client {
 		localWS:   make(map[string]*websocket.Conn),
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					MinVersion:         tls.VersionTLS12,
+					InsecureSkipVerify: false,
+				},
+			},
 		},
 	}
 }
@@ -195,7 +206,13 @@ func (c *Client) reconnectLoop() {
 func (c *Client) connectOnce(ctx context.Context) error {
 	c.setStatus("connecting", "")
 
-	conn, _, err := websocket.Dial(ctx, c.relayURL, nil)
+	if !strings.HasPrefix(c.relayURL, "wss://") {
+		return fmt.Errorf("relay URL must use wss:// (TLS required), got: %s", c.relayURL)
+	}
+
+	conn, _, err := websocket.Dial(ctx, c.relayURL, &websocket.DialOptions{
+		HTTPClient: c.httpClient,
+	})
 	if err != nil {
 		return fmt.Errorf("dial relay: %w", err)
 	}
@@ -506,16 +523,28 @@ func (c *Client) handleWSClose(msg *Message) {
 	}
 }
 
-// RegisterWithRelay calls POST /tunnel/register on the relay to get a per-user token.
+// RegisterWithRelay calls POST on the relay's registration subdomain to get a per-user token.
 // The endpoint is open (no auth required) — rate limited by IP on the relay side.
+// The relayURL must use wss:// — plaintext connections are rejected.
 func RegisterWithRelay(relayURL string) (string, error) {
-	// Convert wss://host/tunnel/connect → https://host/tunnel/register
-	baseURL := relayURL
-	baseURL = strings.Replace(baseURL, "/tunnel/connect", "", 1)
-	baseURL = strings.Replace(baseURL, "wss://", "https://", 1)
-	baseURL = strings.Replace(baseURL, "ws://", "http://", 1)
+	if !strings.HasPrefix(relayURL, "wss://") {
+		return "", fmt.Errorf("relay URL must use wss:// (TLS required), got: %s", relayURL)
+	}
 
-	resp, err := http.Post(baseURL+"/tunnel/register", "application/json", nil)
+	// Convert wss://tunnel-connect.relay.example.com/ → https://tunnel-register.relay.example.com/
+	registerURL := strings.Replace(relayURL, "wss://", "https://", 1)
+	registerURL = strings.Replace(registerURL, "tunnel-connect.", "tunnel-register.", 1)
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion:         tls.VersionTLS12,
+				InsecureSkipVerify: false,
+			},
+		},
+	}
+	resp, err := client.Post(registerURL, "application/json", nil)
 	if err != nil {
 		return "", fmt.Errorf("register request failed: %w", err)
 	}
