@@ -4209,21 +4209,25 @@ func (h *AIHandler) EvaluateSession(ctx context.Context, sessionID string, trigg
 		return false
 	}
 
-	// Format tasks list
+	// Format tasks list (exclude done tasks to avoid suggesting completed work)
 	var tasksList string
-	if len(tasks) == 0 {
-		tasksList = "No tasks exist for this project."
-	} else {
-		for _, t := range tasks {
-			tasksList += fmt.Sprintf("- [%d] %s (status: %s, priority: %s)\n", t.ID, t.Title, t.Status, t.Priority)
-			if t.Description != "" {
-				desc := t.Description
-				if len(desc) > 100 {
-					desc = desc[:100] + "..."
-				}
-				tasksList += fmt.Sprintf("  Description: %s\n", desc)
-			}
+	var activeTasks int
+	for _, t := range tasks {
+		if t.Status == "done" {
+			continue
 		}
+		activeTasks++
+		tasksList += fmt.Sprintf("- [%d] %s (status: %s, priority: %s)\n", t.ID, t.Title, t.Status, t.Priority)
+		if t.Description != "" {
+			desc := t.Description
+			if len(desc) > 100 {
+				desc = desc[:100] + "..."
+			}
+			tasksList += fmt.Sprintf("  Description: %s\n", desc)
+		}
+	}
+	if activeTasks == 0 {
+		tasksList = "No active tasks exist for this project."
 	}
 
 	linkedTaskInfo := ""
