@@ -352,6 +352,7 @@ body {
     border-radius: var(--border-radius);
     padding: 16px;
     transition: all var(--transition);
+    min-width: 0;
 }
 
 .card:hover {
@@ -375,6 +376,7 @@ body {
     font-size: 12px;
     color: var(--color-text-muted);
     margin-top: 4px;
+    overflow-wrap: anywhere;
 }
 
 .card-body {

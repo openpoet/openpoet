@@ -703,7 +703,7 @@ class OpenPoet {
                 <div class="card-header">
                     <div>
                         <div class="card-title">${this.escapeHtml(project.name)}</div>
-                        <div class="card-subtitle" title="${this.escapeHtml(project.path)}">${this.escapeHtml(project.path)}</div>
+                        <div class="card-subtitle">${this.escapeHtml(project.path)}</div>
                     </div>
                     <span class="badge badge-${project.type}">${project.type}</span>
                 </div>
