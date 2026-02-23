@@ -35,7 +35,7 @@ import (
 
 // Build-time variables injected via -ldflags
 var BuildVersion = "dev"
-var DefaultRelayURL = "" // e.g., "wss://tunnel.openpoet.app/tunnel/connect"
+var DefaultRelayURL = "" // e.g., "wss://tunnel-connect.openpoet.ai/"
 
 // debugResponseWriter wraps http.ResponseWriter to capture status and size for logging
 type debugResponseWriter struct {
