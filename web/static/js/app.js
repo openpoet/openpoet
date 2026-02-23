@@ -6770,12 +6770,23 @@ class OpenPoet {
 
     _doneCollapsed = false;
 
-    toggleDoneSection() {
-        this._doneCollapsed = !this._doneCollapsed;
-        const body = document.querySelector('.done-section-body');
-        const chevron = document.querySelector('.done-section-chevron');
-        if (body) body.classList.toggle('collapsed', this._doneCollapsed);
-        if (chevron) chevron.classList.toggle('collapsed', this._doneCollapsed);
+    toggleDoneSection(el) {
+        if (el) {
+            // Per-section toggle (grouped view) — find the section from the clicked header
+            const section = el.closest('.done-section');
+            if (!section) return;
+            const body = section.querySelector('.done-section-body');
+            const chevron = section.querySelector('.done-section-chevron');
+            if (body) body.classList.toggle('collapsed');
+            if (chevron) chevron.classList.toggle('collapsed');
+        } else {
+            // Global toggle (flat view / project scope)
+            this._doneCollapsed = !this._doneCollapsed;
+            const body = document.querySelector('.done-section-body');
+            const chevron = document.querySelector('.done-section-chevron');
+            if (body) body.classList.toggle('collapsed', this._doneCollapsed);
+            if (chevron) chevron.classList.toggle('collapsed', this._doneCollapsed);
+        }
     }
 
     // ============ Task Drag-and-Drop Reorder (SortableJS) ============
@@ -8145,17 +8156,16 @@ class OpenPoet {
                 }
             }
 
-            // Done section per project group
+            // Done section per project group (always start collapsed)
             if (doneTasks.length > 0) {
-                const doneCollapsed = this._doneCollapsed ? ' collapsed' : '';
                 html += `
                     <div class="done-section">
-                        <div class="done-section-header" onclick="app.toggleDoneSection()">
-                            <svg class="done-section-chevron${this._doneCollapsed ? ' collapsed' : ''}" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                        <div class="done-section-header" onclick="app.toggleDoneSection(this)">
+                            <svg class="done-section-chevron collapsed" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
                             <span class="done-section-title">Completed</span>
                             <span class="done-section-count">${doneTasks.length}</span>
                         </div>
-                        <div class="done-section-body${doneCollapsed}">`;
+                        <div class="done-section-body collapsed">`;
                 for (const task of doneTasks) {
                     const kids = children[task.id] || [];
                     const hasKids = kids.length > 0;
