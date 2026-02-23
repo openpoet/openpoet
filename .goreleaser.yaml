@@ -84,10 +84,8 @@ release:
     curl -fsSL https://raw.githubusercontent.com/openpoet/openpoet/main/install.sh | sh
     ```
 
-    **Windows (winget):**
-    ```powershell
-    winget install openpoet
-    ```
+    **Windows:**
+    Download the `.zip` from the [Releases page](https://github.com/openpoet/openpoet/releases).
   footer: |
     ---
     **Full Changelog**: https://github.com/openpoet/openpoet/compare/{{ .PreviousTag }}...{{ .Tag }}
