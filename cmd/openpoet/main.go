@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -759,10 +760,16 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Start server in goroutine
+	// Bind listener on the main goroutine so port conflicts fail immediately
+	ln, err := net.Listen("tcp", cfg.Address())
+	if err != nil {
+		log.Fatalf("Failed to listen on %s: %v", cfg.Address(), err)
+	}
+	log.Printf("OpenPoet starting on http://%s", cfg.Address())
+
+	// Serve in background
 	go func() {
-		log.Printf("OpenPoet starting on http://%s", cfg.Address())
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server error: %v", err)
 		}
 	}()
@@ -876,9 +883,13 @@ func serveMigrationError(cfg *config.Config) {
 		Handler: mux,
 	}
 
+	errLn, listenErr := net.Listen("tcp", cfg.Address())
+	if listenErr != nil {
+		log.Fatalf("[DB] Failed to listen on %s: %v", cfg.Address(), listenErr)
+	}
+	log.Printf("[DB] Serving error page on http://%s", cfg.Address())
 	go func() {
-		log.Printf("[DB] Serving error page on http://%s", cfg.Address())
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := server.Serve(errLn); err != nil && err != http.ErrServerClosed {
 			log.Printf("[DB] Error server failed: %v", err)
 		}
 	}()
