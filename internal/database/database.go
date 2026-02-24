@@ -479,6 +479,12 @@ func (d *DB) GetProjectMCPServer(ctx context.Context, id int64) (*ProjectMCPServ
 	return &m, err
 }
 
+func (d *DB) GetProjectMCPServerByName(ctx context.Context, projectID int64, name string) (*ProjectMCPServer, error) {
+	var m ProjectMCPServer
+	err := d.GetContext(ctx, &m, "SELECT * FROM project_mcp_servers WHERE project_id = ? AND name = ?", projectID, name)
+	return &m, err
+}
+
 func (d *DB) ListProjectMCPServers(ctx context.Context, projectID int64) ([]ProjectMCPServer, error) {
 	var servers []ProjectMCPServer
 	err := d.SelectContext(ctx, &servers, "SELECT * FROM project_mcp_servers WHERE project_id = ? ORDER BY name", projectID)

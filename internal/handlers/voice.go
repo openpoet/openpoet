@@ -10,10 +10,10 @@ import (
 
 type VoiceHandler struct {
 	api               *API
-	getProviderConfig func() (voice.ProviderType, string)
+	getProviderConfig func() (voice.ProviderType, string, string) // provider, apiKey, model
 }
 
-func NewVoiceHandler(api *API, getProviderConfig func() (voice.ProviderType, string)) *VoiceHandler {
+func NewVoiceHandler(api *API, getProviderConfig func() (voice.ProviderType, string, string)) *VoiceHandler {
 	return &VoiceHandler{
 		api:               api,
 		getProviderConfig: getProviderConfig,
@@ -29,7 +29,7 @@ type base64TranscribeRequest struct {
 }
 
 func (h *VoiceHandler) Transcribe(w http.ResponseWriter, r *http.Request) {
-	providerType, apiKey := h.getProviderConfig()
+	providerType, apiKey, model := h.getProviderConfig()
 	if apiKey == "" {
 		respondError(w, http.StatusServiceUnavailable, providerType.String()+" API key not configured")
 		return
@@ -39,7 +39,7 @@ func (h *VoiceHandler) Transcribe(w http.ResponseWriter, r *http.Request) {
 
 	// JSON body with base64-encoded audio (used via relay tunnel)
 	if strings.HasPrefix(ct, "application/json") {
-		h.transcribeBase64(w, r, providerType, apiKey)
+		h.transcribeBase64(w, r, providerType, apiKey, model)
 		return
 	}
 
@@ -56,7 +56,7 @@ func (h *VoiceHandler) Transcribe(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	provider, err := voice.NewTranscriptionProvider(providerType, apiKey)
+	provider, err := voice.NewTranscriptionProvider(providerType, apiKey, model)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -75,7 +75,7 @@ func (h *VoiceHandler) Transcribe(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, result)
 }
 
-func (h *VoiceHandler) transcribeBase64(w http.ResponseWriter, r *http.Request, providerType voice.ProviderType, apiKey string) {
+func (h *VoiceHandler) transcribeBase64(w http.ResponseWriter, r *http.Request, providerType voice.ProviderType, apiKey string, model string) {
 	var req base64TranscribeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON: "+err.Error())
@@ -96,7 +96,7 @@ func (h *VoiceHandler) transcribeBase64(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	provider, err := voice.NewTranscriptionProvider(providerType, apiKey)
+	provider, err := voice.NewTranscriptionProvider(providerType, apiKey, model)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return

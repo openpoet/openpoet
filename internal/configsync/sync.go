@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -231,8 +232,9 @@ func (cs *ConfigSyncer) syncToRemote(ctx context.Context, project *database.Proj
 type syncableSkill struct {
 	Name           string
 	Content        string
-	GlobalSkillID  int64 // >0 for global skills, 0 for project skills
-	ProjectSkillID int64 // >0 for project skills, 0 for global skills
+	UpdatedAt      time.Time // DB updated_at for timestamp comparison
+	GlobalSkillID  int64     // >0 for global skills, 0 for project skills
+	ProjectSkillID int64     // >0 for project skills, 0 for global skills
 }
 
 // getSkillsForProject returns the effective list of skills to sync for a project,
@@ -247,7 +249,7 @@ func (cs *ConfigSyncer) getSkillsForProject(ctx context.Context, project *databa
 			return nil, fmt.Errorf("failed to list enabled skills for project: %w", err)
 		}
 		for _, s := range globalSkills {
-			result = append(result, syncableSkill{Name: s.Name, Content: s.Content, GlobalSkillID: s.ID})
+			result = append(result, syncableSkill{Name: s.Name, Content: s.Content, UpdatedAt: s.UpdatedAt, GlobalSkillID: s.ID})
 		}
 	} else {
 		// Inherit: use all globally enabled skills
@@ -256,7 +258,7 @@ func (cs *ConfigSyncer) getSkillsForProject(ctx context.Context, project *databa
 			return nil, fmt.Errorf("failed to list enabled skills: %w", err)
 		}
 		for _, s := range globalSkills {
-			result = append(result, syncableSkill{Name: s.Name, Content: s.Content, GlobalSkillID: s.ID})
+			result = append(result, syncableSkill{Name: s.Name, Content: s.Content, UpdatedAt: s.UpdatedAt, GlobalSkillID: s.ID})
 		}
 	}
 
@@ -280,7 +282,7 @@ func (cs *ConfigSyncer) getSkillsForProject(ctx context.Context, project *databa
 				}
 			}
 		}
-		result = append(result, syncableSkill{Name: ps.Name, Content: ps.Content, ProjectSkillID: ps.ID})
+		result = append(result, syncableSkill{Name: ps.Name, Content: ps.Content, UpdatedAt: ps.UpdatedAt, ProjectSkillID: ps.ID})
 	}
 
 	return result, nil
@@ -302,9 +304,11 @@ func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string,
 		expectedDirs[skill.Name] = true
 	}
 
-	// Get previously synced files for this project and clean up stale ones
+	// Get previously synced files for this project
+	var syncedFiles []database.SyncedSkillFile
 	if projectID > 0 {
-		syncedFiles, _ := cs.db.ListSyncedSkillFiles(ctx, projectID)
+		syncedFiles, _ = cs.db.ListSyncedSkillFiles(ctx, projectID)
+		// Clean up stale ones
 		for _, sf := range syncedFiles {
 			// Extract dir name from tracked file (could be old "name.md" or new "name/SKILL.md")
 			dirName := sf.FileName
@@ -327,15 +331,47 @@ func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string,
 		}
 	}
 
+	// Build synced_at lookup for timestamp comparison
+	syncedAtByFile := make(map[string]time.Time)
+	for _, sf := range syncedFiles {
+		syncedAtByFile[sf.FileName] = sf.SyncedAt
+	}
+
 	// Write skills as <name>/SKILL.md
 	for _, skill := range skills {
 		skillDirPath := filepath.Join(skillsDir, skill.Name)
+		skillFilePath := filepath.Join(skillDirPath, "SKILL.md")
+		trackedName := skill.Name + "/SKILL.md"
+
+		// For project skills only: check if file was externally modified since last sync
+		if skill.ProjectSkillID > 0 {
+			if info, err := os.Stat(skillFilePath); err == nil {
+				if syncedAt, ok := syncedAtByFile[trackedName]; ok {
+					if info.ModTime().After(syncedAt.Add(time.Second)) {
+						// File was edited after OpenPoet last wrote it — update DB from file
+						if raw, readErr := os.ReadFile(skillFilePath); readErr == nil {
+							name, content, category := parseSkillMD(string(raw), skill.Name)
+							if dbSkill, getErr := cs.db.GetProjectSkill(ctx, skill.ProjectSkillID); getErr == nil {
+								dbSkill.Content = content
+								dbSkill.Name = name
+								if category != "" {
+									dbSkill.Category = category
+								}
+								cs.db.UpdateProjectSkill(ctx, dbSkill)
+								skill.Content = content
+								log.Printf("[configsync] project skill '%s' updated from disk (file newer than synced_at)", name)
+							}
+						}
+					}
+				}
+			}
+		}
+
 		if err := os.MkdirAll(skillDirPath, 0755); err != nil {
 			return fmt.Errorf("failed to create skill dir %s: %w", skill.Name, err)
 		}
 
 		content := buildSkillMD(skill.Name, skill.Content)
-		skillFilePath := filepath.Join(skillDirPath, "SKILL.md")
 		if err := os.WriteFile(skillFilePath, []byte(content), 0644); err != nil {
 			return fmt.Errorf("failed to write skill %s: %w", skill.Name, err)
 		}
@@ -345,7 +381,6 @@ func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string,
 		os.Remove(legacyPath)
 
 		// Track with new format
-		trackedName := skill.Name + "/SKILL.md"
 		if projectID > 0 {
 			if skill.GlobalSkillID > 0 {
 				cs.db.UpsertSyncedSkillFile(ctx, projectID, skill.GlobalSkillID, trackedName)
@@ -397,13 +432,49 @@ func (cs *ConfigSyncer) syncSkillsToRemote(ctx context.Context, sftpClient *sftp
 		}
 	}
 
+	// Build synced_at lookup for timestamp comparison
+	syncedAtByFile := make(map[string]time.Time)
+	for _, sf := range syncedFiles {
+		syncedAtByFile[sf.FileName] = sf.SyncedAt
+	}
+
 	// Write skills as <name>/SKILL.md
 	for _, skill := range skills {
 		skillDirPath := filepath.Join(skillsDir, skill.Name)
+		skillFilePath := filepath.Join(skillDirPath, "SKILL.md")
+		trackedName := skill.Name + "/SKILL.md"
+
+		// For project skills only: check if remote file was externally modified since last sync
+		if skill.ProjectSkillID > 0 {
+			if info, err := sftpClient.Stat(skillFilePath); err == nil {
+				if syncedAt, ok := syncedAtByFile[trackedName]; ok {
+					if info.ModTime().After(syncedAt.Add(time.Second)) {
+						// File was edited after OpenPoet last wrote it — update DB from file
+						if f, readErr := sftpClient.Open(skillFilePath); readErr == nil {
+							raw, ioErr := io.ReadAll(f)
+							f.Close()
+							if ioErr == nil {
+								name, content, category := parseSkillMD(string(raw), skill.Name)
+								if dbSkill, getErr := cs.db.GetProjectSkill(ctx, skill.ProjectSkillID); getErr == nil {
+									dbSkill.Content = content
+									dbSkill.Name = name
+									if category != "" {
+										dbSkill.Category = category
+									}
+									cs.db.UpdateProjectSkill(ctx, dbSkill)
+									skill.Content = content
+									log.Printf("[configsync] project skill '%s' updated from remote disk (file newer than synced_at)", name)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
 		sftpClient.MkdirAll(skillDirPath)
 
 		content := buildSkillMD(skill.Name, skill.Content)
-		skillFilePath := filepath.Join(skillDirPath, "SKILL.md")
 		f, err := sftpClient.Create(skillFilePath)
 		if err != nil {
 			return fmt.Errorf("failed to create skill file: %w", err)
@@ -414,7 +485,6 @@ func (cs *ConfigSyncer) syncSkillsToRemote(ctx context.Context, sftpClient *sftp
 		// Clean up legacy flat file
 		sftpClient.Remove(filepath.Join(skillsDir, skill.Name+".md"))
 
-		trackedName := skill.Name + "/SKILL.md"
 		if skill.GlobalSkillID > 0 {
 			cs.db.UpsertSyncedSkillFile(ctx, project.ID, skill.GlobalSkillID, trackedName)
 			cs.db.IncrementSkillSyncCount(ctx, skill.GlobalSkillID)
@@ -555,6 +625,7 @@ func (cs *ConfigSyncer) importSkillsFromDisk(ctx context.Context, skillsDir stri
 
 // importMCPsFromDisk reads .mcp.json from the project root and imports
 // any MCP servers not already in the database as project-scoped servers.
+// For existing project-scoped MCPs, updates the DB record if the file is newer.
 func (cs *ConfigSyncer) importMCPsFromDisk(ctx context.Context, projectPath string, project *database.Project) error {
 	mcpPath := filepath.Join(projectPath, ".mcp.json")
 	raw, err := os.ReadFile(mcpPath)
@@ -574,6 +645,12 @@ func (cs *ConfigSyncer) importMCPsFromDisk(ctx context.Context, projectPath stri
 		return nil
 	}
 
+	// Get .mcp.json file modification time for timestamp comparison
+	var mcpFileMtime time.Time
+	if info, err := os.Stat(mcpPath); err == nil {
+		mcpFileMtime = info.ModTime()
+	}
+
 	// Build set of existing project MCP server names
 	existing, _ := cs.db.ListProjectMCPServers(ctx, project.ID)
 	existingNames := make(map[string]bool)
@@ -589,11 +666,8 @@ func (cs *ConfigSyncer) importMCPsFromDisk(ctx context.Context, projectPath stri
 	}
 
 	imported := 0
+	updated := 0
 	for name, rawServer := range mcpConfig.MCPServers {
-		if existingNames[name] || globalNames[name] {
-			continue
-		}
-
 		var server struct {
 			Command string            `json:"command"`
 			Args    []string          `json:"args"`
@@ -616,6 +690,31 @@ func (cs *ConfigSyncer) importMCPsFromDisk(ctx context.Context, projectPath stri
 			envJSON = []byte("{}")
 		}
 
+		if existingNames[name] {
+			// Project MCP exists — update if file is newer
+			if !mcpFileMtime.IsZero() {
+				if dbMCP, err := cs.db.GetProjectMCPServerByName(ctx, project.ID, name); err == nil {
+					if mcpFileMtime.After(dbMCP.UpdatedAt.Add(time.Second)) {
+						dbMCP.Command = server.Command
+						dbMCP.Args = string(argsJSON)
+						dbMCP.Env = string(envJSON)
+						if err := cs.db.UpdateProjectMCPServer(ctx, dbMCP); err != nil {
+							log.Printf("[configsync] failed to update MCP server '%s' for project %d: %v", name, project.ID, err)
+						} else {
+							updated++
+							log.Printf("[configsync] updated MCP server '%s' from .mcp.json for project %d (file newer)", name, project.ID)
+						}
+					}
+				}
+			}
+			continue
+		}
+		if globalNames[name] {
+			// Global MCP — never update from project file
+			continue
+		}
+
+		// New MCP server — import as project-scoped
 		m := &database.ProjectMCPServer{
 			ProjectID: project.ID,
 			Name:      name,
@@ -633,8 +732,8 @@ func (cs *ConfigSyncer) importMCPsFromDisk(ctx context.Context, projectPath stri
 		log.Printf("[configsync] imported MCP server '%s' from .mcp.json for project %d (ID: %d)", name, project.ID, m.ID)
 	}
 
-	if imported > 0 {
-		cs.reportProgress(project.ID, "mcps_import", "done", fmt.Sprintf("Imported %d MCP server(s) from .mcp.json", imported))
+	if imported > 0 || updated > 0 {
+		cs.reportProgress(project.ID, "mcps_import", "done", fmt.Sprintf("Imported %d, updated %d MCP server(s) from .mcp.json", imported, updated))
 	}
 	return nil
 }
@@ -719,6 +818,7 @@ func (cs *ConfigSyncer) importSkillsFromRemote(ctx context.Context, sftpClient *
 
 // importMCPsFromRemote reads .mcp.json from a remote project via SFTP
 // and imports untracked MCP servers as project-scoped servers.
+// For existing project-scoped MCPs, updates the DB record if the file is newer.
 func (cs *ConfigSyncer) importMCPsFromRemote(ctx context.Context, sftpClient *sftp.Client, projectPath string, project *database.Project) error {
 	mcpPath := filepath.Join(projectPath, ".mcp.json")
 	f, err := sftpClient.Open(mcpPath)
@@ -741,6 +841,12 @@ func (cs *ConfigSyncer) importMCPsFromRemote(ctx context.Context, sftpClient *sf
 		return nil
 	}
 
+	// Get remote .mcp.json file modification time
+	var mcpFileMtime time.Time
+	if info, err := sftpClient.Stat(mcpPath); err == nil {
+		mcpFileMtime = info.ModTime()
+	}
+
 	existing, _ := cs.db.ListProjectMCPServers(ctx, project.ID)
 	existingNames := make(map[string]bool)
 	for _, m := range existing {
@@ -753,11 +859,8 @@ func (cs *ConfigSyncer) importMCPsFromRemote(ctx context.Context, sftpClient *sf
 	}
 
 	imported := 0
+	updated := 0
 	for name, rawServer := range mcpConfig.MCPServers {
-		if existingNames[name] || globalNames[name] {
-			continue
-		}
-
 		var server struct {
 			Command string            `json:"command"`
 			Args    []string          `json:"args"`
@@ -776,6 +879,29 @@ func (cs *ConfigSyncer) importMCPsFromRemote(ctx context.Context, sftpClient *sf
 			envJSON = []byte("{}")
 		}
 
+		if existingNames[name] {
+			// Project MCP exists — update if file is newer
+			if !mcpFileMtime.IsZero() {
+				if dbMCP, err := cs.db.GetProjectMCPServerByName(ctx, project.ID, name); err == nil {
+					if mcpFileMtime.After(dbMCP.UpdatedAt.Add(time.Second)) {
+						dbMCP.Command = server.Command
+						dbMCP.Args = string(argsJSON)
+						dbMCP.Env = string(envJSON)
+						if err := cs.db.UpdateProjectMCPServer(ctx, dbMCP); err == nil {
+							updated++
+							log.Printf("[configsync] updated MCP server '%s' from remote .mcp.json for project %d (file newer)", name, project.ID)
+						}
+					}
+				}
+			}
+			continue
+		}
+		if globalNames[name] {
+			// Global MCP — never update from project file
+			continue
+		}
+
+		// New MCP server — import as project-scoped
 		m := &database.ProjectMCPServer{
 			ProjectID: project.ID,
 			Name:      name,
@@ -791,8 +917,8 @@ func (cs *ConfigSyncer) importMCPsFromRemote(ctx context.Context, sftpClient *sf
 		imported++
 	}
 
-	if imported > 0 {
-		cs.reportProgress(project.ID, "mcps_import", "done", fmt.Sprintf("Imported %d MCP server(s) from remote .mcp.json", imported))
+	if imported > 0 || updated > 0 {
+		cs.reportProgress(project.ID, "mcps_import", "done", fmt.Sprintf("Imported %d, updated %d MCP server(s) from remote .mcp.json", imported, updated))
 	}
 	return nil
 }
