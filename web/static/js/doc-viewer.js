@@ -14,11 +14,15 @@ class DocViewer {
         this.contentEl = document.getElementById('doc-review-content');
         this.footerEl = document.getElementById('doc-review-footer');
         this.closeBtn = document.getElementById('doc-review-close');
+        this.downloadBtn = document.getElementById('doc-review-download');
 
         if (!this.overlay) return;
         this._history = [];
+        this._currentContent = null;
+        this._currentTitle = null;
 
         this.closeBtn?.addEventListener('click', () => this.close());
+        this.downloadBtn?.addEventListener('click', () => this._downloadDocument());
         this.overlay.addEventListener('click', (e) => {
             if (e.target === this.overlay) this.close();
         });
@@ -213,6 +217,8 @@ class DocViewer {
             this._history.push({
                 title: this.nameEl.textContent,
                 html: this.contentEl.innerHTML,
+                rawContent: this._currentContent,
+                rawTitle: this._currentTitle,
                 footerFragment,
                 footerHidden: this.footerEl.classList.contains('hidden'),
                 footerVersion: this.footerEl.dataset.version || '',
@@ -221,8 +227,10 @@ class DocViewer {
         }
 
         this._onClose = opts.onClose || null;
-        this.nameEl.textContent = title || 'Document';
-        this.contentEl.innerHTML = this._renderMarkdown(content || '');
+        this._currentContent = content || '';
+        this._currentTitle = title || 'Document';
+        this.nameEl.textContent = this._currentTitle;
+        this.contentEl.innerHTML = this._renderMarkdown(this._currentContent);
         // Defer mermaid rendering to ensure DOM is stable
         requestAnimationFrame(() => {
             if (typeof FileViewer !== 'undefined') FileViewer.renderMermaid(this.contentEl);
@@ -296,6 +304,8 @@ class DocViewer {
             const prev = this._history.pop();
             this.nameEl.textContent = prev.title;
             this.contentEl.innerHTML = prev.html;
+            this._currentContent = prev.rawContent || null;
+            this._currentTitle = prev.rawTitle || null;
             this.footerEl.innerHTML = '';
             this.footerEl.appendChild(prev.footerFragment);
             if (prev.footerVersion) {
@@ -316,6 +326,8 @@ class DocViewer {
             this._onClose();
             this._onClose = null;
         }
+        this._currentContent = null;
+        this._currentTitle = null;
         this.overlay.classList.add('hidden');
         this._history = [];
     }
@@ -332,6 +344,24 @@ class DocViewer {
             }
         }
         return this._escapeHtml(text).replace(/\n/g, '<br>');
+    }
+
+    _downloadDocument() {
+        if (!this._currentContent) return;
+        const safeName = (this._currentTitle || 'document')
+            .replace(/[^a-zA-Z0-9\s-]/g, '')
+            .replace(/\s+/g, '-')
+            .toLowerCase()
+            .substring(0, 60) || 'document';
+        const blob = new Blob([this._currentContent], { type: 'text/markdown;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${safeName}.md`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
     _escapeHtml(str) {
