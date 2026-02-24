@@ -352,6 +352,12 @@ class TerminalManager {
             if (msg.type === 'session_output' && msg.data) {
                 this.dismissConnectingOverlay(sessionId);
                 terminal.write(msg.data);
+                // Clear pending input tracking for activity bar
+                const _td = this.terminals.get(sessionId);
+                if (_td && _td._awaitingOutput) {
+                    _td._awaitingOutput = false;
+                    window.networkFeedback?.requestFinished();
+                }
             } else if (msg.type === 'session_status') {
                 if (msg.data.status === 'completed' || msg.data.status === 'error' || msg.data.status === 'stopped') {
                     this.dismissConnectingOverlay(sessionId);
@@ -392,6 +398,11 @@ class TerminalManager {
                 if (ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'input', data: data }));
                     this.clearScrollLock(termData);
+                    // Track pending output for activity bar
+                    if (!termData._awaitingOutput) {
+                        termData._awaitingOutput = true;
+                        window.networkFeedback?.requestStarted();
+                    }
                 }
             });
         }
@@ -581,6 +592,11 @@ class TerminalManager {
                 const msg = JSON.parse(data);
                 if (msg.type === 'session_output' && msg.data) {
                     td.terminal.write(msg.data);
+                    // Clear pending input tracking for activity bar
+                    if (td._awaitingOutput) {
+                        td._awaitingOutput = false;
+                        window.networkFeedback?.requestFinished();
+                    }
                 } else if (msg.type === 'session_status') {
                     if (msg.data.status === 'completed' || msg.data.status === 'error' || msg.data.status === 'stopped') {
                         td.terminal.writeln(`\r\n\x1b[33mSession ${msg.data.status}\x1b[0m`);
@@ -610,6 +626,10 @@ class TerminalManager {
                     if (ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({ type: 'input', data: data }));
                         this.clearScrollLock(td);
+                        if (!td._awaitingOutput) {
+                            td._awaitingOutput = true;
+                            window.networkFeedback?.requestStarted();
+                        }
                     }
                 });
             }
@@ -867,6 +887,11 @@ class TerminalManager {
         const termData = this.terminals.get(sessionId);
         if (termData && termData.ws && termData.ws.readyState === WebSocket.OPEN) {
             termData.ws.send(JSON.stringify({ type: 'input', data: data }));
+            // Track pending output for activity bar
+            if (!termData._awaitingOutput) {
+                termData._awaitingOutput = true;
+                window.networkFeedback?.requestStarted();
+            }
         }
     }
 
