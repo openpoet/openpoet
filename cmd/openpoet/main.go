@@ -1103,21 +1103,17 @@ func runTaskDueChecker(db *database.DB, notifService *notifications.Service, hub
 }
 
 // runUpdateChecker periodically checks for binary updates via GitHub Releases.
+// Always runs — not configurable. Notifies once per release version.
 func runUpdateChecker(db *database.DB, u *updater.Updater, hub *websocket.Hub) {
 	// Initial delay to let server start and avoid contention at boot
 	time.Sleep(30 * time.Second)
 
 	checkOnce := func() {
-		ctx := context.Background()
-
-		policy, _ := db.GetSetting(ctx, "auto_update_policy")
-		if policy == updater.PolicyDisabled {
-			return
-		}
 		if updater.IsDevBuild(u.CurrentVersion) {
 			return
 		}
 
+		ctx := context.Background()
 		status, err := u.CheckForUpdate(ctx)
 		if err != nil {
 			log.Printf("[Updater] Check failed: %v", err)
@@ -1127,33 +1123,18 @@ func runUpdateChecker(db *database.DB, u *updater.Updater, hub *websocket.Hub) {
 		db.SetSetting(ctx, "auto_update_last_check", time.Now().Format(time.RFC3339))
 
 		if status.Available {
-			db.SetSetting(ctx, "auto_update_last_version", status.LatestVersion)
+			// Only notify once per release version
+			notifiedVersion, _ := db.GetSetting(ctx, "auto_update_notified_version")
+			if notifiedVersion == status.LatestVersion {
+				return // already notified for this version
+			}
+
+			db.SetSetting(ctx, "auto_update_notified_version", status.LatestVersion)
 			hub.BroadcastStateUpdate("update", map[string]interface{}{
 				"action":  "available",
 				"version": status.LatestVersion,
 			})
-
-			// Auto-apply if policy is "auto" (still respects active sessions)
-			if policy == updater.PolicyAuto {
-				activeSessions, _ := db.ListActiveSessions(ctx)
-				if len(activeSessions) > 0 {
-					log.Printf("[Updater] Auto-update deferred: %d session(s) running", len(activeSessions))
-					return
-				}
-				log.Printf("[Updater] Auto-applying update to v%s", status.LatestVersion)
-				if err := u.DownloadAndApply(ctx, status); err != nil {
-					log.Printf("[Updater] Auto-apply failed: %v", err)
-					return
-				}
-				hub.BroadcastStateUpdate("update", map[string]interface{}{
-					"action":  "restarting",
-					"version": status.LatestVersion,
-				})
-				time.Sleep(1 * time.Second)
-				if err := updater.RestartSelf(); err != nil {
-					log.Printf("[Updater] Restart failed: %v", err)
-				}
-			}
+			log.Printf("[Updater] New version available: v%s", status.LatestVersion)
 		}
 	}
 
