@@ -5560,16 +5560,6 @@ class OpenPoet {
             });
         });
 
-        // Sync all button
-        document.getElementById('btn-sync-all')?.addEventListener('click', async () => {
-            try {
-                await this.api('POST', '/config/sync-all');
-                this.showToast('Success', 'Config synced to all projects', 'success');
-            } catch (error) {
-                this._showApiError(error);
-            }
-        });
-
         // Project detail back button
         document.getElementById('btn-back-projects')?.addEventListener('click', () => {
             this.showView('projects');
