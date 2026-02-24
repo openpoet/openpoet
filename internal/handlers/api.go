@@ -18,6 +18,7 @@ import (
 	"openpoet/internal/security"
 	"openpoet/internal/session"
 	"openpoet/internal/tunnel"
+	"openpoet/internal/updater"
 	"openpoet/internal/websocket"
 	"os"
 	"path/filepath"
@@ -131,6 +132,9 @@ type API struct {
 
 	pendingSkillProposalsMu sync.Mutex
 	pendingSkillProposals   map[string]*pendingSkillProposal // docID -> pending skill
+
+	// Binary auto-updater
+	updater *updater.Updater
 
 	// Tunnel client for remote access (dynamically created/destroyed)
 	tunnelMu     sync.Mutex
@@ -599,6 +603,11 @@ func NewAPI(
 		notifService: notifService,
 		hookHandler:  hookHandler,
 	}
+}
+
+// SetUpdater configures the binary auto-updater for the API.
+func (a *API) SetUpdater(u *updater.Updater) {
+	a.updater = u
 }
 
 func respondJSON(w http.ResponseWriter, status int, data interface{}) {

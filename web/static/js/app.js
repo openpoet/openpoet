@@ -91,6 +91,8 @@ class OpenPoet {
                 } else if (event.data && event.data.type === 'navigate_to_session') {
                     this.openTerminal(event.data.session_id);
                 } else if (event.data && event.data.type === 'sw_updated') {
+                    // Defense-in-depth: skip if we just applied an update and are mid-reload
+                    if (sessionStorage.getItem('openpoet-update-applying')) return;
                     const metaVersion = document.querySelector('meta[name="app-version"]')?.content;
                     if (metaVersion && event.data.version &&
                         event.data.version !== 'openpoet-' + metaVersion) {
@@ -557,6 +559,13 @@ class OpenPoet {
             case 'mcp':
             case 'settings':
                 this.loadConfig();
+                break;
+            case 'update':
+                if (data.data?.action === 'available') {
+                    this.showToast('Update Available', `OpenPoet v${data.data.version} is available. Go to Settings to update.`, 'warning');
+                } else if (data.data?.action === 'restarting') {
+                    this._waitForRestart(data.data.version);
+                }
                 break;
             case 'tunnel':
                 if (data.data) this.updateTunnelUI({ ...this._tunnelStatus, ...data.data });
@@ -4487,6 +4496,31 @@ class OpenPoet {
             </div>
             <div class="card" style="margin-top: 16px;">
                 <div class="card-header">
+                    <div class="card-title">Application Updates</div>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: 12px; color: var(--text-secondary, #999); font-size: 13px;">
+                        Control how OpenPoet checks for and applies binary updates.
+                    </p>
+                    <div class="form-group" style="margin-bottom: 12px;">
+                        <label class="form-label">Update Policy</label>
+                        <select class="form-input" id="update-policy" onchange="app.saveUpdatePolicy(this.value)">
+                            <option value="notify">Notify only (recommended)</option>
+                            <option value="auto">Auto-update</option>
+                            <option value="disabled">Disabled</option>
+                        </select>
+                    </div>
+                    <div id="update-status-area" style="margin-bottom: 12px; font-size: 13px; color: var(--color-text-secondary, #999);">
+                        Current version: ${this.escapeHtml(this.appVersion || 'unknown')}
+                    </div>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <button class="btn btn-primary btn-sm" onclick="app.checkForBinaryUpdate()">Check Now</button>
+                        <button class="btn btn-sm" id="apply-update-btn" style="display:none;" onclick="app.applyBinaryUpdate()">Apply Update</button>
+                    </div>
+                </div>
+            </div>
+            <div class="card" style="margin-top: 16px;">
+                <div class="card-header">
                     <div class="card-title">AI Providers</div>
                 </div>
                 <div class="card-body">
@@ -4575,6 +4609,12 @@ class OpenPoet {
                     }
                 }
             }
+            // Update policy dropdown
+            const updatePolicySelect = document.getElementById('update-policy');
+            if (updatePolicySelect && this.settings && this.settings.auto_update_policy) {
+                updatePolicySelect.value = this.settings.auto_update_policy;
+            }
+
             // Relay URL display is populated by loadTunnelStatus()
 
             this.loadTunnelStatus();
@@ -5139,6 +5179,9 @@ class OpenPoet {
     setupVersionCheck() {
         this.appVersion = document.querySelector('meta[name="app-version"]')?.content || '';
 
+        // Clear the update-applying flag — if we got here, the reload succeeded
+        sessionStorage.removeItem('openpoet-update-applying');
+
         // Check for updates every 60 seconds
         setInterval(() => this.checkForUpdate(), 60000);
 
@@ -5173,10 +5216,158 @@ class OpenPoet {
         banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:10000;background:linear-gradient(135deg,var(--color-gradient-start,#667eea),var(--color-gradient-end,#764ba2));color:#fff;padding:12px 20px;display:flex;align-items:center;justify-content:center;gap:12px;font-size:14px;font-weight:500;box-shadow:0 2px 12px rgba(0,0,0,0.3);';
         banner.innerHTML = `
             <span>Nova vers\u00e3o dispon\u00edvel</span>
-            <button onclick="window.location.reload()" style="background:#fff;color:var(--color-gradient-end,#764ba2);border:none;padding:6px 16px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px;">Atualizar</button>
+            <button id="update-btn" style="background:#fff;color:var(--color-gradient-end,#764ba2);border:none;padding:6px 16px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px;">Atualizar</button>
             <button onclick="this.parentElement.remove()" style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.4);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:13px;">Depois</button>
         `;
         document.body.prepend(banner);
+
+        document.getElementById('update-btn').addEventListener('click', async () => {
+            const btn = document.getElementById('update-btn');
+            btn.textContent = 'Atualizando...';
+            btn.disabled = true;
+            btn.style.opacity = '0.7';
+
+            try {
+                // Mark that we're applying an update (prevents sw_updated re-trigger on reload)
+                sessionStorage.setItem('openpoet-update-applying', '1');
+
+                // 1. Clear all SW caches so stale HTML is never served
+                const cacheNames = await caches.keys();
+                await Promise.all(cacheNames.map(name => caches.delete(name)));
+
+                // 2. If there's a waiting SW, tell it to activate now
+                const reg = await navigator.serviceWorker.getRegistration();
+                if (reg) {
+                    if (reg.waiting) {
+                        reg.waiting.postMessage({ type: 'skipWaiting' });
+                        await new Promise(resolve => setTimeout(resolve, 300));
+                    }
+                    // Force check for new SW version
+                    await reg.update().catch(() => {});
+                }
+
+                // 3. Reload — with caches cleared, browser fetches fresh HTML from server
+                window.location.reload();
+            } catch (e) {
+                sessionStorage.removeItem('openpoet-update-applying');
+                window.location.reload();
+            }
+        });
+    }
+
+    // Binary auto-update: check for new version
+    async checkForBinaryUpdate() {
+        const area = document.getElementById('update-status-area');
+        if (area) area.textContent = 'Checking...';
+        try {
+            const status = await this.api('GET', '/update/check');
+            this._renderBinaryUpdateStatus(status);
+        } catch (e) {
+            if (area) area.textContent = 'Check failed: ' + (e.message || 'network error');
+        }
+    }
+
+    _renderBinaryUpdateStatus(status) {
+        const area = document.getElementById('update-status-area');
+        const btn = document.getElementById('apply-update-btn');
+        if (!area) return;
+
+        if (status.error) {
+            area.innerHTML = `Current version: <strong>${this.escapeHtml(status.current_version || this.appVersion)}</strong><br><span style="color:var(--color-text-secondary);">${this.escapeHtml(status.error)}</span>`;
+            if (btn) btn.style.display = 'none';
+            return;
+        }
+
+        if (status.managed) {
+            area.innerHTML = `Current version: <strong>${this.escapeHtml(status.current_version)}</strong><br>Installed via <strong>${this.escapeHtml(status.managed)}</strong>. Use <code>${this.escapeHtml(status.managed)} upgrade openpoet</code> to update.`;
+            if (btn) btn.style.display = 'none';
+            return;
+        }
+
+        if (status.available) {
+            area.innerHTML = `Update available: <strong>v${this.escapeHtml(status.latest_version)}</strong> (current: v${this.escapeHtml(status.current_version)})`;
+            if (btn) {
+                btn.style.display = 'inline-block';
+                btn.textContent = `Update to v${status.latest_version}`;
+            }
+        } else {
+            area.innerHTML = `Up to date: <strong>v${this.escapeHtml(status.current_version)}</strong>`;
+            if (btn) btn.style.display = 'none';
+        }
+
+        if (status.checked_at) {
+            area.innerHTML += `<br><span style="font-size:12px;color:var(--color-text-secondary);">Checked: ${new Date(status.checked_at).toLocaleString()}</span>`;
+        }
+    }
+
+    // Binary auto-update: apply update
+    async applyBinaryUpdate() {
+        const btn = document.getElementById('apply-update-btn');
+        if (btn) { btn.textContent = 'Updating...'; btn.disabled = true; }
+        try {
+            const resp = await this.api('POST', '/update/apply');
+            if (resp.error === 'active_sessions') {
+                if (confirm(`${resp.session_count} Claude Code session(s) are running. Update anyway?`)) {
+                    const resp2 = await this.api('POST', '/update/apply', { force: true });
+                    if (resp2.status === 'applied') {
+                        this._waitForRestart(resp2.version);
+                        return;
+                    }
+                }
+                if (btn) { btn.textContent = 'Apply Update'; btn.disabled = false; }
+                return;
+            }
+            if (resp.error === 'managed_install') {
+                this.showToast('Update', resp.message, 'warning');
+                if (btn) { btn.textContent = 'Apply Update'; btn.disabled = false; }
+                return;
+            }
+            if (resp.status === 'applied') {
+                this._waitForRestart(resp.version);
+            } else if (resp.status === 'already_up_to_date') {
+                this.showToast('Update', 'Already up to date', 'info');
+                if (btn) { btn.textContent = 'Apply Update'; btn.disabled = false; }
+            }
+        } catch (e) {
+            this.showToast('Error', e.message || 'Update failed', 'error');
+            if (btn) { btn.textContent = 'Apply Update'; btn.disabled = false; }
+        }
+    }
+
+    // Poll for server restart after binary update
+    _waitForRestart(version) {
+        const area = document.getElementById('update-status-area');
+        if (area) area.innerHTML = `<strong>Restarting to v${this.escapeHtml(version || '')}...</strong>`;
+
+        let attempts = 0;
+        const poll = setInterval(async () => {
+            attempts++;
+            try {
+                const resp = await fetch('/api/version');
+                if (resp.ok) {
+                    clearInterval(poll);
+                    // Clear SW caches and reload to get fresh frontend assets
+                    const cacheNames = await caches.keys();
+                    await Promise.all(cacheNames.map(name => caches.delete(name)));
+                    window.location.reload();
+                }
+            } catch (e) {
+                // Server still restarting
+            }
+            if (attempts > 30) {
+                clearInterval(poll);
+                if (area) area.textContent = 'Restart taking longer than expected. Refresh manually.';
+            }
+        }, 1000);
+    }
+
+    // Save update policy setting
+    async saveUpdatePolicy(value) {
+        try {
+            await this.api('PUT', '/config/settings', { auto_update_policy: value });
+        } catch (e) {
+            this.showToast('Error', 'Failed to save update policy', 'error');
+        }
     }
 
     // Show API error with special handling for rate limits (429)
