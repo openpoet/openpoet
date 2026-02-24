@@ -23,6 +23,32 @@ const (
 	ProviderGroq   ProviderType = "groq"
 )
 
+// OpenAI transcription models
+const (
+	ModelWhisper1            = "whisper-1"
+	ModelGPT4oTranscribe     = "gpt-4o-transcribe"
+	ModelGPT4oMiniTranscribe = "gpt-4o-mini-transcribe"
+)
+
+// Groq transcription models
+const (
+	ModelGroqWhisperLargeV3Turbo = "whisper-large-v3-turbo"
+	ModelGroqWhisperLargeV3      = "whisper-large-v3"
+	ModelGroqDistilWhisperEN     = "distil-whisper-large-v3-en"
+)
+
+// DefaultModel returns the default model for a given provider
+func DefaultModel(provider ProviderType) string {
+	switch provider {
+	case ProviderOpenAI:
+		return ModelGPT4oMiniTranscribe
+	case ProviderGroq:
+		return ModelGroqWhisperLargeV3Turbo
+	default:
+		return ModelWhisper1
+	}
+}
+
 // String returns the string representation of the provider type
 func (p ProviderType) String() string {
 	return string(p)
