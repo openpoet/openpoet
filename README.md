@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://openpoet.ai" target="_blank">
-    <img src="mascot.svg" alt="OpenPoet Mascot" width="200" />
+    <img src="docs/images/mascot.svg" alt="OpenPoet Mascot" width="200" />
   </a>
 </p>
 
@@ -11,7 +11,22 @@
 </p>
 
 <p align="center">
-  <a href="https://openpoet.ai" target="_blank"><strong>openpoet.ai</strong></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.24-00ADD8.svg" alt="Go Version" /></a>
+  <a href="https://github.com/openpoet/openpoet/releases"><img src="https://img.shields.io/github/v/release/openpoet/openpoet" alt="Release" /></a>
+  <a href="https://goreportcard.com/report/github.com/openpoet/openpoet"><img src="https://goreportcard.com/badge/github.com/openpoet/openpoet" alt="Go Report Card" /></a>
+</p>
+
+<p align="center">
+  <a href="https://openpoet.ai"><strong>openpoet.ai</strong></a> · <a href="https://openpoet.ai/docs.html"><strong>Documentation</strong></a>
+</p>
+
+## What is OpenPoet?
+
+OpenPoet is an open-source web application that lets you orchestrate multiple [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions from a single dashboard. It provides project management, task tracking, a skills system for reusable prompts, and MCP server integration — all accessible from desktop or mobile via a PWA-enabled interface. Whether you're managing one project or a dozen, OpenPoet gives you a centralized control plane for AI-assisted development.
+
+<p align="center">
+  <img src="docs/images/dashboard-projects.png" alt="OpenPoet Dashboard" width="800" />
 </p>
 
 ## Install
@@ -91,13 +106,13 @@ openpoet benchmark     Run benchmarks
 
 ## Features
 
-- **Multi-Project Management** — Manage both local and remote (SSH) projects
-- **Claude Code Integration** — Start and manage AI-assisted terminal sessions
-- **Skills System** — Create and sync instruction templates for Claude Code
-- **MCP Server Configuration** — Configure and inject MCP servers into sessions
-- **Task Management** — Track todos, progress, and priorities per project
-- **Mobile-Optimized UI** — Full-featured mobile terminal with voice input
-- **PWA Support** — Install as a progressive web app with offline capability
+- [**Multi-Project Management**](https://openpoet.ai/docs/projects.html) — Manage both local and remote (SSH) projects
+- [**Claude Code Integration**](https://openpoet.ai/docs/sessions.html) — Start and manage AI-assisted terminal sessions
+- [**Skills System**](https://openpoet.ai/docs/skills.html) — Create and sync instruction templates for Claude Code
+- [**MCP Server Configuration**](https://openpoet.ai/docs/mcp-servers.html) — Configure and inject MCP servers into sessions
+- [**Task Management**](https://openpoet.ai/docs/tasks.html) — Track todos, progress, and priorities per project
+- [**Mobile-Optimized UI**](https://openpoet.ai/docs/mobile.html) — Full-featured mobile terminal with voice input
+- [**PWA Support**](https://openpoet.ai/docs/mobile.html) — Install as a progressive web app with offline capability
 
 ## Development
 
@@ -112,6 +127,21 @@ make dev
 make test
 ```
 
+## Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to get started.
+
+## Community
+
+- [GitHub Discussions](https://github.com/openpoet/openpoet/discussions) — Ask questions and share ideas
+- [Issue Tracker](https://github.com/openpoet/openpoet/issues) — Report bugs and request features
+
+## Acknowledgments
+
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) by Anthropic
+- [xterm.js](https://xtermjs.org/) for terminal emulation
+- [Chi](https://github.com/go-chi/chi) for HTTP routing
+
 ## License
 
-MIT
+[MIT](LICENSE)
