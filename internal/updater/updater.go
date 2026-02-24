@@ -23,10 +23,6 @@ import (
 const (
 	GitHubRepo    = "openpoet/openpoet"
 	CheckInterval = 6 * time.Hour
-
-	PolicyNotify   = "notify"
-	PolicyAuto     = "auto"
-	PolicyDisabled = "disabled"
 )
 
 // UpdateStatus represents the current update state for the UI.

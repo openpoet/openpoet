@@ -4500,21 +4500,13 @@ class OpenPoet {
                 </div>
                 <div class="card-body">
                     <p style="margin-bottom: 12px; color: var(--text-secondary, #999); font-size: 13px;">
-                        Control how OpenPoet checks for and applies binary updates.
+                        OpenPoet automatically checks for new releases and notifies you when one is available.
                     </p>
-                    <div class="form-group" style="margin-bottom: 12px;">
-                        <label class="form-label">Update Policy</label>
-                        <select class="form-input" id="update-policy" onchange="app.saveUpdatePolicy(this.value)">
-                            <option value="notify">Notify only (recommended)</option>
-                            <option value="auto">Auto-update</option>
-                            <option value="disabled">Disabled</option>
-                        </select>
-                    </div>
                     <div id="update-status-area" style="margin-bottom: 12px; font-size: 13px; color: var(--color-text-secondary, #999);">
                         Current version: ${this.escapeHtml(this.appVersion || 'unknown')}
                     </div>
                     <div style="display: flex; gap: 8px; align-items: center;">
-                        <button class="btn btn-primary btn-sm" onclick="app.checkForBinaryUpdate()">Check Now</button>
+                        <button class="btn btn-primary btn-sm" onclick="app.checkForBinaryUpdate()">Check for Updates</button>
                         <button class="btn btn-sm" id="apply-update-btn" style="display:none;" onclick="app.applyBinaryUpdate()">Apply Update</button>
                     </div>
                 </div>
@@ -4609,12 +4601,6 @@ class OpenPoet {
                     }
                 }
             }
-            // Update policy dropdown
-            const updatePolicySelect = document.getElementById('update-policy');
-            if (updatePolicySelect && this.settings && this.settings.auto_update_policy) {
-                updatePolicySelect.value = this.settings.auto_update_policy;
-            }
-
             // Relay URL display is populated by loadTunnelStatus()
 
             this.loadTunnelStatus();
@@ -5359,15 +5345,6 @@ class OpenPoet {
                 if (area) area.textContent = 'Restart taking longer than expected. Refresh manually.';
             }
         }, 1000);
-    }
-
-    // Save update policy setting
-    async saveUpdatePolicy(value) {
-        try {
-            await this.api('PUT', '/config/settings', { auto_update_policy: value });
-        } catch (e) {
-            this.showToast('Error', 'Failed to save update policy', 'error');
-        }
     }
 
     // Show API error with special handling for rate limits (429)
