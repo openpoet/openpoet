@@ -27,22 +27,8 @@ type TranscriptionResult struct {
 	Duration float64 `json:"duration,omitempty"`
 }
 
-func NewWhisperClient(apiKey string) (*WhisperClient, error) {
-	if apiKey == "" {
-		return nil, fmt.Errorf("OpenAI API key is required")
-	}
-
-	client := openai.NewClient(apiKey)
-	return &WhisperClient{
-		client:   client,
-		model:    openai.Whisper1,
-		language: "", // Auto-detect
-		provider: ProviderOpenAI,
-	}, nil
-}
-
 // NewTranscriptionProvider creates a transcription provider based on type
-func NewTranscriptionProvider(providerType ProviderType, apiKey string) (TranscriptionProvider, error) {
+func NewTranscriptionProvider(providerType ProviderType, apiKey string, model string) (TranscriptionProvider, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("API key is required for provider %s", providerType)
 	}
@@ -61,15 +47,14 @@ func NewTranscriptionProvider(providerType ProviderType, apiKey string) (Transcr
 
 	client := openai.NewClientWithConfig(config)
 
-	model := openai.Whisper1
-	if providerType == ProviderGroq {
-		model = "whisper-large-v3-turbo" // Groq's faster model
+	if model == "" {
+		model = DefaultModel(providerType)
 	}
 
 	return &WhisperClient{
 		client:   client,
 		model:    model,
-		language: "", // Auto-detect
+		language: "",
 		provider: providerType,
 	}, nil
 }
@@ -171,7 +156,10 @@ func (w *WhisperClient) TranscribeMultipart(ctx context.Context, file multipart.
 
 // DirectAPITranscribe calls the OpenAI API directly without the SDK
 // Useful for custom handling or when the SDK has issues
-func DirectAPITranscribe(ctx context.Context, apiKey string, audioData []byte, filename string) (*TranscriptionResult, error) {
+func DirectAPITranscribe(ctx context.Context, apiKey string, audioData []byte, filename string, model string) (*TranscriptionResult, error) {
+	if model == "" {
+		model = ModelGPT4oMiniTranscribe
+	}
 	// Create multipart form
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
@@ -184,7 +172,7 @@ func DirectAPITranscribe(ctx context.Context, apiKey string, audioData []byte, f
 	part.Write(audioData)
 
 	// Add model field
-	writer.WriteField("model", "whisper-1")
+	writer.WriteField("model", model)
 
 	writer.Close()
 

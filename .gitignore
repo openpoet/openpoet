@@ -38,6 +38,9 @@ CLAUDE.md
 # Run configs
 .run/
 
+# OpenPoet config
+.openpoet/
+
 # OS
 .DS_Store
 Thumbs.db
