@@ -7892,7 +7892,7 @@ class OpenPoet {
                 const label = this.taskHistoryLabel(entry);
                 const time = this.relativeTime(entry.created_at);
                 const docLink = this.taskHistoryDocLink(entry);
-                md += `${icon} ${label}${docLink} — *${time}*\n\n`;
+                md += `${icon} ${label} — *${time}*${docLink}\n\n`;
             }
         }
 
@@ -8226,8 +8226,9 @@ class OpenPoet {
         if (entry.event_type === 'verification_doc_created' && details.doc_id) {
             return ` <a href="#" data-action="open-doc" data-doc-id="${this.escapeHtml(details.doc_id)}" data-doc-type="document" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Open</a>`;
         }
-        if (entry.event_type === 'plan_updated' && entry.session_id) {
-            const sid = entry.session_id;
+        const sessionId = entry.session_id?.String || entry.session_id;
+        if (entry.event_type === 'plan_updated' && sessionId) {
+            const sid = sessionId;
             return ` <a href="#" data-action="open-doc" data-doc-id="plan:${this.escapeHtml(sid)}" data-doc-type="plan" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">View plan</a>`;
         }
         return '';
