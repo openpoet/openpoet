@@ -4513,17 +4513,6 @@ class OpenPoet {
             </div>
             <div class="card" style="margin-top: 16px;">
                 <div class="card-header">
-                    <div class="card-title">AI Providers</div>
-                </div>
-                <div class="card-body">
-                    <p style="margin-bottom: 12px; color: var(--text-secondary, #999); font-size: 13px;">
-                        AI provider configurations have moved to their own tab. You can create multiple configurations and assign each to different operations (Chat, Background, Sessions).
-                    </p>
-                    <button class="btn btn-primary btn-sm" onclick="document.querySelector('[data-tab=ai-providers]').click()">Go to AI Providers</button>
-                </div>
-            </div>
-            <div class="card" style="margin-top: 16px;">
-                <div class="card-header">
                     <div class="card-title">MCP HTTP Endpoint</div>
                 </div>
                 <div class="card-body">
