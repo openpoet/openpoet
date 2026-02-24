@@ -5264,20 +5264,22 @@ class OpenPoet {
             return;
         }
 
-        if (status.managed) {
-            area.innerHTML = `Current version: <strong>${this.escapeHtml(status.current_version)}</strong><br>Installed via <strong>${this.escapeHtml(status.managed)}</strong>. Use <code>${this.escapeHtml(status.managed)} upgrade openpoet</code> to update.`;
-            if (btn) btn.style.display = 'none';
-            return;
-        }
-
+        // Show version status (available or up to date)
         if (status.available) {
             area.innerHTML = `Update available: <strong>v${this.escapeHtml(status.latest_version)}</strong> (current: v${this.escapeHtml(status.current_version)})`;
-            if (btn) {
+            if (status.managed) {
+                // Managed install — tell user how to update, no Apply button
+                area.innerHTML += `<br>Installed via <strong>${this.escapeHtml(status.managed)}</strong>. Run <code>${this.escapeHtml(status.managed)} upgrade openpoet</code> to update.`;
+                if (btn) btn.style.display = 'none';
+            } else if (btn) {
                 btn.style.display = 'inline-block';
                 btn.textContent = `Update to v${status.latest_version}`;
             }
         } else {
             area.innerHTML = `Up to date: <strong>v${this.escapeHtml(status.current_version)}</strong>`;
+            if (status.managed) {
+                area.innerHTML += `<br><span style="color:var(--color-text-secondary);">Installed via ${this.escapeHtml(status.managed)}</span>`;
+            }
             if (btn) btn.style.display = 'none';
         }
 
