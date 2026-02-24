@@ -75,6 +75,25 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
+    // Network-first for navigation requests (HTML pages)
+    // Prevents stale-cache loop after updates — the root page must always
+    // come fresh from the server so the <meta app-version> tag is current.
+    if (event.request.mode === 'navigate') {
+        event.respondWith(
+            fetch(event.request)
+                .then((response) => {
+                    if (response && response.status === 200 && response.type === 'basic') {
+                        const responseToCache = response.clone();
+                        caches.open(CACHE_NAME)
+                            .then((cache) => cache.put(event.request, responseToCache));
+                    }
+                    return response;
+                })
+                .catch(() => caches.match(OFFLINE_URL))
+        );
+        return;
+    }
+
     // Cache-first strategy for other assets (images, fonts, vendor libs)
     event.respondWith(
         caches.match(event.request)
@@ -85,27 +104,18 @@ self.addEventListener('fetch', (event) => {
 
                 return fetch(event.request)
                     .then((response) => {
-                        // Don't cache non-successful responses
                         if (!response || response.status !== 200 || response.type !== 'basic') {
                             return response;
                         }
 
-                        // Clone the response
                         const responseToCache = response.clone();
-
-                        // Cache the fetched response
                         caches.open(CACHE_NAME)
-                            .then((cache) => {
-                                cache.put(event.request, responseToCache);
-                            });
+                            .then((cache) => cache.put(event.request, responseToCache));
 
                         return response;
                     })
                     .catch(() => {
-                        // Return offline page for navigation requests
-                        if (event.request.mode === 'navigate') {
-                            return caches.match(OFFLINE_URL);
-                        }
+                        // No offline fallback for non-navigation assets
                     });
             })
     );
@@ -147,9 +157,11 @@ self.addEventListener('push', (event) => {
     );
 });
 
-// Message from page — close notifications on demand
+// Message from page — handle skipWaiting and close notifications
 self.addEventListener('message', (event) => {
-    if (event.data && event.data.type === 'close_notifications' && event.data.session_id) {
+    if (event.data && event.data.type === 'skipWaiting') {
+        self.skipWaiting();
+    } else if (event.data && event.data.type === 'close_notifications' && event.data.session_id) {
         self.registration.getNotifications({ tag: `session-${event.data.session_id}` })
             .then(notifications => notifications.forEach(n => n.close()));
     }
