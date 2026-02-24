@@ -29,6 +29,7 @@ import (
 	"openpoet/internal/security"
 	"openpoet/internal/session"
 	"openpoet/internal/tunnel"
+	"openpoet/internal/updater"
 	"openpoet/internal/voice"
 	"openpoet/internal/websocket"
 	"openpoet/web"
@@ -215,15 +216,22 @@ func main() {
 	// Initialize API handlers
 	api := handlers.NewAPI(db, hub, sessionMgr, configSync, encryptor, notifService, hookHandler)
 
+	// Initialize binary auto-updater
+	appUpdater := updater.New(BuildVersion)
+	api.SetUpdater(appUpdater)
+
 	// Initialize other handlers
 	fileHandler := handlers.NewFileHandler(api)
-	voiceHandler := handlers.NewVoiceHandler(api, func() (voice.ProviderType, string) {
+	voiceHandler := handlers.NewVoiceHandler(api, func() (voice.ProviderType, string, string) {
 		// Get provider type from settings, default to openai
 		providerSetting, _ := db.GetSetting(context.Background(), "whisper_provider")
 		if providerSetting == "" {
 			providerSetting = "openai"
 		}
 		provider := voice.ProviderType(providerSetting)
+
+		// Get model from settings (empty = use default for provider)
+		model, _ := db.GetSetting(context.Background(), "whisper_model")
 
 		// Get API key based on provider (decrypt from DB)
 		var key string
@@ -240,7 +248,7 @@ func main() {
 			}
 		}
 
-		return provider, key
+		return provider, key, model
 	})
 	wsHandler := handlers.NewWebSocketHandler(hub, api, webpush)
 
@@ -687,6 +695,10 @@ func main() {
 		r.Get("/token-usage/summary", api.GetTokenUsageSummary)
 		r.Delete("/token-usage", api.ClearTokenUsage)
 
+		// Binary Auto-Update
+		r.Get("/update/check", api.CheckUpdate)
+		r.Post("/update/apply", api.ApplyUpdate)
+
 		// Remote Access / Tunnel
 		r.Get("/tunnel/status", api.GetTunnelStatus)
 		r.Post("/tunnel/enable", api.EnableTunnel)
@@ -763,6 +775,9 @@ func main() {
 
 	// Start task due date checker goroutine
 	go runTaskDueChecker(db, notifService, hub)
+
+	// Start binary update checker goroutine
+	go runUpdateChecker(db, appUpdater, hub)
 
 	// Create server
 	// WriteTimeout is 600s to support long-polling hook permission requests (up to 590s)
@@ -1084,6 +1099,70 @@ func runTaskDueChecker(db *database.DB, notifService *notifications.Service, hub
 			notifService.Send(ctx, "", "info", title, body, fmt.Sprintf("/app/project/%d", task.ProjectID))
 			db.MarkTaskDueNotified(ctx, task.ID)
 		}
+	}
+}
+
+// runUpdateChecker periodically checks for binary updates via GitHub Releases.
+func runUpdateChecker(db *database.DB, u *updater.Updater, hub *websocket.Hub) {
+	// Initial delay to let server start and avoid contention at boot
+	time.Sleep(30 * time.Second)
+
+	checkOnce := func() {
+		ctx := context.Background()
+
+		policy, _ := db.GetSetting(ctx, "auto_update_policy")
+		if policy == updater.PolicyDisabled {
+			return
+		}
+		if updater.IsDevBuild(u.CurrentVersion) {
+			return
+		}
+
+		status, err := u.CheckForUpdate(ctx)
+		if err != nil {
+			log.Printf("[Updater] Check failed: %v", err)
+			return
+		}
+
+		db.SetSetting(ctx, "auto_update_last_check", time.Now().Format(time.RFC3339))
+
+		if status.Available {
+			db.SetSetting(ctx, "auto_update_last_version", status.LatestVersion)
+			hub.BroadcastStateUpdate("update", map[string]interface{}{
+				"action":  "available",
+				"version": status.LatestVersion,
+			})
+
+			// Auto-apply if policy is "auto" (still respects active sessions)
+			if policy == updater.PolicyAuto {
+				activeSessions, _ := db.ListActiveSessions(ctx)
+				if len(activeSessions) > 0 {
+					log.Printf("[Updater] Auto-update deferred: %d session(s) running", len(activeSessions))
+					return
+				}
+				log.Printf("[Updater] Auto-applying update to v%s", status.LatestVersion)
+				if err := u.DownloadAndApply(ctx, status); err != nil {
+					log.Printf("[Updater] Auto-apply failed: %v", err)
+					return
+				}
+				hub.BroadcastStateUpdate("update", map[string]interface{}{
+					"action":  "restarting",
+					"version": status.LatestVersion,
+				})
+				time.Sleep(1 * time.Second)
+				if err := updater.RestartSelf(); err != nil {
+					log.Printf("[Updater] Restart failed: %v", err)
+				}
+			}
+		}
+	}
+
+	checkOnce()
+
+	ticker := time.NewTicker(updater.CheckInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		checkOnce()
 	}
 }
 
