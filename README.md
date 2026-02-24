@@ -28,16 +28,24 @@ brew install openpoet/tap/openpoet
 curl -fsSL https://raw.githubusercontent.com/openpoet/openpoet/main/install.sh | sh
 ```
 
+Installs to `~/.local/bin` by default (no sudo required). The installer will offer to add it to your PATH if needed.
+
 Install a specific version:
 
 ```bash
-OPENPOET_VERSION=1.0.0 curl -fsSL https://raw.githubusercontent.com/openpoet/openpoet/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/openpoet/openpoet/main/install.sh | OPENPOET_VERSION=1.0.0 sh
 ```
 
 Install to a custom directory:
 
 ```bash
-OPENPOET_INSTALL=$HOME/.local/bin curl -fsSL https://raw.githubusercontent.com/openpoet/openpoet/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/openpoet/openpoet/main/install.sh | OPENPOET_INSTALL=/custom/path sh
+```
+
+Uninstall:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/openpoet/openpoet/main/install.sh | sh -s -- --uninstall
 ```
 
 ### Manual download
