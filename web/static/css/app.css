@@ -4319,6 +4319,12 @@ body {
     flex-shrink: 0;
     color: var(--color-primary);
 }
+.doc-review-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
 .doc-review-content {
     flex: 1;
     overflow-y: auto;
