@@ -165,6 +165,30 @@ main() {
     OS=$(detect_os)
     ARCH=$(detect_arch)
 
+    # Check for existing installation
+    EXISTING=$(command -v openpoet 2>/dev/null || true)
+    if [ -n "$EXISTING" ]; then
+        EXISTING_VER=$(openpoet version 2>/dev/null || echo "unknown")
+        case "$EXISTING" in
+            */Cellar/*|*/homebrew/*)
+                warn "OpenPoet is already installed via Homebrew at ${EXISTING} (${EXISTING_VER})."
+                warn "Use 'brew upgrade openpoet' to update, or 'brew uninstall openpoet' first."
+                error "Aborting to avoid conflicting installations."
+                ;;
+            *)
+                warn "OpenPoet is already installed at ${EXISTING} (${EXISTING_VER})."
+                if [ -e /dev/tty ]; then
+                    printf "${YELLOW}[openpoet]${RESET} %s" "Proceed with reinstall/update? [y/N] "
+                    read -r REPLY < /dev/tty
+                    case "$REPLY" in
+                        [yY]|[yY][eE][sS]) ;;
+                        *) info "Aborted."; exit 0 ;;
+                    esac
+                fi
+                ;;
+        esac
+    fi
+
     if [ -z "$VERSION" ]; then
         info "Fetching latest version..."
         VERSION=$(get_latest_version)
