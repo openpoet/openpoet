@@ -763,6 +763,7 @@ func (a *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	project.Path = input.Path
 	project.Type = input.Type
 	project.ToolPolicy = input.ToolPolicy
+	project.DangerouslySkipPermissions = input.DangerouslySkipPermissions
 
 	if input.Type == "remote" {
 		log.Printf("[API] UpdateProject: id=%d ssh_auth_type=%q credential_len=%d", id, input.SSHAuthType, len(input.SSHCredential))
@@ -1158,9 +1159,10 @@ func (a *API) GetActiveSessionDetails(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		ProjectID int64             `json:"project_id"`
-		TaskID    *int64            `json:"task_id,omitempty"`
-		EnvVars   map[string]string `json:"env_vars,omitempty"`
+		ProjectID                  int64             `json:"project_id"`
+		TaskID                     *int64            `json:"task_id,omitempty"`
+		EnvVars                    map[string]string `json:"env_vars,omitempty"`
+		DangerouslySkipPermissions bool              `json:"dangerously_skip_permissions"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
@@ -1248,6 +1250,11 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+
+	// Inject dangerously-skip-permissions flag if both project and request allow it
+	if input.DangerouslySkipPermissions && project.DangerouslySkipPermissions {
+		input.EnvVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"] = "true"
 	}
 
 	var sess *database.Session
@@ -1369,6 +1376,13 @@ func (a *API) DeleteSession(w http.ResponseWriter, r *http.Request) {
 func (a *API) ReopenSession(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
 
+	// Parse optional request body for dangerously_skip_permissions flag
+	var reopenInput struct {
+		DangerouslySkipPermissions bool `json:"dangerously_skip_permissions"`
+	}
+	// Body is optional — ignore decode errors (empty body is fine)
+	_ = json.NewDecoder(r.Body).Decode(&reopenInput)
+
 	sess, err := a.db.GetSession(r.Context(), sessionID)
 	if err != nil {
 		respondError(w, http.StatusNotFound, "Session not found")
@@ -1419,6 +1433,11 @@ func (a *API) ReopenSession(w http.ResponseWriter, r *http.Request) {
 				"You can use the openpoet_get_my_task MCP tool to fetch updated task details or the openpoet_request_task_evaluation tool when you believe you have completed significant work.",
 			linkedTask.Title, description,
 		)
+	}
+
+	// Inject dangerously-skip-permissions flag if both project and request allow it
+	if reopenInput.DangerouslySkipPermissions && project.DangerouslySkipPermissions {
+		envVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"] = "true"
 	}
 
 	if err := a.sessionMgr.ReopenSession(r.Context(), sess, project, envVars, a.encryptor.Decrypt); err != nil {

@@ -779,10 +779,20 @@ class OpenPoet {
             return;
         }
 
+        // Step 2a: Prompt for skip-permissions if project allows it (for new and reopen paths)
+        let skipPermissions = false;
+        if (project?.dangerously_skip_permissions) {
+            const permResult = await this.showSkipPermissionsPrompt();
+            if (permResult === false) return; // User cancelled
+            skipPermissions = permResult.skipPermissions;
+        }
+
         // Step 2b: If reopening a stopped session, call reopen API then open terminal
         if (taskSelection && taskSelection.reopen) {
             try {
-                const sess = await this.api('POST', `/sessions/${taskSelection.reopen}/reopen`);
+                const sess = await this.api('POST', `/sessions/${taskSelection.reopen}/reopen`, {
+                    dangerously_skip_permissions: skipPermissions
+                });
                 this.showToast('Success', 'Session reopened (continuing conversation)', 'success');
                 this.openTerminal(sess.id, sess, sess.name);
             } catch (error) {
@@ -805,6 +815,7 @@ class OpenPoet {
         try {
             const payload = { project_id: projectId };
             if (taskId) payload.task_id = taskId;
+            if (skipPermissions) payload.dangerously_skip_permissions = true;
 
             const session = await this.api('POST', '/sessions', payload);
 
@@ -4695,6 +4706,18 @@ class OpenPoet {
                     </div>
                     <input type="hidden" name="tool_policy" id="project-tool-policy-value" value="${project?.tool_policy || ''}">
                 </div>
+                <div class="form-group">
+                    <label class="form-label" style="color: var(--color-warning, #d29922);">&#9888; Dangerously Skip Permissions</label>
+                    <p style="margin-bottom: 8px; color: var(--text-secondary, #999); font-size: 12px;">
+                        When enabled, you will be prompted each time a session starts to optionally
+                        skip all permission checks. The AI will be able to execute any action without confirmation.
+                    </p>
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" name="dangerously_skip_permissions"
+                               ${project?.dangerously_skip_permissions ? 'checked' : ''}>
+                        <span style="font-size: 13px;">Allow skip-permissions option for this project</span>
+                    </label>
+                </div>
                 <div id="ssh-fields" class="${project?.type !== 'remote' ? 'hidden' : ''}">
                     <div class="form-group">
                         <label class="form-label">SSH Host</label>
@@ -4861,7 +4884,8 @@ class OpenPoet {
             ssh_user: formData.get('ssh_user'),
             ssh_auth_type: formData.get('ssh_auth_type'),
             ssh_credential,
-            tool_policy: formData.get('tool_policy') || ''
+            tool_policy: formData.get('tool_policy') || '',
+            dangerously_skip_permissions: form.querySelector('[name="dangerously_skip_permissions"]')?.checked || false
         };
 
         try {
@@ -8334,6 +8358,42 @@ class OpenPoet {
 
     // ============ Session-Task Integration ============
 
+    showSkipPermissionsPrompt() {
+        return new Promise((resolve) => {
+            document.querySelector('.confirm-modal-overlay')?.remove();
+            const overlay = document.createElement('div');
+            overlay.className = 'confirm-modal-overlay';
+            overlay.innerHTML = `
+                <div class="confirm-modal" style="max-width: 420px;">
+                    <div class="confirm-modal-title" style="color: var(--color-warning, #d29922);">&#9888; Skip Permission Checks?</div>
+                    <div class="confirm-modal-message" style="font-size: 13px; line-height: 1.5;">
+                        <p style="margin-bottom: 8px;">This session can run with <strong>--dangerously-skip-permissions</strong>.</p>
+                        <p style="margin-bottom: 12px; color: var(--text-secondary, #999);">
+                            Claude Code will execute <strong>any action</strong> without asking for confirmation,
+                            including file writes, deletions, and shell commands.
+                        </p>
+                        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 8px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-bg-secondary, #1a1a2e);">
+                            <input type="checkbox" id="skip-perms-checkbox">
+                            <span>Skip permissions for this session</span>
+                        </label>
+                    </div>
+                    <div class="confirm-modal-actions" style="gap:8px;">
+                        <button class="confirm-modal-cancel">Cancel</button>
+                        <button class="btn btn-primary" data-action="start">Start Session</button>
+                    </div>
+                </div>
+            `;
+            const finish = (val) => { overlay.remove(); resolve(val); };
+            overlay.querySelector('.confirm-modal-cancel').addEventListener('click', () => finish(false));
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(false); });
+            overlay.querySelector('[data-action="start"]').addEventListener('click', () => {
+                const checked = overlay.querySelector('#skip-perms-checkbox')?.checked || false;
+                finish({ skipPermissions: checked });
+            });
+            document.body.appendChild(overlay);
+        });
+    }
+
     showSessionReopenChoiceModal() {
         return new Promise((resolve) => {
             document.querySelector('.confirm-modal-overlay')?.remove();
@@ -8369,11 +8429,22 @@ class OpenPoet {
                 return;
             }
 
+            // Prompt for skip-permissions if project allows it
+            const project = this.projects.find(p => p.id === projectId);
+            let skipPermissions = false;
+            if (project?.dangerously_skip_permissions) {
+                const permResult = await this.showSkipPermissionsPrompt();
+                if (permResult === false) return;
+                skipPermissions = permResult.skipPermissions;
+            }
+
             if (taskSummary?.stopped_count > 0 && taskSummary.latest_stopped_session) {
                 const choice = await this.showSessionReopenChoiceModal();
                 if (!choice) return;
                 if (choice === 'reopen') {
-                    const sess = await this.api('POST', `/sessions/${taskSummary.latest_stopped_session}/reopen`);
+                    const sess = await this.api('POST', `/sessions/${taskSummary.latest_stopped_session}/reopen`, {
+                        dangerously_skip_permissions: skipPermissions
+                    });
                     this.showToast('Success', 'Session reopened', 'success');
                     this.openTerminal(sess.id, sess, sess.name);
                     return;
@@ -8381,10 +8452,13 @@ class OpenPoet {
                 // choice === 'new' — fall through to create new session
             }
 
-            const session = await this.api('POST', '/sessions', {
+            const payload = {
                 project_id: projectId,
                 task_id: taskId
-            });
+            };
+            if (skipPermissions) payload.dangerously_skip_permissions = true;
+
+            const session = await this.api('POST', '/sessions', payload);
 
             // Mark this session as recently created (protect from restoreTabsFromStorage)
             this.recentlyCreatedSessions.add(session.id);

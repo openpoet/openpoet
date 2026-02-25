@@ -180,6 +180,12 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 		delete(envVars, "OPENPOET_APPEND_SYSTEM_PROMPT") // don't leak as env var
 	}
 
+	// Inject --dangerously-skip-permissions if requested and project allows it
+	if v, ok := envVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"]; ok && v == "true" {
+		cliArgs = append(cliArgs, "--dangerously-skip-permissions")
+		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
+	}
+
 	// Create runner based on project type
 	var runner Runner
 	var err error
@@ -291,6 +297,12 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	if prompt, ok := envVars["OPENPOET_APPEND_SYSTEM_PROMPT"]; ok && prompt != "" {
 		cliArgs = append(cliArgs, "--append-system-prompt", prompt)
 		delete(envVars, "OPENPOET_APPEND_SYSTEM_PROMPT")
+	}
+
+	// Inject --dangerously-skip-permissions if requested and project allows it
+	if v, ok := envVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"]; ok && v == "true" {
+		cliArgs = append(cliArgs, "--dangerously-skip-permissions")
+		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
 
 	// Create runner based on project type
@@ -742,6 +754,12 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	if prompt, ok := envVars["OPENPOET_APPEND_SYSTEM_PROMPT"]; ok && prompt != "" {
 		cliArgs = append(cliArgs, "--append-system-prompt", prompt)
 		delete(envVars, "OPENPOET_APPEND_SYSTEM_PROMPT") // don't leak as env var
+	}
+
+	// Inject --dangerously-skip-permissions if requested and project allows it
+	if v, ok := envVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"]; ok && v == "true" {
+		cliArgs = append(cliArgs, "--dangerously-skip-permissions")
+		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
 
 	// Create output buffer (1MB max)
