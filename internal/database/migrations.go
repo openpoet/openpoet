@@ -49,6 +49,7 @@ var migrations = []Migration{
 	{Version: 31, Description: "tunnel: add paired_devices table for remote access authentication", Up: migrateV31},
 	{Version: 32, Description: "shares: add project_shares table for cross-project file read access", Up: migrateV32},
 	{Version: 33, Description: "mcp: add project_mcp_servers table for per-project MCP server configurations", Up: migrateV33},
+	{Version: 34, Description: "projects: add dangerously_skip_permissions column", Up: migrateV34},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -935,6 +936,14 @@ func migrateV33(tx *sqlx.Tx) error {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV33 failed: %w\nSQL: %s", err, s)
 		}
+	}
+	return nil
+}
+
+func migrateV34(tx *sqlx.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE projects ADD COLUMN dangerously_skip_permissions INTEGER NOT NULL DEFAULT 0`)
+	if err != nil {
+		return fmt.Errorf("migrateV34 failed: %w", err)
 	}
 	return nil
 }
