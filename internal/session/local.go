@@ -20,6 +20,7 @@ type LocalRunner struct {
 	envVars       map[string]string
 	outputHandler func([]byte)
 	cliArgs       []string
+	backend       BackendStrategy
 
 	mu     sync.Mutex
 	cmd    *exec.Cmd
@@ -29,7 +30,7 @@ type LocalRunner struct {
 	done   chan struct{}
 }
 
-func NewLocalRunner(workDir string, envVars map[string]string, outputHandler func([]byte), cliArgs []string) (*LocalRunner, error) {
+func NewLocalRunner(workDir string, envVars map[string]string, outputHandler func([]byte), cliArgs []string, backend BackendStrategy) (*LocalRunner, error) {
 	// Verify work directory exists
 	if _, err := os.Stat(workDir); os.IsNotExist(err) {
 		return nil, fmt.Errorf("work directory does not exist: %s", workDir)
@@ -40,6 +41,7 @@ func NewLocalRunner(workDir string, envVars map[string]string, outputHandler fun
 		envVars:       envVars,
 		outputHandler: outputHandler,
 		cliArgs:       cliArgs,
+		backend:       backend,
 		done:          make(chan struct{}),
 	}, nil
 }
@@ -50,24 +52,23 @@ func (r *LocalRunner) Start(ctx context.Context) error {
 
 	r.ctx, r.cancel = context.WithCancel(ctx)
 
-	// Check if claude command exists and get full path
-	claudePath, err := exec.LookPath("claude")
+	// Check if CLI binary exists and get full path
+	binaryName := r.backend.BinaryName()
+	binaryPath, err := exec.LookPath(binaryName)
 	if err != nil {
-		errMsg := fmt.Sprintf("\r\n\x1b[31mError: Claude Code CLI not found in PATH.\r\nPlease install it with: npm install -g @anthropic-ai/claude-code\x1b[0m\r\n")
 		if r.outputHandler != nil {
-			r.outputHandler([]byte(errMsg))
+			r.outputHandler([]byte(r.backend.NotFoundMessage()))
 		}
-		return fmt.Errorf("claude command not found: %w", err)
+		return fmt.Errorf("%s command not found: %w", binaryName, err)
 	}
 
 	// Send startup message
 	if r.outputHandler != nil {
-		startMsg := fmt.Sprintf("\x1b[90mStarting Claude Code from: %s\r\nWorking directory: %s\x1b[0m\r\n\r\n", claudePath, r.workDir)
-		r.outputHandler([]byte(startMsg))
+		r.outputHandler([]byte(r.backend.StartupMessage(binaryPath, r.workDir)))
 	}
 
-	// Create command using full path to claude (avoids needing PATH in env)
-	r.cmd = exec.CommandContext(r.ctx, claudePath, r.cliArgs...)
+	// Create command using full path (avoids needing PATH in env)
+	r.cmd = exec.CommandContext(r.ctx, binaryPath, r.cliArgs...)
 	r.cmd.Dir = r.workDir
 
 	// NO parent environment variables are inherited.
@@ -95,7 +96,7 @@ func (r *LocalRunner) Start(ctx context.Context) error {
 	// Start with PTY
 	ptmx, err := pty.Start(r.cmd)
 	if err != nil {
-		errMsg := fmt.Sprintf("\r\n\x1b[31mError starting Claude Code: %v\x1b[0m\r\n", err)
+		errMsg := fmt.Sprintf("\r\n\x1b[31mError starting %s: %v\x1b[0m\r\n", binaryName, err)
 		if r.outputHandler != nil {
 			r.outputHandler([]byte(errMsg))
 		}

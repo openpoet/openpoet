@@ -50,6 +50,7 @@ var migrations = []Migration{
 	{Version: 32, Description: "shares: add project_shares table for cross-project file read access", Up: migrateV32},
 	{Version: 33, Description: "mcp: add project_mcp_servers table for per-project MCP server configurations", Up: migrateV33},
 	{Version: 34, Description: "projects: add dangerously_skip_permissions column", Up: migrateV34},
+	{Version: 35, Description: "multi-backend: add backend and backend_config columns to projects and sessions", Up: migrateV35},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -964,6 +965,20 @@ func migrateV32(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV32 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV35(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE projects ADD COLUMN backend TEXT NOT NULL DEFAULT 'claude_code'`,
+		`ALTER TABLE projects ADD COLUMN backend_config TEXT NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE sessions ADD COLUMN backend TEXT NOT NULL DEFAULT 'claude_code'`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV35 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

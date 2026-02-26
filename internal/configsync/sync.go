@@ -56,6 +56,11 @@ func (cs *ConfigSyncer) SyncToProject(ctx context.Context, project *database.Pro
 }
 
 func (cs *ConfigSyncer) syncToLocal(ctx context.Context, project *database.Project) error {
+	// Copilot projects use a different sync path
+	if project.Backend == "copilot" {
+		return cs.syncToLocalCopilot(ctx, project)
+	}
+
 	projectPath := project.Path
 	claudeDir := filepath.Join(projectPath, ".claude")
 	skillsDir := filepath.Join(claudeDir, "skills")
@@ -123,6 +128,69 @@ func (cs *ConfigSyncer) syncToLocal(ctx context.Context, project *database.Proje
 		}
 	} else {
 		cs.reportProgress(project.ID, "memory_doc", "done", "No CLAUDE.md found")
+	}
+
+	return nil
+}
+
+// syncToLocalCopilot syncs configuration for Copilot CLI projects.
+// Uses .github/ directory instead of .claude/ for hooks and instructions.
+func (cs *ConfigSyncer) syncToLocalCopilot(ctx context.Context, project *database.Project) error {
+	projectPath := project.Path
+	githubDir := filepath.Join(projectPath, ".github")
+	hooksDir := filepath.Join(githubDir, "hooks")
+
+	// Ensure directories exist
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		return fmt.Errorf("failed to create .github/hooks directory: %w", err)
+	}
+
+	// Sync Copilot bridge script
+	cs.reportProgress(project.ID, "hooks", "running", "Syncing Copilot hook scripts...")
+	if err := cs.syncCopilotBridgeScriptLocal(hooksDir); err != nil {
+		cs.reportProgress(project.ID, "hooks", "error", err.Error())
+		return fmt.Errorf("failed to sync copilot-bridge.sh: %w", err)
+	}
+
+	// Write hooks.json for Copilot
+	hooksConfig := cs.buildCopilotHooksConfig()
+	hooksJSON, _ := json.MarshalIndent(hooksConfig, "", "  ")
+	hooksConfigPath := filepath.Join(hooksDir, "hooks.json")
+	if err := os.WriteFile(hooksConfigPath, hooksJSON, 0644); err != nil {
+		cs.reportProgress(project.ID, "hooks", "error", err.Error())
+		return fmt.Errorf("failed to write hooks.json: %w", err)
+	}
+	cs.reportProgress(project.ID, "hooks", "done", "Copilot hook scripts synced")
+
+	// Sync skills → .github/copilot-instructions.md
+	cs.reportProgress(project.ID, "skills", "running", "Syncing skills to Copilot instructions...")
+	if err := cs.syncSkillsToCopilotInstructions(ctx, githubDir, project); err != nil {
+		cs.reportProgress(project.ID, "skills", "error", err.Error())
+		return fmt.Errorf("failed to sync skills to copilot instructions: %w", err)
+	}
+	cs.reportProgress(project.ID, "skills", "done", "Skills synced to copilot-instructions.md")
+
+	// Auto-detect MCP servers from .mcp.json
+	cs.importMCPsFromDisk(ctx, projectPath, project)
+	cs.reportProgress(project.ID, "mcps", "done", "MCP servers configured via CLI flag at session start")
+
+	// Sync AGENTS.md → memory doc (Copilot's equivalent of CLAUDE.md)
+	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing AGENTS.md to memory doc...")
+	agentsMDPath := filepath.Join(projectPath, "AGENTS.md")
+	claudeMDPath := filepath.Join(projectPath, "CLAUDE.md")
+	// Try AGENTS.md first, fallback to CLAUDE.md
+	mdPath := agentsMDPath
+	if _, err := os.Stat(agentsMDPath); os.IsNotExist(err) {
+		mdPath = claudeMDPath
+	}
+	if data, err := os.ReadFile(mdPath); err == nil {
+		if _, err := cs.db.UpsertMemoryDoc(ctx, project.ID, string(data), "sync", "Synced from "+filepath.Base(mdPath)); err != nil {
+			cs.reportProgress(project.ID, "memory_doc", "error", err.Error())
+		} else {
+			cs.reportProgress(project.ID, "memory_doc", "done", filepath.Base(mdPath)+" synced to memory doc")
+		}
+	} else {
+		cs.reportProgress(project.ID, "memory_doc", "done", "No AGENTS.md or CLAUDE.md found")
 	}
 
 	return nil
@@ -982,6 +1050,110 @@ func (cs *ConfigSyncer) buildHooksConfig() map[string]interface{} {
 		"Stop":               hookEntry,
 		"UserPromptSubmit":   hookEntry,
 	}
+}
+
+// buildCopilotHooksConfig generates the hooks.json configuration for Copilot CLI.
+func (cs *ConfigSyncer) buildCopilotHooksConfig() map[string]interface{} {
+	hookCommand := map[string]interface{}{
+		"type":    "command",
+		"command": ".github/hooks/openpoet-bridge.sh",
+	}
+	hookEntry := []interface{}{
+		map[string]interface{}{
+			"hooks": []interface{}{hookCommand},
+		},
+	}
+
+	return map[string]interface{}{
+		"version": 1,
+		"hooks": map[string]interface{}{
+			"preToolUse":          hookEntry,
+			"postToolUse":         hookEntry,
+			"userPromptSubmitted": hookEntry,
+			"sessionStart":        hookEntry,
+			"sessionEnd":          hookEntry,
+		},
+	}
+}
+
+// syncCopilotBridgeScriptLocal writes the Copilot bridge script to .github/hooks/
+func (cs *ConfigSyncer) syncCopilotBridgeScriptLocal(hooksDir string) error {
+	bridgeScript := `#!/bin/bash
+# OpenPoet Hook Bridge Script for GitHub Copilot CLI
+
+HOOK_URL="${OPENPOET_HOOK_URL:-http://localhost:8080}"
+SESSION_ID="${OPENPOET_SESSION_ID}"
+INPUT=$(cat)
+
+EVENT=""
+if command -v jq &>/dev/null; then
+    EVENT=$(echo "$INPUT" | jq -r '.hook_event_name // empty' 2>/dev/null)
+fi
+if [ -z "$EVENT" ]; then
+    EVENT=$(echo "$INPUT" | sed -n 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+fi
+
+if [ -z "$EVENT" ] || [ -z "$SESSION_ID" ]; then
+    exit 0
+fi
+
+translate_response() {
+    local RESPONSE="$1"
+    if [ -z "$RESPONSE" ]; then return; fi
+    if command -v jq &>/dev/null; then
+        echo "$RESPONSE" | jq -c '.hookSpecificOutput.hookEventName = "preToolUse" |
+            if .hookSpecificOutput.decision.behavior == "allow" then .hookSpecificOutput.decision.behavior = "approve" else . end' 2>/dev/null
+    else
+        echo "$RESPONSE" | sed 's/"behavior":"allow"/"behavior":"approve"/g' | sed 's/"hookEventName":"PermissionRequest"/"hookEventName":"preToolUse"/g'
+    fi
+}
+
+case "$EVENT" in
+    preToolUse)
+        RESPONSE=$(curl -s --max-time 590 -X POST \
+            "${HOOK_URL}/api/hooks/permission" \
+            -H "Content-Type: application/json" \
+            -H "X-Session-ID: ${SESSION_ID}" \
+            -H "X-Backend: copilot" \
+            -d "$INPUT" 2>/dev/null)
+        if [ $? -eq 0 ] && [ -n "$RESPONSE" ]; then
+            translate_response "$RESPONSE"
+        fi
+        ;;
+    postToolUse|userPromptSubmitted|sessionStart|sessionEnd)
+        curl -s -X POST "${HOOK_URL}/api/hooks/event" \
+            -H "Content-Type: application/json" \
+            -H "X-Session-ID: ${SESSION_ID}" \
+            -H "X-Backend: copilot" \
+            -d "$INPUT" > /dev/null 2>&1 &
+        ;;
+esac
+
+exit 0
+`
+	bridgePath := filepath.Join(hooksDir, "openpoet-bridge.sh")
+	if err := os.WriteFile(bridgePath, []byte(bridgeScript), 0755); err != nil {
+		return err
+	}
+	return nil
+}
+
+// syncSkillsToCopilotInstructions concatenates all enabled skills into .github/copilot-instructions.md
+func (cs *ConfigSyncer) syncSkillsToCopilotInstructions(ctx context.Context, githubDir string, project *database.Project) error {
+	skills, err := cs.getSkillsForProject(ctx, project)
+	if err != nil {
+		return err
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# OpenPoet Custom Instructions\n\n")
+	for _, skill := range skills {
+		sb.WriteString("## " + skill.Name + "\n\n")
+		sb.WriteString(skill.Content + "\n\n")
+	}
+
+	instructionsPath := filepath.Join(githubDir, "copilot-instructions.md")
+	return os.WriteFile(instructionsPath, []byte(sb.String()), 0644)
 }
 
 // syncBridgeScriptLocal copies bridge.sh to the project's .claude/hooks/ directory

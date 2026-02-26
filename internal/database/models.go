@@ -20,6 +20,8 @@ type Project struct {
 	ToolPolicy                 string         `db:"tool_policy" json:"tool_policy,omitempty"`   // JSON ToolPolicy
 	SkillPolicy                string         `db:"skill_policy" json:"skill_policy,omitempty"` // '' = inherit global, 'custom' = per-project
 	DangerouslySkipPermissions bool           `db:"dangerously_skip_permissions" json:"dangerously_skip_permissions"`
+	Backend                    string         `db:"backend" json:"backend"`               // 'claude_code' or 'copilot'
+	BackendConfig              string         `db:"backend_config" json:"backend_config"` // JSON blob for backend-specific settings
 	ConfigSyncedAt             sql.NullTime   `db:"config_synced_at" json:"config_synced_at,omitempty"`
 	CreatedAt                  time.Time      `db:"created_at" json:"created_at"`
 	UpdatedAt                  time.Time      `db:"updated_at" json:"updated_at"`
@@ -37,6 +39,8 @@ type ProjectInput struct {
 	ToolPolicy                 string `json:"tool_policy,omitempty"`
 	SkillPolicy                string `json:"skill_policy,omitempty"`
 	DangerouslySkipPermissions bool   `json:"dangerously_skip_permissions"`
+	Backend                    string `json:"backend,omitempty"`
+	BackendConfig              string `json:"backend_config,omitempty"`
 }
 
 type Session struct {
@@ -51,6 +55,7 @@ type Session struct {
 	LastActivityAt sql.NullTime  `db:"last_activity_at" json:"last_activity_at,omitempty"`
 	PlanContent    string        `db:"plan_content" json:"plan_content"`
 	PlanUpdatedAt  sql.NullTime  `db:"plan_updated_at" json:"plan_updated_at,omitempty"`
+	Backend        string        `db:"backend" json:"backend"` // 'claude_code' or 'copilot'
 }
 
 type Skill struct {
