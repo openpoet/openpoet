@@ -741,6 +741,7 @@ class OpenPoet {
                         <div class="card-title">${this.escapeHtml(project.name)}</div>
                         <div class="card-subtitle">${this.escapeHtml(project.path)}</div>
                     </div>
+                    ${project.backend === 'copilot' ? '<span class="badge badge-copilot">Copilot</span>' : ''}
                     <span class="badge badge-${project.type}">${project.type}</span>
                 </div>
                 <div class="card-body">
@@ -969,6 +970,8 @@ class OpenPoet {
                         : '';
                     const summary = sessSummary[task.id];
                     const hasActive = summary?.active_count > 0;
+                    const projectBackend = this.projects.find(p => p.id === projectId)?.backend || 'claude_code';
+                    const canReopen = projectBackend !== 'copilot';
                     const hasStopped = !hasActive && summary?.stopped_count > 0;
 
                     let actionsHtml = '';
@@ -978,7 +981,7 @@ class OpenPoet {
                                 <button class="btn btn-sm btn-success task-select-reconnect" data-session-id="${this.escapeHtml(summary.latest_session)}" title="Reconnect to active session">Reconnect</button>
                                 <button class="btn btn-sm btn-secondary task-select-new" data-task-id="${task.id}" data-task-title="${this.escapeHtml(task.title)}" title="Start new session">New</button>
                             </div>`;
-                    } else if (hasStopped) {
+                    } else if (hasStopped && canReopen) {
                         actionsHtml = `
                             <div class="task-select-item-actions">
                                 <button class="btn btn-sm btn-warning task-select-reopen" data-session-id="${this.escapeHtml(summary.latest_stopped_session)}" title="Reopen stopped session (continue conversation)">Reopen</button>
@@ -2783,10 +2786,14 @@ class OpenPoet {
             const modeLabels = { plan_mode: 'Plan', executing: 'Exec', idle: 'Idle' };
             const modeLabel = modeLabels[mode] || mode;
 
+            const isCopilot = session.backend === 'copilot';
+            const backendBadge = isCopilot ? '<span class="badge badge-copilot" style="margin-left:4px;">Copilot</span>' : '';
+
             return `
                 <div class="session-card" onclick="app.openTerminal('${session.id}')">
                     <div class="session-card-header">
                         <span class="badge badge-mode-${mode}" data-session-mode="${session.id}">${modeLabel}</span>
+                        ${backendBadge}
                         ${pendingBadge}
                         <span class="session-card-name">${this.escapeHtml(displayName)}</span>
                         <button class="btn btn-danger btn-sm session-card-stop" onclick="event.stopPropagation(); app.stopSession('${session.id}')">
@@ -2802,10 +2809,10 @@ class OpenPoet {
                             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                             <span class="session-elapsed" data-start="${session.start_time}">${elapsed}</span>
                         </span>
-                        <span class="session-card-stat" title="Tokens used">
+                        ${!isCopilot ? `<span class="session-card-stat" title="Tokens used">
                             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
                             ${tokenLabel}${costLabel ? ` (${costLabel})` : ''}
-                        </span>
+                        </span>` : ''}
                         ${lastActivity ? `<span class="session-card-stat" title="Last activity">${lastActivity}</span>` : ''}
                     </div>
                 </div>
@@ -4678,6 +4685,13 @@ class OpenPoet {
                     </select>
                 </div>
                 <div class="form-group">
+                    <label class="form-label">Backend</label>
+                    <select class="form-select" name="backend">
+                        <option value="claude_code" ${(project?.backend || 'claude_code') === 'claude_code' ? 'selected' : ''}>Claude Code</option>
+                        <option value="copilot" ${project?.backend === 'copilot' ? 'selected' : ''}>GitHub Copilot CLI</option>
+                    </select>
+                </div>
+                <div class="form-group">
                     <label class="form-label" style="display: flex; align-items: center; gap: 8px;">
                         Tool Policy
                         <span style="font-size: 11px; font-weight: normal; color: var(--color-text-muted);">(click to expand)</span>
@@ -4879,6 +4893,7 @@ class OpenPoet {
             name,
             path,
             type: formData.get('type'),
+            backend: formData.get('backend') || 'claude_code',
             ssh_host: formData.get('ssh_host'),
             ssh_port: parseInt(formData.get('ssh_port')) || 22,
             ssh_user: formData.get('ssh_user'),
@@ -8054,7 +8069,7 @@ class OpenPoet {
                 onClick: () => { window.docViewer.close(); this.openTerminal(activeSession.id); }
             };
         }
-        if (stoppedSession) {
+        if (stoppedSession && stoppedSession.backend !== 'copilot') {
             return {
                 label: 'Reopen Session',
                 role: 'primary',
@@ -8438,7 +8453,7 @@ class OpenPoet {
                 skipPermissions = permResult.skipPermissions;
             }
 
-            if (taskSummary?.stopped_count > 0 && taskSummary.latest_stopped_session) {
+            if (taskSummary?.stopped_count > 0 && taskSummary.latest_stopped_session && project?.backend !== 'copilot') {
                 const choice = await this.showSessionReopenChoiceModal();
                 if (!choice) return;
                 if (choice === 'reopen') {

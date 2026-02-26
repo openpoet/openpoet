@@ -678,11 +678,22 @@ func (a *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	backend := input.Backend
+	if backend == "" {
+		backend = "claude_code"
+	}
+	backendConfig := input.BackendConfig
+	if backendConfig == "" {
+		backendConfig = "{}"
+	}
+
 	project := &database.Project{
-		Name:       input.Name,
-		Path:       input.Path,
-		Type:       input.Type,
-		ToolPolicy: input.ToolPolicy,
+		Name:          input.Name,
+		Path:          input.Path,
+		Type:          input.Type,
+		ToolPolicy:    input.ToolPolicy,
+		Backend:       backend,
+		BackendConfig: backendConfig,
 	}
 
 	if input.Type == "remote" {
@@ -764,6 +775,12 @@ func (a *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	project.Type = input.Type
 	project.ToolPolicy = input.ToolPolicy
 	project.DangerouslySkipPermissions = input.DangerouslySkipPermissions
+	if input.Backend != "" {
+		project.Backend = input.Backend
+	}
+	if input.BackendConfig != "" {
+		project.BackendConfig = input.BackendConfig
+	}
 
 	if input.Type == "remote" {
 		log.Printf("[API] UpdateProject: id=%d ssh_auth_type=%q credential_len=%d", id, input.SSHAuthType, len(input.SSHCredential))
@@ -826,6 +843,8 @@ func (a *API) DuplicateProject(w http.ResponseWriter, r *http.Request) {
 		SSHAuthType:            original.SSHAuthType,
 		SSHCredentialEncrypted: original.SSHCredentialEncrypted,
 		SSHCredentialIV:        original.SSHCredentialIV,
+		Backend:                original.Backend,
+		BackendConfig:          original.BackendConfig,
 	}
 
 	// Apply overrides
@@ -1217,8 +1236,8 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 
-	// Inject env vars based on the claude_session slot config
-	if a.aiHandler != nil && a.aiHandler.providerMgr != nil {
+	// Inject env vars based on the claude_session slot config (only for Claude Code backend)
+	if project.Backend != "copilot" && a.aiHandler != nil && a.aiHandler.providerMgr != nil {
 		sessionConfig := a.aiHandler.providerMgr.GetSlotConfig(llm.SlotSession)
 		if sessionConfig != nil {
 			switch sessionConfig.ProviderType {
@@ -1402,6 +1421,12 @@ func (a *API) ReopenSession(w http.ResponseWriter, r *http.Request) {
 	project, err := a.db.GetProject(r.Context(), sess.ProjectID)
 	if err != nil {
 		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	// Check if backend supports session resume
+	if sess.Backend == "copilot" {
+		respondError(w, http.StatusBadRequest, "Copilot sessions cannot be resumed. Start a new session instead.")
 		return
 	}
 

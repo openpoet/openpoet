@@ -136,12 +136,14 @@ func NewManager(db *database.DB, hub *websocket.Hub, serverAddr string) *Manager
 }
 
 func (m *Manager) StartSession(ctx context.Context, project *database.Project, envVars map[string]string) (*database.Session, error) {
+	backend := GetBackend(project.Backend)
 	sessionID := uuid.New().String()
 	session := &database.Session{
 		ID:        sessionID,
 		ProjectID: project.ID,
 		Status:    "starting",
 		StartTime: time.Now(),
+		Backend:   project.Backend,
 	}
 
 	if err := m.db.CreateSession(ctx, session); err != nil {
@@ -151,39 +153,34 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	// Create output buffer (1MB max)
 	outputBuffer := NewOutputBuffer(1024 * 1024)
 
-	// Inject hook environment variables
 	if envVars == nil {
 		envVars = make(map[string]string)
 	}
-	envVars["OPENPOET_HOOK_URL"] = "http://" + m.serverAddr
-	envVars["OPENPOET_SESSION_ID"] = sessionID
 
-	// Inject OpenTelemetry env vars for Claude Code token tracking
-	envVars["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
-	envVars["OTEL_METRICS_EXPORTER"] = "otlp"
-	envVars["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/json"
-	envVars["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://" + m.serverAddr
-	envVars["OTEL_RESOURCE_ATTRIBUTES"] = "openpoet.session_id=" + sessionID
-	envVars["OTEL_METRIC_EXPORT_INTERVAL"] = "10000" // 10 seconds for faster feedback
-
-	// Build MCP config for --mcp-config CLI flag (additive, preserves project's existing MCPs)
-	// Use --session-id so Claude Code conversation ID matches OpenPoet session ID.
-	// This allows --resume to restore the exact conversation when reopening.
-	cliArgs := []string{"--session-id", sessionID}
-	if mcpJSON := m.buildMCPConfigJSON(ctx, project, sessionID); mcpJSON != "" {
-		cliArgs = append(cliArgs, "--mcp-config", mcpJSON)
+	// Build backend-agnostic session config
+	cfg := &SessionConfig{
+		SessionID:     sessionID,
+		ServerAddr:    m.serverAddr,
+		BackendConfig: project.BackendConfig,
 	}
 
-	// Inject task system prompt if present (set by API handler when session starts from a task)
+	// Extract special env vars set by API handler before passing to backend
 	if prompt, ok := envVars["OPENPOET_APPEND_SYSTEM_PROMPT"]; ok && prompt != "" {
-		cliArgs = append(cliArgs, "--append-system-prompt", prompt)
-		delete(envVars, "OPENPOET_APPEND_SYSTEM_PROMPT") // don't leak as env var
+		cfg.AppendSystemPrompt = prompt
+		delete(envVars, "OPENPOET_APPEND_SYSTEM_PROMPT")
+	}
+	if v, ok := envVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"]; ok && v == "true" {
+		cfg.DangerouslySkipPermissions = true
+		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
 
-	// Inject --dangerously-skip-permissions if requested and project allows it
-	if v, ok := envVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"]; ok && v == "true" {
-		cliArgs = append(cliArgs, "--dangerously-skip-permissions")
-		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
+	// Build MCP config
+	cfg.MCPConfigJSON = m.buildMCPConfigJSON(ctx, project, sessionID)
+
+	// Let the backend build its CLI args and env vars
+	cliArgs := backend.BuildCLIArgs(cfg)
+	for k, v := range backend.BuildEnvVars(cfg) {
+		envVars[k] = v
 	}
 
 	// Create runner based on project type
@@ -195,7 +192,7 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 			outputBuffer.Write(data)
 			m.hub.BroadcastSessionOutput(sessionID, data)
 			m.checkForNotificationTriggers(sessionID, data)
-		}, cliArgs)
+		}, cliArgs, backend)
 	} else {
 		return nil, fmt.Errorf("remote sessions not yet implemented")
 	}
@@ -249,7 +246,13 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 }
 
 func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, project *database.Project, envVars map[string]string, decryptFunc func(string, string) (string, error)) error {
+	backend := GetBackend(session.Backend)
 	sessionID := session.ID
+
+	// Check backend supports resume
+	if !backend.SupportsResume() {
+		return fmt.Errorf("backend %q does not support session resume", session.Backend)
+	}
 
 	// Verify session is not already running
 	m.mu.RLock()
@@ -267,42 +270,35 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	// Create output buffer (1MB max)
 	outputBuffer := NewOutputBuffer(1024 * 1024)
 
-	// Inject hook environment variables
 	if envVars == nil {
 		envVars = make(map[string]string)
 	}
-	envVars["OPENPOET_HOOK_URL"] = "http://" + m.serverAddr
-	envVars["OPENPOET_SESSION_ID"] = sessionID
 
-	// Inject OpenTelemetry env vars for Claude Code token tracking
-	envVars["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
-	envVars["OTEL_METRICS_EXPORTER"] = "otlp"
-	envVars["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/json"
-	envVars["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://" + m.serverAddr
-	envVars["OTEL_RESOURCE_ATTRIBUTES"] = "openpoet.session_id=" + sessionID
-	envVars["OTEL_METRIC_EXPORT_INTERVAL"] = "10000"
-
-	// Build CLI args - resume the specific conversation by session ID.
-	// Using --resume <id> instead of --continue ensures each task reopens
-	// its own conversation, even when multiple tasks share the same project directory.
-	var cliArgs []string
-	cliArgs = append(cliArgs, "--resume", sessionID)
-
-	// Build MCP config for --mcp-config CLI flag
-	if mcpJSON := m.buildMCPConfigJSON(ctx, project, sessionID); mcpJSON != "" {
-		cliArgs = append(cliArgs, "--mcp-config", mcpJSON)
+	// Build backend-agnostic session config
+	cfg := &SessionConfig{
+		SessionID:     sessionID,
+		ServerAddr:    m.serverAddr,
+		IsReopen:      true,
+		BackendConfig: project.BackendConfig,
 	}
 
-	// Inject task system prompt if present
+	// Extract special env vars set by API handler
 	if prompt, ok := envVars["OPENPOET_APPEND_SYSTEM_PROMPT"]; ok && prompt != "" {
-		cliArgs = append(cliArgs, "--append-system-prompt", prompt)
+		cfg.AppendSystemPrompt = prompt
 		delete(envVars, "OPENPOET_APPEND_SYSTEM_PROMPT")
 	}
-
-	// Inject --dangerously-skip-permissions if requested and project allows it
 	if v, ok := envVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"]; ok && v == "true" {
-		cliArgs = append(cliArgs, "--dangerously-skip-permissions")
+		cfg.DangerouslySkipPermissions = true
 		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
+	}
+
+	// Build MCP config
+	cfg.MCPConfigJSON = m.buildMCPConfigJSON(ctx, project, sessionID)
+
+	// Let the backend build its CLI args and env vars
+	cliArgs := backend.BuildCLIArgs(cfg)
+	for k, v := range backend.BuildEnvVars(cfg) {
+		envVars[k] = v
 	}
 
 	// Create runner based on project type
@@ -316,7 +312,7 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	}
 
 	if project.Type == "local" {
-		runner, err = NewLocalRunner(project.Path, envVars, outputHandler, cliArgs)
+		runner, err = NewLocalRunner(project.Path, envVars, outputHandler, cliArgs, backend)
 	} else {
 		if remoteRunnerFactory == nil {
 			return fmt.Errorf("remote runner factory not set")
@@ -716,50 +712,48 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 		return nil, fmt.Errorf("remote runner factory not set")
 	}
 
+	backend := GetBackend(project.Backend)
 	sessionID := uuid.New().String()
 	session := &database.Session{
 		ID:        sessionID,
 		ProjectID: project.ID,
 		Status:    "starting",
 		StartTime: time.Now(),
+		Backend:   project.Backend,
 	}
 
 	if err := m.db.CreateSession(ctx, session); err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
 
-	// Inject hook environment variables for remote sessions
 	if envVars == nil {
 		envVars = make(map[string]string)
 	}
-	envVars["OPENPOET_HOOK_URL"] = "http://" + m.serverAddr
-	envVars["OPENPOET_SESSION_ID"] = sessionID
 
-	// Inject OpenTelemetry env vars for Claude Code token tracking
-	envVars["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
-	envVars["OTEL_METRICS_EXPORTER"] = "otlp"
-	envVars["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/json"
-	envVars["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://" + m.serverAddr
-	envVars["OTEL_RESOURCE_ATTRIBUTES"] = "openpoet.session_id=" + sessionID
-	envVars["OTEL_METRIC_EXPORT_INTERVAL"] = "10000" // 10 seconds for faster feedback
-
-	// Use --session-id so Claude Code conversation ID matches OpenPoet session ID.
-	// This allows --resume to restore the exact conversation when reopening.
-	cliArgs := []string{"--session-id", sessionID}
-	if mcpJSON := m.buildMCPConfigJSON(ctx, project, sessionID); mcpJSON != "" {
-		cliArgs = append(cliArgs, "--mcp-config", mcpJSON)
+	// Build backend-agnostic session config
+	cfg := &SessionConfig{
+		SessionID:     sessionID,
+		ServerAddr:    m.serverAddr,
+		BackendConfig: project.BackendConfig,
 	}
 
-	// Inject task system prompt if present (set by API handler when session starts from a task)
+	// Extract special env vars set by API handler
 	if prompt, ok := envVars["OPENPOET_APPEND_SYSTEM_PROMPT"]; ok && prompt != "" {
-		cliArgs = append(cliArgs, "--append-system-prompt", prompt)
-		delete(envVars, "OPENPOET_APPEND_SYSTEM_PROMPT") // don't leak as env var
+		cfg.AppendSystemPrompt = prompt
+		delete(envVars, "OPENPOET_APPEND_SYSTEM_PROMPT")
+	}
+	if v, ok := envVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"]; ok && v == "true" {
+		cfg.DangerouslySkipPermissions = true
+		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
 
-	// Inject --dangerously-skip-permissions if requested and project allows it
-	if v, ok := envVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"]; ok && v == "true" {
-		cliArgs = append(cliArgs, "--dangerously-skip-permissions")
-		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
+	// Build MCP config
+	cfg.MCPConfigJSON = m.buildMCPConfigJSON(ctx, project, sessionID)
+
+	// Let the backend build its CLI args and env vars
+	cliArgs := backend.BuildCLIArgs(cfg)
+	for k, v := range backend.BuildEnvVars(cfg) {
+		envVars[k] = v
 	}
 
 	// Create output buffer (1MB max)

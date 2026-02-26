@@ -38,9 +38,9 @@ func (d *DB) migrate() error {
 
 // Project operations
 func (d *DB) CreateProject(ctx context.Context, p *Project) error {
-	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv, tool_policy, skill_policy)
-			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy)
+	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv, tool_policy, skill_policy, backend, backend_config)
+			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.Backend, p.BackendConfig)
 	if err != nil {
 		return err
 	}
@@ -72,8 +72,8 @@ func (d *DB) ListProjects(ctx context.Context) ([]Project, error) {
 }
 
 func (d *DB) UpdateProject(ctx context.Context, p *Project) error {
-	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, tool_policy=?, skill_policy=?, dangerously_skip_permissions=?, updated_at=? WHERE id=?`
-	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.DangerouslySkipPermissions, time.Now(), p.ID)
+	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, tool_policy=?, skill_policy=?, dangerously_skip_permissions=?, backend=?, backend_config=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.DangerouslySkipPermissions, p.Backend, p.BackendConfig, time.Now(), p.ID)
 	return err
 }
 
@@ -131,8 +131,8 @@ func (d *DB) HasProjectShare(ctx context.Context, projectID, sharedProjectID int
 
 // Session operations
 func (d *DB) CreateSession(ctx context.Context, s *Session) error {
-	query := `INSERT INTO sessions (id, project_id, status, pid, name, task_id, start_time) VALUES (?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.ExecContext(ctx, query, s.ID, s.ProjectID, s.Status, s.PID, s.Name, s.TaskID, s.StartTime)
+	query := `INSERT INTO sessions (id, project_id, status, pid, name, task_id, start_time, backend) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.ExecContext(ctx, query, s.ID, s.ProjectID, s.Status, s.PID, s.Name, s.TaskID, s.StartTime, s.Backend)
 	return err
 }
 
