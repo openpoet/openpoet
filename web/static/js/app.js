@@ -970,8 +970,6 @@ class OpenPoet {
                         : '';
                     const summary = sessSummary[task.id];
                     const hasActive = summary?.active_count > 0;
-                    const projectBackend = this.projects.find(p => p.id === projectId)?.backend || 'claude_code';
-                    const canReopen = projectBackend !== 'copilot';
                     const hasStopped = !hasActive && summary?.stopped_count > 0;
 
                     let actionsHtml = '';
@@ -981,7 +979,7 @@ class OpenPoet {
                                 <button class="btn btn-sm btn-success task-select-reconnect" data-session-id="${this.escapeHtml(summary.latest_session)}" title="Reconnect to active session">Reconnect</button>
                                 <button class="btn btn-sm btn-secondary task-select-new" data-task-id="${task.id}" data-task-title="${this.escapeHtml(task.title)}" title="Start new session">New</button>
                             </div>`;
-                    } else if (hasStopped && canReopen) {
+                    } else if (hasStopped) {
                         actionsHtml = `
                             <div class="task-select-item-actions">
                                 <button class="btn btn-sm btn-warning task-select-reopen" data-session-id="${this.escapeHtml(summary.latest_stopped_session)}" title="Reopen stopped session (continue conversation)">Reopen</button>
@@ -8069,7 +8067,7 @@ class OpenPoet {
                 onClick: () => { window.docViewer.close(); this.openTerminal(activeSession.id); }
             };
         }
-        if (stoppedSession && stoppedSession.backend !== 'copilot') {
+        if (stoppedSession) {
             return {
                 label: 'Reopen Session',
                 role: 'primary',
@@ -8453,7 +8451,7 @@ class OpenPoet {
                 skipPermissions = permResult.skipPermissions;
             }
 
-            if (taskSummary?.stopped_count > 0 && taskSummary.latest_stopped_session && project?.backend !== 'copilot') {
+            if (taskSummary?.stopped_count > 0 && taskSummary.latest_stopped_session) {
                 const choice = await this.showSessionReopenChoiceModal();
                 if (!choice) return;
                 if (choice === 'reopen') {
