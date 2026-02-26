@@ -1424,12 +1424,6 @@ func (a *API) ReopenSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if backend supports session resume
-	if sess.Backend == "copilot" {
-		respondError(w, http.StatusBadRequest, "Copilot sessions cannot be resumed. Start a new session instead.")
-		return
-	}
-
 	// Auto-sync config before starting
 	if a.configSync != nil {
 		if syncErr := a.configSync.SyncToProject(r.Context(), project); syncErr != nil {

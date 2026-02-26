@@ -10,7 +10,7 @@ type CopilotBackend struct{}
 
 func (b *CopilotBackend) Type() BackendType          { return BackendCopilot }
 func (b *CopilotBackend) BinaryName() string         { return "copilot" }
-func (b *CopilotBackend) SupportsResume() bool       { return false }
+func (b *CopilotBackend) SupportsResume() bool       { return true }
 func (b *CopilotBackend) SupportsOTEL() bool         { return false }
 func (b *CopilotBackend) SupportsPlanCapture() bool  { return false }
 func (b *CopilotBackend) SupportsAskUser() bool      { return false }
@@ -35,18 +35,20 @@ func (b *CopilotBackend) BuildCLIArgs(cfg *SessionConfig) []string {
 	var args []string
 	cc := parseCopilotConfig(cfg.BackendConfig)
 
+	if cfg.IsReopen {
+		args = append(args, "--resume")
+	}
+
 	if cc.AllowAllTools || cfg.DangerouslySkipPermissions {
 		args = append(args, b.PermissionSkipFlag())
 	}
 
 	if cfg.MCPConfigJSON != "" {
-		args = append(args, "--mcp-config", cfg.MCPConfigJSON)
+		args = append(args, "--additional-mcp-config", "@"+cfg.MCPConfigJSON)
 	}
 
-	// Copilot uses -p for one-shot prompts; for task context, inject via initial prompt
-	if cfg.AppendSystemPrompt != "" {
-		args = append(args, "-p", cfg.AppendSystemPrompt)
-	}
+	// System prompt is injected via copilot-instructions.md (synced by configsync),
+	// not via -p which runs Copilot in non-interactive one-shot mode.
 
 	return args
 }
