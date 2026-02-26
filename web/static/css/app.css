@@ -628,6 +628,16 @@ body {
     color: var(--color-warning);
 }
 
+.badge-copilot {
+    background-color: rgba(var(--color-info-rgb), 0.2);
+    color: var(--color-info);
+}
+
+.badge-claude_code {
+    background-color: rgba(var(--color-primary-rgb), 0.2);
+    color: var(--color-primary);
+}
+
 .badge-running {
     background-color: rgba(var(--color-success-rgb), 0.2);
     color: var(--color-success);

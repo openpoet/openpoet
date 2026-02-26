@@ -121,6 +121,25 @@ func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, ses
 // modeIdleTimeout is how long to wait without events before assuming idle.
 const modeIdleTimeout = 15 * time.Second
 
+// normalizeCopilotEventName maps Copilot CLI hook event names to Claude Code equivalents.
+// This allows the rest of the hook handler to use a single code path.
+func normalizeCopilotEventName(name string) string {
+	switch name {
+	case "preToolUse":
+		return "PreToolUse"
+	case "postToolUse":
+		return "PostToolUse"
+	case "userPromptSubmitted":
+		return "UserPromptSubmit"
+	case "sessionStart":
+		return "Notification"
+	case "sessionEnd":
+		return "Stop"
+	default:
+		return name
+	}
+}
+
 // setSessionMode updates the mode and broadcasts if changed. Must NOT hold h.mu.
 func (h *HookHandler) setSessionMode(sessionID, newMode, reason string) {
 	h.mu.Lock()
@@ -201,11 +220,21 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Detect backend from header
+	isCopilot := r.Header.Get("X-Backend") == "copilot"
+
 	// Parse the hook event JSON
 	var hookEvent map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&hookEvent); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
+	}
+
+	// Normalize Copilot event names
+	if isCopilot {
+		if en, ok := hookEvent["hook_event_name"].(string); ok {
+			hookEvent["hook_event_name"] = normalizeCopilotEventName(en)
+		}
 	}
 
 	// Check tool name for auto-allow logic
@@ -628,6 +657,12 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	eventName, _ := hookEvent["hook_event_name"].(string)
+
+	// Normalize Copilot event names to Claude Code equivalents
+	if r.Header.Get("X-Backend") == "copilot" {
+		eventName = normalizeCopilotEventName(eventName)
+		hookEvent["hook_event_name"] = eventName
+	}
 
 	// Log every incoming event for debugging
 	shortID := sessionID
