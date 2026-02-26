@@ -21,6 +21,7 @@ func (b *CopilotBackend) HookFormat() string         { return "copilot" }
 type copilotConfig struct {
 	AllowAllTools bool   `json:"allow_all_tools"`
 	GitHubToken   string `json:"github_token"`
+	EnableMCP     bool   `json:"enable_mcp"` // opt-in: many orgs block third-party MCP servers
 }
 
 func parseCopilotConfig(raw string) copilotConfig {
@@ -43,7 +44,7 @@ func (b *CopilotBackend) BuildCLIArgs(cfg *SessionConfig) []string {
 		args = append(args, b.PermissionSkipFlag())
 	}
 
-	if cfg.MCPConfigJSON != "" {
+	if cfg.MCPConfigJSON != "" && cc.EnableMCP {
 		args = append(args, "--additional-mcp-config", "@"+cfg.MCPConfigJSON)
 	}
 
