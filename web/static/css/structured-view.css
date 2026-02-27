@@ -144,8 +144,60 @@
 
 .sv-text {
     color: var(--color-text);
-    white-space: pre-wrap;
     word-break: break-word;
+    line-height: 1.6;
+}
+
+.sv-text p {
+    margin: 0.4em 0;
+}
+
+.sv-text p:first-child {
+    margin-top: 0;
+}
+
+.sv-text p:last-child {
+    margin-bottom: 0;
+}
+
+.sv-text code {
+    background: var(--color-bg-tertiary, rgba(255,255,255,0.06));
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.9em;
+}
+
+.sv-text pre {
+    background: var(--color-bg-tertiary, rgba(255,255,255,0.06));
+    padding: 0.75em 1em;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 0.5em 0;
+}
+
+.sv-text pre code {
+    background: none;
+    padding: 0;
+}
+
+.sv-text ul, .sv-text ol {
+    padding-left: 1.5em;
+    margin: 0.4em 0;
+}
+
+.sv-text a {
+    color: var(--color-primary);
+}
+
+.sv-text strong {
+    color: var(--color-text);
+}
+
+.sv-text blockquote {
+    border-left: 3px solid var(--color-border);
+    padding-left: 0.75em;
+    margin: 0.4em 0;
+    opacity: 0.85;
 }
 
 /* Tool use blocks */
@@ -347,7 +399,148 @@
     background: rgba(var(--color-primary-rgb), 0.15);
 }
 
-/* Responsive */
+/* ==================== Input Area ==================== */
+
+.sv-input-area {
+    flex-shrink: 0;
+    padding: 8px 16px 12px;
+    border-top: 1px solid var(--color-border);
+    background: var(--color-bg-secondary);
+}
+
+.sv-input-wrapper {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+}
+
+.sv-input-textarea {
+    flex: 1;
+    min-height: 40px;
+    max-height: 150px;
+    padding: 10px 14px;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-family: "Monaco", "Menlo", "Consolas", monospace;
+    font-size: 14px;
+    line-height: 1.4;
+    resize: none;
+    outline: none;
+    transition: border-color 0.15s ease;
+}
+
+.sv-input-textarea:focus {
+    border-color: var(--color-primary);
+}
+
+.sv-input-textarea::placeholder {
+    color: var(--color-text-muted);
+}
+
+.sv-input-send {
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 8px;
+    background: var(--color-primary);
+    color: white;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: opacity 0.15s ease, transform 0.1s ease;
+}
+
+.sv-input-send:hover {
+    opacity: 0.9;
+}
+
+.sv-input-send:active {
+    transform: scale(0.95);
+}
+
+.sv-input-hint {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    margin-top: 4px;
+    padding-left: 2px;
+}
+
+/* ==================== AskUserQuestion Cards ==================== */
+
+.sv-ask-user {
+    border: 1px solid rgba(var(--color-primary-rgb), 0.4);
+    background: rgba(var(--color-primary-rgb), 0.04);
+    border-radius: 8px;
+    padding: 12px 14px;
+}
+
+.sv-ask-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.sv-ask-question {
+    margin-bottom: 10px;
+}
+
+.sv-ask-question-text {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--color-text);
+    margin-bottom: 8px;
+}
+
+.sv-ask-options {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.sv-ask-option {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 10px 14px;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-size: 13px;
+    text-align: left;
+    width: 100%;
+}
+
+.sv-ask-option-label {
+    font-weight: 500;
+}
+
+.sv-ask-option-desc {
+    font-size: 12px;
+    color: var(--color-text-muted);
+    margin-top: 2px;
+}
+
+/* ==================== Session State Hint ==================== */
+
+.sv-input-state {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    padding: 0 2px 4px;
+}
+
+/* ==================== Responsive ==================== */
+
 @media (max-width: 768px) {
     .sv-messages {
         padding: 8px 10px;
@@ -363,5 +556,17 @@
     .sv-message {
         padding: 8px 10px;
         font-size: 13px;
+    }
+
+    .sv-input-area {
+        padding: 6px 10px 8px;
+    }
+
+    .sv-input-hint {
+        display: none;
+    }
+
+    .sv-input-textarea {
+        font-size: 16px;
     }
 }
