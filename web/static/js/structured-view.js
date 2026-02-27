@@ -801,7 +801,7 @@ class StructuredViewManager {
                 const textarea = isMobile
                     ? document.getElementById('mobile-terminal-input')
                     : view.textarea;
-                if (textarea) textarea.placeholder = 'Send a message...';
+                if (textarea) textarea.placeholder = isMobile ? 'Message...' : 'Send a message...';
             } else if (msg.stop_reason === 'tool_use') {
                 stateEl.textContent = 'Claude is using tools...';
             } else {
