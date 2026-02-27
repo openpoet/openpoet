@@ -3678,15 +3678,55 @@ class OpenPoet {
 
         if (!input || !sendBtn) return;
 
-        // Send input on Enter key
+        // Track what the terminal currently has (synced value)
+        input._lastSyncedValue = '';
+
+        // Real-time sync: forward every input change to the terminal
+        input.addEventListener('input', () => {
+            const newVal = input.value;
+            const oldVal = input._lastSyncedValue || '';
+            const sessionId = window.terminalManager?.activeSessionId;
+            if (!sessionId) return;
+
+            if (newVal.length > oldVal.length && newVal.startsWith(oldVal)) {
+                // Characters added at end — send just the new chars
+                const added = newVal.substring(oldVal.length);
+                window.terminalManager.sendInputToSession(sessionId, added);
+            } else if (newVal.length < oldVal.length && oldVal.startsWith(newVal)) {
+                // Characters removed from end (backspace)
+                const count = oldVal.length - newVal.length;
+                for (let i = 0; i < count; i++) {
+                    window.terminalManager.sendInputToSession(sessionId, '\x7f');
+                }
+            } else {
+                // Complex edit (paste over selection, etc.) — clear line and resend
+                window.terminalManager.sendInputToSession(sessionId, '\x15'); // Ctrl+U
+                if (newVal) {
+                    setTimeout(() => {
+                        window.terminalManager.sendInputToSession(sessionId, newVal);
+                    }, 30);
+                }
+            }
+            input._lastSyncedValue = newVal;
+
+            // Auto-resize textarea
+            input.style.height = '44px';
+            input.style.overflow = 'hidden';
+            if (input.scrollHeight > input.clientHeight) {
+                input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+                input.style.overflow = 'auto';
+            }
+        });
+
+        // Enter sends \r to terminal (text is already there via real-time sync)
         input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 this.sendMobileTerminalInput();
             }
         });
 
-        // Send input on button click
+        // Send button sends Enter to terminal
         sendBtn.addEventListener('click', () => {
             this.sendMobileTerminalInput();
         });
@@ -3713,26 +3753,11 @@ class OpenPoet {
         const voiceBtn = document.getElementById('mobile-editor-voice');
 
         closeBtn?.addEventListener('click', () => {
-            this.closeMobileEditor();
+            this._closeEditor();
         });
 
         sendBtn?.addEventListener('click', () => {
-            const textarea = document.getElementById('mobile-editor-textarea');
-            const input = document.getElementById('mobile-terminal-input');
-            if (!textarea) return;
-
-            const text = textarea.value.trim();
-            if (text) {
-                // Copy to inline input and use the canonical send method
-                if (input) input.value = text;
-                this.sendMobileTerminalInput();
-            }
-
-            // Clear and close
-            textarea.value = '';
-            if (input) input.value = '';
-            const editor = document.getElementById('mobile-text-editor');
-            if (editor) editor.classList.add('hidden');
+            this._sendFromEditor();
         });
 
         voiceBtn?.addEventListener('click', () => {
@@ -3748,18 +3773,118 @@ class OpenPoet {
         });
     }
 
+    /**
+     * Get the SV view for the current editor context, if any.
+     */
+    _getEditorSVView() {
+        const sid = this._svEditorSessionId;
+        if (sid && window.structuredView) {
+            return window.structuredView.views.get(sid) ?? null;
+        }
+        return null;
+    }
+
+    /**
+     * Send text from the full-screen editor.
+     * Context-aware: syncs with SV textarea (desktop) or mobile input.
+     */
+    _sendFromEditor() {
+        const editorTextarea = document.getElementById('mobile-editor-textarea');
+        const editor = document.getElementById('mobile-text-editor');
+        if (!editorTextarea) return;
+
+        const text = editorTextarea.value.trim();
+        const svView = this._getEditorSVView();
+
+        if (svView?.textarea && text) {
+            // SV context (desktop): copy to SV textarea and send
+            svView.textarea.value = text;
+            svView.sendToTerminal();
+        } else if (text) {
+            // Mobile context: send directly to terminal (Ctrl+U, text, Enter)
+            const sessionId = window.terminalManager?.activeSessionId;
+            if (sessionId) {
+                window.terminalManager.sendInputToSession(sessionId, '\x15'); // Clear line
+                setTimeout(() => {
+                    window.terminalManager.sendInputToSession(sessionId, text);
+                    setTimeout(() => {
+                        window.terminalManager.sendInputToSession(sessionId, '\r');
+                    }, 50);
+                }, 30);
+            }
+        }
+
+        editorTextarea.value = '';
+        const input = document.getElementById('mobile-terminal-input');
+        if (input) {
+            input.value = '';
+            input._lastSyncedValue = '';
+            input.style.height = '44px';
+            input.style.overflow = 'hidden';
+        }
+        if (editor) editor.classList.add('hidden');
+        this._svEditorSessionId = null;
+    }
+
+    /**
+     * Close the full-screen editor.
+     * Context-aware: preserves text back to SV textarea or mobile input.
+     */
+    _closeEditor() {
+        const editorTextarea = document.getElementById('mobile-editor-textarea');
+        const editor = document.getElementById('mobile-text-editor');
+        if (!editorTextarea || !editor) return;
+
+        const svView = this._getEditorSVView();
+        const text = editorTextarea.value;
+
+        if (svView?.textarea) {
+            // SV context (desktop): preserve text back to SV textarea
+            svView.textarea.value = text;
+            svView.textarea.style.height = 'auto';
+            svView.textarea.style.height = Math.min(svView.textarea.scrollHeight, 150) + 'px';
+        } else {
+            // Mobile context: sync text to terminal and update mobile input
+            const input = document.getElementById('mobile-terminal-input');
+            const sessionId = window.terminalManager?.activeSessionId;
+            if (sessionId) {
+                // Clear terminal line and send editor text so terminal matches
+                window.terminalManager.sendInputToSession(sessionId, '\x15');
+                if (text) {
+                    setTimeout(() => {
+                        window.terminalManager.sendInputToSession(sessionId, text);
+                    }, 30);
+                }
+            }
+            if (input) {
+                input.value = text;
+                input._lastSyncedValue = text;
+                // Auto-resize
+                input.style.height = '44px';
+                input.style.overflow = 'hidden';
+                if (input.scrollHeight > input.clientHeight) {
+                    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+                    input.style.overflow = 'auto';
+                }
+            }
+        }
+
+        editor.classList.add('hidden');
+        this._svEditorSessionId = null;
+    }
+
     openMobileEditor() {
         const editor = document.getElementById('mobile-text-editor');
         const textarea = document.getElementById('mobile-editor-textarea');
         const input = document.getElementById('mobile-terminal-input');
 
-        if (!editor || !textarea || !input) return;
+        if (!editor || !textarea) return;
 
-        // Copy text from input to textarea
-        textarea.value = input.value;
+        // Mobile context — no SV session
+        this._svEditorSessionId = null;
+        textarea.value = input?.value ?? '';
         editor.classList.remove('hidden');
 
-        // Focus textarea and move cursor to end
         setTimeout(() => {
             textarea.focus();
             textarea.selectionStart = textarea.value.length;
@@ -3767,16 +3892,26 @@ class OpenPoet {
         }, 50);
     }
 
-    closeMobileEditor() {
+    /**
+     * Open the full-screen editor for a desktop SV input.
+     */
+    openSVEditor(sessionId) {
         const editor = document.getElementById('mobile-text-editor');
-        const textarea = document.getElementById('mobile-editor-textarea');
-        const input = document.getElementById('mobile-terminal-input');
+        const editorTextarea = document.getElementById('mobile-editor-textarea');
+        if (!editor || !editorTextarea) return;
 
-        if (!editor || !textarea || !input) return;
+        const svView = window.structuredView?.views?.get(sessionId);
+        if (!svView?.textarea) return;
 
-        // Preserve text back into inline input
-        input.value = textarea.value;
-        editor.classList.add('hidden');
+        this._svEditorSessionId = sessionId;
+        editorTextarea.value = svView.textarea.value;
+        editor.classList.remove('hidden');
+
+        setTimeout(() => {
+            editorTextarea.focus();
+            editorTextarea.selectionStart = editorTextarea.value.length;
+            editorTextarea.selectionEnd = editorTextarea.value.length;
+        }, 50);
     }
 
     setupMobileSpecialKeys() {
@@ -3916,36 +4051,15 @@ class OpenPoet {
         const input = document.getElementById('mobile-terminal-input');
         if (!input) return;
 
-        const text = input.value.trim();
-        if (text) {
-            if (window.terminalManager) {
-                const targetSessionId = window.terminalManager.activeSessionId;
-                if (!targetSessionId) return;
+        const sessionId = window.terminalManager?.activeSessionId;
+        if (!sessionId) return;
 
-                const delays = this.getInputDelays(targetSessionId, 'mobile');
-
-                // Clear current line, send text, then Enter after delay.
-                window.terminalManager.sendInputToSession(targetSessionId, '\x15'); // Ctrl+U
-                const sendTextAndEnter = () => {
-                    window.terminalManager.sendInputToSession(targetSessionId, text);
-                    setTimeout(() => {
-                        window.terminalManager.sendInputToSession(targetSessionId, '\r');
-                    }, delays.textToEnter);
-                };
-
-                if (delays.ctrlUToText > 0) {
-                    setTimeout(sendTextAndEnter, delays.ctrlUToText);
-                } else {
-                    sendTextAndEnter();
-                }
-            }
-            input.value = '';
-        } else {
-            // Empty input: send Enter to the terminal (for navigation, confirming prompts, etc.)
-            if (window.terminalManager) {
-                window.terminalManager.sendInput('\r');
-            }
-        }
+        // Text is already in the terminal via real-time sync — just send Enter
+        window.terminalManager.sendInputToSession(sessionId, '\r');
+        input.value = '';
+        input._lastSyncedValue = '';
+        input.style.height = '44px';
+        input.style.overflow = 'hidden';
     }
 
     // ==================== LOCALSTORAGE PERSISTENCE ====================

@@ -608,35 +608,49 @@
     /* Mobile terminal input bar - flex item in terminal-main-area */
     .mobile-terminal-input-bar {
         display: flex;
-        align-items: center;
-        gap: 6px;
-        padding: 10px;
+        flex-direction: column;
+        gap: 0;
+        padding: 6px 10px 10px;
         background-color: var(--color-bg-secondary);
         border-top: 1px solid var(--color-border);
         flex-shrink: 0;
     }
 
+    .mobile-input-state {
+        font-size: 11px;
+        color: var(--color-text-muted);
+        padding: 0 2px 4px;
+        min-height: 0;
+    }
+
+    .mobile-input-state:empty {
+        display: none;
+    }
+
+    .mobile-input-wrapper {
+        display: flex;
+        align-items: flex-end;
+        gap: 6px;
+    }
+
     .mobile-terminal-input {
         flex: 1;
-        min-width: 0; /* Allow shrinking below intrinsic width */
-        height: 44px; /* Touch-friendly height */
-        padding: 0 12px;
+        min-width: 0;
+        height: 44px;
+        max-height: 120px;
+        padding: 11px 12px;
+        box-sizing: border-box;
         background-color: var(--color-surface);
         border: 1px solid var(--color-border);
         border-radius: var(--border-radius);
         color: var(--color-text);
         font-size: 16px; /* Prevents zoom on iOS */
         font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-        -webkit-appearance: none; /* Remove default search styling on iOS/Android */
-        appearance: none;
-    }
-
-    /* Hide search clear button on all browsers */
-    .mobile-terminal-input::-webkit-search-cancel-button,
-    .mobile-terminal-input::-webkit-search-decoration {
+        line-height: 20px;
+        resize: none;
+        overflow: hidden;
         -webkit-appearance: none;
         appearance: none;
-        display: none;
     }
 
     .mobile-terminal-input:focus {
