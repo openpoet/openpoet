@@ -763,6 +763,14 @@ class TerminalManager {
 
             window.structuredView.show(sessionId);
             this._updateStructuredViewButton(true);
+
+            // Focus textarea on desktop
+            if (window.innerWidth > 768) {
+                const svView = window.structuredView.views.get(sessionId);
+                if (svView?.textarea) {
+                    requestAnimationFrame(() => svView.textarea.focus());
+                }
+            }
         }
 
         // Persist preference

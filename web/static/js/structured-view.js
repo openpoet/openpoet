@@ -40,12 +40,62 @@ class StructuredViewManager {
         messagesEl.className = 'sv-messages';
         container.appendChild(messagesEl);
 
+        // Input area
+        const inputArea = document.createElement('div');
+        inputArea.className = 'sv-input-area';
+        inputArea.innerHTML = `
+            <div class="sv-input-state"></div>
+            <div class="sv-input-wrapper">
+                <textarea class="sv-input-textarea" rows="1"
+                    placeholder="Send a message..."
+                    autocomplete="off" autocorrect="off" autocapitalize="off"
+                    spellcheck="false"></textarea>
+                <button class="sv-input-send" title="Send message">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                         stroke="currentColor" stroke-width="2">
+                        <line x1="22" y1="2" x2="11" y2="13"></line>
+                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                    </svg>
+                </button>
+            </div>
+            <div class="sv-input-hint">Enter to send, Shift+Enter for new line</div>
+        `;
+        container.appendChild(inputArea);
+
+        const textarea = inputArea.querySelector('.sv-input-textarea');
+        const sendBtn = inputArea.querySelector('.sv-input-send');
+
+        // Auto-resize textarea
+        textarea.addEventListener('input', () => {
+            textarea.style.height = 'auto';
+            textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px';
+        });
+
+        // Send on Enter (Shift+Enter for newline)
+        textarea.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                this._sendInput(sessionId, textarea.value);
+                textarea.value = '';
+                textarea.style.height = 'auto';
+            }
+        });
+
+        // Send on button click
+        sendBtn.addEventListener('click', () => {
+            this._sendInput(sessionId, textarea.value);
+            textarea.value = '';
+            textarea.style.height = 'auto';
+        });
+
         wrapper.appendChild(container);
 
         const viewData = {
             container,
             messagesEl,
             tokenBarEl: tokenBar,
+            inputArea,
+            textarea,
             events: [],
             totalTokens: { input: 0, output: 0, cache_read: 0, cache_create: 0 },
             loaded: false,
@@ -197,6 +247,42 @@ class StructuredViewManager {
         }
     }
 
+    // --- Input ---
+
+    /**
+     * Send text to the terminal using the same 3-step sequence as mobile input.
+     */
+    _sendInput(sessionId, text) {
+        const tm = window.terminalManager;
+        if (!tm) return;
+
+        if (text.trim()) {
+            const delays = window.app?.getInputDelays?.(sessionId, 'mobile')
+                || { ctrlUToText: 0, textToEnter: 700 };
+
+            // Step 1: Ctrl+U (clear current line)
+            tm.sendInputToSession(sessionId, '\x15');
+
+            const sendTextAndEnter = () => {
+                // Step 2: Send the text
+                tm.sendInputToSession(sessionId, text);
+                // Step 3: Send Enter after delay
+                setTimeout(() => {
+                    tm.sendInputToSession(sessionId, '\r');
+                }, delays.textToEnter);
+            };
+
+            if (delays.ctrlUToText > 0) {
+                setTimeout(sendTextAndEnter, delays.ctrlUToText);
+            } else {
+                sendTextAndEnter();
+            }
+        } else {
+            // Empty input: just send Enter (for confirming prompts)
+            tm.sendInputToSession(sessionId, '\r');
+        }
+    }
+
     // --- Internal rendering ---
 
     _appendEventToDOM(view, event) {
@@ -216,6 +302,9 @@ class StructuredViewManager {
             view.totalTokens.cache_create += u.cache_creation_tokens || 0;
             this._updateTokenBar(view);
         }
+
+        // Update input state hint
+        this._updateInputState(view, event);
     }
 
     _renderEvent(event) {
@@ -297,6 +386,9 @@ class StructuredViewManager {
             case 'text':
                 return this._renderTextBlock(block);
             case 'tool_use':
+                if (block.tool_name === 'AskUserQuestion') {
+                    return this._renderAskUserBlock(block);
+                }
                 return this._renderToolUseBlock(block);
             case 'tool_result':
                 return this._renderToolResultBlock(block);
@@ -310,8 +402,16 @@ class StructuredViewManager {
     _renderTextBlock(block) {
         if (!block.text) return null;
         const div = document.createElement('div');
-        div.className = 'sv-text';
-        div.textContent = block.text;
+        div.className = 'sv-text markdown-body';
+        if (typeof marked !== 'undefined') {
+            try {
+                div.innerHTML = marked.parse(block.text);
+            } catch (e) {
+                div.textContent = block.text;
+            }
+        } else {
+            div.textContent = block.text;
+        }
         return div;
     }
 
@@ -400,6 +500,87 @@ class StructuredViewManager {
         div.className = 'sv-message sv-message--progress';
         div.innerHTML = `<div class="sv-progress"><span class="sv-progress-dot"></span> ${this._escapeHtml(p.hook_event || p.type || '')} ${this._escapeHtml(p.hook_name || '')}</div>`;
         return div;
+    }
+
+    _renderAskUserBlock(block) {
+        const input = block.tool_input || {};
+        const questions = input.questions || [];
+        if (questions.length === 0) return this._renderToolUseBlock(block);
+
+        const div = document.createElement('div');
+        div.className = 'sv-ask-user';
+
+        const header = document.createElement('div');
+        header.className = 'sv-ask-header';
+        header.innerHTML = '&#10067; Question from Claude';
+        div.appendChild(header);
+
+        for (const q of questions) {
+            const qDiv = document.createElement('div');
+            qDiv.className = 'sv-ask-question';
+
+            if (q.question) {
+                const text = document.createElement('div');
+                text.className = 'sv-ask-question-text';
+                text.textContent = q.question;
+                qDiv.appendChild(text);
+            }
+
+            const options = q.options || [];
+            if (options.length > 0) {
+                const optionsDiv = document.createElement('div');
+                optionsDiv.className = 'sv-ask-options';
+
+                for (const opt of options) {
+                    const optEl = document.createElement('div');
+                    optEl.className = 'sv-ask-option';
+
+                    const label = document.createElement('span');
+                    label.className = 'sv-ask-option-label';
+                    label.textContent = opt.label || '';
+                    optEl.appendChild(label);
+
+                    if (opt.description) {
+                        const desc = document.createElement('span');
+                        desc.className = 'sv-ask-option-desc';
+                        desc.textContent = opt.description;
+                        optEl.appendChild(desc);
+                    }
+
+                    optionsDiv.appendChild(optEl);
+                }
+
+                qDiv.appendChild(optionsDiv);
+            }
+
+            div.appendChild(qDiv);
+        }
+
+        return div;
+    }
+
+    _updateInputState(view, event) {
+        const stateEl = view.inputArea?.querySelector('.sv-input-state');
+        if (!stateEl) return;
+
+        const msg = event.message;
+        if (!msg) {
+            stateEl.textContent = '';
+            return;
+        }
+
+        if (msg.role === 'assistant') {
+            if (msg.stop_reason === 'end_turn') {
+                stateEl.textContent = '';
+                if (view.textarea) view.textarea.placeholder = 'Send a message...';
+            } else if (msg.stop_reason === 'tool_use') {
+                stateEl.textContent = 'Claude is using tools...';
+            } else {
+                stateEl.textContent = 'Claude is responding...';
+            }
+        } else if (msg.role === 'user') {
+            stateEl.textContent = 'Waiting for response...';
+        }
     }
 
     // --- Helpers ---
