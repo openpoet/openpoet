@@ -746,11 +746,25 @@ class TerminalManager {
         const mobileKeysBar = document.getElementById('mobile-terminal-keys-bar');
 
         if (isActive) {
-            // Switch back to terminal
+            // Switch back to terminal — sync SV textarea to terminal prompt
+            const svView = window.structuredView.views.get(sessionId);
+            const svText = svView?.textarea?.value ?? '';
+            const svOriginal = svView?._originalValue ?? '';
+
             this.structuredViewActive.set(sessionId, false);
             window.structuredView.hide(sessionId);
 
             const termData = this.terminals.get(sessionId);
+
+            // Sync SV text to terminal only if user modified the textarea
+            if (svText !== svOriginal && termData?.ws?.readyState === WebSocket.OPEN) {
+                this.sendInputToSession(sessionId, '\x15'); // Ctrl+U clear line
+                if (svText) {
+                    setTimeout(() => {
+                        this.sendInputToSession(sessionId, svText);
+                    }, 50);
+                }
+            }
             if (termData) {
                 termData.container.classList.add('active');
                 requestAnimationFrame(() => {
@@ -784,10 +798,17 @@ class TerminalManager {
             if (mobileInputBar) mobileInputBar.style.display = 'none';
             if (mobileKeysBar) mobileKeysBar.style.display = 'none';
 
-            // Focus textarea on desktop
-            if (window.innerWidth > 768) {
-                const svView = window.structuredView.views.get(sessionId);
-                if (svView?.textarea) {
+            // Populate textarea from terminal's current line content
+            const svView = window.structuredView.views.get(sessionId);
+            const lineContent = this.getSessionLineContent(sessionId);
+            if (svView?.textarea) {
+                svView.textarea.value = lineContent;
+                svView._originalValue = lineContent; // Track for change detection on toggle back
+                // Trigger resize
+                svView.textarea.style.height = 'auto';
+                svView.textarea.style.height = Math.min(svView.textarea.scrollHeight, 150) + 'px';
+
+                if (window.innerWidth > 768) {
                     requestAnimationFrame(() => svView.textarea.focus());
                 }
             }
@@ -1005,6 +1026,60 @@ class TerminalManager {
                 window.networkFeedback?.requestStarted();
             }
         }
+    }
+
+    /**
+     * Read the current terminal input content for a session.
+     * Claude Code's TUI places the cursor below the input line, so we scan
+     * backwards from the cursor to find the prompt line (starts with ❯).
+     * Placeholder/suggestion text (e.g. 'Try "fix lint errors"') is rendered
+     * with the dim attribute — we detect and ignore it.
+     */
+    getSessionLineContent(sessionId) {
+        const termData = this.terminals.get(sessionId);
+        if (!termData?.terminal) return '';
+        const buf = termData.terminal.buffer.active;
+        const cursorRow = buf.cursorY + buf.baseY;
+
+        // Scan backwards (up to 10 rows) looking for the prompt line
+        for (let i = cursorRow; i >= Math.max(0, cursorRow - 10); i--) {
+            const line = buf.getLine(i);
+            if (!line) continue;
+            const text = line.translateToString(true).trimEnd();
+            // Claude Code prompt: ❯ <user input>
+            const match = text.match(/^❯\s*(.*)/);
+            if (match) {
+                const afterPrompt = match[1] || '';
+                if (!afterPrompt) return '';
+                // Check if the text after ❯ is placeholder (dim attribute).
+                // The first char at cursor position may not be dim, so check
+                // the second non-space character after ❯ for the dim flag.
+                const promptIdx = text.indexOf('❯');
+                let dimChecked = false;
+                let charsChecked = 0;
+                for (let col = promptIdx + 1; col < line.length; col++) {
+                    const cell = line.getCell(col);
+                    if (!cell) break;
+                    const ch = cell.getChars();
+                    if (!ch || !ch.trim()) continue;
+                    charsChecked++;
+                    // Skip the first char (cursor position is never dim)
+                    if (charsChecked >= 2) {
+                        dimChecked = true;
+                        if (cell.isDim()) return ''; // Placeholder text — ignore
+                        break;
+                    }
+                }
+                // If only 1 char typed, it's real input (no placeholder is 1 char)
+                if (!dimChecked) return afterPrompt;
+                return afterPrompt;
+            }
+        }
+        // Fallback: try cursor line, strip common prompts
+        const cursorLine = buf.getLine(cursorRow);
+        if (!cursorLine) return '';
+        const text = cursorLine.translateToString(true).trimEnd();
+        return text.replace(/^[\s]*[❯>$%#]\s*/, '');
     }
 
     // Focus active terminal (desktop only - mobile terminal is read-only)
