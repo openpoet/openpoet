@@ -697,15 +697,23 @@ class TerminalManager {
 
         this.activeSessionId = sessionId;
 
+        // Toggle mobile input bars based on structured view state
+        const mobileInputBar = document.getElementById('mobile-terminal-input-bar');
+        const mobileKeysBar = document.getElementById('mobile-terminal-keys-bar');
+
         // Check if structured view is active for this session
         if (this.structuredViewActive.get(sessionId) && window.structuredView) {
             window.structuredView.show(sessionId);
             this._updateStructuredViewButton(true);
+            if (mobileInputBar) mobileInputBar.style.display = 'none';
+            if (mobileKeysBar) mobileKeysBar.style.display = 'none';
         } else {
             // Show terminal
             const termData = this.terminals.get(sessionId);
             termData.container.classList.add('active');
             this._updateStructuredViewButton(false);
+            if (mobileInputBar) mobileInputBar.style.display = '';
+            if (mobileKeysBar) mobileKeysBar.style.display = '';
 
             // Re-fit terminal after layout settles (double rAF ensures paint is done)
             requestAnimationFrame(() => {
@@ -733,6 +741,10 @@ class TerminalManager {
 
         const isActive = this.structuredViewActive.get(sessionId) || false;
 
+        // Mobile input elements to toggle
+        const mobileInputBar = document.getElementById('mobile-terminal-input-bar');
+        const mobileKeysBar = document.getElementById('mobile-terminal-keys-bar');
+
         if (isActive) {
             // Switch back to terminal
             this.structuredViewActive.set(sessionId, false);
@@ -752,6 +764,10 @@ class TerminalManager {
                 });
             }
             this._updateStructuredViewButton(false);
+
+            // Restore mobile input bars
+            if (mobileInputBar) mobileInputBar.style.display = '';
+            if (mobileKeysBar) mobileKeysBar.style.display = '';
         } else {
             // Switch to structured view
             this.structuredViewActive.set(sessionId, true);
@@ -763,6 +779,10 @@ class TerminalManager {
 
             window.structuredView.show(sessionId);
             this._updateStructuredViewButton(true);
+
+            // Hide mobile input bars (structured view has its own input)
+            if (mobileInputBar) mobileInputBar.style.display = 'none';
+            if (mobileKeysBar) mobileKeysBar.style.display = 'none';
 
             // Focus textarea on desktop
             if (window.innerWidth > 768) {
