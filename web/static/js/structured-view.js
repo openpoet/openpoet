@@ -544,23 +544,69 @@ class StructuredViewManager {
         return div;
     }
 
+    /**
+     * Extract readable text from tool result content.
+     * Handles JSON arrays [{text:"..."}], objects {text:"..."}, and plain strings.
+     */
     _extractResultText(content) {
         if (!content) return null;
+
+        const trimmed = content.trim();
+
+        // Strategy 1: Parse as JSON and extract text fields
         try {
-            const parsed = JSON.parse(content);
+            const parsed = JSON.parse(trimmed);
             if (Array.isArray(parsed)) {
                 const texts = parsed
                     .filter(item => item && typeof item.text === 'string')
                     .map(item => item.text);
-                if (texts.length > 0) return texts.join('\n\n');
+                if (texts.length > 0) return this._cleanResultText(texts.join('\n\n'));
             }
             if (parsed && typeof parsed === 'object' && typeof parsed.text === 'string') {
-                return parsed.text;
+                return this._cleanResultText(parsed.text);
             }
         } catch (e) {
-            // not JSON, fall through
+            // not valid JSON, try fallback strategies
         }
+
+        // Strategy 2: Content looks like JSON array with text keys but parsing failed
+        // (handles malformed JSON from streaming, truncation, etc.)
+        if (trimmed.startsWith('[{') && trimmed.includes('"text"')) {
+            try {
+                const textMatches = [];
+                const re = /"text"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+                let match;
+                while ((match = re.exec(trimmed)) !== null) {
+                    // Unescape JSON string escapes
+                    const raw = match[1]
+                        .replace(/\\n/g, '\n')
+                        .replace(/\\t/g, '\t')
+                        .replace(/\\"/g, '"')
+                        .replace(/\\\\/g, '\\');
+                    textMatches.push(raw);
+                }
+                if (textMatches.length > 0) {
+                    return this._cleanResultText(textMatches.join('\n\n'));
+                }
+            } catch (e) {
+                // regex fallback also failed
+            }
+        }
+
         return null;
+    }
+
+    /**
+     * Clean extracted text by removing metadata noise (agentId, usage tags).
+     */
+    _cleanResultText(text) {
+        if (!text) return null;
+        return text
+            // Remove agentId lines
+            .replace(/\n*agentId:\s*\S+\s*(\(for resuming[^)]*\))?/g, '')
+            // Remove <usage>...</usage> blocks
+            .replace(/\n*<usage>[\s\S]*?<\/usage>/g, '')
+            .trim() || null;
     }
 
     _renderToolResultBlock(block) {
@@ -573,9 +619,7 @@ class StructuredViewManager {
 
         if (extractedText && !block.is_error) {
             // Render extracted text as markdown
-            const preview = extractedText.length > 80
-                ? extractedText.substring(0, 80) + '...'
-                : extractedText;
+            const preview = this._plainTextPreview(extractedText, 80);
 
             div.innerHTML = `
                 <button class="sv-tool-toggle">
@@ -600,9 +644,9 @@ class StructuredViewManager {
                 textEl.textContent = extractedText;
             }
         } else {
-            const preview = content.length > 80
-                ? content.substring(0, 80) + '...'
-                : content;
+            // Try to pretty-print JSON content for readability
+            const displayContent = this._formatJsonContent(content);
+            const preview = this._plainTextPreview(content, 80);
 
             div.innerHTML = `
                 <button class="sv-tool-toggle">
@@ -612,7 +656,7 @@ class StructuredViewManager {
                     <span class="sv-tool-chevron">&#9654;</span>
                 </button>
                 <div class="sv-tool-body">
-                    <pre class="sv-tool-output${errorClass}">${this._escapeHtml(content)}</pre>
+                    <pre class="sv-tool-output${errorClass}">${this._escapeHtml(displayContent)}</pre>
                 </div>
             `;
         }
@@ -801,6 +845,35 @@ class StructuredViewManager {
         const div = document.createElement('div');
         div.textContent = str;
         return div.innerHTML;
+    }
+
+    /**
+     * Generate a clean preview from text, stripping markdown and collapsing whitespace.
+     */
+    _plainTextPreview(text, maxLen) {
+        if (!text) return '';
+        const plain = text
+            .replace(/#{1,6}\s+/g, '')     // strip markdown headings
+            .replace(/\*{1,2}([^*]+)\*{1,2}/g, '$1') // strip bold/italic
+            .replace(/`([^`]+)`/g, '$1')   // strip inline code
+            .replace(/\n+/g, ' ')          // collapse newlines
+            .replace(/\s+/g, ' ')          // collapse whitespace
+            .trim();
+        return plain.length > maxLen ? plain.substring(0, maxLen) + '...' : plain;
+    }
+
+    /**
+     * Format JSON content for display, pretty-printing if valid JSON.
+     */
+    _formatJsonContent(content) {
+        if (!content) return '';
+        const trimmed = content.trim();
+        try {
+            const parsed = JSON.parse(trimmed);
+            return JSON.stringify(parsed, null, 2);
+        } catch (e) {
+            return content;
+        }
     }
 
     _toolInputSummary(toolName, input) {
