@@ -200,9 +200,39 @@ func extractToolResultContent(v any) string {
 	}
 }
 
+// mergeAssistantMessage merges content blocks from a newer partial message into
+// the existing one. Claude Code streams assistant messages as partial chunks where
+// each chunk may contain different block types (text, thinking, tool_use).
+// This keeps all unique blocks and updates metadata (usage, stop_reason) from the newer version.
+func mergeAssistantMessage(dst, src *EventMessage) {
+	// Build a set of block types already present in dst
+	existingTypes := make(map[string]bool)
+	for _, b := range dst.ContentBlocks {
+		existingTypes[b.Type] = true
+	}
+
+	// Append blocks from src that aren't already in dst
+	for _, b := range src.ContentBlocks {
+		if !existingTypes[b.Type] {
+			dst.ContentBlocks = append(dst.ContentBlocks, b)
+			existingTypes[b.Type] = true
+		}
+	}
+
+	// Always take the latest metadata
+	if src.Usage != nil {
+		dst.Usage = src.Usage
+	}
+	if src.StopReason != "" {
+		dst.StopReason = src.StopReason
+	}
+	if src.Model != "" {
+		dst.Model = src.Model
+	}
+}
+
 // ParseFile reads an entire JSONL file and returns all parsed events.
-// Deduplicates assistant messages by keeping only the final version
-// (the one with a non-empty stop_reason) for each message ID.
+// Merges assistant message chunks by combining content blocks across partials.
 func ParseFile(path string) ([]*SessionEvent, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -226,13 +256,15 @@ func ParseFile(path string) ([]*SessionEvent, error) {
 			continue
 		}
 
-		// Deduplicate assistant messages: Claude Code writes partial messages
+		// Deduplicate assistant messages: Claude Code streams partial messages
 		// (stop_reason=null) followed by the final one (stop_reason=tool_use/end_turn).
-		// Keep only the last version for each message ID.
+		// Each partial chunk may contain different content blocks (text, thinking, tool_use).
+		// Merge all unique blocks into the final event to avoid losing text/thinking.
 		if event.Type == "assistant" && event.Message != nil && event.Message.MessageID != "" {
 			msgID := event.Message.MessageID
 			if idx, exists := msgIDIndex[msgID]; exists {
-				events[idx] = event // replace with newer version
+				prev := events[idx]
+				mergeAssistantMessage(prev.Message, event.Message)
 				continue
 			}
 			msgIDIndex[msgID] = len(events)
