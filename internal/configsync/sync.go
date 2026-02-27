@@ -1152,8 +1152,41 @@ func (cs *ConfigSyncer) syncSkillsToCopilotInstructions(ctx context.Context, git
 		sb.WriteString(skill.Content + "\n\n")
 	}
 
+	// When MCP is not enabled, inject CLI tool instructions so the AI can
+	// interact with OpenPoet via bash commands instead.
+	if !cs.isCopilotMCPEnabled(project) {
+		sb.WriteString("## OpenPoet CLI Tools\n\n")
+		sb.WriteString("You have access to OpenPoet project management tools via the CLI binary at `$OPENPOET_BIN`.\n\n")
+		sb.WriteString("### Discover available tools\n\n")
+		sb.WriteString("```bash\n$OPENPOET_BIN cli tools\n```\n\n")
+		sb.WriteString("### Call a tool\n\n")
+		sb.WriteString("```bash\n$OPENPOET_BIN cli call <tool_name> '<json_args>'\n```\n\n")
+		sb.WriteString("### Examples\n\n")
+		sb.WriteString("```bash\n")
+		sb.WriteString("$OPENPOET_BIN cli call openpoet_list_tasks '{\"project_id\":\"1\"}'\n")
+		sb.WriteString("$OPENPOET_BIN cli call openpoet_create_task '{\"project_id\":\"1\",\"title\":\"Fix bug\"}'\n")
+		sb.WriteString("$OPENPOET_BIN cli call openpoet_update_task '{\"project_id\":\"1\",\"task_id\":\"5\",\"status\":\"done\"}'\n")
+		sb.WriteString("$OPENPOET_BIN cli call openpoet_get_session_info '{}'\n")
+		sb.WriteString("```\n\n")
+		sb.WriteString("Always run `$OPENPOET_BIN cli tools` first to discover the exact tools available in the current session.\n\n")
+	}
+
 	instructionsPath := filepath.Join(githubDir, "copilot-instructions.md")
 	return os.WriteFile(instructionsPath, []byte(sb.String()), 0644)
+}
+
+// isCopilotMCPEnabled checks if MCP is enabled in the project's Copilot backend config.
+func (cs *ConfigSyncer) isCopilotMCPEnabled(project *database.Project) bool {
+	if project.BackendConfig == "" {
+		return false
+	}
+	var cfg struct {
+		EnableMCP bool `json:"enable_mcp"`
+	}
+	if err := json.Unmarshal([]byte(project.BackendConfig), &cfg); err != nil {
+		return false
+	}
+	return cfg.EnableMCP
 }
 
 // syncBridgeScriptLocal copies bridge.sh to the project's .claude/hooks/ directory

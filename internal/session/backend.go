@@ -13,6 +13,7 @@ type SessionConfig struct {
 	SessionID     string
 	ServerAddr    string // OpenPoet server address (e.g., "localhost:8080")
 	MCPConfigJSON string // JSON for --mcp-config flag
+	ExecPath      string // Resolved path to the openpoet binary
 	IsReopen      bool   // true when resuming a previous session
 
 	// Env var passthrough from API handler

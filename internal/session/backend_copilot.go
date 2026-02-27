@@ -60,6 +60,11 @@ func (b *CopilotBackend) BuildEnvVars(cfg *SessionConfig) map[string]string {
 		"OPENPOET_SESSION_ID": cfg.SessionID,
 	}
 
+	// Expose binary path so Copilot sessions can call CLI tools via bash
+	if cfg.ExecPath != "" {
+		env["OPENPOET_BIN"] = cfg.ExecPath
+	}
+
 	cc := parseCopilotConfig(cfg.BackendConfig)
 	if cc.GitHubToken != "" {
 		env["GITHUB_TOKEN"] = cc.GitHubToken
