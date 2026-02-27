@@ -120,6 +120,7 @@ class StructuredViewManager {
             textarea,
             events: [],
             uuidTypeMap: new Map(), // uuid → event type, for parent-chain detection
+            currentProgressWidget: null, // active blinking progress widget
             totalTokens: { input: 0, output: 0, cache_read: 0, cache_create: 0 },
             loaded: false,
             userScrolled: false,
@@ -280,9 +281,17 @@ class StructuredViewManager {
             view.uuidTypeMap.set(event.uuid, event.type);
         }
 
-        const el = this._renderEvent(view, event);
-        if (el) {
-            view.messagesEl.appendChild(el);
+        // Progress events use a blinking widget instead of individual lines
+        if (event.type === 'progress') {
+            this._updateProgressWidget(view, event);
+        } else {
+            // Non-progress event: finalize any active progress widget
+            view.currentProgressWidget = null;
+
+            const el = this._renderEvent(view, event);
+            if (el) {
+                view.messagesEl.appendChild(el);
+            }
         }
 
         // Update token counter
@@ -305,8 +314,6 @@ class StructuredViewManager {
                 return this._renderUserMessage(view, event);
             case 'assistant':
                 return this._renderAssistantMessage(event);
-            case 'progress':
-                return this._renderProgress(event);
             default:
                 return null;
         }
@@ -532,13 +539,36 @@ class StructuredViewManager {
         return div;
     }
 
-    _renderProgress(event) {
-        if (!event.progress) return null;
+    _updateProgressWidget(view, event) {
         const p = event.progress;
-        const div = document.createElement('div');
-        div.className = 'sv-message sv-message--progress';
-        div.innerHTML = `<div class="sv-progress"><span class="sv-progress-dot"></span> ${this._escapeHtml(p.hook_event || p.type || '')} ${this._escapeHtml(p.hook_name || '')}</div>`;
-        return div;
+        const text = p
+            ? `${p.hook_event || p.type || ''} ${p.hook_name || ''}`.trim()
+            : '';
+
+        if (view.currentProgressWidget) {
+            // Update existing widget
+            const w = view.currentProgressWidget;
+            w.count++;
+            w.el.querySelector('.sv-progress-widget-text').textContent = text;
+            w.el.querySelector('.sv-progress-widget-count').textContent = w.count;
+
+            // Re-trigger blink animation
+            const dot = w.el.querySelector('.sv-progress-widget-dot');
+            dot.classList.remove('sv-blink');
+            void dot.offsetWidth; // force reflow
+            dot.classList.add('sv-blink');
+        } else {
+            // Create new widget
+            const div = document.createElement('div');
+            div.className = 'sv-progress-widget';
+            div.innerHTML = `
+                <span class="sv-progress-widget-dot sv-blink"></span>
+                <span class="sv-progress-widget-text">${this._escapeHtml(text)}</span>
+                <span class="sv-progress-widget-count">1</span>
+            `;
+            view.messagesEl.appendChild(div);
+            view.currentProgressWidget = { el: div, count: 1 };
+        }
     }
 
     _renderAskUserBlock(block) {
