@@ -1469,6 +1469,112 @@ func (a *API) ReopenSession(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, sess)
 }
 
+// AutoRestoreSession restores a previously-active session after a service restart.
+// It rebuilds the full session context (task, config, env vars) and calls ReopenSession.
+// Returns nil on success, or an error (session is marked "stopped" on failure).
+func (a *API) AutoRestoreSession(ctx context.Context, sess *database.Session) error {
+	sessionID := sess.ID
+
+	// Get the project — skip if deleted
+	project, err := a.db.GetProject(ctx, sess.ProjectID)
+	if err != nil {
+		a.db.EndSession(ctx, sessionID, "stopped")
+		return fmt.Errorf("project not found (may have been deleted): %w", err)
+	}
+
+	// Skip remote/SSH sessions — tunnels can't survive restart
+	if project.Type != "local" {
+		a.db.EndSession(ctx, sessionID, "stopped")
+		return fmt.Errorf("skipping remote session %s (tunnels don't survive restart)", sessionID)
+	}
+
+	// Check backend supports resume
+	backend := session.GetBackend(sess.Backend)
+	if !backend.SupportsResume() {
+		a.db.EndSession(ctx, sessionID, "stopped")
+		return fmt.Errorf("backend %q does not support resume", sess.Backend)
+	}
+
+	// Sync config to project before restoring
+	if a.configSync != nil {
+		if syncErr := a.configSync.SyncToProject(ctx, project); syncErr != nil {
+			log.Printf("[AutoRestore] Warning: config sync failed for session %s: %v", sessionID, syncErr)
+		}
+	}
+
+	// Build env vars with task context if linked
+	envVars := make(map[string]string)
+	linkedTask, _ := a.db.GetTaskForSession(ctx, sessionID)
+	if linkedTask != nil {
+		envVars["OPENPOET_TASK_ID"] = fmt.Sprintf("%d", linkedTask.ID)
+		envVars["OPENPOET_TASK_TITLE"] = linkedTask.Title
+
+		description := linkedTask.Description
+		if description == "" {
+			description = "(no description provided)"
+		}
+		envVars["OPENPOET_APPEND_SYSTEM_PROMPT"] = fmt.Sprintf(
+			"You have been assigned the following task by OpenPoet:\n\n"+
+				"Title: %s\n\n"+
+				"Description:\n%s\n\n"+
+				"IMPORTANT: This is a RESUMED session. You are continuing work from a previous conversation.\n\n"+
+				"IMPORTANT: Communicate with the user in the same language used in the task title and description above. "+
+				"If the task is written in Portuguese, respond in Portuguese. If in English, respond in English. Match the language naturally.\n\n"+
+				"You can use the openpoet_get_my_task MCP tool to fetch updated task details or the openpoet_request_task_evaluation tool when you believe you have completed significant work.",
+			linkedTask.Title, description,
+		)
+	}
+
+	// Inject provider env vars (same logic as CreateSession)
+	if project.Backend != "copilot" && a.aiHandler != nil && a.aiHandler.providerMgr != nil {
+		sessionConfig := a.aiHandler.providerMgr.GetSlotConfig(llm.SlotSession)
+		if sessionConfig != nil {
+			switch sessionConfig.ProviderType {
+			case "ollama", "ollama-sdk":
+				baseURL := sessionConfig.BaseURL
+				if baseURL == "" {
+					baseURL = "http://localhost:11434"
+				}
+				model := sessionConfig.Model
+				if model == "" {
+					model = "qwen3-coder"
+				}
+				envVars["ANTHROPIC_BASE_URL"] = baseURL
+				envVars["ANTHROPIC_API_KEY"] = ""
+				envVars["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
+				envVars["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
+				envVars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
+				envVars["CLAUDE_CODE_SUBAGENT_MODEL"] = model
+				if sessionConfig.APIKey != "" {
+					envVars["ANTHROPIC_AUTH_TOKEN"] = sessionConfig.APIKey
+				} else {
+					envVars["ANTHROPIC_AUTH_TOKEN"] = "ollama"
+				}
+			case "apikey":
+				if sessionConfig.APIKey != "" {
+					envVars["ANTHROPIC_API_KEY"] = sessionConfig.APIKey
+				}
+			}
+		}
+	}
+
+	// Restore skip_permissions flag (persisted in DB, gated by project setting)
+	if sess.SkipPermissions && project.DangerouslySkipPermissions {
+		envVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"] = "true"
+	}
+
+	// Mark session as "stopped" first so ReopenSession SQL works
+	// (it requires status IN ('stopped', 'completed'))
+	a.db.EndSession(ctx, sessionID, "stopped")
+
+	// Reopen the session
+	if err := a.sessionMgr.ReopenSession(ctx, sess, project, envVars, a.encryptor.Decrypt); err != nil {
+		return fmt.Errorf("failed to restore session %s: %w", sessionID, err)
+	}
+
+	return nil
+}
+
 // ============ Skills ============
 
 // validateSkillName checks for empty, path traversal, and invalid characters.

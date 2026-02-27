@@ -168,17 +168,9 @@ func main() {
 	}
 	defer db.Close()
 
-	// Clean up stale sessions (server restart means all in-memory sessions are lost)
+	// Collect active sessions for auto-restore after server is fully initialized
 	ctx := context.Background()
-	sessions, err := db.ListSessions(ctx)
-	if err == nil {
-		for _, sess := range sessions {
-			if sess.Status == "running" || sess.Status == "starting" {
-				log.Printf("Cleaning up stale session: %s (status: %s)", sess.ID, sess.Status)
-				db.EndSession(ctx, sess.ID, "stopped")
-			}
-		}
-	}
+	sessionsToRestore, _ := db.ListActiveSessions(ctx)
 
 	// Clean up stale streaming AI messages (server restart means in-flight streams are lost)
 	if err := db.FixStaleStreamingMessages(ctx); err != nil {
@@ -821,6 +813,26 @@ func main() {
 		}
 	}()
 
+	// Auto-restore previously active sessions (non-blocking)
+	if len(sessionsToRestore) > 0 {
+		go func() {
+			time.Sleep(2 * time.Second) // let server start first
+			log.Printf("[AutoRestore] Restoring %d active session(s) from before restart...", len(sessionsToRestore))
+			restoreCtx := context.Background()
+			restored := 0
+			for _, sess := range sessionsToRestore {
+				sess := sess // capture loop var
+				if err := api.AutoRestoreSession(restoreCtx, &sess); err != nil {
+					log.Printf("[AutoRestore] Failed to restore session %s: %v", sess.ID, err)
+				} else {
+					restored++
+					log.Printf("[AutoRestore] Session %s restored successfully", sess.ID)
+				}
+			}
+			log.Printf("[AutoRestore] Done: %d/%d sessions restored", restored, len(sessionsToRestore))
+		}()
+	}
+
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -834,8 +846,8 @@ func main() {
 	// Close AI provider sessions (SDK providers may have persistent subprocesses)
 	providerMgr.CloseAll()
 
-	// Stop all sessions
-	sessionMgr.StopAll()
+	// Stop all sessions (preserve DB state for auto-restore on next startup)
+	sessionMgr.StopAllForRestart()
 
 	// Stop WebSocket hub
 	hub.Stop()

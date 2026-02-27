@@ -51,6 +51,7 @@ var migrations = []Migration{
 	{Version: 33, Description: "mcp: add project_mcp_servers table for per-project MCP server configurations", Up: migrateV33},
 	{Version: 34, Description: "projects: add dangerously_skip_permissions column", Up: migrateV34},
 	{Version: 35, Description: "multi-backend: add backend and backend_config columns to projects and sessions", Up: migrateV35},
+	{Version: 36, Description: "sessions: add skip_permissions for auto-restore on restart", Up: migrateV36},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -980,6 +981,14 @@ func migrateV35(tx *sqlx.Tx) error {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV35 failed: %w\nSQL: %s", err, s)
 		}
+	}
+	return nil
+}
+
+func migrateV36(tx *sqlx.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE sessions ADD COLUMN skip_permissions INTEGER NOT NULL DEFAULT 0`)
+	if err != nil {
+		return fmt.Errorf("migrateV36 failed: %w", err)
 	}
 	return nil
 }
