@@ -254,10 +254,26 @@ class VoiceInput {
             }
 
             if (submit) {
-                // Trigger the mobile send flow
-                if (window.app) {
-                    window.app.sendMobileTerminalInput();
+                // Send text directly to terminal (bypassing real-time sync
+                // which doesn't fire for programmatic value changes)
+                const sessionId = window.terminalManager?.activeSessionId;
+                if (sessionId) {
+                    const fullText = mobileInput.value;
+                    const delays = window.app
+                        ? window.app.getInputDelays(sessionId, 'voice')
+                        : { ctrlUToText: 0, textToEnter: 50 };
+                    window.terminalManager.sendInputToSession(sessionId, '\x15'); // Ctrl+U clear line
+                    setTimeout(() => {
+                        window.terminalManager.sendInputToSession(sessionId, fullText);
+                        setTimeout(() => {
+                            window.terminalManager.sendInputToSession(sessionId, '\r');
+                        }, delays.textToEnter);
+                    }, delays.ctrlUToText);
                 }
+                mobileInput.value = '';
+                mobileInput._lastSyncedValue = '';
+                mobileInput.style.height = '44px';
+                mobileInput.style.overflow = 'hidden';
             } else {
                 // Open full-screen editor with the transcribed text
                 if (window.app && window.app.openMobileEditor) {
