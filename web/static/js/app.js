@@ -450,7 +450,14 @@ class OpenPoet {
                 this.handleAIProactive(msg.data);
                 break;
             case 'chat_doc_card':
-                window.aiChat?.injectDocCardFromWS(msg.data);
+                if (msg.data.session_id && this.currentView === 'terminal'
+                    && window.terminalManager?.activeSessionId === msg.data.session_id) {
+                    this._showSessionDocCard(msg.data);
+                    // Refresh the documents list so the button updates
+                    window.hookManager?.fetchSessionDocs(msg.data.session_id);
+                } else {
+                    window.aiChat?.injectDocCardFromWS(msg.data);
+                }
                 break;
             case 'ai_suggestion':
                 this.handleAIProactive(this._normalizeProactive(msg.data));
@@ -5530,6 +5537,60 @@ class OpenPoet {
         container.appendChild(toast);
 
         setTimeout(() => toast.remove(), type === 'warning' ? 8000 : 5000);
+    }
+
+    // Session document card notifications (floating over terminal)
+    _showSessionDocCard(data) {
+        const container = document.getElementById('session-doc-cards');
+        if (!container) return;
+
+        const card = document.createElement('div');
+        card.className = 'session-doc-card';
+        if (data.doc_id) card.dataset.docId = data.doc_id;
+
+        const title = this.escapeHtml(data.title || 'Document');
+        card.innerHTML = `
+            <div class="session-doc-card-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                    <polyline points="14 2 14 8 20 8"/>
+                    <line x1="9" y1="15" x2="15" y2="15"/>
+                    <line x1="9" y1="11" x2="15" y2="11"/>
+                </svg>
+            </div>
+            <div class="session-doc-card-info">
+                <div class="session-doc-card-title">${title}</div>
+            </div>
+            <button class="session-doc-card-btn">View</button>
+            <button class="session-doc-card-close" title="Dismiss">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+            </button>
+        `;
+
+        card.querySelector('.session-doc-card-btn').addEventListener('click', () => {
+            if (window.docViewer && data.doc_id) {
+                window.docViewer.open(data.doc_id);
+            }
+            this._dismissSessionDocCard(card);
+        });
+
+        card.querySelector('.session-doc-card-close').addEventListener('click', () => {
+            this._dismissSessionDocCard(card);
+        });
+
+        container.appendChild(card);
+
+        setTimeout(() => {
+            if (card.parentNode) this._dismissSessionDocCard(card);
+        }, 15000);
+    }
+
+    _dismissSessionDocCard(card) {
+        card.classList.add('dismissing');
+        card.addEventListener('animationend', () => card.remove(), { once: true });
     }
 
     // Utility

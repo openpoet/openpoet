@@ -328,9 +328,10 @@ class TerminalManager {
                 console.error('Failed to fetch hook state:', err);
             }
 
-            // Fetch persisted plan for this session
+            // Fetch persisted plan and documents for this session
             if (window.hookManager) {
                 window.hookManager.fetchPlan(sessionId);
+                window.hookManager.fetchSessionDocs(sessionId);
             }
         };
 
