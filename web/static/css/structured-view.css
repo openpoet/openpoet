@@ -388,21 +388,47 @@
     transform: rotate(90deg);
 }
 
-/* Progress events */
-.sv-progress {
+/* Progress widget (blinking activity indicator) */
+.sv-progress-widget {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
+    padding: 4px 14px;
     font-size: 11px;
     color: var(--color-text-muted);
+    opacity: 0.7;
 }
 
-.sv-progress-dot {
+.sv-progress-widget-dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
     background: var(--color-text-muted);
     flex-shrink: 0;
+}
+
+.sv-progress-widget-dot.sv-blink {
+    animation: sv-blink 0.4s ease-out;
+}
+
+@keyframes sv-blink {
+    0% { background: var(--color-primary); transform: scale(1.8); opacity: 1; }
+    100% { background: var(--color-text-muted); transform: scale(1); opacity: 0.7; }
+}
+
+.sv-progress-widget-text {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sv-progress-widget-count {
+    background: var(--color-surface);
+    padding: 0 6px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
 }
 
 /* Toggle button active state */
