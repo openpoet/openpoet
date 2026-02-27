@@ -65,25 +65,48 @@ class StructuredViewManager {
         const textarea = inputArea.querySelector('.sv-input-textarea');
         const sendBtn = inputArea.querySelector('.sv-input-send');
 
-        // Auto-resize textarea
+        // Real-time sync: forward textarea content to terminal on each keystroke
+        let syncTimer = null;
+        const syncToTerminal = () => {
+            const tm = window.terminalManager;
+            if (!tm) return;
+            tm.sendInputToSession(sessionId, '\x15'); // Ctrl+U clear line
+            if (textarea.value) {
+                tm.sendInputToSession(sessionId, textarea.value);
+            }
+        };
+
+        // Auto-resize + debounced sync to terminal
         textarea.addEventListener('input', () => {
             textarea.style.height = 'auto';
             textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px';
+            clearTimeout(syncTimer);
+            syncTimer = setTimeout(syncToTerminal, 50);
         });
 
-        // Send on Enter (Shift+Enter for newline)
+        // Enter sends \r (text already on terminal from sync)
         textarea.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                this._sendInput(sessionId, textarea.value);
+                clearTimeout(syncTimer);
+                syncToTerminal(); // ensure latest text is on terminal
+                const tm = window.terminalManager;
+                if (tm) {
+                    setTimeout(() => tm.sendInputToSession(sessionId, '\r'), 30);
+                }
                 textarea.value = '';
                 textarea.style.height = 'auto';
             }
         });
 
-        // Send on button click
+        // Send button: sync + Enter
         sendBtn.addEventListener('click', () => {
-            this._sendInput(sessionId, textarea.value);
+            clearTimeout(syncTimer);
+            syncToTerminal();
+            const tm = window.terminalManager;
+            if (tm) {
+                setTimeout(() => tm.sendInputToSession(sessionId, '\r'), 30);
+            }
             textarea.value = '';
             textarea.style.height = 'auto';
         });
@@ -244,42 +267,6 @@ class StructuredViewManager {
             this.stopWatching(sessionId);
             view.container.remove();
             this.views.delete(sessionId);
-        }
-    }
-
-    // --- Input ---
-
-    /**
-     * Send text to the terminal using the same 3-step sequence as mobile input.
-     */
-    _sendInput(sessionId, text) {
-        const tm = window.terminalManager;
-        if (!tm) return;
-
-        if (text.trim()) {
-            const delays = window.app?.getInputDelays?.(sessionId, 'mobile')
-                || { ctrlUToText: 0, textToEnter: 700 };
-
-            // Step 1: Ctrl+U (clear current line)
-            tm.sendInputToSession(sessionId, '\x15');
-
-            const sendTextAndEnter = () => {
-                // Step 2: Send the text
-                tm.sendInputToSession(sessionId, text);
-                // Step 3: Send Enter after delay
-                setTimeout(() => {
-                    tm.sendInputToSession(sessionId, '\r');
-                }, delays.textToEnter);
-            };
-
-            if (delays.ctrlUToText > 0) {
-                setTimeout(sendTextAndEnter, delays.ctrlUToText);
-            } else {
-                sendTextAndEnter();
-            }
-        } else {
-            // Empty input: just send Enter (for confirming prompts)
-            tm.sendInputToSession(sessionId, '\r');
         }
     }
 
