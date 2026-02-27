@@ -119,6 +119,7 @@ class StructuredViewManager {
             inputArea,
             textarea,
             events: [],
+            uuidTypeMap: new Map(), // uuid → event type, for parent-chain detection
             totalTokens: { input: 0, output: 0, cache_read: 0, cache_create: 0 },
             loaded: false,
             userScrolled: false,
@@ -274,7 +275,12 @@ class StructuredViewManager {
     _appendEventToDOM(view, event) {
         view.events.push(event);
 
-        const el = this._renderEvent(event);
+        // Track UUID → type for parent-chain detection
+        if (event.uuid) {
+            view.uuidTypeMap.set(event.uuid, event.type);
+        }
+
+        const el = this._renderEvent(view, event);
         if (el) {
             view.messagesEl.appendChild(el);
         }
@@ -293,10 +299,10 @@ class StructuredViewManager {
         this._updateInputState(view, event);
     }
 
-    _renderEvent(event) {
+    _renderEvent(view, event) {
         switch (event.type) {
             case 'user':
-                return this._renderUserMessage(event);
+                return this._renderUserMessage(view, event);
             case 'assistant':
                 return this._renderAssistantMessage(event);
             case 'progress':
@@ -306,7 +312,7 @@ class StructuredViewManager {
         }
     }
 
-    _renderUserMessage(event) {
+    _renderUserMessage(view, event) {
         const msg = event.message;
         if (!msg) return null;
 
@@ -314,9 +320,11 @@ class StructuredViewManager {
         const textBlocks = blocks.filter(b => b.type === 'text');
         const toolResultBlocks = blocks.filter(b => b.type === 'tool_result');
 
-        // Sidechain user messages (skills, system prompts, agent injections)
-        // are NOT real user input — render as assistant-style cards
-        const isRealUser = !event.isSidechain;
+        // Detect system-injected user messages:
+        // - isSidechain: true → agent/subagent injections
+        // - Parent is a user event → skill prompts (skill content follows tool_result in same user chain)
+        const parentType = event.parent_uuid ? view.uuidTypeMap.get(event.parent_uuid) : null;
+        const isRealUser = !event.isSidechain && parentType !== 'user';
 
         // If only tool_result blocks, render as a system-style card (not user)
         if (textBlocks.length === 0 && toolResultBlocks.length > 0) {
