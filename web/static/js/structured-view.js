@@ -177,6 +177,7 @@ class StructuredViewManager {
             sendToTerminal,
             events: [],
             uuidTypeMap: new Map(), // uuid → event type, for parent-chain detection
+            toolIdMap: new Map(), // tool_id → { tool_name, title, cardEl }
             currentProgressWidget: null, // active blinking progress widget
             totalTokens: { input: 0, output: 0, cache_read: 0, cache_create: 0 },
             loaded: false,
@@ -370,7 +371,7 @@ class StructuredViewManager {
             case 'user':
                 return this._renderUserMessage(view, event);
             case 'assistant':
-                return this._renderAssistantMessage(event);
+                return this._renderAssistantMessage(view, event);
             default:
                 return null;
         }
@@ -392,14 +393,14 @@ class StructuredViewManager {
 
         // If only tool_result blocks, render as a system-style card (not user)
         if (textBlocks.length === 0 && toolResultBlocks.length > 0) {
-            return this._renderToolResultsMessage(event, toolResultBlocks);
+            return this._renderToolResultsMessage(view, event, toolResultBlocks);
         }
 
         const fragment = document.createDocumentFragment();
 
         // Render tool_result blocks first as a separate system card
         if (toolResultBlocks.length > 0) {
-            const trMsg = this._renderToolResultsMessage(event, toolResultBlocks);
+            const trMsg = this._renderToolResultsMessage(view, event, toolResultBlocks);
             if (trMsg) fragment.appendChild(trMsg);
         }
 
@@ -423,7 +424,7 @@ class StructuredViewManager {
             content.className = 'sv-content';
 
             for (const block of textBlocks) {
-                const blockEl = this._renderContentBlock(block);
+                const blockEl = this._renderContentBlock(view, block);
                 if (blockEl) content.appendChild(blockEl);
             }
 
@@ -434,7 +435,7 @@ class StructuredViewManager {
         return fragment;
     }
 
-    _renderToolResultsMessage(event, toolResultBlocks) {
+    _renderToolResultsMessage(view, event, toolResultBlocks) {
         const div = document.createElement('div');
         div.className = 'sv-message sv-message--tool-results';
 
@@ -442,7 +443,7 @@ class StructuredViewManager {
         content.className = 'sv-content';
 
         for (const block of toolResultBlocks) {
-            const blockEl = this._renderToolResultBlock(block);
+            const blockEl = this._renderContentBlock(view, block);
             if (blockEl) content.appendChild(blockEl);
         }
 
@@ -450,7 +451,7 @@ class StructuredViewManager {
         return div;
     }
 
-    _renderAssistantMessage(event) {
+    _renderAssistantMessage(view, event) {
         const msg = event.message;
         if (!msg) return null;
 
@@ -476,7 +477,7 @@ class StructuredViewManager {
         content.className = 'sv-content';
 
         for (const block of (msg.content_blocks || [])) {
-            const blockEl = this._renderContentBlock(block);
+            const blockEl = this._renderContentBlock(view, block);
             if (blockEl) content.appendChild(blockEl);
         }
 
@@ -484,7 +485,7 @@ class StructuredViewManager {
         return div;
     }
 
-    _renderContentBlock(block) {
+    _renderContentBlock(view, block) {
         switch (block.type) {
             case 'text':
                 return this._renderTextBlock(block);
@@ -492,9 +493,26 @@ class StructuredViewManager {
                 if (block.tool_name === 'AskUserQuestion') {
                     return this._renderAskUserBlock(block);
                 }
+                if (block.tool_name?.endsWith('openpoet_create_document')) {
+                    return this._renderDocCardBlock(view, block);
+                }
                 return this._renderToolUseBlock(block);
-            case 'tool_result':
+            case 'tool_result': {
+                // If this tool_result corresponds to a create_document, render as doc card update
+                const meta = view?.toolIdMap?.get(block.tool_id);
+                if (meta?.tool_name?.endsWith('openpoet_create_document')) {
+                    const match = (block.content || '').match(/\/app\/doc\/([a-zA-Z0-9]+)/);
+                    if (match && meta.cardEl) {
+                        const btn = meta.cardEl.querySelector('.sv-doc-card-btn');
+                        if (btn) {
+                            btn.disabled = false;
+                            btn.onclick = () => window.docViewer?.open(match[1]);
+                        }
+                    }
+                    return null; // suppress generic tool_result for doc cards
+                }
                 return this._renderToolResultBlock(block);
+            }
             case 'thinking':
                 return this._renderThinkingBlock(block);
             default:
@@ -540,6 +558,36 @@ class StructuredViewManager {
         div.querySelector('.sv-tool-toggle').addEventListener('click', () => {
             div.classList.toggle('expanded');
         });
+
+        return div;
+    }
+
+    _renderDocCardBlock(view, block) {
+        const title = block.tool_input?.title || 'Document';
+        const div = document.createElement('div');
+        div.className = 'sv-doc-card';
+
+        div.innerHTML = `
+            <div class="sv-doc-card-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                    <polyline points="14 2 14 8 20 8"/>
+                    <line x1="9" y1="15" x2="15" y2="15"/>
+                    <line x1="9" y1="11" x2="15" y2="11"/>
+                </svg>
+            </div>
+            <div class="sv-doc-card-title">${this._escapeHtml(title)}</div>
+            <button class="sv-doc-card-btn" disabled>View Document</button>
+        `;
+
+        // Store reference so tool_result can enable the button with doc_id
+        if (view?.toolIdMap) {
+            view.toolIdMap.set(block.tool_id, {
+                tool_name: block.tool_name,
+                title,
+                cardEl: div
+            });
+        }
 
         return div;
     }

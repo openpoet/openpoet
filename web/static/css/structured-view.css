@@ -613,6 +613,55 @@
     margin-top: 2px;
 }
 
+/* ==================== Document Cards ==================== */
+
+.sv-doc-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: rgba(99, 102, 241, 0.08);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: 8px;
+    margin: 8px 0;
+}
+
+.sv-doc-card-icon {
+    flex-shrink: 0;
+    color: var(--color-primary);
+    display: flex;
+    align-items: center;
+}
+
+.sv-doc-card-title {
+    flex: 1;
+    font-weight: 500;
+    font-size: 14px;
+    color: var(--color-text);
+}
+
+.sv-doc-card-btn {
+    flex-shrink: 0;
+    padding: 6px 14px;
+    border: none;
+    border-radius: 6px;
+    background: var(--color-primary);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity 0.15s;
+}
+
+.sv-doc-card-btn:hover:not(:disabled) {
+    opacity: 0.85;
+}
+
+.sv-doc-card-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
 /* ==================== Session State Hint ==================== */
 
 .sv-input-state {
