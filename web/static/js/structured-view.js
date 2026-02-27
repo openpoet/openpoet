@@ -40,75 +40,131 @@ class StructuredViewManager {
         messagesEl.className = 'sv-messages';
         container.appendChild(messagesEl);
 
-        // Input area
-        const inputArea = document.createElement('div');
-        inputArea.className = 'sv-input-area';
-        inputArea.innerHTML = `
-            <div class="sv-input-state"></div>
-            <div class="sv-input-wrapper">
-                <textarea class="sv-input-textarea" rows="1"
-                    placeholder="Send a message..."
-                    autocomplete="off" autocorrect="off" autocapitalize="off"
-                    spellcheck="false"></textarea>
-                <button class="sv-input-send" title="Send message">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
-                         stroke="currentColor" stroke-width="2">
-                        <line x1="22" y1="2" x2="11" y2="13"></line>
-                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-                    </svg>
-                </button>
-            </div>
-            <div class="sv-input-hint">Enter to send, Shift+Enter for new line</div>
-        `;
-        container.appendChild(inputArea);
+        // Input area — only on desktop. On mobile, the shared #mobile-terminal-input-bar
+        // is the single input component used in both terminal and SV modes.
+        const isMobile = window.innerWidth <= 768;
+        let inputArea = null;
+        let textarea = null;
+        let sendToTerminal = null;
 
-        const textarea = inputArea.querySelector('.sv-input-textarea');
-        const sendBtn = inputArea.querySelector('.sv-input-send');
+        if (!isMobile) {
+            inputArea = document.createElement('div');
+            inputArea.className = 'sv-input-area';
+            inputArea.innerHTML = `
+                <div class="sv-input-state"></div>
+                <div class="sv-input-wrapper">
+                    <textarea class="sv-input-textarea" rows="1"
+                        placeholder="Send a message..."
+                        autocomplete="off" autocorrect="off" autocapitalize="off"
+                        spellcheck="false"></textarea>
+                    <button class="sv-input-btn sv-btn-expand" title="Expand editor">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="15 3 21 3 21 9"></polyline>
+                            <polyline points="9 21 3 21 3 15"></polyline>
+                            <line x1="21" y1="3" x2="14" y2="10"></line>
+                            <line x1="3" y1="21" x2="10" y2="14"></line>
+                        </svg>
+                    </button>
+                    <button class="sv-input-btn sv-btn-image" title="Send Image">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                            <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                            <polyline points="21 15 16 10 5 21"></polyline>
+                        </svg>
+                    </button>
+                    <button class="sv-input-btn sv-btn-voice" title="Voice Input">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                            <line x1="12" y1="19" x2="12" y2="23"></line>
+                            <line x1="8" y1="23" x2="16" y2="23"></line>
+                        </svg>
+                    </button>
+                    <button class="sv-input-send" title="Send message">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                             stroke="currentColor" stroke-width="2">
+                            <line x1="22" y1="2" x2="11" y2="13"></line>
+                            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                        </svg>
+                    </button>
+                </div>
+                <div class="sv-input-hint">Enter to send, Shift+Enter for new line</div>
+            `;
+            container.appendChild(inputArea);
 
-        // Send text to terminal: Ctrl+U (clear line) → text → Enter
-        const sendToTerminal = () => {
-            const text = textarea.value;
-            const tm = window.terminalManager;
-            if (!tm) return;
+            textarea = inputArea.querySelector('.sv-input-textarea');
+            const sendBtn = inputArea.querySelector('.sv-input-send');
 
-            const delays = window.app?.getInputDelays?.(sessionId, 'mobile') || { ctrlUToText: 0, textToEnter: 700 };
+            // Send text to terminal: Ctrl+U (clear line) → text → Enter
+            sendToTerminal = () => {
+                const text = textarea.value;
+                const tm = window.terminalManager;
+                if (!tm) return;
 
-            // Clear any existing input on the terminal line
-            tm.sendInputToSession(sessionId, '\x15');
+                const delays = window.app?.getInputDelays?.(sessionId, 'mobile') || { ctrlUToText: 0, textToEnter: 700 };
 
-            // Send text after clear delay
-            setTimeout(() => {
-                if (text) {
-                    tm.sendInputToSession(sessionId, text);
-                }
-                // Send Enter after text delay
+                tm.sendInputToSession(sessionId, '\x15');
                 setTimeout(() => {
-                    tm.sendInputToSession(sessionId, '\r');
-                }, delays.textToEnter);
-            }, delays.ctrlUToText);
+                    if (text) {
+                        tm.sendInputToSession(sessionId, text);
+                    }
+                    setTimeout(() => {
+                        tm.sendInputToSession(sessionId, '\r');
+                    }, delays.textToEnter);
+                }, delays.ctrlUToText);
 
-            textarea.value = '';
-            textarea.style.height = 'auto';
-        };
+                textarea.value = '';
+                textarea.style.height = 'auto';
+            };
 
-        // Auto-resize textarea
-        textarea.addEventListener('input', () => {
-            textarea.style.height = 'auto';
-            textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px';
-        });
+            // Auto-resize textarea
+            textarea.addEventListener('input', () => {
+                textarea.style.height = 'auto';
+                textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px';
+            });
 
-        // Enter submits (Shift+Enter for newline)
-        textarea.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendToTerminal();
-            }
-        });
+            // Enter submits (Shift+Enter for newline)
+            textarea.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendToTerminal();
+                }
+            });
 
-        // Send button
-        sendBtn.addEventListener('click', () => {
-            sendToTerminal();
-        });
+            // Send button
+            sendBtn.addEventListener('click', () => sendToTerminal());
+
+            // Expand editor button
+            inputArea.querySelector('.sv-btn-expand')?.addEventListener('click', () => {
+                window.app?.openSVEditor?.(sessionId);
+            });
+
+            // Image picker button
+            inputArea.querySelector('.sv-btn-image')?.addEventListener('click', () => {
+                document.getElementById('image-picker-input')?.click();
+            });
+
+            // Voice input button
+            const voiceBtn = inputArea.querySelector('.sv-btn-voice');
+            voiceBtn?.addEventListener('click', () => {
+                if (window.voiceInput) {
+                    if (window.voiceInput.isRecording) {
+                        window.voiceInput.stopRecording(false);
+                        voiceBtn.classList.remove('recording');
+                        return;
+                    }
+                    voiceBtn.classList.add('recording');
+                    window.voiceInput.startRecordingWithCallback((text) => {
+                        voiceBtn.classList.remove('recording');
+                        const current = textarea.value;
+                        textarea.value = current.length > 0 ? current + ' ' + text : text;
+                        textarea.style.height = 'auto';
+                        textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px';
+                        textarea.focus();
+                    });
+                }
+            });
+        }
 
         wrapper.appendChild(container);
 
@@ -118,6 +174,7 @@ class StructuredViewManager {
             tokenBarEl: tokenBar,
             inputArea,
             textarea,
+            sendToTerminal,
             events: [],
             uuidTypeMap: new Map(), // uuid → event type, for parent-chain detection
             currentProgressWidget: null, // active blinking progress widget
@@ -487,25 +544,78 @@ class StructuredViewManager {
         return div;
     }
 
+    _extractResultText(content) {
+        if (!content) return null;
+        try {
+            const parsed = JSON.parse(content);
+            if (Array.isArray(parsed)) {
+                const texts = parsed
+                    .filter(item => item && typeof item.text === 'string')
+                    .map(item => item.text);
+                if (texts.length > 0) return texts.join('\n\n');
+            }
+            if (parsed && typeof parsed === 'object' && typeof parsed.text === 'string') {
+                return parsed.text;
+            }
+        } catch (e) {
+            // not JSON, fall through
+        }
+        return null;
+    }
+
     _renderToolResultBlock(block) {
         const div = document.createElement('div');
         div.className = 'sv-tool-result';
 
         const content = block.content || '';
-        const preview = content.length > 80 ? content.substring(0, 80) + '...' : content;
+        const extractedText = this._extractResultText(content);
         const errorClass = block.is_error ? ' sv-tool-output--error' : '';
 
-        div.innerHTML = `
-            <button class="sv-tool-toggle">
-                <span class="sv-tool-icon">${block.is_error ? '&#10060;' : '&#9989;'}</span>
-                <span class="sv-tool-name">Result</span>
-                <span class="sv-tool-summary">${this._escapeHtml(preview)}</span>
-                <span class="sv-tool-chevron">&#9654;</span>
-            </button>
-            <div class="sv-tool-body">
-                <pre class="sv-tool-output${errorClass}">${this._escapeHtml(content)}</pre>
-            </div>
-        `;
+        if (extractedText && !block.is_error) {
+            // Render extracted text as markdown
+            const preview = extractedText.length > 80
+                ? extractedText.substring(0, 80) + '...'
+                : extractedText;
+
+            div.innerHTML = `
+                <button class="sv-tool-toggle">
+                    <span class="sv-tool-icon">&#9989;</span>
+                    <span class="sv-tool-name">Result</span>
+                    <span class="sv-tool-summary">${this._escapeHtml(preview)}</span>
+                    <span class="sv-tool-chevron">&#9654;</span>
+                </button>
+                <div class="sv-tool-body">
+                    <div class="sv-text markdown-body sv-result-text"></div>
+                </div>
+            `;
+
+            const textEl = div.querySelector('.sv-result-text');
+            if (typeof marked !== 'undefined') {
+                try {
+                    textEl.innerHTML = marked.parse(extractedText);
+                } catch (e) {
+                    textEl.textContent = extractedText;
+                }
+            } else {
+                textEl.textContent = extractedText;
+            }
+        } else {
+            const preview = content.length > 80
+                ? content.substring(0, 80) + '...'
+                : content;
+
+            div.innerHTML = `
+                <button class="sv-tool-toggle">
+                    <span class="sv-tool-icon">${block.is_error ? '&#10060;' : '&#9989;'}</span>
+                    <span class="sv-tool-name">Result</span>
+                    <span class="sv-tool-summary">${this._escapeHtml(preview)}</span>
+                    <span class="sv-tool-chevron">&#9654;</span>
+                </button>
+                <div class="sv-tool-body">
+                    <pre class="sv-tool-output${errorClass}">${this._escapeHtml(content)}</pre>
+                </div>
+            `;
+        }
 
         div.querySelector('.sv-tool-toggle').addEventListener('click', () => {
             div.classList.toggle('expanded');
@@ -629,7 +739,10 @@ class StructuredViewManager {
     }
 
     _updateInputState(view, event) {
-        const stateEl = view.inputArea?.querySelector('.sv-input-state');
+        const isMobile = window.innerWidth <= 768;
+        const stateEl = isMobile
+            ? document.getElementById('mobile-input-state')
+            : view.inputArea?.querySelector('.sv-input-state');
         if (!stateEl) return;
 
         const msg = event.message;
@@ -641,7 +754,10 @@ class StructuredViewManager {
         if (msg.role === 'assistant') {
             if (msg.stop_reason === 'end_turn') {
                 stateEl.textContent = '';
-                if (view.textarea) view.textarea.placeholder = 'Send a message...';
+                const textarea = isMobile
+                    ? document.getElementById('mobile-terminal-input')
+                    : view.textarea;
+                if (textarea) textarea.placeholder = 'Send a message...';
             } else if (msg.stop_reason === 'tool_use') {
                 stateEl.textContent = 'Claude is using tools...';
             } else {

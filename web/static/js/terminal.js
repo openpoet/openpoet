@@ -353,6 +353,8 @@ class TerminalManager {
             if (msg.type === 'session_output' && msg.data) {
                 this.dismissConnectingOverlay(sessionId);
                 terminal.write(msg.data);
+                // Sync terminal prompt line to mobile input (debounced)
+                this._scheduleMobileInputSync(sessionId);
                 // Clear pending input tracking for activity bar
                 const _td = this.terminals.get(sessionId);
                 if (_td && _td._awaitingOutput) {
@@ -697,23 +699,15 @@ class TerminalManager {
 
         this.activeSessionId = sessionId;
 
-        // Toggle mobile input bars based on structured view state
-        const mobileInputBar = document.getElementById('mobile-terminal-input-bar');
-        const mobileKeysBar = document.getElementById('mobile-terminal-keys-bar');
-
         // Check if structured view is active for this session
         if (this.structuredViewActive.get(sessionId) && window.structuredView) {
             window.structuredView.show(sessionId);
             this._updateStructuredViewButton(true);
-            if (mobileInputBar) mobileInputBar.style.display = 'none';
-            if (mobileKeysBar) mobileKeysBar.style.display = 'none';
         } else {
             // Show terminal
             const termData = this.terminals.get(sessionId);
             termData.container.classList.add('active');
             this._updateStructuredViewButton(false);
-            if (mobileInputBar) mobileInputBar.style.display = '';
-            if (mobileKeysBar) mobileKeysBar.style.display = '';
 
             // Re-fit terminal after layout settles (double rAF ensures paint is done)
             requestAnimationFrame(() => {
@@ -740,31 +734,45 @@ class TerminalManager {
         if (!sessionId || !window.structuredView) return;
 
         const isActive = this.structuredViewActive.get(sessionId) || false;
-
-        // Mobile input elements to toggle
-        const mobileInputBar = document.getElementById('mobile-terminal-input-bar');
-        const mobileKeysBar = document.getElementById('mobile-terminal-keys-bar');
+        const isMobile = window.innerWidth <= 768;
 
         if (isActive) {
-            // Switch back to terminal — sync SV textarea to terminal prompt
-            const svView = window.structuredView.views.get(sessionId);
-            const svText = svView?.textarea?.value ?? '';
-            const svOriginal = svView?._originalValue ?? '';
+            // Switch back to terminal — sync textarea to terminal prompt
+            const termData = this.terminals.get(sessionId);
+
+            if (isMobile) {
+                // On mobile, sync from the shared mobile input
+                const mobileInput = document.getElementById('mobile-terminal-input');
+                const svText = mobileInput?.value ?? '';
+                const svOriginal = this._svOriginalValue ?? '';
+
+                if (svText !== svOriginal && termData?.ws?.readyState === WebSocket.OPEN) {
+                    this.sendInputToSession(sessionId, '\x15');
+                    if (svText) {
+                        setTimeout(() => {
+                            this.sendInputToSession(sessionId, svText);
+                        }, 50);
+                    }
+                }
+            } else {
+                // On desktop, sync from the SV textarea
+                const svView = window.structuredView.views.get(sessionId);
+                const svText = svView?.textarea?.value ?? '';
+                const svOriginal = svView?._originalValue ?? '';
+
+                if (svText !== svOriginal && termData?.ws?.readyState === WebSocket.OPEN) {
+                    this.sendInputToSession(sessionId, '\x15');
+                    if (svText) {
+                        setTimeout(() => {
+                            this.sendInputToSession(sessionId, svText);
+                        }, 50);
+                    }
+                }
+            }
 
             this.structuredViewActive.set(sessionId, false);
             window.structuredView.hide(sessionId);
 
-            const termData = this.terminals.get(sessionId);
-
-            // Sync SV text to terminal only if user modified the textarea
-            if (svText !== svOriginal && termData?.ws?.readyState === WebSocket.OPEN) {
-                this.sendInputToSession(sessionId, '\x15'); // Ctrl+U clear line
-                if (svText) {
-                    setTimeout(() => {
-                        this.sendInputToSession(sessionId, svText);
-                    }, 50);
-                }
-            }
             if (termData) {
                 termData.container.classList.add('active');
                 requestAnimationFrame(() => {
@@ -778,10 +786,6 @@ class TerminalManager {
                 });
             }
             this._updateStructuredViewButton(false);
-
-            // Restore mobile input bars
-            if (mobileInputBar) mobileInputBar.style.display = '';
-            if (mobileKeysBar) mobileKeysBar.style.display = '';
         } else {
             // Switch to structured view
             this.structuredViewActive.set(sessionId, true);
@@ -794,21 +798,24 @@ class TerminalManager {
             window.structuredView.show(sessionId);
             this._updateStructuredViewButton(true);
 
-            // Hide mobile input bars (structured view has its own input)
-            if (mobileInputBar) mobileInputBar.style.display = 'none';
-            if (mobileKeysBar) mobileKeysBar.style.display = 'none';
-
-            // Populate textarea from terminal's current line content
-            const svView = window.structuredView.views.get(sessionId);
+            // Populate the appropriate textarea from terminal's current line content
             const lineContent = this.getSessionLineContent(sessionId);
-            if (svView?.textarea) {
-                svView.textarea.value = lineContent;
-                svView._originalValue = lineContent; // Track for change detection on toggle back
-                // Trigger resize
-                svView.textarea.style.height = 'auto';
-                svView.textarea.style.height = Math.min(svView.textarea.scrollHeight, 150) + 'px';
 
-                if (window.innerWidth > 768) {
+            if (isMobile) {
+                // On mobile, just update the shared mobile input value — no style changes
+                const mobileInput = document.getElementById('mobile-terminal-input');
+                if (mobileInput) {
+                    mobileInput.value = lineContent;
+                    mobileInput._lastSyncedValue = lineContent;
+                    this._svOriginalValue = lineContent;
+                }
+            } else {
+                const svView = window.structuredView.views.get(sessionId);
+                if (svView?.textarea) {
+                    svView.textarea.value = lineContent;
+                    svView._originalValue = lineContent;
+                    svView.textarea.style.height = 'auto';
+                    svView.textarea.style.height = Math.min(svView.textarea.scrollHeight, 150) + 'px';
                     requestAnimationFrame(() => svView.textarea.focus());
                 }
             }
@@ -1026,6 +1033,32 @@ class TerminalManager {
                 window.networkFeedback?.requestStarted();
             }
         }
+    }
+
+    /**
+     * Debounced sync of terminal prompt line content to the mobile input.
+     * Only runs on mobile, in terminal mode (not SV), when the input isn't focused.
+     */
+    _scheduleMobileInputSync(sessionId) {
+        if (window.innerWidth > 768) return; // Desktop — no sync needed
+        if (sessionId !== this.activeSessionId) return; // Not the visible session
+
+        clearTimeout(this._mobileInputSyncTimer);
+        this._mobileInputSyncTimer = setTimeout(() => {
+            const mobileInput = document.getElementById('mobile-terminal-input');
+            if (!mobileInput || document.activeElement === mobileInput) return; // User is typing
+
+            const lineContent = this.getSessionLineContent(sessionId);
+            if (mobileInput.value !== lineContent) {
+                mobileInput.value = lineContent;
+                mobileInput._lastSyncedValue = lineContent;
+                // Keep single-line height unless content is multi-line
+                if (!lineContent || lineContent.indexOf('\n') === -1) {
+                    mobileInput.style.height = '44px';
+                    mobileInput.style.overflow = 'hidden';
+                }
+            }
+        }, 100);
     }
 
     /**

@@ -333,6 +333,14 @@
     transform: rotate(90deg);
 }
 
+.sv-result-text {
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
 /* Thinking blocks */
 .sv-thinking {
     border: 1px solid rgba(var(--color-warning-rgb), 0.3);
@@ -477,6 +485,42 @@
     color: var(--color-text-muted);
 }
 
+.sv-input-btn {
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: opacity 0.15s ease, transform 0.1s ease, background 0.15s ease;
+}
+
+.sv-input-btn:hover {
+    background: var(--color-bg);
+    color: var(--color-text);
+}
+
+.sv-input-btn:active {
+    transform: scale(0.95);
+}
+
+.sv-input-btn.recording {
+    background: var(--color-danger, #ef4444);
+    border-color: var(--color-danger, #ef4444);
+    color: white;
+    animation: sv-pulse-recording 1.5s ease-in-out infinite;
+}
+
+@keyframes sv-pulse-recording {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
 .sv-input-send {
     width: 40px;
     height: 40px;
@@ -597,7 +641,7 @@
     }
 
     .sv-input-area {
-        padding: 6px 10px 8px;
+        display: none; /* On mobile, the shared mobile input bar is used instead */
     }
 
     .sv-input-hint {
