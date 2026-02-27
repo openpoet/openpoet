@@ -4063,8 +4063,21 @@ class OpenPoet {
         const sessionId = window.terminalManager?.activeSessionId;
         if (!sessionId) return;
 
-        // Text is already in the terminal via real-time sync — just send Enter
-        window.terminalManager.sendInputToSession(sessionId, '\r');
+        const text = input.value;
+        const delays = this.getInputDelays(sessionId, 'mobile');
+
+        // Always clear the terminal line and send exactly what the user sees
+        // in the text box (Ctrl+U clears, then text, then Enter)
+        window.terminalManager.sendInputToSession(sessionId, '\x15'); // Ctrl+U
+        setTimeout(() => {
+            if (text) {
+                window.terminalManager.sendInputToSession(sessionId, text);
+            }
+            setTimeout(() => {
+                window.terminalManager.sendInputToSession(sessionId, '\r');
+            }, delays.textToEnter);
+        }, delays.ctrlUToText);
+
         input.value = '';
         input._lastSyncedValue = '';
         input.style.height = '44px';
