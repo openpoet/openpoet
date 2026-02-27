@@ -314,6 +314,10 @@ class StructuredViewManager {
         const textBlocks = blocks.filter(b => b.type === 'text');
         const toolResultBlocks = blocks.filter(b => b.type === 'tool_result');
 
+        // Sidechain user messages (skills, system prompts, agent injections)
+        // are NOT real user input — render as assistant-style cards
+        const isRealUser = !event.isSidechain;
+
         // If only tool_result blocks, render as a system-style card (not user)
         if (textBlocks.length === 0 && toolResultBlocks.length > 0) {
             return this._renderToolResultsMessage(event, toolResultBlocks);
@@ -327,17 +331,20 @@ class StructuredViewManager {
             if (trMsg) fragment.appendChild(trMsg);
         }
 
-        // Render actual user text as a right-aligned user card
+        // Render text blocks
         if (textBlocks.length > 0) {
             const div = document.createElement('div');
-            div.className = 'sv-message sv-message--user';
+            div.className = isRealUser
+                ? 'sv-message sv-message--user'
+                : 'sv-message sv-message--assistant';
 
             const header = document.createElement('div');
             header.className = 'sv-message-header';
-            header.innerHTML = `
-                <span class="sv-role sv-role--user">User</span>
-                <span class="sv-timestamp">${this._formatTime(event.timestamp)}</span>
-            `;
+            header.innerHTML = isRealUser
+                ? `<span class="sv-role sv-role--user">User</span>
+                   <span class="sv-timestamp">${this._formatTime(event.timestamp)}</span>`
+                : `<span class="sv-role sv-role--assistant">System</span>
+                   <span class="sv-timestamp">${this._formatTime(event.timestamp)}</span>`;
             div.appendChild(header);
 
             const content = document.createElement('div');

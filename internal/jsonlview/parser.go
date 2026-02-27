@@ -11,13 +11,14 @@ import (
 
 // rawEvent is the raw JSON structure of a JSONL line.
 type rawEvent struct {
-	Type       string          `json:"type"`
-	UUID       string          `json:"uuid"`
-	ParentUUID *string         `json:"parentUuid"`
-	Timestamp  string          `json:"timestamp"`
-	SessionID  string          `json:"sessionId"`
-	Message    json.RawMessage `json:"message"`
-	Data       json.RawMessage `json:"data"`
+	Type        string          `json:"type"`
+	UUID        string          `json:"uuid"`
+	ParentUUID  *string         `json:"parentUuid"`
+	Timestamp   string          `json:"timestamp"`
+	SessionID   string          `json:"sessionId"`
+	IsSidechain bool            `json:"isSidechain"`
+	Message     json.RawMessage `json:"message"`
+	Data        json.RawMessage `json:"data"`
 }
 
 // rawMessage is the raw JSON structure of a message field.
@@ -74,10 +75,11 @@ func ParseLine(line []byte) (*SessionEvent, error) {
 	ts, _ := time.Parse(time.RFC3339Nano, raw.Timestamp)
 
 	event := &SessionEvent{
-		Type:      raw.Type,
-		UUID:      raw.UUID,
-		Timestamp: ts,
-		SessionID: raw.SessionID,
+		Type:        raw.Type,
+		UUID:        raw.UUID,
+		Timestamp:   ts,
+		SessionID:   raw.SessionID,
+		IsSidechain: raw.IsSidechain,
 	}
 	if raw.ParentUUID != nil {
 		event.ParentUUID = *raw.ParentUUID
