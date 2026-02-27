@@ -44,18 +44,19 @@ type ProjectInput struct {
 }
 
 type Session struct {
-	ID             string        `db:"id" json:"id"`
-	ProjectID      int64         `db:"project_id" json:"project_id"`
-	Status         string        `db:"status" json:"status"` // 'starting', 'running', 'stopped', 'error', 'completed'
-	PID            sql.NullInt64 `db:"pid" json:"pid,omitempty"`
-	Name           string        `db:"name" json:"name"`
-	TaskID         sql.NullInt64 `db:"task_id" json:"task_id,omitempty"`
-	StartTime      time.Time     `db:"start_time" json:"start_time"`
-	EndTime        sql.NullTime  `db:"end_time" json:"end_time,omitempty"`
-	LastActivityAt sql.NullTime  `db:"last_activity_at" json:"last_activity_at,omitempty"`
-	PlanContent    string        `db:"plan_content" json:"plan_content"`
-	PlanUpdatedAt  sql.NullTime  `db:"plan_updated_at" json:"plan_updated_at,omitempty"`
-	Backend        string        `db:"backend" json:"backend"` // 'claude_code' or 'copilot'
+	ID              string        `db:"id" json:"id"`
+	ProjectID       int64         `db:"project_id" json:"project_id"`
+	Status          string        `db:"status" json:"status"` // 'starting', 'running', 'stopped', 'error', 'completed'
+	PID             sql.NullInt64 `db:"pid" json:"pid,omitempty"`
+	Name            string        `db:"name" json:"name"`
+	TaskID          sql.NullInt64 `db:"task_id" json:"task_id,omitempty"`
+	StartTime       time.Time     `db:"start_time" json:"start_time"`
+	EndTime         sql.NullTime  `db:"end_time" json:"end_time,omitempty"`
+	LastActivityAt  sql.NullTime  `db:"last_activity_at" json:"last_activity_at,omitempty"`
+	PlanContent     string        `db:"plan_content" json:"plan_content"`
+	PlanUpdatedAt   sql.NullTime  `db:"plan_updated_at" json:"plan_updated_at,omitempty"`
+	Backend         string        `db:"backend" json:"backend"` // 'claude_code' or 'copilot'
+	SkipPermissions bool          `db:"skip_permissions" json:"skip_permissions"`
 }
 
 type Skill struct {

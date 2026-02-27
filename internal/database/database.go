@@ -131,8 +131,13 @@ func (d *DB) HasProjectShare(ctx context.Context, projectID, sharedProjectID int
 
 // Session operations
 func (d *DB) CreateSession(ctx context.Context, s *Session) error {
-	query := `INSERT INTO sessions (id, project_id, status, pid, name, task_id, start_time, backend) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.ExecContext(ctx, query, s.ID, s.ProjectID, s.Status, s.PID, s.Name, s.TaskID, s.StartTime, s.Backend)
+	query := `INSERT INTO sessions (id, project_id, status, pid, name, task_id, start_time, backend, skip_permissions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.ExecContext(ctx, query, s.ID, s.ProjectID, s.Status, s.PID, s.Name, s.TaskID, s.StartTime, s.Backend, s.SkipPermissions)
+	return err
+}
+
+func (d *DB) UpdateSessionSkipPermissions(ctx context.Context, id string, skipPermissions bool) error {
+	_, err := d.ExecContext(ctx, "UPDATE sessions SET skip_permissions=? WHERE id=?", skipPermissions, id)
 	return err
 }
 
