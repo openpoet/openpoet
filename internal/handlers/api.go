@@ -1404,6 +1404,53 @@ func (a *API) GetSessionPlan(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, result)
 }
 
+// ListSessionDocuments returns all documents associated with a session (temp_documents + session plan).
+func (a *API) ListSessionDocuments(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+
+	type docEntry struct {
+		ID        string    `json:"id"`
+		Title     string    `json:"title"`
+		Type      string    `json:"type"` // "document" or "plan"
+		Status    string    `json:"status"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+
+	var results []docEntry
+
+	// 1. Documents created in this session
+	docs, _ := a.db.ListDocumentsBySession(r.Context(), sessionID)
+	for _, d := range docs {
+		results = append(results, docEntry{
+			ID:        d.ID,
+			Title:     d.Title,
+			Type:      "document",
+			Status:    d.Status,
+			CreatedAt: d.CreatedAt,
+		})
+	}
+
+	// 2. Session plan (if any)
+	planContent, _, err := a.db.GetSessionPlan(r.Context(), sessionID)
+	if err == nil && planContent != "" {
+		session, _ := a.db.GetSession(r.Context(), sessionID)
+		planTitle := "Plan"
+		if session != nil && session.Name != "" {
+			planTitle = "Plan: " + session.Name
+		}
+		results = append(results, docEntry{
+			ID:    "plan:" + sessionID,
+			Title: planTitle,
+			Type:  "plan",
+		})
+	}
+
+	if results == nil {
+		results = []docEntry{}
+	}
+	respondJSON(w, http.StatusOK, results)
+}
+
 func (a *API) DeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
@@ -2423,6 +2470,7 @@ func (a *API) CreateTempDocument(w http.ResponseWriter, r *http.Request) {
 		Content        string `json:"content"`
 		ConversationID string `json:"conversation_id"`
 		TaskID         string `json:"task_id"`
+		SessionID      string `json:"session_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
@@ -2446,18 +2494,20 @@ func (a *API) CreateTempDocument(w http.ResponseWriter, r *http.Request) {
 		Content:        input.Content,
 		ConversationID: sql.NullInt64{Int64: convID, Valid: convID > 0},
 		TaskID:         sql.NullInt64{Int64: taskID, Valid: taskID > 0},
+		SessionID:      input.SessionID,
 	}
 	if err := a.db.CreateTempDocument(r.Context(), doc); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	// Notify the chat panel via WebSocket to inject an inline doc card
+	// Notify the frontend via WebSocket to inject an inline doc card
 	a.hub.BroadcastChatDocCard(map[string]interface{}{
 		"doc_id":          doc.ID,
 		"type":            "document",
 		"title":           title,
 		"conversation_id": input.ConversationID,
+		"session_id":      input.SessionID,
 	})
 
 	respondJSON(w, http.StatusCreated, map[string]string{

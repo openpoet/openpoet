@@ -533,6 +533,7 @@ func main() {
 		r.Post("/sessions/{id}/events/watch", api.StartWatchingSessionEvents)
 		r.Delete("/sessions/{id}/events/watch", api.StopWatchingSessionEvents)
 		r.Get("/sessions/{id}/plan", api.GetSessionPlan)
+		r.Get("/sessions/{id}/documents", api.ListSessionDocuments)
 		r.Delete("/sessions/{id}", api.DeleteSession)
 		r.Post("/sessions/{id}/reopen", api.ReopenSession)
 

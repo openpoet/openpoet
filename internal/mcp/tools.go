@@ -845,6 +845,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 			"title":           title,
 			"content":         content,
 			"conversation_id": convID,
+			"session_id":      sessionID,
 		}
 		if taskID, ok := params["task_id"].(string); ok && taskID != "" {
 			docPayload["task_id"] = taskID
@@ -859,7 +860,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 			Link string `json:"link"`
 		}
 		if json.Unmarshal(body, &result) == nil {
-			return fmt.Sprintf("Document created successfully. A 'View Document' button was automatically displayed in chat. Do NOT generate links — the user will use the native button. Internal link: %s", result.Link), nil
+			return fmt.Sprintf("Document created successfully. A 'View Document' button was automatically displayed to the user. Do NOT generate links — the user will use the native button. Internal link: %s", result.Link), nil
 		}
 		return string(body), nil
 

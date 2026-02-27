@@ -192,6 +192,7 @@ type TempDocument struct {
 	Content        string        `db:"content" json:"content"`
 	ConversationID sql.NullInt64 `db:"conversation_id" json:"conversation_id,omitempty"`
 	TaskID         sql.NullInt64 `db:"task_id" json:"task_id,omitempty"`
+	SessionID      string        `db:"session_id" json:"session_id,omitempty"`
 	Summary        string        `db:"summary" json:"summary"`
 	Status         string        `db:"status" json:"status"`
 	MessageID      int64         `db:"message_id" json:"message_id"`
