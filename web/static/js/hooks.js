@@ -16,6 +16,7 @@ class HookManager {
 
         // Persisted plan cache per session
         this.sessionPlans = {}; // sessionID -> { content, updatedAt }
+        this.sessionDocs = {}; // sessionID -> [{ id, title, type, status, created_at }]
 
         this.setupUI();
     }
@@ -183,9 +184,9 @@ class HookManager {
             this.dismissDialog('askUser');
         });
 
-        // View Plan button
+        // Session Documents button (was "View Plan")
         document.getElementById('btn-view-plan')?.addEventListener('click', () => {
-            this.showPlan();
+            this.showDocuments();
         });
 
         // Task Loaded dialog buttons
@@ -332,7 +333,10 @@ class HookManager {
                 this._handleTaskLoaded(msg.data);
                 break;
             case 'session_plan_updated':
-                if (msg.data?.session_id) this.fetchPlan(msg.data.session_id);
+                if (msg.data?.session_id) {
+                    this.fetchPlan(msg.data.session_id);
+                    this.fetchSessionDocs(msg.data.session_id);
+                }
                 break;
         }
     }
@@ -740,7 +744,7 @@ class HookManager {
         const planContent = toolInput.plan || '';
         if (planContent && data.session_id) {
             this.sessionPlans[data.session_id] = { content: planContent, updatedAt: new Date().toISOString() };
-            this._updatePlanButton();
+            this._updateDocsButton();
         }
 
         // Show View Plan button if plan content is available in the event
@@ -1491,7 +1495,7 @@ class HookManager {
         }
     }
 
-    // ==================== PLAN PERSISTENCE ====================
+    // ==================== PLAN & DOCUMENTS ====================
 
     async fetchPlan(sessionId) {
         if (!sessionId) return;
@@ -1507,26 +1511,138 @@ class HookManager {
             } else {
                 delete this.sessionPlans[sessionId];
             }
-            this._updatePlanButton();
+            this._updateDocsButton();
         } catch (err) {
             console.error('[HookManager] Failed to fetch plan:', err);
         }
     }
 
-    showPlan() {
-        const sessionId = this._getActiveSessionId();
-        const plan = this.sessionPlans[sessionId];
-        if (plan?.content && window.fileViewer) {
-            window.fileViewer.showPlanContent(plan.content, 'Plan');
+    async fetchSessionDocs(sessionId) {
+        if (!sessionId) return;
+        try {
+            const resp = await fetch(`/api/sessions/${sessionId}/documents`);
+            if (!resp.ok) return;
+            this.sessionDocs[sessionId] = await resp.json();
+            this._updateDocsButton();
+        } catch (err) {
+            console.error('[HookManager] Failed to fetch session docs:', err);
         }
     }
 
-    _updatePlanButton() {
+    showDocuments() {
+        const sessionId = this._getActiveSessionId();
+        const docs = this.sessionDocs[sessionId] || [];
+        if (docs.length === 0) {
+            // Fallback: if only plan is cached but docs not fetched yet, show plan directly
+            const plan = this.sessionPlans[sessionId];
+            if (plan?.content && window.fileViewer) {
+                window.fileViewer.showPlanContent(plan.content, 'Plan');
+            }
+            return;
+        }
+        if (docs.length === 1) {
+            // Single document — open directly
+            this._openSessionDoc(docs[0]);
+            return;
+        }
+        this._showDocsModal(docs);
+    }
+
+    _openSessionDoc(doc) {
+        if (doc.type === 'plan') {
+            const sessionId = doc.id.replace('plan:', '');
+            const cached = this.sessionPlans[sessionId];
+            if (cached?.content && window.fileViewer) {
+                window.fileViewer.showPlanContent(cached.content, doc.title);
+            } else {
+                // Fetch and show
+                fetch(`/api/sessions/${sessionId}/plan`)
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.plan_content && window.docViewer) {
+                            window.docViewer.openWithContent(doc.title, data.plan_content);
+                        }
+                    });
+            }
+        } else if (window.docViewer) {
+            window.docViewer.open(doc.id);
+        }
+    }
+
+    _showDocsModal(docs) {
+        // Remove existing modal if any
+        document.getElementById('session-docs-modal')?.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'session-docs-modal';
+        overlay.className = 'session-docs-modal';
+
+        const panel = document.createElement('div');
+        panel.className = 'session-docs-panel';
+
+        // Header
+        const header = document.createElement('div');
+        header.className = 'session-docs-header';
+        header.innerHTML = `
+            <span class="session-docs-title">Session Documents</span>
+            <button class="session-docs-close" title="Close">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+            </button>
+        `;
+        panel.appendChild(header);
+
+        // List
+        const list = document.createElement('div');
+        list.className = 'session-docs-list';
+
+        for (const doc of docs) {
+            const row = document.createElement('div');
+            row.className = 'session-docs-row';
+            const icon = doc.type === 'plan'
+                ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>'
+                : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+            const title = doc.title || 'Untitled';
+            const time = doc.created_at ? new Date(doc.created_at).toLocaleTimeString() : '';
+            row.innerHTML = `
+                <span class="session-docs-row-icon">${icon}</span>
+                <span class="session-docs-row-title">${this._escapeHtml(title)}</span>
+                <span class="session-docs-row-time">${time}</span>
+            `;
+            row.addEventListener('click', () => {
+                overlay.remove();
+                this._openSessionDoc(doc);
+            });
+            list.appendChild(row);
+        }
+
+        panel.appendChild(list);
+        overlay.appendChild(panel);
+
+        // Close on backdrop click
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) overlay.remove();
+        });
+        header.querySelector('.session-docs-close').addEventListener('click', () => overlay.remove());
+
+        document.body.appendChild(overlay);
+    }
+
+    _escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text || '';
+        return div.innerHTML;
+    }
+
+    _updateDocsButton() {
         const btn = document.getElementById('btn-view-plan');
         if (!btn) return;
         const sessionId = this._getActiveSessionId();
         const hasPlan = sessionId && this.sessionPlans[sessionId]?.content;
-        btn.style.display = hasPlan ? '' : 'none';
+        const hasDocs = sessionId && this.sessionDocs[sessionId]?.length > 0;
+        btn.style.display = (hasPlan || hasDocs) ? '' : 'none';
     }
 
     // Called when user switches session tab - refresh panel and badge for new session.
@@ -1535,13 +1651,15 @@ class HookManager {
         this.renderToolPanel();
         this.updateToolBadge();
 
-        // Fetch plan for new active session if not cached
+        // Fetch plan and docs for new active session if not cached
         const activeId = this._getActiveSessionId();
         if (activeId && !this.sessionPlans[activeId]) {
             this.fetchPlan(activeId);
-        } else {
-            this._updatePlanButton();
         }
+        if (activeId && !this.sessionDocs[activeId]) {
+            this.fetchSessionDocs(activeId);
+        }
+        this._updateDocsButton();
 
         // Auto-reopen the first dismissed request for the newly active session
         const pendingForActive = this.dismissedRequests.find(e => e.sessionId === activeId);
@@ -1620,8 +1738,9 @@ class HookManager {
         delete this.toolEventsBySession[sessionId];
         delete this.sessionModes[sessionId];
         delete this.sessionPlans[sessionId];
+        delete this.sessionDocs[sessionId];
         this._saveToolEvents();
-        this._updatePlanButton();
+        this._updateDocsButton();
 
         this.dismissedRequests = this.dismissedRequests.filter(e => e.sessionId !== sessionId);
         this._saveDismissedRequests();

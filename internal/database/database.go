@@ -840,8 +840,8 @@ func (d *DB) CreateTempDocument(ctx context.Context, doc *TempDocument) error {
 	if doc.Status == "" {
 		doc.Status = "pending"
 	}
-	query := `INSERT INTO temp_documents (id, title, content, conversation_id, task_id, summary, status, message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.ExecContext(ctx, query, doc.ID, doc.Title, doc.Content, doc.ConversationID, doc.TaskID, doc.Summary, doc.Status, doc.MessageID)
+	query := `INSERT INTO temp_documents (id, title, content, conversation_id, task_id, session_id, summary, status, message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.ExecContext(ctx, query, doc.ID, doc.Title, doc.Content, doc.ConversationID, doc.TaskID, doc.SessionID, doc.Summary, doc.Status, doc.MessageID)
 	return err
 }
 
@@ -849,6 +849,13 @@ func (d *DB) ListDocumentsByTask(ctx context.Context, taskID int64) ([]TempDocum
 	var docs []TempDocument
 	err := d.SelectContext(ctx, &docs,
 		"SELECT id, title, status, task_id, created_at FROM temp_documents WHERE task_id = ? ORDER BY created_at DESC", taskID)
+	return docs, err
+}
+
+func (d *DB) ListDocumentsBySession(ctx context.Context, sessionID string) ([]TempDocument, error) {
+	var docs []TempDocument
+	err := d.SelectContext(ctx, &docs,
+		"SELECT id, title, status, session_id, created_at FROM temp_documents WHERE session_id = ? ORDER BY created_at DESC", sessionID)
 	return docs, err
 }
 

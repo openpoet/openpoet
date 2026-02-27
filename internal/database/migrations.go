@@ -52,6 +52,7 @@ var migrations = []Migration{
 	{Version: 34, Description: "projects: add dangerously_skip_permissions column", Up: migrateV34},
 	{Version: 35, Description: "multi-backend: add backend and backend_config columns to projects and sessions", Up: migrateV35},
 	{Version: 36, Description: "sessions: add skip_permissions for auto-restore on restart", Up: migrateV36},
+	{Version: 37, Description: "docs: add session_id to temp_documents for session-document linking", Up: migrateV37},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -989,6 +990,18 @@ func migrateV36(tx *sqlx.Tx) error {
 	_, err := tx.Exec(`ALTER TABLE sessions ADD COLUMN skip_permissions INTEGER NOT NULL DEFAULT 0`)
 	if err != nil {
 		return fmt.Errorf("migrateV36 failed: %w", err)
+	}
+	return nil
+}
+
+func migrateV37(tx *sqlx.Tx) error {
+	for _, q := range []string{
+		`ALTER TABLE temp_documents ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_temp_documents_session ON temp_documents(session_id)`,
+	} {
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("migrateV37 failed: %w", err)
+		}
 	}
 	return nil
 }
