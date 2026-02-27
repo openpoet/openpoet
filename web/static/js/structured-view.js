@@ -65,50 +65,49 @@ class StructuredViewManager {
         const textarea = inputArea.querySelector('.sv-input-textarea');
         const sendBtn = inputArea.querySelector('.sv-input-send');
 
-        // Real-time sync: forward textarea content to terminal on each keystroke
-        let syncTimer = null;
-        const syncToTerminal = () => {
+        // Send text to terminal: Ctrl+U (clear line) → text → Enter
+        const sendToTerminal = () => {
+            const text = textarea.value;
             const tm = window.terminalManager;
             if (!tm) return;
-            tm.sendInputToSession(sessionId, '\x15'); // Ctrl+U clear line
-            if (textarea.value) {
-                tm.sendInputToSession(sessionId, textarea.value);
-            }
+
+            const delays = window.app?.getInputDelays?.(sessionId, 'mobile') || { ctrlUToText: 0, textToEnter: 700 };
+
+            // Clear any existing input on the terminal line
+            tm.sendInputToSession(sessionId, '\x15');
+
+            // Send text after clear delay
+            setTimeout(() => {
+                if (text) {
+                    tm.sendInputToSession(sessionId, text);
+                }
+                // Send Enter after text delay
+                setTimeout(() => {
+                    tm.sendInputToSession(sessionId, '\r');
+                }, delays.textToEnter);
+            }, delays.ctrlUToText);
+
+            textarea.value = '';
+            textarea.style.height = 'auto';
         };
 
-        // Auto-resize + debounced sync to terminal
+        // Auto-resize textarea
         textarea.addEventListener('input', () => {
             textarea.style.height = 'auto';
             textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px';
-            clearTimeout(syncTimer);
-            syncTimer = setTimeout(syncToTerminal, 50);
         });
 
-        // Enter sends \r (text already on terminal from sync)
+        // Enter submits (Shift+Enter for newline)
         textarea.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                clearTimeout(syncTimer);
-                syncToTerminal(); // ensure latest text is on terminal
-                const tm = window.terminalManager;
-                if (tm) {
-                    setTimeout(() => tm.sendInputToSession(sessionId, '\r'), 30);
-                }
-                textarea.value = '';
-                textarea.style.height = 'auto';
+                sendToTerminal();
             }
         });
 
-        // Send button: sync + Enter
+        // Send button
         sendBtn.addEventListener('click', () => {
-            clearTimeout(syncTimer);
-            syncToTerminal();
-            const tm = window.terminalManager;
-            if (tm) {
-                setTimeout(() => tm.sendInputToSession(sessionId, '\r'), 30);
-            }
-            textarea.value = '';
-            textarea.style.height = 'auto';
+            sendToTerminal();
         });
 
         wrapper.appendChild(container);
@@ -311,22 +310,60 @@ class StructuredViewManager {
         const msg = event.message;
         if (!msg) return null;
 
-        const div = document.createElement('div');
-        div.className = 'sv-message sv-message--user';
+        const blocks = msg.content_blocks || [];
+        const textBlocks = blocks.filter(b => b.type === 'text');
+        const toolResultBlocks = blocks.filter(b => b.type === 'tool_result');
 
-        const header = document.createElement('div');
-        header.className = 'sv-message-header';
-        header.innerHTML = `
-            <span class="sv-role sv-role--user">User</span>
-            <span class="sv-timestamp">${this._formatTime(event.timestamp)}</span>
-        `;
-        div.appendChild(header);
+        // If only tool_result blocks, render as a system-style card (not user)
+        if (textBlocks.length === 0 && toolResultBlocks.length > 0) {
+            return this._renderToolResultsMessage(event, toolResultBlocks);
+        }
+
+        const fragment = document.createDocumentFragment();
+
+        // Render tool_result blocks first as a separate system card
+        if (toolResultBlocks.length > 0) {
+            const trMsg = this._renderToolResultsMessage(event, toolResultBlocks);
+            if (trMsg) fragment.appendChild(trMsg);
+        }
+
+        // Render actual user text as a right-aligned user card
+        if (textBlocks.length > 0) {
+            const div = document.createElement('div');
+            div.className = 'sv-message sv-message--user';
+
+            const header = document.createElement('div');
+            header.className = 'sv-message-header';
+            header.innerHTML = `
+                <span class="sv-role sv-role--user">User</span>
+                <span class="sv-timestamp">${this._formatTime(event.timestamp)}</span>
+            `;
+            div.appendChild(header);
+
+            const content = document.createElement('div');
+            content.className = 'sv-content';
+
+            for (const block of textBlocks) {
+                const blockEl = this._renderContentBlock(block);
+                if (blockEl) content.appendChild(blockEl);
+            }
+
+            div.appendChild(content);
+            fragment.appendChild(div);
+        }
+
+        return fragment;
+    }
+
+    _renderToolResultsMessage(event, toolResultBlocks) {
+        const div = document.createElement('div');
+        div.className = 'sv-message sv-message--tool-results';
 
         const content = document.createElement('div');
         content.className = 'sv-content';
 
-        for (const block of (msg.content_blocks || [])) {
-            const blockEl = this._renderContentBlock(block);
+        for (const block of toolResultBlocks) {
+            const blockEl = this._renderToolResultBlock(block);
             if (blockEl) content.appendChild(blockEl);
         }
 

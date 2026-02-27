@@ -76,11 +76,23 @@
 .sv-message--user {
     background: var(--color-bg-tertiary);
     border: 1px solid var(--color-border);
+    align-self: flex-end;
+    max-width: 85%;
 }
 
 .sv-message--assistant {
     background: var(--color-bg-secondary);
     border: 1px solid var(--color-border);
+    align-self: flex-start;
+    max-width: 95%;
+}
+
+.sv-message--tool-results {
+    align-self: flex-start;
+    max-width: 95%;
+    padding: 4px 14px;
+    background: none;
+    border: none;
 }
 
 .sv-message--progress {
