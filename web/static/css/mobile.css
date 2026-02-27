@@ -660,6 +660,9 @@
 
     .mobile-terminal-input::placeholder {
         color: var(--color-text-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
 
     .mobile-terminal-action-btn {
