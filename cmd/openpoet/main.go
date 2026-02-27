@@ -218,6 +218,10 @@ func main() {
 	appUpdater := updater.New(BuildVersion)
 	api.SetUpdater(appUpdater)
 
+	// Initialize structured view handler (JSONL event browser)
+	svHandler := handlers.NewStructuredViewHandler(db, hub)
+	api.SetStructuredView(svHandler)
+
 	// Initialize other handlers
 	fileHandler := handlers.NewFileHandler(api)
 	voiceHandler := handlers.NewVoiceHandler(api, func() (voice.ProviderType, string, string) {
@@ -314,6 +318,8 @@ func main() {
 	}
 	sessionMgr.OnSessionEnd = func(sessionID string, output []byte) {
 		log.Printf("[AI-Session] >>> OnSessionEnd callback fired for session %s (outputLen=%d)", sessionID[:8], len(output))
+		// Stop structured view watcher for this session
+		svHandler.StopSessionWatcher(sessionID)
 		// Record basic session_ended history (AI may enrich with summary later)
 		if task, err := db.GetTaskForSession(context.Background(), sessionID); err == nil && task != nil {
 			api.RecordTaskHistory(context.Background(), task.ID, task.ProjectID, "session_ended", map[string]interface{}{
@@ -523,6 +529,9 @@ func main() {
 		r.Post("/sessions", api.CreateSession)
 		r.Get("/sessions/{id}", api.GetSession)
 		r.Get("/sessions/{id}/output", api.GetSessionOutput)
+		r.Get("/sessions/{id}/events", api.GetSessionEvents)
+		r.Post("/sessions/{id}/events/watch", api.StartWatchingSessionEvents)
+		r.Delete("/sessions/{id}/events/watch", api.StopWatchingSessionEvents)
 		r.Get("/sessions/{id}/plan", api.GetSessionPlan)
 		r.Delete("/sessions/{id}", api.DeleteSession)
 		r.Post("/sessions/{id}/reopen", api.ReopenSession)
@@ -851,6 +860,9 @@ func main() {
 
 	// Close AI provider sessions (SDK providers may have persistent subprocesses)
 	providerMgr.CloseAll()
+
+	// Stop structured view watchers
+	svHandler.StopAllWatchers()
 
 	// Stop all sessions (preserve DB state for auto-restore on next startup)
 	sessionMgr.StopAllForRestart()

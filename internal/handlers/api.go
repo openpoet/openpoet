@@ -136,6 +136,9 @@ type API struct {
 	// Binary auto-updater
 	updater *updater.Updater
 
+	// Structured view (JSONL event browser)
+	structuredView *StructuredViewHandler
+
 	// Tunnel client for remote access (dynamically created/destroyed)
 	tunnelMu     sync.Mutex
 	tunnelClient *tunnel.Client
@@ -608,6 +611,38 @@ func NewAPI(
 // SetUpdater configures the binary auto-updater for the API.
 func (a *API) SetUpdater(u *updater.Updater) {
 	a.updater = u
+}
+
+// SetStructuredView configures the structured view handler for the API.
+func (a *API) SetStructuredView(sv *StructuredViewHandler) {
+	a.structuredView = sv
+}
+
+// GetSessionEvents delegates to the structured view handler.
+func (a *API) GetSessionEvents(w http.ResponseWriter, r *http.Request) {
+	if a.structuredView == nil {
+		respondJSON(w, http.StatusOK, []any{})
+		return
+	}
+	a.structuredView.GetSessionEvents(w, r)
+}
+
+// StartWatchingSessionEvents delegates to the structured view handler.
+func (a *API) StartWatchingSessionEvents(w http.ResponseWriter, r *http.Request) {
+	if a.structuredView == nil {
+		respondJSON(w, http.StatusOK, map[string]string{"status": "unavailable"})
+		return
+	}
+	a.structuredView.StartWatching(w, r)
+}
+
+// StopWatchingSessionEvents delegates to the structured view handler.
+func (a *API) StopWatchingSessionEvents(w http.ResponseWriter, r *http.Request) {
+	if a.structuredView == nil {
+		respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+	a.structuredView.StopWatching(w, r)
 }
 
 func respondJSON(w http.ResponseWriter, status int, data interface{}) {

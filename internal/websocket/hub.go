@@ -45,6 +45,9 @@ const (
 
 	// Tunnel status
 	MsgTypeTunnelStatus MessageType = "tunnel_status"
+
+	// Structured view (JSONL event stream)
+	MsgTypeSessionEvent MessageType = "session_event"
 )
 
 type Message struct {
