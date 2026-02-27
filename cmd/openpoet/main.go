@@ -115,6 +115,12 @@ func main() {
 		return
 	}
 
+	// Handle cli subcommand before flag parsing — exposes MCP tools via bash
+	if len(os.Args) > 1 && os.Args[1] == "cli" {
+		mcp.RunCLI(os.Args[2:])
+		return
+	}
+
 	// Handle benchmark subcommand before flag parsing
 	if len(os.Args) > 1 && os.Args[1] == "benchmark" {
 		benchmark.RunCLI(os.Args[2:])

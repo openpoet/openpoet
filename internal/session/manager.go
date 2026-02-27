@@ -162,6 +162,7 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	cfg := &SessionConfig{
 		SessionID:     sessionID,
 		ServerAddr:    m.serverAddr,
+		ExecPath:      m.execPath,
 		BackendConfig: project.BackendConfig,
 	}
 
@@ -280,6 +281,7 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	cfg := &SessionConfig{
 		SessionID:     sessionID,
 		ServerAddr:    m.serverAddr,
+		ExecPath:      m.execPath,
 		IsReopen:      true,
 		BackendConfig: project.BackendConfig,
 	}
@@ -772,6 +774,7 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	cfg := &SessionConfig{
 		SessionID:     sessionID,
 		ServerAddr:    m.serverAddr,
+		ExecPath:      m.execPath,
 		BackendConfig: project.BackendConfig,
 	}
 
