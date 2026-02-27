@@ -260,6 +260,51 @@ class StructuredViewManager {
     }
 
     /**
+     * Append a document card directly (e.g. from WebSocket chat_doc_card event).
+     */
+    appendDocCard(sessionId, data) {
+        const view = this.views.get(sessionId);
+        if (!view) return;
+
+        const div = document.createElement('div');
+        div.className = 'sv-doc-card';
+
+        const title = data.title || 'Document';
+        const docId = data.doc_id;
+
+        div.innerHTML = `
+            <div class="sv-doc-card-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                    <polyline points="14 2 14 8 20 8"/>
+                    <line x1="9" y1="15" x2="15" y2="15"/>
+                    <line x1="9" y1="11" x2="15" y2="11"/>
+                </svg>
+            </div>
+            <div class="sv-doc-card-title">${this._escapeHtml(title)}</div>
+            <button class="sv-doc-card-btn"${docId ? '' : ' disabled'}>View Document</button>
+        `;
+
+        if (docId) {
+            div.querySelector('.sv-doc-card-btn').onclick = () => window.docViewer?.open(docId);
+        }
+
+        // Wrap in a message container for consistent spacing
+        const wrapper = document.createElement('div');
+        wrapper.className = 'sv-message sv-message--tool-results';
+        const content = document.createElement('div');
+        content.className = 'sv-content';
+        content.appendChild(div);
+        wrapper.appendChild(content);
+
+        view.messagesEl.appendChild(wrapper);
+
+        if (!view.userScrolled) {
+            this._scrollToBottom(view);
+        }
+    }
+
+    /**
      * Show the structured view for a session.
      */
     show(sessionId) {

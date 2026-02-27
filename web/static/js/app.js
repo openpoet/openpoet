@@ -455,6 +455,8 @@ class OpenPoet {
                     this._showSessionDocCard(msg.data);
                     // Refresh the documents list so the button updates
                     window.hookManager?.fetchSessionDocs(msg.data.session_id);
+                    // Also inject into structured view if active
+                    window.structuredView?.appendDocCard(msg.data.session_id, msg.data);
                 } else {
                     window.aiChat?.injectDocCardFromWS(msg.data);
                 }
