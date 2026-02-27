@@ -4,6 +4,7 @@ class TerminalManager {
         this.containerWrapperId = containerWrapperId || 'terminal-containers-wrapper';
         this.terminals = new Map(); // sessionId -> { terminal, container, ws, sessionName, fitAddon, status }
         this.activeSessionId = null;
+        this.structuredViewActive = new Map(); // sessionId -> boolean
         console.log('TerminalManager initialized for multi-terminal support');
     }
 
@@ -369,6 +370,11 @@ class TerminalManager {
                 if (window.hookManager) {
                     window.hookManager.handleMessage(msg);
                 }
+            } else if (msg.type === 'session_event' && msg.data) {
+                // Route structured view events
+                if (window.structuredView) {
+                    window.structuredView.appendEvent(sessionId, msg.data);
+                }
             }
         };
 
@@ -606,6 +612,10 @@ class TerminalManager {
                     if (window.hookManager) {
                         window.hookManager.handleMessage(msg);
                     }
+                } else if (msg.type === 'session_event' && msg.data) {
+                    if (window.structuredView) {
+                        window.structuredView.appendEvent(sessionId, msg.data);
+                    }
                 }
             };
 
@@ -675,31 +685,99 @@ class TerminalManager {
 
         console.log(`Switching to session: ${sessionId}`);
 
-        // Hide all terminals
+        // Hide all terminals and structured views
         this.terminals.forEach((termData, sid) => {
             termData.container.classList.remove('active');
         });
+        if (window.structuredView) {
+            window.structuredView.views.forEach((view, sid) => {
+                view.container.classList.remove('active');
+            });
+        }
 
-        // Show the selected terminal
-        const termData = this.terminals.get(sessionId);
-        termData.container.classList.add('active');
         this.activeSessionId = sessionId;
 
-        // Re-fit terminal after layout settles (double rAF ensures paint is done)
-        requestAnimationFrame(() => {
+        // Check if structured view is active for this session
+        if (this.structuredViewActive.get(sessionId) && window.structuredView) {
+            window.structuredView.show(sessionId);
+            this._updateStructuredViewButton(true);
+        } else {
+            // Show terminal
+            const termData = this.terminals.get(sessionId);
+            termData.container.classList.add('active');
+            this._updateStructuredViewButton(false);
+
+            // Re-fit terminal after layout settles (double rAF ensures paint is done)
             requestAnimationFrame(() => {
-                this.safeFit(termData);
-                this.clearScrollLock(termData);
-                termData.terminal.scrollToBottom();
-                if (window.innerWidth > 768) {
-                    termData.terminal.focus();
-                }
+                requestAnimationFrame(() => {
+                    this.safeFit(termData);
+                    this.clearScrollLock(termData);
+                    termData.terminal.scrollToBottom();
+                    if (window.innerWidth > 768) {
+                        termData.terminal.focus();
+                    }
+                });
             });
-        });
+        }
 
         // Notify hook manager to refresh panel/badge for the new session
         if (window.hookManager) {
             window.hookManager.onSessionSwitch();
+        }
+    }
+
+    // Toggle between terminal and structured view for the active session
+    toggleStructuredView() {
+        const sessionId = this.activeSessionId;
+        if (!sessionId || !window.structuredView) return;
+
+        const isActive = this.structuredViewActive.get(sessionId) || false;
+
+        if (isActive) {
+            // Switch back to terminal
+            this.structuredViewActive.set(sessionId, false);
+            window.structuredView.hide(sessionId);
+
+            const termData = this.terminals.get(sessionId);
+            if (termData) {
+                termData.container.classList.add('active');
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        this.safeFit(termData);
+                        termData.terminal.scrollToBottom();
+                        if (window.innerWidth > 768) {
+                            termData.terminal.focus();
+                        }
+                    });
+                });
+            }
+            this._updateStructuredViewButton(false);
+        } else {
+            // Switch to structured view
+            this.structuredViewActive.set(sessionId, true);
+
+            const termData = this.terminals.get(sessionId);
+            if (termData) {
+                termData.container.classList.remove('active');
+            }
+
+            window.structuredView.show(sessionId);
+            this._updateStructuredViewButton(true);
+        }
+
+        // Persist preference
+        try {
+            const prefs = JSON.parse(localStorage.getItem('sv_prefs') || '{}');
+            prefs[sessionId] = this.structuredViewActive.get(sessionId);
+            localStorage.setItem('sv_prefs', JSON.stringify(prefs));
+        } catch (e) { /* ignore */ }
+    }
+
+    // Update the toggle button visual state
+    _updateStructuredViewButton(active) {
+        const btn = document.getElementById('btn-structured-view');
+        if (btn) {
+            btn.classList.toggle('active', active);
         }
     }
 
@@ -743,6 +821,12 @@ class TerminalManager {
         if (termData.container) {
             termData.container.remove();
         }
+
+        // Clean up structured view
+        if (window.structuredView) {
+            window.structuredView.dispose(sessionId);
+        }
+        this.structuredViewActive.delete(sessionId);
 
         // Remove from map
         this.terminals.delete(sessionId);
