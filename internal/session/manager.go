@@ -37,9 +37,10 @@ type Manager struct {
 	serverAddr string // OpenPoet server address (e.g. "localhost:8080")
 	execPath   string // Resolved path to this binary (for MCP subprocess)
 
-	mu          sync.RWMutex
-	sessions    map[string]*runningSession
-	clientSizes map[string]map[string]TermSize // sessionID -> clientID -> size
+	mu           sync.RWMutex
+	sessions     map[string]*runningSession
+	clientSizes  map[string]map[string]TermSize // sessionID -> clientID -> size
+	shuttingDown bool                           // true during graceful shutdown for restart
 
 	// Callbacks for AI session evaluation
 	OnSessionStart func(sessionID string)
@@ -171,6 +172,7 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	}
 	if v, ok := envVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"]; ok && v == "true" {
 		cfg.DangerouslySkipPermissions = true
+		m.db.UpdateSessionSkipPermissions(ctx, sessionID, true)
 		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
 
@@ -289,6 +291,7 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	}
 	if v, ok := envVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"]; ok && v == "true" {
 		cfg.DangerouslySkipPermissions = true
+		m.db.UpdateSessionSkipPermissions(ctx, sessionID, true)
 		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
 
@@ -531,6 +534,21 @@ func (m *Manager) ListRunningSessions() []string {
 func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 	err := rs.runner.Wait()
 
+	// If we're shutting down for restart, keep sessions as "running" in DB
+	// so they can be auto-restored on next startup.
+	m.mu.Lock()
+	shuttingDown := m.shuttingDown
+	delete(m.sessions, sessionID)
+	m.mu.Unlock()
+
+	if shuttingDown {
+		log.Printf("Session %s stopped for restart (preserving DB state)", sessionID)
+		if m.OnSessionFlush != nil {
+			m.OnSessionFlush(sessionID)
+		}
+		return
+	}
+
 	// Capture output snapshot BEFORE cleanup for AI evaluation
 	var outputSnapshot []byte
 	if rs.outputBuffer != nil {
@@ -560,10 +578,6 @@ func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 		rs.outputBuffer.Write([]byte(exitMsg))
 		m.hub.BroadcastSessionOutput(sessionID, []byte(exitMsg))
 	}
-
-	m.mu.Lock()
-	delete(m.sessions, sessionID)
-	m.mu.Unlock()
 
 	ctx := context.Background()
 	if status == "error" {
@@ -695,6 +709,30 @@ func (m *Manager) StopAll() {
 		rs.cancel()
 		rs.runner.Stop()
 	}
+}
+
+// StopAllForRestart gracefully stops all sessions but preserves their "running"
+// status in the database so they can be auto-restored on next startup.
+func (m *Manager) StopAllForRestart() {
+	m.mu.Lock()
+	m.shuttingDown = true
+	sessions := make(map[string]*runningSession, len(m.sessions))
+	for id, rs := range m.sessions {
+		sessions[id] = rs
+	}
+	m.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for id, rs := range sessions {
+		wg.Add(1)
+		go func(id string, rs *runningSession) {
+			defer wg.Done()
+			log.Printf("Stopping session for restart: %s", id)
+			rs.cancel()
+			rs.runner.Stop()
+		}(id, rs)
+	}
+	wg.Wait()
 }
 
 // SetRemoteRunnerFactory allows setting a factory function for creating remote runners
