@@ -1019,8 +1019,6 @@ class StructuredViewManager {
 
     _reasonMessage(reason) {
         switch (reason) {
-            case 'remote':
-                return 'Structured view is not available for remote sessions';
             case 'unsupported_backend':
                 return 'Structured view is only available for Claude Code sessions';
             default:

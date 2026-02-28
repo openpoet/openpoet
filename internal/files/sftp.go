@@ -52,10 +52,11 @@ func (m *RemoteFileManager) connect() (*ssh.Client, *sftp.Client, error) {
 func (m *RemoteFileManager) buildSSHConfig() (*ssh.ClientConfig, error) {
 	authType := m.project.SSHAuthType.String
 	user := m.project.SSHUser.String
+	hasCredential := m.project.SSHCredentialEncrypted.Valid && m.project.SSHCredentialEncrypted.String != ""
 
 	var authMethods []ssh.AuthMethod
 
-	if authType == "password" {
+	if authType == "password" && hasCredential {
 		password, err := m.decryptFunc(
 			m.project.SSHCredentialEncrypted.String,
 			m.project.SSHCredentialIV.String,
@@ -64,7 +65,7 @@ func (m *RemoteFileManager) buildSSHConfig() (*ssh.ClientConfig, error) {
 			return nil, err
 		}
 		authMethods = append(authMethods, ssh.Password(password))
-	} else if authType == "key" || authType == "key_passphrase" {
+	} else if (authType == "key" || authType == "key_passphrase") && hasCredential {
 		keyData, err := m.decryptFunc(
 			m.project.SSHCredentialEncrypted.String,
 			m.project.SSHCredentialIV.String,
@@ -78,8 +79,10 @@ func (m *RemoteFileManager) buildSSHConfig() (*ssh.ClientConfig, error) {
 			return nil, err
 		}
 		authMethods = append(authMethods, ssh.PublicKeys(signer))
-	} else {
-		// Try default keys
+	}
+
+	// Fall back to default SSH keys when no credential was provided
+	if len(authMethods) == 0 {
 		homeDir, _ := os.UserHomeDir()
 		keyPaths := []string{
 			homeDir + "/.ssh/id_rsa",
@@ -106,6 +109,18 @@ func (m *RemoteFileManager) buildSSHConfig() (*ssh.ClientConfig, error) {
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         30 * time.Second,
 	}, nil
+}
+
+// HomeDir returns the remote user's home directory via SFTP.
+func (m *RemoteFileManager) HomeDir() (string, error) {
+	sshClient, sftpClient, err := m.connect()
+	if err != nil {
+		return "", err
+	}
+	defer sftpClient.Close()
+	defer sshClient.Close()
+
+	return sftpClient.Getwd()
 }
 
 // List lists files in a directory
@@ -450,4 +465,20 @@ func (m *RemoteFileManager) Grep(pattern string, searchPath string, fileGlob str
 // GetBasePath returns the project path
 func (m *RemoteFileManager) GetBasePath() string {
 	return m.project.Path
+}
+
+// SFTPConnectorAdapter wraps RemoteFileManager to provide SSH+SFTP connections.
+// Implements jsonlview.SFTPConnector via structural typing.
+type SFTPConnectorAdapter struct {
+	fm *RemoteFileManager
+}
+
+// Connect creates a new SSH+SFTP connection using the RemoteFileManager's credentials.
+func (a *SFTPConnectorAdapter) Connect() (*ssh.Client, *sftp.Client, error) {
+	return a.fm.connect()
+}
+
+// NewSFTPConnector returns a connector backed by this RemoteFileManager's credentials.
+func (m *RemoteFileManager) NewSFTPConnector() *SFTPConnectorAdapter {
+	return &SFTPConnectorAdapter{fm: m}
 }
