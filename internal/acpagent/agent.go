@@ -1,4 +1,4 @@
-package main
+package acpagent
 
 import (
 	"bufio"
@@ -153,18 +153,20 @@ type CopilotAgent struct {
 	done chan struct{}
 }
 
-func main() {
-	sessionID := flag.String("session-id", "", "OpenPoet session ID for hook tracking")
-	resume := flag.String("resume", "", "Resume existing session (alias for --session-id)")
-	systemPrompt := flag.String("system-prompt", "", "System prompt prepended to first message")
-	autoApprove := flag.Bool("auto-approve", false, "Auto-approve permission requests")
-	copilotPath := flag.String("copilot-path", "", "Override copilot binary path")
+// Run is the entry point for the acp-agent subcommand.
+func Run(args []string) {
+	fs := flag.NewFlagSet("acp-agent", flag.ExitOnError)
+	sessionID := fs.String("session-id", "", "OpenPoet session ID for hook tracking")
+	resume := fs.String("resume", "", "Resume existing session (alias for --session-id)")
+	systemPrompt := fs.String("system-prompt", "", "System prompt prepended to first message")
+	autoApprove := fs.Bool("auto-approve", false, "Auto-approve permission requests")
+	copilotPath := fs.String("copilot-path", "", "Override copilot binary path")
 	// Legacy flags from generic ACP mode — accepted but ignored
-	_ = flag.String("agent-url", "", "Deprecated: ignored")
-	_ = flag.String("agent-name", "", "Deprecated: ignored")
-	_ = flag.String("mode", "", "Deprecated: ignored")
-	_ = flag.String("mcp-config", "", "MCP configuration file path (reserved)")
-	flag.Parse()
+	_ = fs.String("agent-url", "", "Deprecated: ignored")
+	_ = fs.String("agent-name", "", "Deprecated: ignored")
+	_ = fs.String("mode", "", "Deprecated: ignored")
+	_ = fs.String("mcp-config", "", "MCP configuration file path (reserved)")
+	fs.Parse(args)
 
 	sid := *sessionID
 	if *resume != "" {
