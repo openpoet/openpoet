@@ -1280,7 +1280,7 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Inject env vars based on the claude_session slot config (only for Claude Code backend)
-	if project.Backend != "copilot" && a.aiHandler != nil && a.aiHandler.providerMgr != nil {
+	if project.Backend == "claude_code" && a.aiHandler != nil && a.aiHandler.providerMgr != nil {
 		sessionConfig := a.aiHandler.providerMgr.GetSlotConfig(llm.SlotSession)
 		if sessionConfig != nil {
 			switch sessionConfig.ProviderType {
@@ -1616,7 +1616,7 @@ func (a *API) AutoRestoreSession(ctx context.Context, sess *database.Session) er
 	}
 
 	// Inject provider env vars (same logic as CreateSession)
-	if project.Backend != "copilot" && a.aiHandler != nil && a.aiHandler.providerMgr != nil {
+	if project.Backend == "claude_code" && a.aiHandler != nil && a.aiHandler.providerMgr != nil {
 		sessionConfig := a.aiHandler.providerMgr.GetSlotConfig(llm.SlotSession)
 		if sessionConfig != nil {
 			switch sessionConfig.ProviderType {

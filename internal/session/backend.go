@@ -6,6 +6,7 @@ type BackendType string
 const (
 	BackendClaudeCode BackendType = "claude_code"
 	BackendCopilot    BackendType = "copilot"
+	BackendACP        BackendType = "acp"
 )
 
 // SessionConfig holds parameters needed to build CLI args and env vars for a session.
@@ -68,6 +69,8 @@ func GetBackend(backendType string) BackendStrategy {
 	switch BackendType(backendType) {
 	case BackendCopilot:
 		return &CopilotBackend{}
+	case BackendACP:
+		return &ACPBackend{}
 	default:
 		return &ClaudeCodeBackend{}
 	}
