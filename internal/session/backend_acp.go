@@ -6,12 +6,12 @@ import (
 )
 
 // ACPBackend implements BackendStrategy for GitHub Copilot CLI in ACP mode (copilot --acp).
-// The acp-agent binary launches copilot --acp as a subprocess and bridges
+// The acp-agent subcommand of openpoet launches copilot --acp as a subprocess and bridges
 // JSON-RPC 2.0 communication with OpenPoet's PTY-based terminal.
 type ACPBackend struct{}
 
 func (b *ACPBackend) Type() BackendType          { return BackendACP }
-func (b *ACPBackend) BinaryName() string         { return "acp-agent" }
+func (b *ACPBackend) BinaryName() string         { return "openpoet" }
 func (b *ACPBackend) SupportsResume() bool       { return true }
 func (b *ACPBackend) SupportsOTEL() bool         { return false }
 func (b *ACPBackend) SupportsPlanCapture() bool  { return true }
@@ -36,7 +36,8 @@ func parseACPConfig(raw string) acpConfig {
 }
 
 func (b *ACPBackend) BuildCLIArgs(cfg *SessionConfig) []string {
-	var args []string
+	// "acp-agent" is a subcommand of the openpoet binary itself
+	args := []string{"acp-agent"}
 	ac := parseACPConfig(cfg.BackendConfig)
 
 	if ac.CopilotPath != "" {
@@ -87,5 +88,5 @@ func (b *ACPBackend) StartupMessage(binaryPath, workDir string) string {
 }
 
 func (b *ACPBackend) NotFoundMessage() string {
-	return "\r\n\x1b[31mError: ACP agent CLI (acp-agent) not found in PATH.\r\nEnsure 'acp-agent' is built alongside openpoet (make build).\x1b[0m\r\n"
+	return "\r\n\x1b[31mError: OpenPoet binary not found.\r\nThe ACP agent runs as 'openpoet acp-agent' subcommand.\x1b[0m\r\n"
 }
