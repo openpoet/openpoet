@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -92,6 +93,20 @@ func ParseLine(line []byte) (*SessionEvent, error) {
 			return nil, err
 		}
 		event.Message = msg
+
+		// Clean Ctrl+U (0x15) residue from user text blocks.
+		// Mobile input sync sends chars in real-time, then Ctrl+U + resend on submit.
+		// If both arrive in the same PTY chunk, the JSONL records "text\x15text".
+		// Strip everything before the last \x15 to show only the final input.
+		if raw.Type == "user" && msg != nil {
+			for i := range msg.ContentBlocks {
+				if msg.ContentBlocks[i].Type == "text" {
+					if idx := strings.LastIndex(msg.ContentBlocks[i].Text, "\x15"); idx >= 0 {
+						msg.ContentBlocks[i].Text = msg.ContentBlocks[i].Text[idx+1:]
+					}
+				}
+			}
+		}
 
 	case "progress":
 		if len(raw.Data) > 0 {

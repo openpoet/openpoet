@@ -460,6 +460,19 @@ func main() {
 			w.WriteHeader(200)
 			w.Write([]byte(`{"ok":true}`))
 		})
+
+		r.Post("/api/debug/client-log", func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Tag string `json:"tag"`
+				Msg string `json:"msg"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "bad request", 400)
+				return
+			}
+			log.Printf("[FRONTEND][%s] %s", body.Tag, body.Msg)
+			w.WriteHeader(200)
+		})
 	}
 
 	r.Route("/api", func(r chi.Router) {

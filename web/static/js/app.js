@@ -751,6 +751,7 @@ class OpenPoet {
                         <div class="card-subtitle">${this.escapeHtml(project.path)}</div>
                     </div>
                     ${project.backend === 'copilot' ? '<span class="badge badge-copilot">Copilot</span>' : ''}
+                    ${project.backend === 'acp' ? '<span class="badge badge-acp">ACP</span>' : ''}
                     <span class="badge badge-${project.type}">${project.type}</span>
                 </div>
                 <div class="card-body">
@@ -2795,7 +2796,9 @@ class OpenPoet {
             const modeLabel = modeLabels[mode] || mode;
 
             const isCopilot = session.backend === 'copilot';
-            const backendBadge = isCopilot ? '<span class="badge badge-copilot" style="margin-left:4px;">Copilot</span>' : '';
+            const isACP = session.backend === 'acp';
+            const backendBadge = isCopilot ? '<span class="badge badge-copilot" style="margin-left:4px;">Copilot</span>'
+                : isACP ? '<span class="badge badge-acp" style="margin-left:4px;">ACP</span>' : '';
 
             return `
                 <div class="session-card" onclick="app.openTerminal('${session.id}')">
@@ -2817,7 +2820,7 @@ class OpenPoet {
                             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                             <span class="session-elapsed" data-start="${session.start_time}">${elapsed}</span>
                         </span>
-                        ${!isCopilot ? `<span class="session-card-stat" title="Tokens used">
+                        ${!isCopilot && !isACP ? `<span class="session-card-stat" title="Tokens used">
                             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
                             ${tokenLabel}${costLabel ? ` (${costLabel})` : ''}
                         </span>` : ''}
@@ -3698,18 +3701,9 @@ class OpenPoet {
             const sessionId = window.terminalManager?.activeSessionId;
             if (!sessionId) return;
 
-            // Skip real-time sync when structured view is active — terminal is hidden,
-            // so char-by-char echo is pointless and causes duplicate text on submit
-            if (window.terminalManager.structuredViewActive?.get(sessionId)) {
+            // During submit, skip sync to prevent interleaving with Ctrl+U sequence
+            if (input._submitInProgress) {
                 input._lastSyncedValue = newVal;
-
-                // Auto-resize textarea
-                input.style.height = '44px';
-                input.style.overflow = 'hidden';
-                if (input.scrollHeight > input.clientHeight) {
-                    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-                    input.style.overflow = 'auto';
-                }
                 return;
             }
 
@@ -3872,13 +3866,14 @@ class OpenPoet {
             // Mobile context: sync text to terminal and update mobile input
             const input = document.getElementById('mobile-terminal-input');
             const sessionId = window.terminalManager?.activeSessionId;
+            const delays = this.getInputDelays(sessionId, 'mobile');
             if (sessionId) {
                 // Clear terminal line and send editor text so terminal matches
                 window.terminalManager.sendInputToSession(sessionId, '\x15');
                 if (text) {
                     setTimeout(() => {
                         window.terminalManager.sendInputToSession(sessionId, text);
-                    }, 30);
+                    }, delays.ctrlUToText);
                 }
             }
             if (input) {
@@ -4038,13 +4033,13 @@ class OpenPoet {
         const isRemote = this._isRemoteSession(sessionId);
         switch (context) {
             case 'quick':
-                return { ctrlUToText: isRemote ? 150 : 0, textToEnter: isRemote ? 1500 : 1000 };
+                return { ctrlUToText: isRemote ? 300 : 50, textToEnter: isRemote ? 1500 : 1000 };
             case 'mobile':
-                return { ctrlUToText: isRemote ? 150 : 0, textToEnter: isRemote ? 1200 : 700 };
+                return { ctrlUToText: isRemote ? 300 : 50, textToEnter: isRemote ? 1200 : 700 };
             case 'voice':
-                return { ctrlUToText: 0, textToEnter: isRemote ? 300 : 50 };
+                return { ctrlUToText: isRemote ? 300 : 50, textToEnter: isRemote ? 300 : 50 };
             default:
-                return { ctrlUToText: isRemote ? 150 : 0, textToEnter: isRemote ? 1200 : 700 };
+                return { ctrlUToText: isRemote ? 300 : 50, textToEnter: isRemote ? 1200 : 700 };
         }
     }
 
@@ -4082,6 +4077,9 @@ class OpenPoet {
         const text = input.value;
         const delays = this.getInputDelays(sessionId, 'mobile');
 
+        // Suppress char-by-char sync during the submit sequence
+        input._submitInProgress = true;
+
         // Always clear the terminal line and send exactly what the user sees
         // in the text box (Ctrl+U clears, then text, then Enter)
         window.terminalManager.sendInputToSession(sessionId, '\x15'); // Ctrl+U
@@ -4091,6 +4089,8 @@ class OpenPoet {
             }
             setTimeout(() => {
                 window.terminalManager.sendInputToSession(sessionId, '\r');
+                // Re-enable char-by-char sync after submit completes
+                input._submitInProgress = false;
             }, delays.textToEnter);
         }, delays.ctrlUToText);
 
@@ -4839,6 +4839,7 @@ class OpenPoet {
                     <select class="form-select" name="backend">
                         <option value="claude_code" ${(project?.backend || 'claude_code') === 'claude_code' ? 'selected' : ''}>Claude Code</option>
                         <option value="copilot" ${project?.backend === 'copilot' ? 'selected' : ''}>GitHub Copilot CLI</option>
+                        <option value="acp" ${project?.backend === 'acp' ? 'selected' : ''}>Copilot ACP</option>
                     </select>
                 </div>
                 <div class="form-group">

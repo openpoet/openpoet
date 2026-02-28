@@ -748,11 +748,12 @@ class TerminalManager {
                 const svOriginal = this._svOriginalValue ?? '';
 
                 if (svText !== svOriginal && termData?.ws?.readyState === WebSocket.OPEN) {
+                    const ctrlUDelay = window.app?.getInputDelays?.(sessionId, 'mobile')?.ctrlUToText ?? 50;
                     this.sendInputToSession(sessionId, '\x15');
                     if (svText) {
                         setTimeout(() => {
                             this.sendInputToSession(sessionId, svText);
-                        }, 50);
+                        }, ctrlUDelay);
                     }
                 }
             } else {
@@ -762,11 +763,12 @@ class TerminalManager {
                 const svOriginal = svView?._originalValue ?? '';
 
                 if (svText !== svOriginal && termData?.ws?.readyState === WebSocket.OPEN) {
+                    const ctrlUDelay = window.app?.getInputDelays?.(sessionId, 'mobile')?.ctrlUToText ?? 50;
                     this.sendInputToSession(sessionId, '\x15');
                     if (svText) {
                         setTimeout(() => {
                             this.sendInputToSession(sessionId, svText);
-                        }, 50);
+                        }, ctrlUDelay);
                     }
                 }
             }
