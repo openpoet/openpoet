@@ -60,6 +60,10 @@ func (cs *ConfigSyncer) syncToLocal(ctx context.Context, project *database.Proje
 	if project.Backend == "copilot" {
 		return cs.syncToLocalCopilot(ctx, project)
 	}
+	// ACP projects use .acp/ directory
+	if project.Backend == "acp" {
+		return cs.syncToLocalACP(ctx, project)
+	}
 
 	projectPath := project.Path
 	claudeDir := filepath.Join(projectPath, ".claude")
@@ -1187,6 +1191,67 @@ func (cs *ConfigSyncer) isCopilotMCPEnabled(project *database.Project) bool {
 		return false
 	}
 	return cfg.EnableMCP
+}
+
+// syncToLocalACP syncs configuration for ACP agent projects.
+// Uses .acp/ directory for instructions. The acp-agent wrapper calls hooks directly.
+func (cs *ConfigSyncer) syncToLocalACP(ctx context.Context, project *database.Project) error {
+	projectPath := project.Path
+	acpDir := filepath.Join(projectPath, ".acp")
+
+	if err := os.MkdirAll(acpDir, 0755); err != nil {
+		return fmt.Errorf("failed to create .acp directory: %w", err)
+	}
+
+	// Sync skills → .acp/instructions.md
+	cs.reportProgress(project.ID, "skills", "running", "Syncing skills to ACP instructions...")
+	if err := cs.syncSkillsToACPInstructions(ctx, acpDir, project); err != nil {
+		cs.reportProgress(project.ID, "skills", "error", err.Error())
+		return fmt.Errorf("failed to sync ACP instructions: %w", err)
+	}
+	cs.reportProgress(project.ID, "skills", "done", "Skills synced to instructions.md")
+
+	// Auto-detect MCP servers from .mcp.json
+	cs.importMCPsFromDisk(ctx, projectPath, project)
+	cs.reportProgress(project.ID, "mcps", "done", "MCP servers configured at session start")
+
+	// Sync CLAUDE.md or AGENTS.md → memory doc
+	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing memory doc...")
+	claudeMDPath := filepath.Join(projectPath, "CLAUDE.md")
+	agentsMDPath := filepath.Join(projectPath, "AGENTS.md")
+	mdPath := agentsMDPath
+	if _, err := os.Stat(agentsMDPath); os.IsNotExist(err) {
+		mdPath = claudeMDPath
+	}
+	if data, err := os.ReadFile(mdPath); err == nil {
+		if _, err := cs.db.UpsertMemoryDoc(ctx, project.ID, string(data), "sync", "Synced from "+filepath.Base(mdPath)); err != nil {
+			cs.reportProgress(project.ID, "memory_doc", "error", err.Error())
+		} else {
+			cs.reportProgress(project.ID, "memory_doc", "done", filepath.Base(mdPath)+" synced to memory doc")
+		}
+	} else {
+		cs.reportProgress(project.ID, "memory_doc", "done", "No AGENTS.md or CLAUDE.md found")
+	}
+
+	return nil
+}
+
+// syncSkillsToACPInstructions concatenates all enabled skills into .acp/instructions.md
+func (cs *ConfigSyncer) syncSkillsToACPInstructions(ctx context.Context, acpDir string, project *database.Project) error {
+	skills, err := cs.getSkillsForProject(ctx, project)
+	if err != nil {
+		return err
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# OpenPoet Custom Instructions\n\n")
+	for _, skill := range skills {
+		sb.WriteString("## " + skill.Name + "\n\n")
+		sb.WriteString(skill.Content + "\n\n")
+	}
+
+	instructionsPath := filepath.Join(acpDir, "instructions.md")
+	return os.WriteFile(instructionsPath, []byte(sb.String()), 0644)
 }
 
 // syncBridgeScriptLocal copies bridge.sh to the project's .claude/hooks/ directory

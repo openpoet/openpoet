@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -55,6 +56,16 @@ func (r *LocalRunner) Start(ctx context.Context) error {
 	// Check if CLI binary exists and get full path
 	binaryName := r.backend.BinaryName()
 	binaryPath, err := exec.LookPath(binaryName)
+	if err != nil {
+		// Try finding the binary as a sibling of the openpoet binary
+		if binPath, ok := r.envVars["OPENPOET_BIN"]; ok && binPath != "" {
+			sibling := filepath.Join(filepath.Dir(binPath), binaryName)
+			if _, statErr := os.Stat(sibling); statErr == nil {
+				binaryPath = sibling
+				err = nil
+			}
+		}
+	}
 	if err != nil {
 		if r.outputHandler != nil {
 			r.outputHandler([]byte(r.backend.NotFoundMessage()))
