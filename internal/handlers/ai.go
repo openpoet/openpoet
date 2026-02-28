@@ -614,26 +614,6 @@ func (h *AIHandler) HandleTestConnection(w http.ResponseWriter, r *http.Request)
 			}
 		}
 
-	case "nodesdk":
-		if _, err := exec.LookPath("node"); err != nil {
-			result["configured"] = false
-			result["error"] = "Node.js is required for the Claude Agent SDK provider. Install Node.js 18+ from https://nodejs.org and restart OpenPoet."
-			break
-		}
-
-		// nodesdk also uses Anthropic API under the hood; validate via CLI
-		model := params.Model
-		if llm.IsClaudeCLIAvailable() {
-			if err := testClaudeCLI(model); err != nil {
-				result["configured"] = false
-				result["error"] = err.Error()
-			} else {
-				result["configured"] = true
-			}
-		} else {
-			result["configured"] = true // Node.js present; can't validate model without CLI
-		}
-
 	default:
 		result["configured"] = false
 		result["error"] = "Unknown provider type: " + params.ProviderType
@@ -782,7 +762,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	model := h.getSlotModel(llm.SlotChat)
 
 	// Determine if we should use tools:
-	// - Session providers (gosdk, nodesdk, ollama-sdk) handle tools internally via MCP — no tools in request
+	// - Session providers (gosdk, ollama-sdk) handle tools internally via MCP — no tools in request
 	// - API key and Ollama direct providers use native tool definitions in the request
 	var tools []llm.ToolDefinition
 	if !isSessionProvider {

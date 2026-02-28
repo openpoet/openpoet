@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -141,7 +142,8 @@ func (r *LocalRunner) readOutput() {
 			}
 		}
 		if err != nil {
-			if err != io.EOF && r.outputHandler != nil {
+			// EIO is the normal signal when the PTY child process exits — suppress it.
+			if err != io.EOF && !errors.Is(err, syscall.EIO) && r.outputHandler != nil {
 				errMsg := fmt.Sprintf("\r\n\x1b[31mSession read error: %v\x1b[0m\r\n", err)
 				r.outputHandler([]byte(errMsg))
 			}
@@ -162,9 +164,9 @@ func (r *LocalRunner) Stop() error {
 		// Send SIGTERM first for graceful shutdown
 		r.cmd.Process.Signal(syscall.SIGTERM)
 
-		// Wait up to 5 seconds for graceful exit, then force kill.
-		// Without this, zombie processes accumulate and exhaust system resources
-		// (PTYs, file descriptors), causing cascading failures across all local sessions.
+		// Wait for process exit, then close the PTY.
+		// Closing the PTY master before the process exits causes spurious EIO
+		// errors in the child (e.g. copilot's "Error: read EIO").
 		go func() {
 			select {
 			case <-r.done:
@@ -177,11 +179,17 @@ func (r *LocalRunner) Stop() error {
 					r.cmd.Process.Signal(syscall.SIGKILL)
 				}
 				r.mu.Unlock()
+				// Wait for the kill to take effect
+				<-r.done
 			}
+			// Close PTY after the process has exited
+			r.mu.Lock()
+			if r.ptmx != nil {
+				r.ptmx.Close()
+			}
+			r.mu.Unlock()
 		}()
-	}
-
-	if r.ptmx != nil {
+	} else if r.ptmx != nil {
 		r.ptmx.Close()
 	}
 
@@ -232,4 +240,8 @@ func (r *LocalRunner) PID() int {
 		return r.cmd.Process.Pid
 	}
 	return 0
+}
+
+func (r *LocalRunner) Done() <-chan struct{} {
+	return r.done
 }
