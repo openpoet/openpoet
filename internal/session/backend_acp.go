@@ -10,8 +10,11 @@ import (
 // JSON-RPC 2.0 communication with OpenPoet's PTY-based terminal.
 type ACPBackend struct{}
 
-func (b *ACPBackend) Type() BackendType          { return BackendACP }
-func (b *ACPBackend) BinaryName() string         { return "openpoet" }
+func (b *ACPBackend) Type() BackendType { return BackendACP }
+
+// BinaryName returns empty to signal self-exec mode — the runner should
+// use OPENPOET_BIN (the currently running binary) instead of LookPath.
+func (b *ACPBackend) BinaryName() string         { return "" }
 func (b *ACPBackend) SupportsResume() bool       { return true }
 func (b *ACPBackend) SupportsOTEL() bool         { return false }
 func (b *ACPBackend) SupportsPlanCapture() bool  { return true }

@@ -54,24 +54,40 @@ func (r *LocalRunner) Start(ctx context.Context) error {
 
 	r.ctx, r.cancel = context.WithCancel(ctx)
 
-	// Check if CLI binary exists and get full path
+	// Check if CLI binary exists and get full path.
+	// Empty BinaryName means self-exec: use the running openpoet binary directly.
 	binaryName := r.backend.BinaryName()
-	binaryPath, err := exec.LookPath(binaryName)
-	if err != nil {
-		// Try finding the binary as a sibling of the openpoet binary
+	var binaryPath string
+	var err error
+
+	if binaryName == "" {
+		// Self-exec mode — use OPENPOET_BIN (the currently running binary)
 		if binPath, ok := r.envVars["OPENPOET_BIN"]; ok && binPath != "" {
-			sibling := filepath.Join(filepath.Dir(binPath), binaryName)
-			if _, statErr := os.Stat(sibling); statErr == nil {
-				binaryPath = sibling
-				err = nil
+			binaryPath = binPath
+		} else {
+			if r.outputHandler != nil {
+				r.outputHandler([]byte(r.backend.NotFoundMessage()))
+			}
+			return fmt.Errorf("OPENPOET_BIN not set for self-exec backend")
+		}
+	} else {
+		binaryPath, err = exec.LookPath(binaryName)
+		if err != nil {
+			// Try finding the binary as a sibling of the openpoet binary
+			if binPath, ok := r.envVars["OPENPOET_BIN"]; ok && binPath != "" {
+				sibling := filepath.Join(filepath.Dir(binPath), binaryName)
+				if _, statErr := os.Stat(sibling); statErr == nil {
+					binaryPath = sibling
+					err = nil
+				}
 			}
 		}
-	}
-	if err != nil {
-		if r.outputHandler != nil {
-			r.outputHandler([]byte(r.backend.NotFoundMessage()))
+		if err != nil {
+			if r.outputHandler != nil {
+				r.outputHandler([]byte(r.backend.NotFoundMessage()))
+			}
+			return fmt.Errorf("%s command not found: %w", binaryName, err)
 		}
-		return fmt.Errorf("%s command not found: %w", binaryName, err)
 	}
 
 	// Send startup message
