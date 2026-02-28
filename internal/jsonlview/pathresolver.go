@@ -28,3 +28,13 @@ func ResolveJSONLPath(projectPath, sessionID string) string {
 	}
 	return filepath.Join(homeDir, ".claude", "projects", encoded, sessionID+".jsonl")
 }
+
+// ResolveRemoteJSONLPath computes the JSONL file path on a remote machine.
+// remoteHomeDir is the remote user's home directory (from SFTP Getwd()).
+// projectPath is the absolute project path on the remote machine.
+// Unlike the local version, this cannot resolve symlinks since the path is remote.
+func ResolveRemoteJSONLPath(projectPath, sessionID, remoteHomeDir string) string {
+	trimmed := strings.TrimPrefix(projectPath, "/")
+	encoded := "-" + nonAlphanumRe.ReplaceAllString(trimmed, "-")
+	return filepath.Join(remoteHomeDir, ".claude", "projects", encoded, sessionID+".jsonl")
+}

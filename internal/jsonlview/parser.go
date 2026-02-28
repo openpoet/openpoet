@@ -276,6 +276,68 @@ func ParseFile(path string) ([]*SessionEvent, error) {
 	return events, scanner.Err()
 }
 
+// ParseReader reads JSONL data from any io.Reader and returns all parsed events.
+// This is the source-agnostic version of ParseFile, used for remote SFTP streams.
+func ParseReader(r io.Reader) ([]*SessionEvent, error) {
+	var events []*SessionEvent
+	msgIDIndex := make(map[string]int)
+
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	for scanner.Scan() {
+		event, err := ParseLine(scanner.Bytes())
+		if err != nil || event == nil {
+			continue
+		}
+
+		if event.Type == "assistant" && event.Message != nil && event.Message.MessageID != "" {
+			msgID := event.Message.MessageID
+			if idx, exists := msgIDIndex[msgID]; exists {
+				mergeAssistantMessage(events[idx].Message, event.Message)
+				continue
+			}
+			msgIDIndex[msgID] = len(events)
+		}
+
+		events = append(events, event)
+	}
+
+	return events, scanner.Err()
+}
+
+// ParseReaderFromOffset reads JSONL data from an io.ReadSeeker starting at
+// the given byte offset. Returns new events and the updated offset.
+// This is the source-agnostic version of ParseFileFromOffset, used for remote SFTP polling.
+func ParseReaderFromOffset(rs io.ReadSeeker, fileSize, offset int64) ([]*SessionEvent, int64, error) {
+	if fileSize <= offset {
+		return nil, offset, nil
+	}
+
+	if _, err := rs.Seek(offset, io.SeekStart); err != nil {
+		return nil, offset, err
+	}
+
+	data, err := io.ReadAll(rs)
+	if err != nil {
+		return nil, offset, err
+	}
+
+	var events []*SessionEvent
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	for scanner.Scan() {
+		event, err := ParseLine(scanner.Bytes())
+		if err != nil || event == nil {
+			continue
+		}
+		events = append(events, event)
+	}
+
+	return events, offset + int64(len(data)), scanner.Err()
+}
+
 // ParseFileFromOffset reads a JSONL file starting from a byte offset and returns
 // new events and the new offset. Used by the watcher for incremental reads.
 func ParseFileFromOffset(path string, offset int64) ([]*SessionEvent, int64, error) {

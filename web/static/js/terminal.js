@@ -1204,6 +1204,14 @@ document.addEventListener('DOMContentLoaded', () => {
         btnScrollTop.addEventListener('click', () => {
             const tm = window.terminalManager;
             if (tm && tm.activeSessionId) {
+                // If structured view is active, scroll it instead
+                if (tm.structuredViewActive.get(tm.activeSessionId) && window.structuredView) {
+                    const view = window.structuredView.views.get(tm.activeSessionId);
+                    if (view && view.messagesEl) {
+                        view.messagesEl.scrollTop = 0;
+                        return;
+                    }
+                }
                 const termData = tm.terminals.get(tm.activeSessionId);
                 if (termData && termData.terminal) {
                     // Cancel any ongoing momentum
@@ -1218,6 +1226,15 @@ document.addEventListener('DOMContentLoaded', () => {
         btnScrollBottom.addEventListener('click', () => {
             const tm = window.terminalManager;
             if (tm && tm.activeSessionId) {
+                // If structured view is active, scroll it instead
+                if (tm.structuredViewActive.get(tm.activeSessionId) && window.structuredView) {
+                    const view = window.structuredView.views.get(tm.activeSessionId);
+                    if (view && view.messagesEl) {
+                        view.messagesEl.scrollTop = view.messagesEl.scrollHeight;
+                        view.userScrolled = false;
+                        return;
+                    }
+                }
                 const termData = tm.terminals.get(tm.activeSessionId);
                 if (termData && termData.terminal) {
                     if (termData._cancelMomentum) termData._cancelMomentum();
