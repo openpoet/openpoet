@@ -2672,12 +2672,13 @@ class OpenPoet {
                     </div>
                     <div class="form-group">
                         <label class="form-label">Auth Type</label>
-                        <select class="form-select" name="ssh_auth_type">
+                        <select class="form-select" name="ssh_auth_type" onchange="app.toggleSSHCredentialField(this.value)">
+                            <option value="default_keys" ${!project.ssh_auth_type?.String || project.ssh_auth_type?.String === 'default_keys' ? 'selected' : ''}>Default SSH Keys (~/.ssh/)</option>
                             <option value="password" ${project.ssh_auth_type?.String === 'password' ? 'selected' : ''}>Password</option>
                             <option value="key" ${project.ssh_auth_type?.String === 'key' ? 'selected' : ''}>Private Key</option>
                         </select>
                     </div>
-                    <div class="form-group">
+                    <div class="form-group ${!project.ssh_auth_type?.String || project.ssh_auth_type?.String === 'default_keys' ? 'hidden' : ''}" id="ssh-credential-group">
                         <label class="form-label">Credential (Password or Key)</label>
                         <textarea class="form-textarea" name="ssh_credential" placeholder="Leave empty to keep the same credential from the original project"></textarea>
                     </div>
@@ -3696,6 +3697,21 @@ class OpenPoet {
             const oldVal = input._lastSyncedValue || '';
             const sessionId = window.terminalManager?.activeSessionId;
             if (!sessionId) return;
+
+            // Skip real-time sync when structured view is active — terminal is hidden,
+            // so char-by-char echo is pointless and causes duplicate text on submit
+            if (window.terminalManager.structuredViewActive?.get(sessionId)) {
+                input._lastSyncedValue = newVal;
+
+                // Auto-resize textarea
+                input.style.height = '44px';
+                input.style.overflow = 'hidden';
+                if (input.scrollHeight > input.clientHeight) {
+                    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+                    input.style.overflow = 'auto';
+                }
+                return;
+            }
 
             if (newVal.length > oldVal.length && newVal.startsWith(oldVal)) {
                 // Characters added at end — send just the new chars
@@ -4881,12 +4897,13 @@ class OpenPoet {
                     </div>
                     <div class="form-group">
                         <label class="form-label">Auth Type</label>
-                        <select class="form-select" name="ssh_auth_type">
+                        <select class="form-select" name="ssh_auth_type" onchange="app.toggleSSHCredentialField(this.value)">
+                            <option value="default_keys" ${!project?.ssh_auth_type?.String || project?.ssh_auth_type?.String === 'default_keys' ? 'selected' : ''}>Default SSH Keys (~/.ssh/)</option>
                             <option value="password" ${project?.ssh_auth_type?.String === 'password' ? 'selected' : ''}>Password</option>
                             <option value="key" ${project?.ssh_auth_type?.String === 'key' ? 'selected' : ''}>Private Key</option>
                         </select>
                     </div>
-                    <div class="form-group">
+                    <div class="form-group ${!project?.ssh_auth_type?.String || project?.ssh_auth_type?.String === 'default_keys' ? 'hidden' : ''}" id="ssh-credential-group">
                         <label class="form-label">
                             Credential (Password or Key)
                             ${isEdit && project?.has_credential ? '<span style="color: var(--color-success, #3fb950); font-size: 12px; margin-left: 8px;">&#10003; Credential stored</span>' : ''}
@@ -5000,6 +5017,11 @@ class OpenPoet {
 
     toggleSSHFields(type) {
         document.getElementById('ssh-fields').classList.toggle('hidden', type !== 'remote');
+    }
+
+    toggleSSHCredentialField(authType) {
+        const el = document.getElementById('ssh-credential-group');
+        if (el) el.classList.toggle('hidden', authType === 'default_keys');
     }
 
     async saveProject(projectId) {

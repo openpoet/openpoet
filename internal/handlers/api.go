@@ -1012,13 +1012,10 @@ func (a *API) BrowseRemoteDirectory(w http.ResponseWriter, r *http.Request) {
 	if input.SSHPort <= 0 {
 		input.SSHPort = 22
 	}
-	if input.Path == "" {
-		input.Path = "/"
-	}
-
-	// Build a temporary project struct for the remote file manager
+	// Build a temporary project struct for the remote file manager.
+	// Use "/" as base path so List() receives the absolute browse path.
 	tmpProject := &database.Project{
-		Path:        input.Path,
+		Path:        "/",
 		Type:        "remote",
 		SSHHost:     sql.NullString{String: input.SSHHost, Valid: true},
 		SSHPort:     sql.NullInt64{Int64: int64(input.SSHPort), Valid: true},
@@ -1038,7 +1035,18 @@ func (a *API) BrowseRemoteDirectory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fm := files.NewRemoteFileManager(tmpProject, a.DecryptFunc())
-	fileList, err := fm.List("")
+
+	// Default to the remote user's home directory when no path is specified
+	if input.Path == "" {
+		home, err := fm.HomeDir()
+		if err != nil {
+			input.Path = "/"
+		} else {
+			input.Path = home
+		}
+	}
+
+	fileList, err := fm.List(input.Path)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("Cannot browse remote directory: %s", err.Error()))
 		return

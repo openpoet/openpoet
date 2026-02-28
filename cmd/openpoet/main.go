@@ -219,7 +219,7 @@ func main() {
 	api.SetUpdater(appUpdater)
 
 	// Initialize structured view handler (JSONL event browser)
-	svHandler := handlers.NewStructuredViewHandler(db, hub)
+	svHandler := handlers.NewStructuredViewHandler(db, hub, api.DecryptFunc())
 	api.SetStructuredView(svHandler)
 
 	// Initialize other handlers
