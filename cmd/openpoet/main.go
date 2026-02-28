@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"openpoet/internal/acpagent"
 	"openpoet/internal/benchmark"
 	"openpoet/internal/config"
 	"openpoet/internal/configsync"
@@ -121,6 +122,12 @@ func main() {
 	// Handle benchmark subcommand before flag parsing
 	if len(os.Args) > 1 && os.Args[1] == "benchmark" {
 		benchmark.RunCLI(os.Args[2:])
+		return
+	}
+
+	// Handle acp-agent subcommand — Copilot ACP bridge (formerly a separate binary)
+	if len(os.Args) > 1 && os.Args[1] == "acp-agent" {
+		acpagent.Run(os.Args[2:])
 		return
 	}
 

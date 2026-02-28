@@ -13,8 +13,7 @@ build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
 	go build -ldflags "-X main.BuildVersion=$$(git rev-parse --short HEAD)-$$(date +%s) -X main.DefaultRelayURL=$(RELAY_URL) -X main.DebugDefault=true" -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
-	go build -o $(BUILD_DIR)/acp-agent ./cmd/acp-agent
-	@echo "Built: $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/acp-agent"
+	@echo "Built: $(BUILD_DIR)/$(BINARY_NAME)"
 
 # Build for multiple platforms
 build-all: deps vendor-js
