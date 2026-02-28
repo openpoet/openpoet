@@ -79,9 +79,6 @@ func main() {
 	os.Unsetenv("CLAUDECODE")
 	os.Unsetenv("CLAUDE_CODE_ENTRYPOINT")
 
-	// Propagate build version to the llm package for sidecar version tracking
-	llm.BuildVersion = BuildVersion
-
 	// Handle version subcommand before flag parsing
 	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version") {
 		fmt.Printf("openpoet %s\n", BuildVersion)

@@ -16,10 +16,6 @@ func TestGoSDKProviderImplementsSessionProvider(t *testing.T) {
 	var _ SessionProvider = (*GoSDKProvider)(nil)
 }
 
-func TestNodeSDKProviderImplementsSessionProvider(t *testing.T) {
-	var _ SessionProvider = (*NodeSDKProvider)(nil)
-}
-
 // --- Provider Construction ---
 
 func TestNewAnthropicProvider(t *testing.T) {
@@ -47,16 +43,6 @@ func TestNewGoSDKProviderWithToolExecutor(t *testing.T) {
 	p := NewGoSDKProvider("http://localhost:8080", executor)
 	if p.toolExecutor == nil {
 		t.Error("toolExecutor should be set when passed to constructor")
-	}
-}
-
-func TestNewNodeSDKProvider(t *testing.T) {
-	p := NewNodeSDKProvider("http://localhost:8080")
-	if p == nil {
-		t.Fatal("NewNodeSDKProvider returned nil")
-	}
-	if p.Name() != "nodesdk" {
-		t.Errorf("Name() = %q, want %q", p.Name(), "nodesdk")
 	}
 }
 
@@ -99,24 +85,6 @@ func TestGoSDKSessionManagement(t *testing.T) {
 	p.CloseAllSessions()
 	if p.HasActiveSession(10) || p.HasActiveSession(20) {
 		t.Error("CloseAllSessions should remove all sessions")
-	}
-}
-
-// --- NodeSDK Session Management ---
-
-func TestNodeSDKSessionManagement(t *testing.T) {
-	p := NewNodeSDKProvider("http://localhost:8080")
-
-	if p.HasActiveSession(1) {
-		t.Error("should not have active session initially")
-	}
-
-	p.mu.Lock()
-	p.sessions[1] = "node-session-abc"
-	p.mu.Unlock()
-
-	if !p.HasActiveSession(1) {
-		t.Error("should have active session after adding")
 	}
 }
 
@@ -302,19 +270,6 @@ func TestGoSDKStreamMessageEmptyPromptOneShot(t *testing.T) {
 	_, err := p.StreamMessage(context.Background(), req, func(StreamEvent) error { return nil })
 	if err == nil {
 		t.Error("should error on empty prompt in one-shot mode")
-	}
-}
-
-func TestNodeSDKStreamMessageEmptyPrompt(t *testing.T) {
-	p := NewNodeSDKProvider("http://localhost:8080")
-	p.started = true // pretend started to avoid actually starting
-	p.sidecarURL = "http://127.0.0.1:99999"
-	req := &Request{
-		Messages: []Message{NewTextMessage("user", "")},
-	}
-	_, err := p.StreamMessage(context.Background(), req, func(StreamEvent) error { return nil })
-	if err == nil {
-		t.Error("should error on empty prompt")
 	}
 }
 

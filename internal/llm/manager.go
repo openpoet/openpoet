@@ -225,10 +225,6 @@ func (pm *ProviderManager) createProvider(config *ProviderConfig, slot Slot) Pro
 		log.Printf("[ProviderMgr] Slot %s: using Ollama via Go Agent SDK at %s model=%s", slot, baseURL, model)
 		return p
 
-	case "nodesdk":
-		log.Printf("[ProviderMgr] Slot %s: using Node.js Agent SDK sidecar provider", slot)
-		return NewNodeSDKProvider(pm.apiURL)
-
 	default:
 		log.Printf("[ProviderMgr] Slot %s: unknown provider type %q, falling back", slot, config.ProviderType)
 		return pm.autoDetect(slot)
