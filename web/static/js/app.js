@@ -6249,7 +6249,6 @@ class OpenPoet {
             'apikey': 'Anthropic API Key',
             'ollama': 'Ollama (Direct)',
             'ollama-sdk': 'Ollama (via CLI)',
-            'nodesdk': 'Agent SDK (Node.js)'
         };
 
         const slotLabels = {
@@ -6291,7 +6290,7 @@ class OpenPoet {
                     <div class="card-body" style="font-size:13px;color:var(--color-text-secondary)">
                         ${c.model ? `<div><strong>Model:</strong> ${this.escapeHtml(c.model)}</div>` : ''}
                         ${c.base_url && (c.provider_type === 'ollama' || c.provider_type === 'ollama-sdk') ? `<div><strong>URL:</strong> ${this.escapeHtml(c.base_url)}</div>` : ''}
-                        ${c.api_key_preview && c.provider_type !== 'gosdk' && c.provider_type !== 'nodesdk' ? `<div><strong>Key:</strong> ${this.escapeHtml(c.api_key_preview)}</div>` : ''}
+                        ${c.api_key_preview && c.provider_type !== 'gosdk' ? `<div><strong>Key:</strong> ${this.escapeHtml(c.api_key_preview)}</div>` : ''}
                     </div>
                     <div class="card-actions">
                         <button class="btn btn-secondary btn-sm" onclick="app.showAIConfigModal(${c.id})">Edit</button>
@@ -6373,7 +6372,6 @@ class OpenPoet {
                         <option value="apikey">Anthropic API Key</option>
                         <option value="ollama">Ollama (Direct API)</option>
                         <option value="ollama-sdk">Ollama (via Claude CLI)</option>
-                        <option value="nodesdk">Agent SDK (Node.js)</option>
                     </select>
                 </div>
                 <div class="form-group" id="ai-config-apikey-group">

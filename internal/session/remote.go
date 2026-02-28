@@ -422,6 +422,10 @@ func (r *RemoteRunner) PID() int {
 	return 0
 }
 
+func (r *RemoteRunner) Done() <-chan struct{} {
+	return r.done
+}
+
 // ValidateConnection tests SSH connection without starting a session
 func ValidateConnection(project *database.Project, decryptFunc func(string, string) (string, error)) error {
 	runner := &RemoteRunner{

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -242,12 +243,38 @@ func main() {
 	}
 	initCancel()
 
-	// Create session
+	// Create or load session
 	sessCtx, sessCancel := context.WithTimeout(ctx, 30*time.Second)
-	if err := agent.newSession(sessCtx); err != nil {
-		sessCancel()
-		fmt.Printf("%sSession creation failed: %s%s\r\n", colorRed, err, colorReset)
-		os.Exit(1)
+	if *resume != "" {
+		// Resuming — try to load the previous copilot session
+		copilotSID := readCopilotSessionID(sid)
+		if copilotSID != "" {
+			if err := agent.loadSession(sessCtx, copilotSID); err != nil {
+				fmt.Printf("%sSession load failed (%v), starting fresh session%s\r\n", colorYellow, err, colorReset)
+				if err := agent.newSession(sessCtx); err != nil {
+					sessCancel()
+					fmt.Printf("%sSession creation failed: %s%s\r\n", colorRed, err, colorReset)
+					os.Exit(1)
+				}
+				saveCopilotSessionID(sid, agent.sessionID)
+			}
+		} else {
+			// No mapping found — create new session
+			if err := agent.newSession(sessCtx); err != nil {
+				sessCancel()
+				fmt.Printf("%sSession creation failed: %s%s\r\n", colorRed, err, colorReset)
+				os.Exit(1)
+			}
+			saveCopilotSessionID(sid, agent.sessionID)
+		}
+	} else {
+		// New session
+		if err := agent.newSession(sessCtx); err != nil {
+			sessCancel()
+			fmt.Printf("%sSession creation failed: %s%s\r\n", colorRed, err, colorReset)
+			os.Exit(1)
+		}
+		saveCopilotSessionID(sid, agent.sessionID)
 	}
 	sessCancel()
 
@@ -798,6 +825,56 @@ func (a *CopilotAgent) newSession(ctx context.Context) error {
 	a.sessionID = result.SessionID
 	fmt.Printf("%sSession: %s%s\r\n", colorGray, a.sessionID, colorReset)
 	return nil
+}
+
+// sessionLoadParams extends sessionNewParams with a session ID for loading.
+type sessionLoadParams struct {
+	SessionID  string        `json:"sessionId"`
+	CWD        string        `json:"cwd"`
+	MCPServers []interface{} `json:"mcpServers"`
+}
+
+// loadSession loads a previous ACP session by its copilot session ID.
+// Copilot replays the full conversation history via session/update notifications.
+func (a *CopilotAgent) loadSession(ctx context.Context, copilotSessionID string) error {
+	params := sessionLoadParams{
+		SessionID:  copilotSessionID,
+		CWD:        a.workDir,
+		MCPServers: []interface{}{},
+	}
+
+	_, err := a.sendRequest(ctx, "session/load", params)
+	if err != nil {
+		return err
+	}
+
+	a.sessionID = copilotSessionID
+	fmt.Printf("%sSession loaded: %s%s\r\n", colorGray, a.sessionID, colorReset)
+	return nil
+}
+
+// sessionMappingPath returns the path where the copilot session ID is stored
+// for a given OpenPoet session ID.
+func sessionMappingPath(openpoetSID string) string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".openpoet", "acp-sessions", openpoetSID)
+}
+
+// saveCopilotSessionID persists the copilot-generated session ID so it can
+// be used for session/load on reopen.
+func saveCopilotSessionID(openpoetSID, copilotSID string) {
+	path := sessionMappingPath(openpoetSID)
+	os.MkdirAll(filepath.Dir(path), 0755)
+	os.WriteFile(path, []byte(copilotSID), 0644)
+}
+
+// readCopilotSessionID reads the previously stored copilot session ID.
+func readCopilotSessionID(openpoetSID string) string {
+	data, err := os.ReadFile(sessionMappingPath(openpoetSID))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // prompt sends a user prompt and blocks until the agent finishes.

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -24,6 +25,7 @@ type Runner interface {
 	Resize(rows, cols uint16) error
 	Wait() error
 	PID() int
+	Done() <-chan struct{} // closed when the process exits
 }
 
 type TermSize struct {
@@ -270,6 +272,14 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 		return fmt.Errorf("failed to reopen session in DB: %w", err)
 	}
 
+	// Clean up copilot session errors before resume.
+	// Copilot replays events.jsonl on --resume, including session.error entries
+	// from previous SIGTERM kills. Removing them prevents "Error: read EIO" from
+	// appearing in the terminal on reopen.
+	if backend.Type() == BackendCopilot {
+		cleanCopilotSessionErrors(sessionID)
+	}
+
 	// Create output buffer (1MB max)
 	outputBuffer := NewOutputBuffer(1024 * 1024)
 
@@ -382,6 +392,31 @@ func (m *Manager) StopSession(ctx context.Context, sessionID string) error {
 	}
 
 	rs.userStopped = true
+
+	// Try graceful exit first: send /exit to the CLI.
+	// This lets copilot/claude record a clean session.end instead of session.error.
+	// Uses the same Ctrl+U → text → Enter sequence as the mobile input,
+	// with delays so the TUI processes each step.
+	backend := BackendType(rs.session.Backend)
+	if backend == BackendCopilot || backend == BackendClaudeCode {
+		rs.runner.Write([]byte("\x15")) // Ctrl+U: clear current line
+		time.Sleep(50 * time.Millisecond)
+		rs.runner.Write([]byte("/exit"))
+		time.Sleep(50 * time.Millisecond)
+		rs.runner.Write([]byte("\r")) // Enter
+		// Give the CLI time to process the exit command
+		timer := time.NewTimer(3 * time.Second)
+		select {
+		case <-rs.runner.Done():
+			timer.Stop()
+			// Exited cleanly, no need for SIGTERM
+			rs.cancel()
+			return nil
+		case <-timer.C:
+			// Didn't exit in time, fall through to SIGTERM
+		}
+	}
+
 	rs.cancel()
 	if err := rs.runner.Stop(); err != nil {
 		log.Printf("Error stopping runner: %v", err)
@@ -507,6 +542,36 @@ func (m *Manager) IsSessionRunning(sessionID string) bool {
 	_, ok := m.sessions[sessionID]
 	m.mu.RUnlock()
 	return ok
+}
+
+// cleanCopilotSessionErrors removes session.error lines from copilot's events.jsonl
+// to prevent "Error: read EIO" from being replayed on resume.
+func cleanCopilotSessionErrors(sessionID string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	eventsPath := filepath.Join(home, ".copilot", "session-state", sessionID, "events.jsonl")
+	data, err := os.ReadFile(eventsPath)
+	if err != nil {
+		return
+	}
+
+	var cleaned []byte
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		if bytes.Contains(line, []byte(`"session.error"`)) {
+			continue
+		}
+		cleaned = append(cleaned, line...)
+		cleaned = append(cleaned, '\n')
+	}
+
+	if len(cleaned) != len(data) {
+		os.WriteFile(eventsPath, cleaned, 0600)
+	}
 }
 
 // GetSessionOutput returns the buffered output for a session

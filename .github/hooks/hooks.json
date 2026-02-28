@@ -1,0 +1,55 @@
+{
+  "hooks": {
+    "postToolUse": [
+      {
+        "hooks": [
+          {
+            "command": ".github/hooks/openpoet-bridge.sh",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "preToolUse": [
+      {
+        "hooks": [
+          {
+            "command": ".github/hooks/openpoet-bridge.sh",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "sessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": ".github/hooks/openpoet-bridge.sh",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "sessionStart": [
+      {
+        "hooks": [
+          {
+            "command": ".github/hooks/openpoet-bridge.sh",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "hooks": [
+          {
+            "command": ".github/hooks/openpoet-bridge.sh",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  },
+  "version": 1
+}

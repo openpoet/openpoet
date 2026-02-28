@@ -36,9 +36,10 @@ func (b *CopilotBackend) BuildCLIArgs(cfg *SessionConfig) []string {
 	var args []string
 	cc := parseCopilotConfig(cfg.BackendConfig)
 
-	if cfg.IsReopen {
-		args = append(args, "--resume")
-	}
+	// Always pass --resume with OpenPoet's session ID.
+	// For new sessions, copilot creates a session with this UUID.
+	// For reopened sessions, copilot resumes from its stored history.
+	args = append(args, "--resume", cfg.SessionID)
 
 	if cc.AllowAllTools || cfg.DangerouslySkipPermissions {
 		args = append(args, b.PermissionSkipFlag())
