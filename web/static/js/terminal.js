@@ -1,4 +1,5 @@
 // Terminal Manager using xterm.js - Multi-Terminal Support
+var flog = window.flog || ((...a) => console.log(...a));
 class TerminalManager {
     constructor(containerWrapperId) {
         this.containerWrapperId = containerWrapperId || 'terminal-containers-wrapper';
@@ -736,46 +737,54 @@ class TerminalManager {
 
         const isActive = this.structuredViewActive.get(sessionId) || false;
         const isMobile = window.innerWidth <= 768;
+        flog('SV-TOGGLE', `toggleStructuredView: sessionId=${sessionId}, currentlyActive=${isActive}, isMobile=${isMobile}`);
 
         if (isActive) {
             // Switch back to terminal — sync textarea to terminal prompt
             const termData = this.terminals.get(sessionId);
+            const wsOpen = termData?.ws?.readyState === WebSocket.OPEN;
 
             if (isMobile) {
-                // On mobile, sync from the shared mobile input
                 const mobileInput = document.getElementById('mobile-terminal-input');
                 const svText = mobileInput?.value ?? '';
                 const svOriginal = this._svOriginalValue ?? '';
+                flog('SV-TOGGLE', `SV->Terminal (mobile): svText="${svText}" (len=${svText.length}), svOriginal="${svOriginal}" (len=${svOriginal.length}), wsOpen=${wsOpen}`);
 
-
-                if (svText !== svOriginal && termData?.ws?.readyState === WebSocket.OPEN) {
+                if (svText !== svOriginal && wsOpen) {
                     const ctrlUDelay = window.app?.getInputDelays?.(sessionId, 'mobile')?.ctrlUToText ?? 50;
+                    flog('SV-TOGGLE', `SV->Terminal (mobile): text changed, sending clearLine + text, ctrlUDelay=${ctrlUDelay}`);
 
+                    this.suppressMobileSync(800);
                     this.clearTerminalLine(sessionId);
                     if (svText) {
                         setTimeout(() => {
-
+                            flog('SV-TOGGLE', `SV->Terminal (mobile): sending text="${svText}" to terminal after delay`);
                             this.sendInputToSession(sessionId, svText);
                         }, ctrlUDelay);
                     }
+                } else {
+                    flog('SV-TOGGLE', `SV->Terminal (mobile): no change or ws closed, skipping sync`);
                 }
             } else {
-                // On desktop, sync from the SV textarea
                 const svView = window.structuredView.views.get(sessionId);
                 const svText = svView?.textarea?.value ?? '';
                 const svOriginal = svView?._originalValue ?? '';
+                flog('SV-TOGGLE', `SV->Terminal (desktop): svText="${svText}" (len=${svText.length}), svOriginal="${svOriginal}" (len=${svOriginal.length}), wsOpen=${wsOpen}`);
 
-
-                if (svText !== svOriginal && termData?.ws?.readyState === WebSocket.OPEN) {
+                if (svText !== svOriginal && wsOpen) {
                     const ctrlUDelay = window.app?.getInputDelays?.(sessionId, 'mobile')?.ctrlUToText ?? 50;
+                    flog('SV-TOGGLE', `SV->Terminal (desktop): text changed, sending clearLine + text, ctrlUDelay=${ctrlUDelay}`);
 
+                    this.suppressMobileSync(800);
                     this.clearTerminalLine(sessionId);
                     if (svText) {
                         setTimeout(() => {
-
+                            flog('SV-TOGGLE', `SV->Terminal (desktop): sending text="${svText}" to terminal after delay`);
                             this.sendInputToSession(sessionId, svText);
                         }, ctrlUDelay);
                     }
+                } else {
+                    flog('SV-TOGGLE', `SV->Terminal (desktop): no change or ws closed, skipping sync`);
                 }
             }
 
@@ -795,6 +804,7 @@ class TerminalManager {
                 });
             }
             this._updateStructuredViewButton(false);
+            flog('SV-TOGGLE', `SV->Terminal: done, structuredViewActive=false`);
         } else {
             // Switch to structured view
             this.structuredViewActive.set(sessionId, true);
@@ -809,25 +819,31 @@ class TerminalManager {
 
             // Populate the appropriate textarea from terminal's current line content
             const lineContent = this.getSessionLineContent(sessionId);
+            flog('SV-TOGGLE', `Terminal->SV: lineContent from terminal="${lineContent}" (len=${lineContent.length}), isMobile=${isMobile}`);
 
             if (isMobile) {
-                // On mobile, just update the shared mobile input value — no style changes
                 const mobileInput = document.getElementById('mobile-terminal-input');
                 if (mobileInput) {
+                    const oldValue = mobileInput.value;
+                    const oldSynced = mobileInput._lastSyncedValue;
                     mobileInput.value = lineContent;
                     mobileInput._lastSyncedValue = lineContent;
                     this._svOriginalValue = lineContent;
+                    flog('SV-TOGGLE', `Terminal->SV (mobile): mobileInput updated: old="${oldValue}", _lastSynced: "${oldSynced}" -> "${lineContent}", _svOriginalValue="${lineContent}"`);
                 }
             } else {
                 const svView = window.structuredView.views.get(sessionId);
                 if (svView?.textarea) {
+                    const oldValue = svView.textarea.value;
                     svView.textarea.value = lineContent;
                     svView._originalValue = lineContent;
                     svView.textarea.style.height = 'auto';
                     svView.textarea.style.height = Math.min(svView.textarea.scrollHeight, 150) + 'px';
+                    flog('SV-TOGGLE', `Terminal->SV (desktop): svTextarea updated: old="${oldValue}" -> "${lineContent}", _originalValue="${lineContent}"`);
                     requestAnimationFrame(() => svView.textarea.focus());
                 }
             }
+            flog('SV-TOGGLE', `Terminal->SV: done, structuredViewActive=true`);
         }
 
         // Persist preference
@@ -1023,7 +1039,7 @@ class TerminalManager {
     // to prevent stray input from reaching the wrong session.
     sendInput(data) {
         if (window.app && window.app.pendingSessionOpen) {
-            console.warn('[sendInput] Blocked: session transition in progress for', window.app.pendingSessionOpen.sessionId);
+            flog('TERM-INPUT', `sendInput BLOCKED: session transition in progress for ${window.app.pendingSessionOpen.sessionId}, data="${data.length > 20 ? data.substring(0,20)+'...' : data}"`);
             return;
         }
         if (this.activeSessionId) {
@@ -1034,20 +1050,27 @@ class TerminalManager {
     // Send a complex edit (autocorrect): backend splits backspaces + text with a delay
     sendComplexEdit(sessionId, backspaces, text) {
         const termData = this.terminals.get(sessionId);
-        if (termData && termData.ws && termData.ws.readyState === WebSocket.OPEN) {
+        const wsOpen = termData?.ws?.readyState === WebSocket.OPEN;
+        flog('TERM-INPUT', `sendComplexEdit: sessionId=${sessionId}, backspaces=${backspaces}, text="${text}", wsOpen=${wsOpen}`);
+        if (termData && termData.ws && wsOpen) {
             termData.ws.send(JSON.stringify({ type: 'complex_edit', data: { backspaces, text } }));
         }
     }
 
     // Clear the terminal input line (Ctrl+U)
     clearTerminalLine(sessionId) {
+        flog('TERM-INPUT', `clearTerminalLine (Ctrl+U): sessionId=${sessionId}`);
         this.sendInputToSession(sessionId, '\x15');
     }
 
     // Send input to a specific session by ID (safe against session switches)
     sendInputToSession(sessionId, data) {
         const termData = this.terminals.get(sessionId);
-        if (termData && termData.ws && termData.ws.readyState === WebSocket.OPEN) {
+        const wsOpen = termData?.ws?.readyState === WebSocket.OPEN;
+        // Log control chars as escape notation
+        const displayData = data.replace(/[\x00-\x1f]/g, c => `\\x${c.charCodeAt(0).toString(16).padStart(2,'0')}`);
+        flog('TERM-INPUT', `sendInputToSession: sessionId=${sessionId}, data="${displayData}" (len=${data.length}), wsOpen=${wsOpen}`);
+        if (termData && termData.ws && wsOpen) {
             termData.ws.send(JSON.stringify({ type: 'input', data: data }));
             // Track pending output for activity bar
             if (!termData._awaitingOutput) {
@@ -1061,20 +1084,39 @@ class TerminalManager {
      * Debounced sync of terminal prompt line content to the mobile input.
      * Only runs on mobile, in terminal mode (not SV), when the input isn't focused.
      */
+    /**
+     * Suppress mobile input sync briefly (e.g. after editor close sends text
+     * to terminal — the terminal echo hasn't stabilized yet and would clobber
+     * the mobile input with truncated content).
+     */
+    suppressMobileSync(ms = 600) {
+        this._mobileSyncSuppressedUntil = Date.now() + ms;
+        flog('MOBILE-SYNC', `suppressMobileSync: suppressed for ${ms}ms`);
+    }
+
     _scheduleMobileInputSync(sessionId) {
         if (window.innerWidth > 768) return; // Desktop — no sync needed
         if (sessionId !== this.activeSessionId) return; // Not the visible session
 
         clearTimeout(this._mobileInputSyncTimer);
         this._mobileInputSyncTimer = setTimeout(() => {
+            // Check suppression guard (set by editor close / SV toggle)
+            if (this._mobileSyncSuppressedUntil && Date.now() < this._mobileSyncSuppressedUntil) {
+                flog('MOBILE-SYNC', `_scheduleMobileInputSync: skipped (suppressed for ${this._mobileSyncSuppressedUntil - Date.now()}ms more)`);
+                return;
+            }
+
             const mobileInput = document.getElementById('mobile-terminal-input');
-            if (!mobileInput || document.activeElement === mobileInput) return; // User is typing
+            if (!mobileInput || document.activeElement === mobileInput) {
+                flog('MOBILE-SYNC', `_scheduleMobileInputSync: skipped (input focused or missing)`);
+                return;
+            }
 
             const lineContent = this.getSessionLineContent(sessionId);
             if (mobileInput.value !== lineContent) {
+                flog('MOBILE-SYNC', `_scheduleMobileInputSync: updating mobile input: old="${mobileInput.value}" (len=${mobileInput.value.length}) -> new="${lineContent}" (len=${lineContent.length}), _lastSynced: "${mobileInput._lastSyncedValue}" -> "${lineContent}"`);
                 mobileInput.value = lineContent;
                 mobileInput._lastSyncedValue = lineContent;
-                // Keep single-line height unless content is multi-line
                 if (!lineContent || lineContent.indexOf('\n') === -1) {
                     mobileInput.style.height = '44px';
                     mobileInput.style.overflow = 'hidden';
@@ -1092,9 +1134,13 @@ class TerminalManager {
      */
     getSessionLineContent(sessionId) {
         const termData = this.terminals.get(sessionId);
-        if (!termData?.terminal) return '';
+        if (!termData?.terminal) {
+            flog('TERM-READ', `getSessionLineContent: no terminal for sessionId=${sessionId}`);
+            return '';
+        }
         const buf = termData.terminal.buffer.active;
         const cursorRow = buf.cursorY + buf.baseY;
+        flog('TERM-READ', `getSessionLineContent: sessionId=${sessionId}, cursorY=${buf.cursorY}, baseY=${buf.baseY}, cursorRow=${cursorRow}`);
 
         // Scan backwards (up to 10 rows) looking for the prompt line
         for (let i = cursorRow; i >= Math.max(0, cursorRow - 10); i--) {
@@ -1104,11 +1150,12 @@ class TerminalManager {
             // Claude Code prompt: ❯ <user input>
             const match = text.match(/^❯\s*(.*)/);
             if (match) {
-                const afterPrompt = match[1] || '';
-                if (!afterPrompt) return '';
+                let afterPrompt = match[1] || '';
+                if (!afterPrompt) {
+                    flog('TERM-READ', `getSessionLineContent: found prompt at row=${i}, empty input -> ""`);
+                    return '';
+                }
                 // Check if the text after ❯ is placeholder (dim attribute).
-                // The first char at cursor position may not be dim, so check
-                // the second non-space character after ❯ for the dim flag.
                 const promptIdx = text.indexOf('❯');
                 let dimChecked = false;
                 let charsChecked = 0;
@@ -1118,23 +1165,39 @@ class TerminalManager {
                     const ch = cell.getChars();
                     if (!ch || !ch.trim()) continue;
                     charsChecked++;
-                    // Skip the first char (cursor position is never dim)
                     if (charsChecked >= 2) {
                         dimChecked = true;
-                        if (cell.isDim()) return ''; // Placeholder text — ignore
+                        if (cell.isDim()) {
+                            flog('TERM-READ', `getSessionLineContent: found prompt at row=${i}, dim text (placeholder) -> ""`);
+                            return '';
+                        }
                         break;
                     }
                 }
-                // If only 1 char typed, it's real input (no placeholder is 1 char)
-                if (!dimChecked) return afterPrompt;
+
+                // Read wrapped continuation lines (isWrapped = soft line wrap)
+                let wrappedRows = 0;
+                for (let j = i + 1; j <= cursorRow; j++) {
+                    const nextLine = buf.getLine(j);
+                    if (!nextLine || !nextLine.isWrapped) break;
+                    afterPrompt += nextLine.translateToString(true).trimEnd();
+                    wrappedRows++;
+                }
+
+                flog('TERM-READ', `getSessionLineContent: found prompt at row=${i}, wrappedRows=${wrappedRows}, content="${afterPrompt}" (len=${afterPrompt.length}, dimChecked=${dimChecked})`);
                 return afterPrompt;
             }
         }
         // Fallback: try cursor line, strip common prompts
         const cursorLine = buf.getLine(cursorRow);
-        if (!cursorLine) return '';
+        if (!cursorLine) {
+            flog('TERM-READ', `getSessionLineContent: no cursor line at row=${cursorRow} -> ""`);
+            return '';
+        }
         const text = cursorLine.translateToString(true).trimEnd();
-        return text.replace(/^[\s]*[❯>$%#]\s*/, '');
+        const result = text.replace(/^[\s]*[❯>$%#]\s*/, '');
+        flog('TERM-READ', `getSessionLineContent: fallback, cursorLine="${text}" -> "${result}"`);
+        return result;
     }
 
     // Focus active terminal (desktop only - mobile terminal is read-only)
