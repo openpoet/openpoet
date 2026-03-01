@@ -130,9 +130,8 @@ func (c *Client) ReadPump(ctx context.Context) {
 				}
 			}
 		case "complex_edit":
-			// Autocorrect/paste/period shortcut: backspaces to clear changed
-			// portion, then retype — split into individual PTY writes with
-			// delays so ink processes each deletion before the new text.
+			// Backspaces to clear terminal input, then retype new text.
+			// Sends all backspaces as a single PTY write, waits for processing, then sends text.
 			c.mu.Lock()
 			handler := c.inputHandler
 			c.mu.Unlock()
@@ -142,14 +141,18 @@ func (c *Client) ReadPump(ctx context.Context) {
 					Text       string `json:"text"`
 				}
 				if err := json.Unmarshal(msg.Data, &edit); err == nil && edit.Backspaces > 0 {
-					singleBS := []byte{0x7f}
-					for i := 0; i < edit.Backspaces; i++ {
-						handler(singleBS)
-						if i < edit.Backspaces-1 {
-							time.Sleep(5 * time.Millisecond)
-						}
+					// Send all backspaces as one write
+					bs := make([]byte, edit.Backspaces)
+					for i := range bs {
+						bs[i] = 0x7f
 					}
-					time.Sleep(30 * time.Millisecond)
+					handler(bs)
+					// Wait proportional to count: base 30ms + 1ms per backspace (cap at 500ms)
+					wait := 30 + edit.Backspaces
+					if wait > 500 {
+						wait = 500
+					}
+					time.Sleep(time.Duration(wait) * time.Millisecond)
 					if len(edit.Text) > 0 {
 						handler([]byte(edit.Text))
 					}

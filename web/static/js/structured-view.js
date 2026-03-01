@@ -102,19 +102,9 @@ class StructuredViewManager {
                 const tm = window.terminalManager;
                 if (!tm) return;
 
-                const delays = window.app?.getInputDelays?.(sessionId, 'mobile') || { ctrlUToText: 0, textToEnter: 700 };
-                flog('SV-SEND', `sendToTerminal: sessionId=${sessionId}, text="${text}" (len=${text.length}), delays=${JSON.stringify(delays)}`);
-                tm.clearTerminalLine(sessionId);
-                setTimeout(() => {
-                    if (text) {
-                        flog('SV-SEND', `sendToTerminal: sending text to terminal after ctrlUToText=${delays.ctrlUToText}ms`);
-                        tm.sendInputToSession(sessionId, text);
-                    }
-                    setTimeout(() => {
-                        flog('SV-SEND', `sendToTerminal: sending \\r after textToEnter=${delays.textToEnter}ms`);
-                        tm.sendInputToSession(sessionId, '\r');
-                    }, delays.textToEnter);
-                }, delays.ctrlUToText);
+                flog('SV-SEND', `sendToTerminal: sessionId=${sessionId}, text="${text}" (len=${text.length})`);
+                // Atomic replace + Enter: backspaces + text + \r handled server-side
+                tm.replaceTerminalLine(sessionId, (text ? text + '\r' : '\r'));
 
                 textarea.value = '';
                 textarea.style.height = 'auto';

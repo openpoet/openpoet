@@ -3893,16 +3893,13 @@ class OpenPoet {
             svView.sendToTerminal();
         } else if (text) {
             const sessionId = window.terminalManager?.activeSessionId;
-            flog('EDITOR', `Mobile context: clear+text+enter to sessionId=${sessionId}`);
+            const input = document.getElementById('mobile-terminal-input');
+            const prevLen = input?.value?.length ?? 0;
+            flog('EDITOR', `Mobile context: clear+text+enter to sessionId=${sessionId}, prevLen=${prevLen}`);
             if (sessionId) {
                 window.terminalManager.suppressMobileSync(800);
-                window.terminalManager.clearTerminalLine(sessionId);
-                setTimeout(() => {
-                    window.terminalManager.sendInputToSession(sessionId, text);
-                    setTimeout(() => {
-                        window.terminalManager.sendInputToSession(sessionId, '\r');
-                    }, 50);
-                }, 30);
+                // Atomic replace + Enter: backspaces + text + \r
+                window.terminalManager.replaceTerminalLine(sessionId, text + '\r', prevLen);
             }
         }
 
@@ -3941,18 +3938,15 @@ class OpenPoet {
         } else {
             const input = document.getElementById('mobile-terminal-input');
             const sessionId = window.terminalManager?.activeSessionId;
+            const prevText = input?.value ?? '';
             const delays = this.getInputDelays(sessionId, 'mobile');
-            flog('EDITOR', `Mobile context: syncing to terminal sessionId=${sessionId}, delays=${JSON.stringify(delays)}`);
+            flog('EDITOR', `Mobile context: syncing to terminal sessionId=${sessionId}, prevText="${prevText}" (len=${prevText.length})`);
             if (sessionId) {
                 // Suppress mobile sync to prevent terminal echo from clobbering input
                 window.terminalManager.suppressMobileSync(800);
-                window.terminalManager.clearTerminalLine(sessionId);
-                if (text) {
-                    setTimeout(() => {
-                        flog('EDITOR', `_closeEditor: sending text to terminal after ctrlUToText delay`);
-                        window.terminalManager.sendInputToSession(sessionId, text);
-                    }, delays.ctrlUToText);
-                }
+                // Atomic replace: backspaces + new text handled server-side
+                window.terminalManager.replaceTerminalLine(sessionId, text, prevText.length);
+                flog('EDITOR', `_closeEditor: replaceTerminalLine sent (atomic)`);
             }
             if (input) {
                 flog('EDITOR', `updating mobile input: old="${input.value}", new="${text}", _lastSynced: "${input._lastSyncedValue}" -> "${text}"`);
@@ -4136,24 +4130,9 @@ class OpenPoet {
         const targetSessionId = window.terminalManager.activeSessionId;
         if (!targetSessionId) return;
 
-        const delays = this.getInputDelays(targetSessionId, 'quick');
-        flog('QUICK-CMD', `sendQuickCommand: command="${command}", sessionId=${targetSessionId}, delays=${JSON.stringify(delays)}`);
-        // Canonical three-step mobile terminal input sequence
-        window.terminalManager.clearTerminalLine(targetSessionId);
-        const sendTextAndEnter = () => {
-            flog('QUICK-CMD', `sendQuickCommand: sending text after ctrlUToText`);
-            window.terminalManager.sendInputToSession(targetSessionId, command);
-            setTimeout(() => {
-                flog('QUICK-CMD', `sendQuickCommand: sending \\r after textToEnter`);
-                window.terminalManager.sendInputToSession(targetSessionId, '\r');
-            }, delays.textToEnter);
-        };
-
-        if (delays.ctrlUToText > 0) {
-            setTimeout(sendTextAndEnter, delays.ctrlUToText);
-        } else {
-            sendTextAndEnter();
-        }
+        flog('QUICK-CMD', `sendQuickCommand: command="${command}", sessionId=${targetSessionId}`);
+        // Atomic replace + Enter
+        window.terminalManager.replaceTerminalLine(targetSessionId, command + '\r');
     }
 
     sendMobileTerminalInput() {

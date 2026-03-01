@@ -386,16 +386,12 @@ class FileBrowser {
                 })
             }).catch(err => console.warn('Image prompt hint failed:', err));
 
-            // Send to terminal using canonical sequence: \x15 separate, text, \r after 700ms
+            // Send to terminal using canonical sequence: clear line, text, \r after 700ms
             // Capture target session ID NOW to prevent input going to a different session.
             if (window.terminalManager) {
                 const targetSessionId = sessionId;
                 if (targetSessionId) {
-                    window.terminalManager.sendInputToSession(targetSessionId, '\x15');
-                    window.terminalManager.sendInputToSession(targetSessionId, message);
-                    setTimeout(() => {
-                        window.terminalManager.sendInputToSession(targetSessionId, '\r');
-                    }, 700);
+                    window.terminalManager.replaceTerminalLine(targetSessionId, message + '\r');
                 }
             }
 
