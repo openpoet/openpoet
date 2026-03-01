@@ -259,16 +259,7 @@ class VoiceInput {
                 const sessionId = window.terminalManager?.activeSessionId;
                 if (sessionId) {
                     const fullText = mobileInput.value;
-                    const delays = window.app
-                        ? window.app.getInputDelays(sessionId, 'voice')
-                        : { ctrlUToText: 0, textToEnter: 50 };
-                    window.terminalManager.clearTerminalLine(sessionId);
-                    setTimeout(() => {
-                        window.terminalManager.sendInputToSession(sessionId, fullText);
-                        setTimeout(() => {
-                            window.terminalManager.sendInputToSession(sessionId, '\r');
-                        }, delays.textToEnter);
-                    }, delays.ctrlUToText);
+                    window.terminalManager.replaceTerminalLine(sessionId, fullText + '\r');
                 }
                 mobileInput.value = '';
                 mobileInput._lastSyncedValue = '';
