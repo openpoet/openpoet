@@ -406,8 +406,11 @@ class TerminalManager {
         // Handle terminal input (desktop only - mobile uses input bar)
         if (window.innerWidth > 768) {
             terminal.onData((data) => {
+                // Block input when structured view is active — let SV textarea handle it
+                if (this.structuredViewActive.get(sessionId)) return;
                 if (ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'input', data: data }));
+                    this._trackInput(sessionId, data);
                     this.clearScrollLock(termData);
                     // Track pending output for activity bar
                     if (!termData._awaitingOutput) {
@@ -499,6 +502,9 @@ class TerminalManager {
                 // Paste: Ctrl+Shift+V (Linux terminal convention)
                 if (domEvent.type === 'keydown' && domEvent.ctrlKey && domEvent.shiftKey &&
                     domEvent.key === 'V') {
+                    if (window.terminalManager?.structuredViewActive.get(sessionId)) {
+                        return false; // let SV textarea handle paste
+                    }
                     navigator.clipboard.readText().then(text => {
                         if (text && window.terminalManager) {
                             window.terminalManager.paste(text);
@@ -638,8 +644,11 @@ class TerminalManager {
             // Re-bind terminal input to new WebSocket
             if (window.innerWidth > 768) {
                 td.terminal.onData((data) => {
+                    // Block input when structured view is active
+                    if (this.structuredViewActive.get(sessionId)) return;
                     if (ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({ type: 'input', data: data }));
+                        this._trackInput(sessionId, data);
                         this.clearScrollLock(td);
                         if (!td._awaitingOutput) {
                             td._awaitingOutput = true;
@@ -797,38 +806,38 @@ class TerminalManager {
             const termData = this.terminals.get(sessionId);
             if (termData) {
                 termData.container.classList.remove('active');
+                // Blur terminal so keyboard/paste events go to SV textarea, not xterm.js
+                termData.terminal.blur();
             }
 
             window.structuredView.show(sessionId);
             this._updateStructuredViewButton(true);
 
-            // Populate the appropriate textarea from _knownInput (trusted tracker)
-            const knownValue = this._knownInput.get(sessionId) ?? '';
+            // Populate textarea from _knownInput (trusted), fallback to buffer read if never tracked
+            const knownRaw = this._knownInput.get(sessionId);
             const bufValue = this.getSessionLineContent(sessionId);
-            flog('SV-TOGGLE', `Terminal->SV: knownInput="${knownValue}" (len=${knownValue.length}), bufRead="${bufValue}" (len=${bufValue.length}), isMobile=${isMobile}`);
+            // If _knownInput has been set (even to ''), trust it. Otherwise fall back to buffer.
+            const value = (knownRaw !== undefined) ? knownRaw : bufValue;
+            flog('SV-TOGGLE', `Terminal->SV: knownInput=${knownRaw !== undefined ? `"${knownRaw}" (len=${knownRaw.length})` : 'undefined'}, bufRead="${bufValue}" (len=${bufValue.length}), value="${value}" (len=${value.length}), isMobile=${isMobile}`);
 
             if (isMobile) {
                 const mobileInput = document.getElementById('mobile-terminal-input');
                 if (mobileInput) {
                     const oldValue = mobileInput.value;
-                    const oldSynced = mobileInput._lastSyncedValue;
-                    // Use the longest of: _knownInput (trusted), mobile input, terminal buffer
-                    const bestValue = [knownValue, oldValue, bufValue].reduce((a, b) => b.length > a.length ? b : a, '');
-                    mobileInput.value = bestValue;
-                    mobileInput._lastSyncedValue = bestValue;
-                    this._svOriginalValue = bestValue;
-                    flog('SV-TOGGLE', `Terminal->SV (mobile): old="${oldValue}" (len=${oldValue.length}), bestValue="${bestValue}" (len=${bestValue.length})`);
+                    mobileInput.value = value;
+                    mobileInput._lastSyncedValue = value;
+                    this._svOriginalValue = value;
+                    flog('SV-TOGGLE', `Terminal->SV (mobile): old="${oldValue}" (len=${oldValue.length}), new="${value}" (len=${value.length})`);
                 }
             } else {
                 const svView = window.structuredView.views.get(sessionId);
                 if (svView?.textarea) {
                     const oldValue = svView.textarea.value;
-                    const bestValue = [knownValue, oldValue, bufValue].reduce((a, b) => b.length > a.length ? b : a, '');
-                    svView.textarea.value = bestValue;
-                    svView._originalValue = bestValue;
+                    svView.textarea.value = value;
+                    svView._originalValue = value;
                     svView.textarea.style.height = 'auto';
                     svView.textarea.style.height = Math.min(svView.textarea.scrollHeight, 150) + 'px';
-                    flog('SV-TOGGLE', `Terminal->SV (desktop): old="${oldValue}" (len=${oldValue.length}), bestValue="${bestValue}" (len=${bestValue.length})`);
+                    flog('SV-TOGGLE', `Terminal->SV (desktop): old="${oldValue}" (len=${oldValue.length}), new="${value}" (len=${value.length})`);
                     requestAnimationFrame(() => svView.textarea.focus());
                 }
             }
@@ -1032,6 +1041,11 @@ class TerminalManager {
             return;
         }
         if (this.activeSessionId) {
+            // Block input to terminal when structured view is active — input should go to SV textarea
+            if (this.structuredViewActive.get(this.activeSessionId)) {
+                flog('TERM-INPUT', `sendInput BLOCKED: SV active for ${this.activeSessionId.slice(0,8)}, data="${data.length > 20 ? data.substring(0,20)+'...' : data}"`);
+                return;
+            }
             this.sendInputToSession(this.activeSessionId, data);
         }
     }
@@ -1094,14 +1108,34 @@ class TerminalManager {
         let current = this._knownInput.get(sessionId) ?? '';
         for (let i = 0; i < data.length; i++) {
             const ch = data[i];
-            if (ch === '\x7f') {
+            if (ch === '\x1b') {
+                // ESC: skip entire ANSI escape sequence
+                // CSI sequences: ESC [ ... <final byte 0x40-0x7E>
+                // SS3 sequences: ESC O <char>
+                // Two-char sequences: ESC <char>
+                if (i + 1 < data.length) {
+                    const next = data[i + 1];
+                    if (next === '[') {
+                        // CSI: skip until final byte (letter/@/~)
+                        i += 2;
+                        while (i < data.length && data.charCodeAt(i) < 0x40) i++;
+                        // i now points at final byte, loop increment will skip it
+                    } else if (next === 'O') {
+                        // SS3: skip ESC O <char>
+                        i += 2;
+                    } else {
+                        // Two-char escape: ESC <char>
+                        i += 1;
+                    }
+                }
+            } else if (ch === '\x7f') {
                 // Backspace: remove last char
                 current = current.slice(0, -1);
             } else if (ch === '\r' || ch === '\n') {
                 // Enter: line submitted, reset
                 current = '';
             } else if (ch === '\x15') {
-                // Ctrl+U: clear line (legacy, shouldn't happen anymore but handle it)
+                // Ctrl+U: clear line
                 current = '';
             } else if (ch.charCodeAt(0) >= 32) {
                 // Printable char: append
@@ -1291,6 +1325,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const wrapper = document.getElementById('terminal-containers-wrapper');
     if (wrapper) {
         wrapper.addEventListener('paste', (e) => {
+            // Don't intercept paste when SV is active — let SV textarea handle it
+            const tm = window.terminalManager;
+            if (tm?.activeSessionId && tm.structuredViewActive.get(tm.activeSessionId)) {
+                return;
+            }
             // If clipboard contains an image, let files.js handle it
             const items = e.clipboardData?.items;
             if (items) {
@@ -1306,8 +1345,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
             const text = e.clipboardData.getData('text');
-            if (text && window.terminalManager) {
-                window.terminalManager.paste(text);
+            if (text && tm) {
+                tm.paste(text);
                 e.preventDefault();
             }
         });
