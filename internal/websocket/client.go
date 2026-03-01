@@ -140,19 +140,21 @@ func (c *Client) ReadPump(ctx context.Context) {
 					Backspaces int    `json:"backspaces"`
 					Text       string `json:"text"`
 				}
-				if err := json.Unmarshal(msg.Data, &edit); err == nil && edit.Backspaces > 0 {
-					// Send all backspaces as one write
-					bs := make([]byte, edit.Backspaces)
-					for i := range bs {
-						bs[i] = 0x7f
+				if err := json.Unmarshal(msg.Data, &edit); err == nil {
+					if edit.Backspaces > 0 {
+						// Send all backspaces as one write
+						bs := make([]byte, edit.Backspaces)
+						for i := range bs {
+							bs[i] = 0x7f
+						}
+						handler(bs)
+						// Wait proportional to count: base 30ms + 1ms per backspace (cap at 500ms)
+						wait := 30 + edit.Backspaces
+						if wait > 500 {
+							wait = 500
+						}
+						time.Sleep(time.Duration(wait) * time.Millisecond)
 					}
-					handler(bs)
-					// Wait proportional to count: base 30ms + 1ms per backspace (cap at 500ms)
-					wait := 30 + edit.Backspaces
-					if wait > 500 {
-						wait = 500
-					}
-					time.Sleep(time.Duration(wait) * time.Millisecond)
 					if len(edit.Text) > 0 {
 						handler([]byte(edit.Text))
 					}
