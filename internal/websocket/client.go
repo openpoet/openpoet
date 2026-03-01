@@ -129,6 +129,32 @@ func (c *Client) ReadPump(ctx context.Context) {
 					handler([]byte(input))
 				}
 			}
+		case "complex_edit":
+			// Autocorrect/paste/period shortcut: backspaces to clear changed
+			// portion, then retype — split into individual PTY writes with
+			// delays so ink processes each deletion before the new text.
+			c.mu.Lock()
+			handler := c.inputHandler
+			c.mu.Unlock()
+			if handler != nil && msg.Data != nil {
+				var edit struct {
+					Backspaces int    `json:"backspaces"`
+					Text       string `json:"text"`
+				}
+				if err := json.Unmarshal(msg.Data, &edit); err == nil && edit.Backspaces > 0 {
+					singleBS := []byte{0x7f}
+					for i := 0; i < edit.Backspaces; i++ {
+						handler(singleBS)
+						if i < edit.Backspaces-1 {
+							time.Sleep(5 * time.Millisecond)
+						}
+					}
+					time.Sleep(30 * time.Millisecond)
+					if len(edit.Text) > 0 {
+						handler([]byte(edit.Text))
+					}
+				}
+			}
 		case "resize":
 			c.mu.Lock()
 			handler := c.resizeHandler
