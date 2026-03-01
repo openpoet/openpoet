@@ -6,6 +6,7 @@ class TerminalManager {
         this.terminals = new Map(); // sessionId -> { terminal, container, ws, sessionName, fitAddon, status }
         this.activeSessionId = null;
         this.structuredViewActive = new Map(); // sessionId -> boolean
+        this._knownInput = new Map(); // sessionId -> string — trusted source of what's in the terminal prompt
         console.log('TerminalManager initialized for multi-terminal support');
     }
 
@@ -751,17 +752,9 @@ class TerminalManager {
                 flog('SV-TOGGLE', `SV->Terminal (mobile): svText="${svText}" (len=${svText.length}), svOriginal="${svOriginal}" (len=${svOriginal.length}), wsOpen=${wsOpen}`);
 
                 if (svText !== svOriginal && wsOpen) {
-                    const ctrlUDelay = window.app?.getInputDelays?.(sessionId, 'mobile')?.ctrlUToText ?? 50;
-                    flog('SV-TOGGLE', `SV->Terminal (mobile): text changed, sending clearLine + text, ctrlUDelay=${ctrlUDelay}`);
-
+                    flog('SV-TOGGLE', `SV->Terminal (mobile): text changed, atomic replaceTerminalLine`);
                     this.suppressMobileSync(800);
-                    this.clearTerminalLine(sessionId);
-                    if (svText) {
-                        setTimeout(() => {
-                            flog('SV-TOGGLE', `SV->Terminal (mobile): sending text="${svText}" to terminal after delay`);
-                            this.sendInputToSession(sessionId, svText);
-                        }, ctrlUDelay);
-                    }
+                    this.replaceTerminalLine(sessionId, svText, svOriginal.length);
                 } else {
                     flog('SV-TOGGLE', `SV->Terminal (mobile): no change or ws closed, skipping sync`);
                 }
@@ -772,17 +765,9 @@ class TerminalManager {
                 flog('SV-TOGGLE', `SV->Terminal (desktop): svText="${svText}" (len=${svText.length}), svOriginal="${svOriginal}" (len=${svOriginal.length}), wsOpen=${wsOpen}`);
 
                 if (svText !== svOriginal && wsOpen) {
-                    const ctrlUDelay = window.app?.getInputDelays?.(sessionId, 'mobile')?.ctrlUToText ?? 50;
-                    flog('SV-TOGGLE', `SV->Terminal (desktop): text changed, sending clearLine + text, ctrlUDelay=${ctrlUDelay}`);
-
+                    flog('SV-TOGGLE', `SV->Terminal (desktop): text changed, atomic replaceTerminalLine`);
                     this.suppressMobileSync(800);
-                    this.clearTerminalLine(sessionId);
-                    if (svText) {
-                        setTimeout(() => {
-                            flog('SV-TOGGLE', `SV->Terminal (desktop): sending text="${svText}" to terminal after delay`);
-                            this.sendInputToSession(sessionId, svText);
-                        }, ctrlUDelay);
-                    }
+                    this.replaceTerminalLine(sessionId, svText, svOriginal.length);
                 } else {
                     flog('SV-TOGGLE', `SV->Terminal (desktop): no change or ws closed, skipping sync`);
                 }
@@ -817,29 +802,33 @@ class TerminalManager {
             window.structuredView.show(sessionId);
             this._updateStructuredViewButton(true);
 
-            // Populate the appropriate textarea from terminal's current line content
-            const lineContent = this.getSessionLineContent(sessionId);
-            flog('SV-TOGGLE', `Terminal->SV: lineContent from terminal="${lineContent}" (len=${lineContent.length}), isMobile=${isMobile}`);
+            // Populate the appropriate textarea from _knownInput (trusted tracker)
+            const knownValue = this._knownInput.get(sessionId) ?? '';
+            const bufValue = this.getSessionLineContent(sessionId);
+            flog('SV-TOGGLE', `Terminal->SV: knownInput="${knownValue}" (len=${knownValue.length}), bufRead="${bufValue}" (len=${bufValue.length}), isMobile=${isMobile}`);
 
             if (isMobile) {
                 const mobileInput = document.getElementById('mobile-terminal-input');
                 if (mobileInput) {
                     const oldValue = mobileInput.value;
                     const oldSynced = mobileInput._lastSyncedValue;
-                    mobileInput.value = lineContent;
-                    mobileInput._lastSyncedValue = lineContent;
-                    this._svOriginalValue = lineContent;
-                    flog('SV-TOGGLE', `Terminal->SV (mobile): mobileInput updated: old="${oldValue}", _lastSynced: "${oldSynced}" -> "${lineContent}", _svOriginalValue="${lineContent}"`);
+                    // Use the longest of: _knownInput (trusted), mobile input, terminal buffer
+                    const bestValue = [knownValue, oldValue, bufValue].reduce((a, b) => b.length > a.length ? b : a, '');
+                    mobileInput.value = bestValue;
+                    mobileInput._lastSyncedValue = bestValue;
+                    this._svOriginalValue = bestValue;
+                    flog('SV-TOGGLE', `Terminal->SV (mobile): old="${oldValue}" (len=${oldValue.length}), bestValue="${bestValue}" (len=${bestValue.length})`);
                 }
             } else {
                 const svView = window.structuredView.views.get(sessionId);
                 if (svView?.textarea) {
                     const oldValue = svView.textarea.value;
-                    svView.textarea.value = lineContent;
-                    svView._originalValue = lineContent;
+                    const bestValue = [knownValue, oldValue, bufValue].reduce((a, b) => b.length > a.length ? b : a, '');
+                    svView.textarea.value = bestValue;
+                    svView._originalValue = bestValue;
                     svView.textarea.style.height = 'auto';
                     svView.textarea.style.height = Math.min(svView.textarea.scrollHeight, 150) + 'px';
-                    flog('SV-TOGGLE', `Terminal->SV (desktop): svTextarea updated: old="${oldValue}" -> "${lineContent}", _originalValue="${lineContent}"`);
+                    flog('SV-TOGGLE', `Terminal->SV (desktop): old="${oldValue}" (len=${oldValue.length}), bestValue="${bestValue}" (len=${bestValue.length})`);
                     requestAnimationFrame(() => svView.textarea.focus());
                 }
             }
@@ -1057,10 +1046,28 @@ class TerminalManager {
         }
     }
 
-    // Clear the terminal input line (Ctrl+U)
-    clearTerminalLine(sessionId) {
-        flog('TERM-INPUT', `clearTerminalLine (Ctrl+U): sessionId=${sessionId}`);
-        this.sendInputToSession(sessionId, '\x15');
+    // Replace terminal input line: clear with backspaces then type new text, all server-side (atomic).
+    // Uses _knownInput as primary source, cross-checks with buffer read and caller hint.
+    // Extra backspaces on empty prompt are harmless.
+    replaceTerminalLine(sessionId, newText, hintCharCount) {
+        const knownLen = (this._knownInput.get(sessionId) ?? '').length;
+        const bufferText = this.getSessionLineContent(sessionId);
+        const bufLen = bufferText.length;
+        const hintLen = (typeof hintCharCount === 'number' && hintCharCount > 0) ? hintCharCount : 0;
+        const bsCount = Math.max(knownLen, bufLen, hintLen) * 2;
+        flog('TERM-INPUT', `replaceTerminalLine: sessionId=${sessionId}, knownLen=${knownLen}, bufLen=${bufLen}, hintLen=${hintLen}, bsCount=${bsCount}, newText="${newText}" (len=${newText.length})`);
+        if (bsCount > 0 || newText) {
+            this.sendComplexEdit(sessionId, bsCount, newText);
+            // Update tracker: if text contains \r, line was submitted → empty
+            const trackedValue = newText.includes('\r') || newText.includes('\n') ? '' : newText;
+            this._knownInput.set(sessionId, trackedValue);
+            flog('TERM-TRACK', `_knownInput[${sessionId.slice(0,8)}] = "${trackedValue}" (len=${trackedValue.length})`);
+        }
+    }
+
+    // Clear the terminal input line (no new text). Legacy wrapper.
+    clearTerminalLine(sessionId, hintCharCount) {
+        this.replaceTerminalLine(sessionId, '', hintCharCount);
     }
 
     // Send input to a specific session by ID (safe against session switches)
@@ -1072,12 +1079,38 @@ class TerminalManager {
         flog('TERM-INPUT', `sendInputToSession: sessionId=${sessionId}, data="${displayData}" (len=${data.length}), wsOpen=${wsOpen}`);
         if (termData && termData.ws && wsOpen) {
             termData.ws.send(JSON.stringify({ type: 'input', data: data }));
+            // Update _knownInput tracker
+            this._trackInput(sessionId, data);
             // Track pending output for activity bar
             if (!termData._awaitingOutput) {
                 termData._awaitingOutput = true;
                 window.networkFeedback?.requestStarted();
             }
         }
+    }
+
+    // Update _knownInput based on what was sent to the terminal
+    _trackInput(sessionId, data) {
+        let current = this._knownInput.get(sessionId) ?? '';
+        for (let i = 0; i < data.length; i++) {
+            const ch = data[i];
+            if (ch === '\x7f') {
+                // Backspace: remove last char
+                current = current.slice(0, -1);
+            } else if (ch === '\r' || ch === '\n') {
+                // Enter: line submitted, reset
+                current = '';
+            } else if (ch === '\x15') {
+                // Ctrl+U: clear line (legacy, shouldn't happen anymore but handle it)
+                current = '';
+            } else if (ch.charCodeAt(0) >= 32) {
+                // Printable char: append
+                current += ch;
+            }
+            // Ignore other control chars
+        }
+        this._knownInput.set(sessionId, current);
+        flog('TERM-TRACK', `_knownInput[${sessionId.slice(0,8)}] = "${current}" (len=${current.length})`);
     }
 
     /**
@@ -1112,11 +1145,11 @@ class TerminalManager {
                 return;
             }
 
-            const lineContent = this.getSessionLineContent(sessionId);
-            if (mobileInput.value !== lineContent) {
-                flog('MOBILE-SYNC', `_scheduleMobileInputSync: updating mobile input: old="${mobileInput.value}" (len=${mobileInput.value.length}) -> new="${lineContent}" (len=${lineContent.length}), _lastSynced: "${mobileInput._lastSyncedValue}" -> "${lineContent}"`);
-                mobileInput.value = lineContent;
-                mobileInput._lastSyncedValue = lineContent;
+            const knownValue = this._knownInput.get(sessionId) ?? '';
+            if (knownValue && mobileInput.value !== knownValue) {
+                flog('MOBILE-SYNC', `_scheduleMobileInputSync: updating mobile input from _knownInput: old="${mobileInput.value}" (len=${mobileInput.value.length}) -> new="${knownValue}" (len=${knownValue.length})`);
+                mobileInput.value = knownValue;
+                mobileInput._lastSyncedValue = knownValue;
                 if (!lineContent || lineContent.indexOf('\n') === -1) {
                     mobileInput.style.height = '44px';
                     mobileInput.style.overflow = 'hidden';
