@@ -262,7 +262,7 @@ class VoiceInput {
                     const delays = window.app
                         ? window.app.getInputDelays(sessionId, 'voice')
                         : { ctrlUToText: 0, textToEnter: 50 };
-                    window.terminalManager.sendInputToSession(sessionId, '\x15'); // Ctrl+U clear line
+                    window.terminalManager.clearTerminalLine(sessionId);
                     setTimeout(() => {
                         window.terminalManager.sendInputToSession(sessionId, fullText);
                         setTimeout(() => {
