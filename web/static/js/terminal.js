@@ -747,11 +747,14 @@ class TerminalManager {
                 const svText = mobileInput?.value ?? '';
                 const svOriginal = this._svOriginalValue ?? '';
 
+
                 if (svText !== svOriginal && termData?.ws?.readyState === WebSocket.OPEN) {
                     const ctrlUDelay = window.app?.getInputDelays?.(sessionId, 'mobile')?.ctrlUToText ?? 50;
-                    this.sendInputToSession(sessionId, '\x15');
+
+                    this.clearTerminalLine(sessionId);
                     if (svText) {
                         setTimeout(() => {
+
                             this.sendInputToSession(sessionId, svText);
                         }, ctrlUDelay);
                     }
@@ -762,11 +765,14 @@ class TerminalManager {
                 const svText = svView?.textarea?.value ?? '';
                 const svOriginal = svView?._originalValue ?? '';
 
+
                 if (svText !== svOriginal && termData?.ws?.readyState === WebSocket.OPEN) {
                     const ctrlUDelay = window.app?.getInputDelays?.(sessionId, 'mobile')?.ctrlUToText ?? 50;
-                    this.sendInputToSession(sessionId, '\x15');
+
+                    this.clearTerminalLine(sessionId);
                     if (svText) {
                         setTimeout(() => {
+
                             this.sendInputToSession(sessionId, svText);
                         }, ctrlUDelay);
                     }
@@ -1023,6 +1029,19 @@ class TerminalManager {
         if (this.activeSessionId) {
             this.sendInputToSession(this.activeSessionId, data);
         }
+    }
+
+    // Send a complex edit (autocorrect): backend splits backspaces + text with a delay
+    sendComplexEdit(sessionId, backspaces, text) {
+        const termData = this.terminals.get(sessionId);
+        if (termData && termData.ws && termData.ws.readyState === WebSocket.OPEN) {
+            termData.ws.send(JSON.stringify({ type: 'complex_edit', data: { backspaces, text } }));
+        }
+    }
+
+    // Clear the terminal input line (Ctrl+U)
+    clearTerminalLine(sessionId) {
+        this.sendInputToSession(sessionId, '\x15');
     }
 
     // Send input to a specific session by ID (safe against session switches)

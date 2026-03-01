@@ -95,15 +95,14 @@ class StructuredViewManager {
             textarea = inputArea.querySelector('.sv-input-textarea');
             const sendBtn = inputArea.querySelector('.sv-input-send');
 
-            // Send text to terminal: Ctrl+U (clear line) → text → Enter
+            // Send text to terminal: clear line → text → Enter
             sendToTerminal = () => {
                 const text = textarea.value;
                 const tm = window.terminalManager;
                 if (!tm) return;
 
                 const delays = window.app?.getInputDelays?.(sessionId, 'mobile') || { ctrlUToText: 0, textToEnter: 700 };
-
-                tm.sendInputToSession(sessionId, '\x15');
+                tm.clearTerminalLine(sessionId);
                 setTimeout(() => {
                     if (text) {
                         tm.sendInputToSession(sessionId, text);

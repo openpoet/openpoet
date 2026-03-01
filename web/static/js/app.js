@@ -3694,39 +3694,49 @@ class OpenPoet {
         // Track what the terminal currently has (synced value)
         input._lastSyncedValue = '';
 
-        // Real-time sync: forward every input change to the terminal
+        // Real-time sync: forward every input change to the terminal.
+        // ALL events are deferred by one tick (setTimeout(0)) to batch rapid
+        // sequences like iOS period shortcut (backspace + "." + " " in one tick).
+        // After the tick, compare _lastSyncedValue with input.value and send
+        // the minimal diff.
         input.addEventListener('input', () => {
-            const newVal = input.value;
-            const oldVal = input._lastSyncedValue || '';
-            const sessionId = window.terminalManager?.activeSessionId;
-            if (!sessionId) return;
+            if (input._syncPending) return; // already scheduled
+            input._syncPending = true;
+            setTimeout(() => {
+                input._syncPending = false;
+                const newVal = input.value;
+                const oldVal = input._lastSyncedValue || '';
+                const sessionId = window.terminalManager?.activeSessionId;
+                if (!sessionId) return;
+                const tm = window.terminalManager;
 
-            // During submit, skip sync to prevent interleaving with Ctrl+U sequence
-            if (input._submitInProgress) {
+                if (newVal === oldVal) return; // no change
+
+                // Find common prefix
+                let prefixLen = 0;
+                const minLen = Math.min(oldVal.length, newVal.length);
+                while (prefixLen < minLen && oldVal[prefixLen] === newVal[prefixLen]) {
+                    prefixLen++;
+                }
+                const bsCount = oldVal.length - prefixLen;
+                const newSuffix = newVal.substring(prefixLen);
+
+                if (bsCount === 0 && newSuffix.length > 0) {
+                    // Pure additive (chars added at end) — send directly
+                    tm.sendInputToSession(sessionId, newSuffix);
+                } else if (bsCount > 0 && newSuffix.length === 0) {
+                    // Pure deletion — send backspaces directly
+                    for (let i = 0; i < bsCount; i++) {
+                        tm.sendInputToSession(sessionId, '\x7f');
+                    }
+                } else if (bsCount > 0 && newSuffix.length > 0) {
+                    // Mixed (backspace + new text) — use complex_edit so
+                    // backend adds delays between deletions and new text
+                    tm.sendComplexEdit(sessionId, bsCount, newSuffix);
+                }
+
                 input._lastSyncedValue = newVal;
-                return;
-            }
-
-            if (newVal.length > oldVal.length && newVal.startsWith(oldVal)) {
-                // Characters added at end — send just the new chars
-                const added = newVal.substring(oldVal.length);
-                window.terminalManager.sendInputToSession(sessionId, added);
-            } else if (newVal.length < oldVal.length && oldVal.startsWith(newVal)) {
-                // Characters removed from end (backspace)
-                const count = oldVal.length - newVal.length;
-                for (let i = 0; i < count; i++) {
-                    window.terminalManager.sendInputToSession(sessionId, '\x7f');
-                }
-            } else {
-                // Complex edit (paste over selection, etc.) — clear line and resend
-                window.terminalManager.sendInputToSession(sessionId, '\x15'); // Ctrl+U
-                if (newVal) {
-                    setTimeout(() => {
-                        window.terminalManager.sendInputToSession(sessionId, newVal);
-                    }, 30);
-                }
-            }
-            input._lastSyncedValue = newVal;
+            }, 0);
 
             // Auto-resize textarea
             input.style.height = '44px';
@@ -3820,10 +3830,10 @@ class OpenPoet {
             svView.textarea.value = text;
             svView.sendToTerminal();
         } else if (text) {
-            // Mobile context: send directly to terminal (Ctrl+U, text, Enter)
+            // Mobile context: send directly to terminal (clear, text, Enter)
             const sessionId = window.terminalManager?.activeSessionId;
             if (sessionId) {
-                window.terminalManager.sendInputToSession(sessionId, '\x15'); // Clear line
+                window.terminalManager.clearTerminalLine(sessionId);
                 setTimeout(() => {
                     window.terminalManager.sendInputToSession(sessionId, text);
                     setTimeout(() => {
@@ -3869,7 +3879,7 @@ class OpenPoet {
             const delays = this.getInputDelays(sessionId, 'mobile');
             if (sessionId) {
                 // Clear terminal line and send editor text so terminal matches
-                window.terminalManager.sendInputToSession(sessionId, '\x15');
+                window.terminalManager.clearTerminalLine(sessionId);
                 if (text) {
                     setTimeout(() => {
                         window.terminalManager.sendInputToSession(sessionId, text);
@@ -4050,9 +4060,8 @@ class OpenPoet {
         if (!targetSessionId) return;
 
         const delays = this.getInputDelays(targetSessionId, 'quick');
-
         // Canonical three-step mobile terminal input sequence
-        window.terminalManager.sendInputToSession(targetSessionId, '\x15'); // Ctrl+U - clear current line
+        window.terminalManager.clearTerminalLine(targetSessionId);
         const sendTextAndEnter = () => {
             window.terminalManager.sendInputToSession(targetSessionId, command);
             setTimeout(() => {
@@ -4074,28 +4083,14 @@ class OpenPoet {
         const sessionId = window.terminalManager?.activeSessionId;
         if (!sessionId) return;
 
-        const text = input.value;
-        const delays = this.getInputDelays(sessionId, 'mobile');
+        const tm = window.terminalManager;
 
-        // Suppress char-by-char sync during the submit sequence
-        input._submitInProgress = true;
+        // Text is already in the terminal via real-time char-by-char sync.
+        // Just send Enter to submit — no clear/re-send needed.
+        tm.sendInputToSession(sessionId, '\r');
 
-        // Always clear the terminal line and send exactly what the user sees
-        // in the text box (Ctrl+U clears, then text, then Enter)
-        window.terminalManager.sendInputToSession(sessionId, '\x15'); // Ctrl+U
-        setTimeout(() => {
-            if (text) {
-                window.terminalManager.sendInputToSession(sessionId, text);
-            }
-            setTimeout(() => {
-                window.terminalManager.sendInputToSession(sessionId, '\r');
-                // Re-enable char-by-char sync after submit completes
-                input._submitInProgress = false;
-            }, delays.textToEnter);
-        }, delays.ctrlUToText);
-
-        input.value = '';
         input._lastSyncedValue = '';
+        input.value = '';
         input.style.height = '44px';
         input.style.overflow = 'hidden';
     }
