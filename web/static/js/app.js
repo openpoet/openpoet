@@ -1,3 +1,40 @@
+// ==================== FRONTEND LOGGER (flog) ====================
+// Lightweight logging utility that prints to console AND transmits to backend.
+// Usage: flog('TAG', 'message', { optional: 'data' })
+// Batches logs and flushes every 500ms to avoid flooding.
+var flog = (() => {
+    const queue = [];
+    let timer = null;
+    const FLUSH_INTERVAL = 500;
+    const MAX_QUEUE = 50;
+
+    function flush() {
+        if (queue.length === 0) return;
+        const batch = queue.splice(0, MAX_QUEUE);
+        const payload = { logs: batch };
+        try {
+            navigator.sendBeacon?.('/api/client-log', new Blob([JSON.stringify(payload)], { type: 'application/json' }))
+                || fetch('/api/client-log', { method: 'POST', body: JSON.stringify(payload), headers: { 'Content-Type': 'application/json' }, keepalive: true }).catch(() => {});
+        } catch (e) { /* swallow */ }
+    }
+
+    function schedule() {
+        if (!timer) {
+            timer = setTimeout(() => { timer = null; flush(); }, FLUSH_INTERVAL);
+        }
+    }
+
+    return function flog(tag, msg, data) {
+        const ts = new Date().toISOString().slice(11, 23); // HH:mm:ss.SSS
+        const fullMsg = data !== undefined ? `${msg} ${JSON.stringify(data)}` : msg;
+        console.log(`[${tag}] ${fullMsg}`);
+        queue.push({ tag, msg: fullMsg, ts });
+        if (queue.length >= MAX_QUEUE) flush();
+        else schedule();
+    };
+})();
+window.flog = flog;
+
 // OpenPoet Application
 class OpenPoet {
     constructor() {
@@ -3690,6 +3727,7 @@ class OpenPoet {
         const sendBtn = document.getElementById('mobile-terminal-send');
 
         if (!input || !sendBtn) return;
+        flog('MOBILE-INPUT', 'setupMobileTerminalInput: initialized');
 
         // Track what the terminal currently has (synced value)
         input._lastSyncedValue = '';
@@ -3700,17 +3738,31 @@ class OpenPoet {
         // After the tick, compare _lastSyncedValue with input.value and send
         // the minimal diff.
         input.addEventListener('input', () => {
-            if (input._syncPending) return; // already scheduled
+            const immediateVal = input.value;
+            flog('MOBILE-INPUT', `input event fired, immediate value="${immediateVal}" (len=${immediateVal.length}), _lastSynced="${input._lastSyncedValue}" (len=${(input._lastSyncedValue||'').length}), syncPending=${!!input._syncPending}`);
+
+            if (input._syncPending) {
+                flog('MOBILE-INPUT', 'input event SKIPPED — syncPending=true');
+                return; // already scheduled
+            }
             input._syncPending = true;
             setTimeout(() => {
                 input._syncPending = false;
                 const newVal = input.value;
                 const oldVal = input._lastSyncedValue || '';
                 const sessionId = window.terminalManager?.activeSessionId;
-                if (!sessionId) return;
+                flog('MOBILE-INPUT', `deferred tick: newVal="${newVal}" (len=${newVal.length}), oldVal="${oldVal}" (len=${oldVal.length}), sessionId=${sessionId}`);
+
+                if (!sessionId) {
+                    flog('MOBILE-INPUT', 'deferred tick ABORT — no activeSessionId');
+                    return;
+                }
                 const tm = window.terminalManager;
 
-                if (newVal === oldVal) return; // no change
+                if (newVal === oldVal) {
+                    flog('MOBILE-INPUT', 'deferred tick SKIP — no change');
+                    return;
+                }
 
                 // Find common prefix
                 let prefixLen = 0;
@@ -3720,30 +3772,36 @@ class OpenPoet {
                 }
                 const bsCount = oldVal.length - prefixLen;
                 const newSuffix = newVal.substring(prefixLen);
+                flog('MOBILE-INPUT', `diff: prefixLen=${prefixLen}, bsCount=${bsCount}, newSuffix="${newSuffix}" (len=${newSuffix.length})`);
 
                 if (bsCount === 0 && newSuffix.length > 0) {
-                    // Pure additive (chars added at end) — send directly
+                    flog('MOBILE-INPUT', `SEND additive: "${newSuffix}"`);
                     tm.sendInputToSession(sessionId, newSuffix);
                 } else if (bsCount > 0 && newSuffix.length === 0) {
-                    // Pure deletion — send backspaces directly
+                    flog('MOBILE-INPUT', `SEND ${bsCount} backspaces`);
                     for (let i = 0; i < bsCount; i++) {
                         tm.sendInputToSession(sessionId, '\x7f');
                     }
                 } else if (bsCount > 0 && newSuffix.length > 0) {
-                    // Mixed (backspace + new text) — use complex_edit so
-                    // backend adds delays between deletions and new text
+                    flog('MOBILE-INPUT', `SEND complex_edit: bs=${bsCount}, text="${newSuffix}"`);
                     tm.sendComplexEdit(sessionId, bsCount, newSuffix);
                 }
 
+                flog('MOBILE-INPUT', `_lastSyncedValue updated: "${oldVal}" -> "${newVal}"`);
                 input._lastSyncedValue = newVal;
             }, 0);
 
             // Auto-resize textarea
+            const prevHeight = input.style.height;
             input.style.height = '44px';
             input.style.overflow = 'hidden';
             if (input.scrollHeight > input.clientHeight) {
-                input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+                const newHeight = Math.min(input.scrollHeight, 120) + 'px';
+                input.style.height = newHeight;
                 input.style.overflow = 'auto';
+                if (prevHeight !== newHeight) {
+                    flog('MOBILE-INPUT', `auto-resize: ${prevHeight} -> ${newHeight}`);
+                }
             }
         });
 
@@ -3751,18 +3809,21 @@ class OpenPoet {
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
+                flog('MOBILE-INPUT', `Enter pressed, calling sendMobileTerminalInput. value="${input.value}"`);
                 this.sendMobileTerminalInput();
             }
         });
 
         // Send button sends Enter to terminal
         sendBtn.addEventListener('click', () => {
+            flog('MOBILE-INPUT', `Send button clicked. value="${input.value}"`);
             this.sendMobileTerminalInput();
         });
 
         // Expand button opens full-screen editor
         const expandBtn = document.getElementById('btn-mobile-expand-editor');
         expandBtn?.addEventListener('click', () => {
+            flog('MOBILE-INPUT', `Expand button clicked. value="${input.value}"`);
             this.openMobileEditor();
         });
 
@@ -3824,15 +3885,17 @@ class OpenPoet {
 
         const text = editorTextarea.value.trim();
         const svView = this._getEditorSVView();
+        flog('EDITOR', `_sendFromEditor: text="${text}" (len=${text.length}), svContext=${!!svView?.textarea}, _svEditorSessionId=${this._svEditorSessionId}`);
 
         if (svView?.textarea && text) {
-            // SV context (desktop): copy to SV textarea and send
+            flog('EDITOR', `SV context: copying to SV textarea and calling sendToTerminal`);
             svView.textarea.value = text;
             svView.sendToTerminal();
         } else if (text) {
-            // Mobile context: send directly to terminal (clear, text, Enter)
             const sessionId = window.terminalManager?.activeSessionId;
+            flog('EDITOR', `Mobile context: clear+text+enter to sessionId=${sessionId}`);
             if (sessionId) {
+                window.terminalManager.suppressMobileSync(800);
                 window.terminalManager.clearTerminalLine(sessionId);
                 setTimeout(() => {
                     window.terminalManager.sendInputToSession(sessionId, text);
@@ -3846,12 +3909,14 @@ class OpenPoet {
         editorTextarea.value = '';
         const input = document.getElementById('mobile-terminal-input');
         if (input) {
+            flog('EDITOR', `clearing mobile input: old value="${input.value}", old _lastSynced="${input._lastSyncedValue}"`);
             input.value = '';
             input._lastSyncedValue = '';
             input.style.height = '44px';
             input.style.overflow = 'hidden';
         }
         if (editor) editor.classList.add('hidden');
+        flog('EDITOR', `_sendFromEditor done, _svEditorSessionId cleared`);
         this._svEditorSessionId = null;
     }
 
@@ -3866,30 +3931,33 @@ class OpenPoet {
 
         const svView = this._getEditorSVView();
         const text = editorTextarea.value;
+        flog('EDITOR', `_closeEditor: text="${text}" (len=${text.length}), svContext=${!!svView?.textarea}, _svEditorSessionId=${this._svEditorSessionId}`);
 
         if (svView?.textarea) {
-            // SV context (desktop): preserve text back to SV textarea
+            flog('EDITOR', `SV context: preserving text back to SV textarea. old svTextarea="${svView.textarea.value}"`);
             svView.textarea.value = text;
             svView.textarea.style.height = 'auto';
             svView.textarea.style.height = Math.min(svView.textarea.scrollHeight, 150) + 'px';
         } else {
-            // Mobile context: sync text to terminal and update mobile input
             const input = document.getElementById('mobile-terminal-input');
             const sessionId = window.terminalManager?.activeSessionId;
             const delays = this.getInputDelays(sessionId, 'mobile');
+            flog('EDITOR', `Mobile context: syncing to terminal sessionId=${sessionId}, delays=${JSON.stringify(delays)}`);
             if (sessionId) {
-                // Clear terminal line and send editor text so terminal matches
+                // Suppress mobile sync to prevent terminal echo from clobbering input
+                window.terminalManager.suppressMobileSync(800);
                 window.terminalManager.clearTerminalLine(sessionId);
                 if (text) {
                     setTimeout(() => {
+                        flog('EDITOR', `_closeEditor: sending text to terminal after ctrlUToText delay`);
                         window.terminalManager.sendInputToSession(sessionId, text);
                     }, delays.ctrlUToText);
                 }
             }
             if (input) {
+                flog('EDITOR', `updating mobile input: old="${input.value}", new="${text}", _lastSynced: "${input._lastSyncedValue}" -> "${text}"`);
                 input.value = text;
                 input._lastSyncedValue = text;
-                // Auto-resize
                 input.style.height = '44px';
                 input.style.overflow = 'hidden';
                 if (input.scrollHeight > input.clientHeight) {
@@ -3900,6 +3968,7 @@ class OpenPoet {
         }
 
         editor.classList.add('hidden');
+        flog('EDITOR', `_closeEditor done, _svEditorSessionId cleared`);
         this._svEditorSessionId = null;
     }
 
@@ -3910,10 +3979,14 @@ class OpenPoet {
 
         if (!editor || !textarea) return;
 
+        const srcValue = input?.value ?? '';
+        flog('EDITOR', `openMobileEditor: mobile input value="${srcValue}" (len=${srcValue.length}), _lastSynced="${input?._lastSyncedValue}"`);
+
         // Mobile context — no SV session
         this._svEditorSessionId = null;
-        textarea.value = input?.value ?? '';
+        textarea.value = srcValue;
         editor.classList.remove('hidden');
+        flog('EDITOR', `openMobileEditor: editor shown, textarea set to "${srcValue}"`);
 
         setTimeout(() => {
             textarea.focus();
@@ -3933,9 +4006,13 @@ class OpenPoet {
         const svView = window.structuredView?.views?.get(sessionId);
         if (!svView?.textarea) return;
 
+        const svText = svView.textarea.value;
+        flog('EDITOR', `openSVEditor: sessionId=${sessionId}, SV textarea value="${svText}" (len=${svText.length})`);
+
         this._svEditorSessionId = sessionId;
-        editorTextarea.value = svView.textarea.value;
+        editorTextarea.value = svText;
         editor.classList.remove('hidden');
+        flog('EDITOR', `openSVEditor: editor shown, _svEditorSessionId=${sessionId}`);
 
         setTimeout(() => {
             editorTextarea.focus();
@@ -4060,11 +4137,14 @@ class OpenPoet {
         if (!targetSessionId) return;
 
         const delays = this.getInputDelays(targetSessionId, 'quick');
+        flog('QUICK-CMD', `sendQuickCommand: command="${command}", sessionId=${targetSessionId}, delays=${JSON.stringify(delays)}`);
         // Canonical three-step mobile terminal input sequence
         window.terminalManager.clearTerminalLine(targetSessionId);
         const sendTextAndEnter = () => {
+            flog('QUICK-CMD', `sendQuickCommand: sending text after ctrlUToText`);
             window.terminalManager.sendInputToSession(targetSessionId, command);
             setTimeout(() => {
+                flog('QUICK-CMD', `sendQuickCommand: sending \\r after textToEnter`);
                 window.terminalManager.sendInputToSession(targetSessionId, '\r');
             }, delays.textToEnter);
         };
@@ -4084,11 +4164,13 @@ class OpenPoet {
         if (!sessionId) return;
 
         const tm = window.terminalManager;
+        flog('MOBILE-SEND', `sendMobileTerminalInput: value="${input.value}", _lastSynced="${input._lastSyncedValue}", sessionId=${sessionId}`);
 
         // Text is already in the terminal via real-time char-by-char sync.
         // Just send Enter to submit — no clear/re-send needed.
         tm.sendInputToSession(sessionId, '\r');
 
+        flog('MOBILE-SEND', `sent \\r, clearing input. old value="${input.value}"`);
         input._lastSyncedValue = '';
         input.value = '';
         input.style.height = '44px';

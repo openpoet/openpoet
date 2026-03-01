@@ -467,17 +467,61 @@ func main() {
 
 		r.Post("/api/debug/client-log", func(w http.ResponseWriter, r *http.Request) {
 			var body struct {
-				Tag string `json:"tag"`
-				Msg string `json:"msg"`
+				Tag  string `json:"tag"`
+				Msg  string `json:"msg"`
+				Logs []struct {
+					Tag string `json:"tag"`
+					Msg string `json:"msg"`
+					Ts  string `json:"ts"`
+				} `json:"logs"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, "bad request", 400)
 				return
 			}
-			log.Printf("[FRONTEND][%s] %s", body.Tag, body.Msg)
+			if len(body.Logs) > 0 {
+				for _, entry := range body.Logs {
+					if entry.Ts != "" {
+						log.Printf("[FRONTEND][%s] %s [%s]", entry.Tag, entry.Msg, entry.Ts)
+					} else {
+						log.Printf("[FRONTEND][%s] %s", entry.Tag, entry.Msg)
+					}
+				}
+			} else if body.Tag != "" {
+				log.Printf("[FRONTEND][%s] %s", body.Tag, body.Msg)
+			}
 			w.WriteHeader(200)
 		})
 	}
+
+	// Always-on client log endpoint (outside debug block) for input-flow diagnostics
+	r.Post("/api/client-log", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Tag  string `json:"tag"`
+			Msg  string `json:"msg"`
+			Logs []struct {
+				Tag string `json:"tag"`
+				Msg string `json:"msg"`
+				Ts  string `json:"ts"`
+			} `json:"logs"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad request", 400)
+			return
+		}
+		if len(body.Logs) > 0 {
+			for _, entry := range body.Logs {
+				if entry.Ts != "" {
+					log.Printf("[FRONTEND][%s] %s [%s]", entry.Tag, entry.Msg, entry.Ts)
+				} else {
+					log.Printf("[FRONTEND][%s] %s", entry.Tag, entry.Msg)
+				}
+			}
+		} else if body.Tag != "" {
+			log.Printf("[FRONTEND][%s] %s", body.Tag, body.Msg)
+		}
+		w.WriteHeader(200)
+	})
 
 	r.Route("/api", func(r chi.Router) {
 		// Version

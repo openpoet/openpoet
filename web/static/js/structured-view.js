@@ -4,6 +4,7 @@
  * Renders Claude Code session events as chat cards with collapsible
  * tool calls, thinking blocks, and token counters.
  */
+var flog = window.flog || ((...a) => console.log(...a));
 class StructuredViewManager {
     constructor() {
         // sessionId → { container, messagesEl, tokenBarEl, events[], totalTokens }
@@ -102,39 +103,53 @@ class StructuredViewManager {
                 if (!tm) return;
 
                 const delays = window.app?.getInputDelays?.(sessionId, 'mobile') || { ctrlUToText: 0, textToEnter: 700 };
+                flog('SV-SEND', `sendToTerminal: sessionId=${sessionId}, text="${text}" (len=${text.length}), delays=${JSON.stringify(delays)}`);
                 tm.clearTerminalLine(sessionId);
                 setTimeout(() => {
                     if (text) {
+                        flog('SV-SEND', `sendToTerminal: sending text to terminal after ctrlUToText=${delays.ctrlUToText}ms`);
                         tm.sendInputToSession(sessionId, text);
                     }
                     setTimeout(() => {
+                        flog('SV-SEND', `sendToTerminal: sending \\r after textToEnter=${delays.textToEnter}ms`);
                         tm.sendInputToSession(sessionId, '\r');
                     }, delays.textToEnter);
                 }, delays.ctrlUToText);
 
                 textarea.value = '';
                 textarea.style.height = 'auto';
+                flog('SV-SEND', `sendToTerminal: textarea cleared`);
             };
 
             // Auto-resize textarea
             textarea.addEventListener('input', () => {
+                const prevH = textarea.style.height;
                 textarea.style.height = 'auto';
-                textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px';
+                const newH = Math.min(textarea.scrollHeight, 150) + 'px';
+                textarea.style.height = newH;
+                if (prevH !== newH) {
+                    flog('SV-INPUT', `SV textarea resize: ${prevH} -> ${newH}, value="${textarea.value}" (len=${textarea.value.length})`);
+                }
             });
 
             // Enter submits (Shift+Enter for newline)
             textarea.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
+                    flog('SV-INPUT', `Enter pressed in SV textarea. value="${textarea.value}"`);
                     sendToTerminal();
                 }
             });
 
             // Send button
-            sendBtn.addEventListener('click', () => sendToTerminal());
+            sendBtn.addEventListener('click', () => {
+                flog('SV-INPUT', `Send button clicked in SV. value="${textarea.value}"`);
+                sendToTerminal();
+            });
 
             // Expand editor button
             inputArea.querySelector('.sv-btn-expand')?.addEventListener('click', () => {
+                flog('SV-INPUT', `Expand editor clicked in SV. sessionId=${sessionId}, textarea value="${textarea.value}"`);
                 window.app?.openSVEditor?.(sessionId);
             });
 
