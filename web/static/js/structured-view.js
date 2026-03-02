@@ -103,8 +103,12 @@ class StructuredViewManager {
                 if (!tm) return;
 
                 flog('SV-SEND', `sendToTerminal: sessionId=${sessionId}, text="${text}" (len=${text.length})`);
-                // Atomic replace + Enter: backspaces + text + \r handled server-side
-                tm.replaceTerminalLine(sessionId, (text ? text + '\r' : '\r'));
+                // Send button: text and Enter must be separate writes for Claude Code
+                if (text) {
+                    tm.submitTerminalLine(sessionId, text);
+                } else {
+                    tm.sendInputToSession(sessionId, '\r');
+                }
 
                 textarea.value = '';
                 textarea.style.height = 'auto';
