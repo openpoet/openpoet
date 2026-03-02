@@ -1079,6 +1079,16 @@ class TerminalManager {
         }
     }
 
+    // Submit text to terminal: replace line with text, then send Enter separately.
+    // Used by send buttons to ensure Claude Code recognizes \r as a submit action.
+    submitTerminalLine(sessionId, text) {
+        flog('TERM-INPUT', `submitTerminalLine: sessionId=${sessionId}, text="${text}" (len=${text.length})`);
+        this.replaceTerminalLine(sessionId, text);
+        setTimeout(() => {
+            this.sendInputToSession(sessionId, '\r');
+        }, 50);
+    }
+
     // Clear the terminal input line (no new text). Legacy wrapper.
     clearTerminalLine(sessionId, hintCharCount) {
         this.replaceTerminalLine(sessionId, '', hintCharCount);

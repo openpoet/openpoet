@@ -259,7 +259,7 @@ class VoiceInput {
                 const sessionId = window.terminalManager?.activeSessionId;
                 if (sessionId) {
                     const fullText = mobileInput.value;
-                    window.terminalManager.replaceTerminalLine(sessionId, fullText + '\r');
+                    window.terminalManager.submitTerminalLine(sessionId, fullText);
                 }
                 mobileInput.value = '';
                 mobileInput._lastSyncedValue = '';

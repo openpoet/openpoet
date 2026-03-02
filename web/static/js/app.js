@@ -3898,8 +3898,8 @@ class OpenPoet {
             flog('EDITOR', `Mobile context: clear+text+enter to sessionId=${sessionId}, prevLen=${prevLen}`);
             if (sessionId) {
                 window.terminalManager.suppressMobileSync(800);
-                // Atomic replace + Enter: backspaces + text + \r
-                window.terminalManager.replaceTerminalLine(sessionId, text + '\r', prevLen);
+                // Send button: text and Enter as separate writes
+                window.terminalManager.submitTerminalLine(sessionId, text);
             }
         }
 
@@ -4131,8 +4131,8 @@ class OpenPoet {
         if (!targetSessionId) return;
 
         flog('QUICK-CMD', `sendQuickCommand: command="${command}", sessionId=${targetSessionId}`);
-        // Atomic replace + Enter
-        window.terminalManager.replaceTerminalLine(targetSessionId, command + '\r');
+        // Send button: text and Enter as separate writes
+        window.terminalManager.submitTerminalLine(targetSessionId, command);
     }
 
     sendMobileTerminalInput() {
