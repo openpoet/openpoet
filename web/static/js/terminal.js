@@ -1079,14 +1079,30 @@ class TerminalManager {
         }
     }
 
-    // Submit text to terminal: replace line with text, then send Enter separately.
-    // Used by send buttons to ensure Claude Code recognizes \r as a submit action.
+    // Submit text to terminal: server bulk-writes text, sleeps, then writes \r.
     submitTerminalLine(sessionId, text) {
         flog('TERM-INPUT', `submitTerminalLine: sessionId=${sessionId}, text="${text}" (len=${text.length})`);
-        this.replaceTerminalLine(sessionId, text);
-        setTimeout(() => {
-            this.sendInputToSession(sessionId, '\r');
-        }, 50);
+        const termData = this.terminals.get(sessionId);
+        if (termData && termData.ws && termData.ws.readyState === WebSocket.OPEN) {
+            termData.ws.send(JSON.stringify({ type: 'submit_line', data: text }));
+            this._trackInput(sessionId, text + '\r');
+        } else {
+            flog('TERM-INPUT', `submitTerminalLine SKIPPED: no open WS`);
+        }
+    }
+
+    // Type text char-by-char then submit: server writes each char with 1ms spacing
+    // to avoid readline paste detection, then sends \r. Use for programmatic text
+    // that wasn't user-typed (e.g. auto-generated image prompts).
+    typeAndSubmitLine(sessionId, text) {
+        flog('TERM-INPUT', `typeAndSubmitLine: sessionId=${sessionId}, text="${text}" (len=${text.length})`);
+        const termData = this.terminals.get(sessionId);
+        if (termData && termData.ws && termData.ws.readyState === WebSocket.OPEN) {
+            termData.ws.send(JSON.stringify({ type: 'type_line', data: text }));
+            this._trackInput(sessionId, text + '\r');
+        } else {
+            flog('TERM-INPUT', `typeAndSubmitLine SKIPPED: no open WS`);
+        }
     }
 
     // Clear the terminal input line (no new text). Legacy wrapper.
