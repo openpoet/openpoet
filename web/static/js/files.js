@@ -52,20 +52,25 @@ class FileBrowser {
 
         // Clipboard paste for images - use capture phase to intercept before terminal
         document.addEventListener('paste', (e) => {
-            // Don't intercept when typing in normal inputs/textareas (except mobile-terminal-input and image-paste-prompt)
-            const activeEl = document.activeElement;
-            if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
-                if (activeEl.id !== 'mobile-terminal-input' && activeEl.id !== 'image-paste-prompt') {
-                    return;
-                }
-            }
-
             // Check if we're in terminal view OR image paste modal is open
             const dialog = document.getElementById('image-paste-dialog');
             const modalOpen = dialog && !dialog.classList.contains('hidden');
             const terminalView = document.getElementById('view-terminal');
-            if (!modalOpen && (!terminalView || !terminalView.classList.contains('active'))) {
+            const inTerminalView = terminalView && terminalView.classList.contains('active');
+
+            if (!modalOpen && !inTerminalView) {
                 return;
+            }
+
+            // Don't intercept inputs/textareas that are outside the terminal view
+            // (e.g. AI assistant, project name, search fields)
+            const activeEl = document.activeElement;
+            if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
+                const insideTerminal = activeEl.closest('#view-terminal') ||
+                    activeEl.id === 'image-paste-prompt';
+                if (!insideTerminal) {
+                    return;
+                }
             }
 
             const items = e.clipboardData?.items;
@@ -316,6 +321,7 @@ class FileBrowser {
 
         const totalImages = this.pendingImages.length;
         const uploadedPaths = [];
+        let message = null;
 
         try {
             // Upload images sequentially
@@ -359,7 +365,6 @@ class FileBrowser {
             app.showToast('Success', `${uploadedPaths.length} image(s) uploaded`, 'success');
 
             // Build the formatted message for Claude Code
-            let message;
             if (uploadedPaths.length === 1) {
                 if (userPrompt) {
                     message = `Read the image file at ${uploadedPaths[0]} and then: ${userPrompt}`;
@@ -386,21 +391,13 @@ class FileBrowser {
                 })
             }).catch(err => console.warn('Image prompt hint failed:', err));
 
-            // Send to terminal using canonical sequence: clear line, text, \r after 700ms
-            // Capture target session ID NOW to prevent input going to a different session.
-            if (window.terminalManager) {
-                const targetSessionId = sessionId;
-                if (targetSessionId) {
-                    window.terminalManager.replaceTerminalLine(targetSessionId, message + '\r');
-                }
-            }
-
         } catch (error) {
             console.error('Image paste error:', error);
             app.showToast('Error', error.message, 'error');
         }
 
-        // Hide modal and clean up
+        // Hide modal and clean up first — closing the modal triggers browser
+        // focus restore which sends \x1b[I (focus-in) to the PTY.
         const dialog = document.getElementById('image-paste-dialog');
         if (dialog) dialog.classList.add('hidden');
 
@@ -414,9 +411,17 @@ class FileBrowser {
         if (progress) progress.classList.add('hidden');
         this.setModalButtonsEnabled(true);
 
-        // Refocus terminal
-        if (window.terminalManager) {
-            window.terminalManager.focus();
+        // Send text AFTER modal close so the focus-in event settles first.
+        if (message && window.terminalManager && sessionId) {
+            setTimeout(() => {
+                if (!userPrompt) {
+                    // Auto-generated text must be "typed" char-by-char to avoid
+                    // readline paste detection which turns \r into a newline.
+                    window.terminalManager.typeAndSubmitLine(sessionId, message);
+                } else {
+                    window.terminalManager.submitTerminalLine(sessionId, message);
+                }
+            }, 200);
         }
     }
 
