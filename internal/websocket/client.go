@@ -160,6 +160,42 @@ func (c *Client) ReadPump(ctx context.Context) {
 					}
 				}
 			}
+		case "submit_line":
+			// Bulk write text to PTY, sleep, then write \r separately.
+			c.mu.Lock()
+			handler := c.inputHandler
+			c.mu.Unlock()
+			if handler != nil && msg.Data != nil {
+				var input string
+				if err := json.Unmarshal(msg.Data, &input); err == nil {
+					if len(input) > 0 {
+						handler([]byte(input))
+						time.Sleep(150 * time.Millisecond)
+					}
+					handler([]byte("\r"))
+				}
+			}
+		case "type_line":
+			// Write text char-by-char (mimics typing to avoid readline paste
+			// detection), then write \r after a pause.
+			c.mu.Lock()
+			handler := c.inputHandler
+			c.mu.Unlock()
+			if handler != nil && msg.Data != nil {
+				var input string
+				if err := json.Unmarshal(msg.Data, &input); err == nil {
+					if len(input) > 0 {
+						for i := 0; i < len(input); i++ {
+							handler([]byte{input[i]})
+							if i < len(input)-1 {
+								time.Sleep(1 * time.Millisecond)
+							}
+						}
+						time.Sleep(50 * time.Millisecond)
+					}
+					handler([]byte("\r"))
+				}
+			}
 		case "resize":
 			c.mu.Lock()
 			handler := c.resizeHandler
