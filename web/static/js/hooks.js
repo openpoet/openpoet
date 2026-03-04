@@ -1315,18 +1315,26 @@ class HookManager {
         // Create a unique-ish key for this tool invocation
         const toolId = event.tool_use_id || `${Date.now()}-${toolName}`;
 
+        // Deduplicate: skip if same tool was added within the last 500ms for this session
+        // (hook events are broadcast to both events and hooks channels)
+        if (!this.toolEventsBySession[sessionId]) {
+            this.toolEventsBySession[sessionId] = [];
+        }
+        const now = Date.now();
+        const recent = this.toolEventsBySession[sessionId].find(
+            e => e.toolName === toolName && e.status === status && (now - e.timestamp) < 500
+        );
+        if (recent) return;
+
         const entry = {
             id: toolId,
             sessionId,
             toolName,
             toolInput,
             status,
-            timestamp: Date.now()
+            timestamp: now
         };
 
-        if (!this.toolEventsBySession[sessionId]) {
-            this.toolEventsBySession[sessionId] = [];
-        }
         this.toolEventsBySession[sessionId].unshift(entry);
         if (this.toolEventsBySession[sessionId].length > this.maxToolEventsPerSession) {
             this.toolEventsBySession[sessionId].pop();

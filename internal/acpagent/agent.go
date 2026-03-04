@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -138,6 +139,11 @@ type CopilotAgent struct {
 	nextID  int
 	pending map[int]chan *jsonrpcMessage
 
+	// stdinMu protects stdin writes. Permission goroutines may write concurrently
+	// with the readLoop (which dispatches incoming requests), so all stdin.Write
+	// calls must be serialized.
+	stdinMu sync.Mutex
+
 	sessionID string
 	workDir   string
 
@@ -149,6 +155,12 @@ type CopilotAgent struct {
 	// Uses single-line overwrite (\r + erase line) to avoid stacking.
 	isThinking    bool
 	thinkingLines int // total lines of thought accumulated
+
+	// Tool tracking for PreToolUse/PostToolUse hook events.
+	lastToolName string
+
+	// injectCh allows goroutines (e.g., plan approval) to inject messages into the REPL.
+	injectCh chan string
 
 	done chan struct{}
 }
@@ -211,6 +223,7 @@ func Run(args []string) {
 		hookSessID:  hookSessID,
 		autoApprove: *autoApprove,
 		pending:     make(map[int]chan *jsonrpcMessage),
+		injectCh:    make(chan string, 1),
 		done:        make(chan struct{}),
 	}
 
@@ -223,7 +236,7 @@ func Run(args []string) {
 		if agent.sessionID != "" {
 			agent.cancelSession()
 		}
-		agent.postHookEvent("mode_changed", map[string]string{"mode": "idle"})
+		agent.postHookEvent("mode_changed", map[string]interface{}{"mode": "idle"})
 		agent.stop()
 		cancel()
 		os.Exit(0)
@@ -281,22 +294,39 @@ func Run(args []string) {
 	sessCancel()
 
 	fmt.Printf("%sSession ready. Type your message and press Enter. Ctrl+C to exit.%s\r\n\r\n", colorGreen, colorReset)
-	agent.postHookEvent("mode_changed", map[string]string{"mode": "idle"})
+	agent.postHookEvent("mode_changed", map[string]interface{}{"mode": "idle"})
 
-	// REPL — custom split to handle both \r and \n as line terminators.
-	// Mobile input sends \r which the PTY may not always translate to \n.
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	scanner.Split(scanCRorLF)
+	// REPL — reads from stdin and also accepts injected messages (e.g., after plan approval).
+	// Custom split to handle both \r and \n as line terminators (mobile sends \r).
+	stdinCh := make(chan string)
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+		scanner.Split(scanCRorLF)
+		for scanner.Scan() {
+			stdinCh <- scanner.Text()
+		}
+		close(stdinCh)
+	}()
+
 	firstMessage := true
 
 	for {
 		fmt.Printf("%s❯%s ", colorGreen, colorReset)
 
-		if !scanner.Scan() {
-			break
+		var input string
+		var ok bool
+		select {
+		case input, ok = <-stdinCh:
+			if !ok {
+				goto done
+			}
+		case input = <-agent.injectCh:
+			// Injected message (e.g., plan approval follow-up)
+			fmt.Printf("%s%s%s\r\n", colorCyan, input, colorReset)
 		}
-		input := strings.TrimSpace(scanner.Text())
+
+		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
 		}
@@ -306,9 +336,12 @@ func Run(args []string) {
 			firstMessage = false
 		}
 
-		agent.postHookEvent("mode_changed", map[string]string{"mode": "executing"})
+		agent.postHookEvent("mode_changed", map[string]interface{}{"mode": "executing"})
+		agent.postHookEvent("userPromptSubmitted", map[string]interface{}{})
 
 		result, err := agent.prompt(ctx, input)
+		// Flush any trailing tool tracking (last tool before prompt completed)
+		agent.emitPostToolUse()
 		if err != nil {
 			fmt.Printf("\r\n%sError: %s%s\r\n\r\n", colorRed, err, colorReset)
 		} else if result != nil && result.StopReason == "cancelled" {
@@ -317,9 +350,10 @@ func Run(args []string) {
 			fmt.Printf("\r\n")
 		}
 
-		agent.postHookEvent("mode_changed", map[string]string{"mode": "idle"})
+		agent.postHookEvent("mode_changed", map[string]interface{}{"mode": "idle"})
 	}
 
+done:
 	fmt.Printf("\r\n%sSession ended.%s\r\n", colorGray, colorReset)
 }
 
@@ -415,8 +449,11 @@ func (a *CopilotAgent) sendRequest(ctx context.Context, method string, params in
 	}
 
 	data = append(data, '\n')
-	if _, err := a.stdin.Write(data); err != nil {
-		return nil, fmt.Errorf("write to copilot stdin: %w", err)
+	a.stdinMu.Lock()
+	_, writeErr := a.stdin.Write(data)
+	a.stdinMu.Unlock()
+	if writeErr != nil {
+		return nil, fmt.Errorf("write to copilot stdin: %w", writeErr)
 	}
 
 	select {
@@ -453,7 +490,9 @@ func (a *CopilotAgent) sendNotification(method string, params interface{}) error
 	}
 
 	data = append(data, '\n')
+	a.stdinMu.Lock()
 	_, err = a.stdin.Write(data)
+	a.stdinMu.Unlock()
 	return err
 }
 
@@ -476,7 +515,9 @@ func (a *CopilotAgent) sendResponse(id int, result interface{}) error {
 	}
 
 	data = append(data, '\n')
+	a.stdinMu.Lock()
 	_, err = a.stdin.Write(data)
+	a.stdinMu.Unlock()
 	return err
 }
 
@@ -542,51 +583,395 @@ func (a *CopilotAgent) handleIncomingRequest(msg *jsonrpcMessage) {
 			}
 			data, _ := json.Marshal(errResp)
 			data = append(data, '\n')
+			a.stdinMu.Lock()
 			a.stdin.Write(data)
+			a.stdinMu.Unlock()
 		}
 	}
 }
 
 // handlePermissionRequest responds to tool permission requests from copilot.
+// When hookURL is available, routes the request through OpenPoet's UI for
+// interactive approval. Otherwise falls back to auto-approve.
 func (a *CopilotAgent) handlePermissionRequest(msg *jsonrpcMessage) {
+	// Copilot ACP permission format:
+	// { "sessionId", "toolCall": { "toolCallId", "title", "kind", "status", "rawInput": {...} }, "options": [...] }
 	var params struct {
-		SessionID   string `json:"sessionId"`
-		Resource    string `json:"resource"`
-		Action      string `json:"action"`
-		Description string `json:"description"`
+		SessionID string `json:"sessionId"`
+		ToolCall  struct {
+			ToolCallID string          `json:"toolCallId"`
+			Title      string          `json:"title"`
+			Kind       string          `json:"kind"`
+			Status     string          `json:"status"`
+			RawInput   json.RawMessage `json:"rawInput"`
+		} `json:"toolCall"`
+		Options []struct {
+			OptionID    string `json:"optionId"`
+			Label       string `json:"label"`
+			Description string `json:"description"`
+		} `json:"options"`
 	}
 	json.Unmarshal(msg.Params, &params)
 
-	granted := a.autoApprove
-	if granted {
-		fmt.Printf("%s%s(auto-approved: %s — %s)%s\r\n", colorDim, colorGray, params.Action, params.Description, colorReset)
-	} else {
-		// Display permission request in terminal
-		fmt.Printf("\r\n%s%s🔒 Permission requested:%s\r\n", colorBold, colorYellow, colorReset)
-		if params.Action != "" {
-			fmt.Printf("%s   Action:      %s%s\r\n", colorYellow, params.Action, colorReset)
+	// Extract a display-friendly tool name from the toolCall
+	toolName := params.ToolCall.Kind // e.g., "execute", "edit", "read"
+	if toolName == "" {
+		toolName = params.ToolCall.ToolCallID // fallback
+	}
+	title := params.ToolCall.Title // e.g., "Write hello to /tmp/test.txt"
+
+	// Build the allow/deny response payloads using optionId from the options array.
+	// Default to "allow_once" / "reject_once" if no options provided.
+	allowOptionID := "allow_once"
+	denyOptionID := "reject_once"
+	for _, opt := range params.Options {
+		switch opt.OptionID {
+		case "allow_once", "allow":
+			allowOptionID = opt.OptionID
+		case "reject_once", "deny", "deny_once":
+			denyOptionID = opt.OptionID
 		}
-		if params.Resource != "" {
-			fmt.Printf("%s   Resource:    %s%s\r\n", colorYellow, params.Resource, colorReset)
-		}
-		if params.Description != "" {
-			fmt.Printf("%s   Description: %s%s\r\n", colorYellow, params.Description, colorReset)
-		}
-		// Auto-approve since we can't easily read stdin during a prompt
-		// (stdin is being read by the REPL scanner)
-		granted = true
-		fmt.Printf("%s   (granted — use --auto-approve to suppress)%s\r\n\r\n", colorGray, colorReset)
 	}
 
-	a.postHookEvent("permission_request", map[string]string{
-		"action":      params.Action,
-		"resource":    params.Resource,
-		"description": params.Description,
-		"granted":     fmt.Sprintf("%t", granted),
+	// permissionOutcome builds the ACP permission response.
+	// ACP format: {outcome: {outcome: "selected", optionId: "<id>"}} for grant
+	//             {outcome: {outcome: "cancelled"}} for cancel/deny
+	permissionOutcome := func(optID string, granted bool) interface{} {
+		if !granted {
+			return map[string]interface{}{
+				"outcome": map[string]string{"outcome": "cancelled"},
+			}
+		}
+		return map[string]interface{}{
+			"outcome": map[string]interface{}{
+				"outcome":  "selected",
+				"optionId": optID,
+			},
+		}
+	}
+
+	// Auto-approve mode: approve silently
+	if a.autoApprove {
+		fmt.Printf("%s%s(auto-approved: %s — %s)%s\r\n", colorDim, colorGray, toolName, title, colorReset)
+		if msg.ID != nil {
+			a.sendResponse(*msg.ID, permissionOutcome(allowOptionID, true))
+		}
+		return
+	}
+
+	// No hook URL: fall back to local auto-approve (standalone mode)
+	if a.hookURL == "" || a.hookSessID == "" {
+		fmt.Printf("\r\n%s%s🔒 Permission requested:%s\r\n", colorBold, colorYellow, colorReset)
+		if title != "" {
+			fmt.Printf("%s   %s%s\r\n", colorYellow, title, colorReset)
+		}
+		if toolName != "" {
+			fmt.Printf("%s   Kind: %s%s\r\n", colorGray, toolName, colorReset)
+		}
+		fmt.Printf("%s   (granted — no hook URL, use --auto-approve to suppress)%s\r\n\r\n", colorGray, colorReset)
+		if msg.ID != nil {
+			a.sendResponse(*msg.ID, permissionOutcome(allowOptionID, true))
+		}
+		return
+	}
+
+	// Route through OpenPoet's hook system for UI-based approval.
+	// Run in a goroutine so readLoop can continue processing session/update notifications.
+	msgID := 0
+	if msg.ID != nil {
+		msgID = *msg.ID
+	}
+	go func() {
+		// Detect Copilot plan file writes and route through OpenPoet's plan approval.
+		// Copilot writes plans to ~/.copilot/session-state/{session-id}/plan.md
+		// using a regular "edit" tool. We intercept this, auto-approve the write,
+		// read the file content, and route it through OpenPoet's ExitPlanMode pipeline.
+		if toolName == "edit" {
+			planPath := detectPlanFilePath(params.ToolCall.RawInput, title)
+			if planPath != "" {
+				log.Printf("[acp] plan file detected: %s", planPath)
+				fmt.Printf("\r\n%s%s   📋 Plan file detected — routing to plan approval%s\r\n", colorBold, colorCyan, colorReset)
+
+				// Auto-approve the edit so Copilot writes the file
+				if err := a.sendResponse(msgID, permissionOutcome(allowOptionID, true)); err != nil {
+					log.Printf("[acp] plan auto-approve error: %v", err)
+				}
+				a.postHookEvent("PostToolUse", map[string]interface{}{"tool_name": toolName})
+
+				// Extract plan content: prefer reading from disk (after write completes),
+				// fall back to extracting from the diff in rawInput.
+				time.Sleep(500 * time.Millisecond)
+				planContent, err := os.ReadFile(planPath)
+				if err != nil {
+					log.Printf("[acp] failed to read plan file, extracting from diff: %v", err)
+					planContent = []byte(extractContentFromDiff(params.ToolCall.RawInput))
+				}
+				if len(planContent) == 0 {
+					log.Printf("[acp] plan file empty or unreadable, skipping plan approval")
+					return
+				}
+
+				// Route through OpenPoet's plan approval pipeline
+				a.postPlanApproval(string(planContent))
+				return
+			}
+		}
+
+		fmt.Printf("\r\n%s%s🔒 Permission requested: %s%s\r\n", colorBold, colorYellow, title, colorReset)
+		if toolName != "" {
+			fmt.Printf("%s   Kind: %s%s\r\n", colorGray, toolName, colorReset)
+		}
+		fmt.Printf("%s   (waiting for approval in OpenPoet UI...)%s\r\n", colorGray, colorReset)
+
+		// Emit PreToolUse so the tool activity panel shows the pending tool
+		toolInput := map[string]interface{}{}
+		if len(params.ToolCall.RawInput) > 0 {
+			json.Unmarshal(params.ToolCall.RawInput, &toolInput)
+		}
+		if title != "" {
+			toolInput["description"] = title
+		}
+		a.postHookEvent("PreToolUse", map[string]interface{}{
+			"tool_name":  toolName,
+			"tool_input": toolInput,
+		})
+
+		granted := a.postHookPermission(toolName, title, params.ToolCall.RawInput)
+
+		if granted {
+			fmt.Printf("%s   ✓ approved%s\r\n", colorGreen, colorReset)
+			a.postHookEvent("PostToolUse", map[string]interface{}{
+				"tool_name": toolName,
+			})
+		} else {
+			fmt.Printf("%s   ✗ denied%s\r\n", colorRed, colorReset)
+			a.postHookEvent("PostToolUseFailure", map[string]interface{}{
+				"tool_name": toolName,
+			})
+		}
+
+		optID := allowOptionID
+		if !granted {
+			optID = denyOptionID
+		}
+		if err := a.sendResponse(msgID, permissionOutcome(optID, granted)); err != nil {
+			log.Printf("[acp] permission sendResponse error: %v", err)
+		}
+	}()
+}
+
+// postHookPermission sends a blocking permission request to OpenPoet's hook endpoint.
+// Maps ACP permission fields to the hook format that OpenPoet's UI understands.
+// Returns true if granted, false if denied or on error.
+func (a *CopilotAgent) postHookPermission(toolName, title string, rawInput json.RawMessage) bool {
+	// Build tool_input: merge rawInput (command, path, etc.) with title as description
+	toolInput := map[string]interface{}{}
+	if len(rawInput) > 0 {
+		json.Unmarshal(rawInput, &toolInput)
+	}
+	if title != "" {
+		toolInput["description"] = title
+	}
+
+	payload := map[string]interface{}{
+		"hook_event_name": "PreToolUse",
+		"tool_name":       toolName,
+		"tool_input":      toolInput,
+		"session_id":      a.hookSessID,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[acp] permission marshal error: %v", err)
+		return true // fail-open
+	}
+
+	url := strings.TrimRight(a.hookURL, "/") + "/api/hooks/permission"
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[acp] permission request error: %v", err)
+		return true
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Session-ID", a.hookSessID)
+	req.Header.Set("X-Backend", "acp")
+
+	// Use a long timeout — OpenPoet blocks up to 590s waiting for user response
+	client := &http.Client{Timeout: 600 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[acp] permission request failed: %v", err)
+		return true // fail-open on network error
+	}
+	defer resp.Body.Close()
+
+	// 204 No Content = passthrough (user dismissed dialog), treat as allow
+	if resp.StatusCode == http.StatusNoContent {
+		return true
+	}
+
+	// Parse OpenPoet's response envelope
+	var output struct {
+		HookSpecificOutput struct {
+			Decision struct {
+				Behavior string `json:"behavior"`
+			} `json:"decision"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&output); err != nil {
+		log.Printf("[acp] permission response parse error: %v", err)
+		return true // fail-open
+	}
+
+	return output.HookSpecificOutput.Decision.Behavior == "allow"
+}
+
+// planPathRe matches absolute paths containing .copilot/session-state/*/plan.md
+var planPathRe = regexp.MustCompile(`(/[^\s"']+/\.copilot/session-state/[^/]+/plan\.md)`)
+
+// detectPlanFilePath checks if a Copilot edit permission targets a plan.md file.
+// It tries multiple sources: rawInput fields (path, file, file_path, filename) and title text.
+func detectPlanFilePath(rawInput json.RawMessage, title string) string {
+	// Try common field names in rawInput
+	if len(rawInput) > 0 {
+		var fields map[string]interface{}
+		if json.Unmarshal(rawInput, &fields) == nil {
+			for _, key := range []string{"path", "file", "fileName", "file_path", "filename", "filePath"} {
+				if v, ok := fields[key]; ok {
+					if s, ok := v.(string); ok && isPlanPath(s) {
+						return s
+					}
+				}
+			}
+		}
+	}
+	// Fall back to extracting path from the title string
+	if m := planPathRe.FindString(title); m != "" {
+		return m
+	}
+	// Also check rawInput as a string dump for the path pattern
+	if len(rawInput) > 0 {
+		if m := planPathRe.FindString(string(rawInput)); m != "" {
+			return m
+		}
+	}
+	return ""
+}
+
+// extractContentFromDiff extracts file content from a Copilot edit diff.
+// The diff field contains unified diff format with +lines being the new content.
+func extractContentFromDiff(rawInput json.RawMessage) string {
+	var fields struct {
+		Diff string `json:"diff"`
+	}
+	if json.Unmarshal(rawInput, &fields) != nil || fields.Diff == "" {
+		return ""
+	}
+	var lines []string
+	inContent := false
+	for _, line := range strings.Split(fields.Diff, "\n") {
+		if strings.HasPrefix(line, "@@") {
+			inContent = true
+			continue
+		}
+		if inContent && strings.HasPrefix(line, "+") {
+			lines = append(lines, line[1:])
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func isPlanPath(p string) bool {
+	return strings.HasSuffix(p, "/plan.md") && strings.Contains(p, ".copilot/session-state/")
+}
+
+// postPlanApproval sends a synthetic ExitPlanMode permission request to OpenPoet's
+// hook endpoint. This routes Copilot's plan.md file writes through OpenPoet's plan
+// approval UI (dialog, DB persistence, task history).
+func (a *CopilotAgent) postPlanApproval(planContent string) {
+	// Emit plan_captured event first so the hook system has the plan content
+	a.postHookEvent("plan_captured", map[string]interface{}{
+		"plan": planContent,
 	})
 
-	if msg.ID != nil {
-		a.sendResponse(*msg.ID, map[string]bool{"granted": granted})
+	toolInput := map[string]interface{}{
+		"plan": planContent,
+	}
+	payload := map[string]interface{}{
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "ExitPlanMode",
+		"tool_input":      toolInput,
+		"session_id":      a.hookSessID,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[acp] plan approval marshal error: %v", err)
+		return
+	}
+
+	url := strings.TrimRight(a.hookURL, "/") + "/api/hooks/permission"
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[acp] plan approval request error: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Session-ID", a.hookSessID)
+	req.Header.Set("X-Backend", "acp")
+
+	fmt.Printf("%s   (waiting for plan approval in OpenPoet UI...)%s\r\n", colorGray, colorReset)
+
+	client := &http.Client{Timeout: 600 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[acp] plan approval request failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// 204 No Content = dismissed, treat as approved
+	if resp.StatusCode == http.StatusNoContent {
+		fmt.Printf("%s   ✓ plan approved%s\r\n", colorGreen, colorReset)
+		return
+	}
+
+	var output struct {
+		HookSpecificOutput struct {
+			Decision struct {
+				Behavior string `json:"behavior"`
+				Message  string `json:"message"`
+			} `json:"decision"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&output); err != nil {
+		log.Printf("[acp] plan approval response parse error: %v", err)
+		return
+	}
+
+	if output.HookSpecificOutput.Decision.Behavior == "allow" {
+		fmt.Printf("\r\n%s   ✓ plan approved — sending implementation prompt%s\r\n", colorGreen, colorReset)
+		// Write follow-up prompt to PTY stdin so the REPL picks it up
+		a.writePTYInput("Plan approved. Proceed with the implementation.\n")
+	} else {
+		feedback := output.HookSpecificOutput.Decision.Message
+		if feedback != "" {
+			fmt.Printf("\r\n%s   ✗ plan denied — feedback: %s%s\r\n", colorRed, feedback, colorReset)
+			a.writePTYInput("Plan denied. User feedback: " + feedback + "\n")
+		} else {
+			fmt.Printf("\r\n%s   ✗ plan denied%s\r\n", colorRed, colorReset)
+			a.writePTYInput("Plan denied. Please revise the plan based on user feedback.\n")
+		}
+	}
+}
+
+// writePTYInput writes text to the PTY's stdin pipe (os.Stdin of the acp-agent process).
+// This simulates user input so the REPL loop picks it up as the next message.
+func (a *CopilotAgent) writePTYInput(text string) {
+	// The acp-agent runs inside a PTY. Writing to /dev/stdin or using the PTY master
+	// would be complex. Instead, we use a channel to inject messages into the REPL.
+	if a.injectCh != nil {
+		a.injectCh <- text
 	}
 }
 
@@ -609,6 +994,8 @@ func (a *CopilotAgent) handleNotification(msg *jsonrpcMessage) {
 func (a *CopilotAgent) handleSessionUpdate(params *sessionUpdateParams) {
 	switch params.Update.SessionUpdate {
 	case "agent_message_chunk":
+		// If we were tracking a tool, it's done now
+		a.emitPostToolUse()
 		a.collapseThinking()
 		a.renderContentChunks(params.Update.Content)
 
@@ -619,6 +1006,8 @@ func (a *CopilotAgent) handleSessionUpdate(params *sessionUpdateParams) {
 		}
 
 	case "tool_call":
+		// If a previous tool was tracked, emit PostToolUse for it
+		a.emitPostToolUse()
 		a.collapseThinking()
 		name := ""
 		if params.Update.Function != nil {
@@ -626,6 +1015,11 @@ func (a *CopilotAgent) handleSessionUpdate(params *sessionUpdateParams) {
 		}
 		if name != "" {
 			fmt.Printf("\r\n%s%s⚙ Tool: %s%s\r\n", colorDim, colorBlue, name, colorReset)
+			// Post PreToolUse hook event
+			a.lastToolName = name
+			a.postHookEvent("PreToolUse", map[string]interface{}{
+				"tool_name": name,
+			})
 		}
 
 	case "tool_call_update":
@@ -634,6 +1028,7 @@ func (a *CopilotAgent) handleSessionUpdate(params *sessionUpdateParams) {
 		}
 
 	case "plan":
+		a.emitPostToolUse()
 		a.collapseThinking()
 		if len(params.Update.Steps) > 0 {
 			fmt.Printf("\r\n%s%s📋 Plan:%s\r\n", colorBold, colorCyan, colorReset)
@@ -641,15 +1036,28 @@ func (a *CopilotAgent) handleSessionUpdate(params *sessionUpdateParams) {
 				fmt.Printf("%s  %d. %s%s\r\n", colorCyan, i+1, step, colorReset)
 			}
 			fmt.Printf("\r\n")
-			a.postHookEvent("plan_captured", map[string]string{
+			a.postHookEvent("plan_captured", map[string]interface{}{
 				"plan": strings.Join(params.Update.Steps, "\n"),
 			})
 		}
 
 	default:
+		a.emitPostToolUse()
 		a.collapseThinking()
 		a.renderContentChunks(params.Update.Content)
 	}
+}
+
+// emitPostToolUse posts a PostToolUse hook event if a tool was being tracked.
+func (a *CopilotAgent) emitPostToolUse() {
+	if a.lastToolName == "" {
+		return
+	}
+	name := a.lastToolName
+	a.lastToolName = ""
+	a.postHookEvent("PostToolUse", map[string]interface{}{
+		"tool_name": name,
+	})
 }
 
 // appendThinking overwrites a single line with the latest thinking snippet.
@@ -920,7 +1328,7 @@ func (a *CopilotAgent) cancelSession() {
 }
 
 // postHookEvent sends an event to the OpenPoet hook endpoint.
-func (a *CopilotAgent) postHookEvent(eventName string, data map[string]string) {
+func (a *CopilotAgent) postHookEvent(eventName string, data map[string]interface{}) {
 	if a.hookURL == "" || a.hookSessID == "" {
 		return
 	}

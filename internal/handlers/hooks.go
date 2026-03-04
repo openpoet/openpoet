@@ -220,8 +220,9 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Detect backend from header
-	isCopilot := r.Header.Get("X-Backend") == "copilot"
+	// Detect backend from header (both "copilot" and "acp" use non-Claude hook format)
+	backend := r.Header.Get("X-Backend")
+	isCopilot := backend == "copilot" || backend == "acp"
 
 	// Parse the hook event JSON
 	var hookEvent map[string]interface{}
@@ -658,8 +659,8 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 
 	eventName, _ := hookEvent["hook_event_name"].(string)
 
-	// Normalize Copilot event names to Claude Code equivalents
-	if r.Header.Get("X-Backend") == "copilot" {
+	// Normalize Copilot/ACP event names to Claude Code equivalents
+	if r.Header.Get("X-Backend") == "copilot" || r.Header.Get("X-Backend") == "acp" {
 		eventName = normalizeCopilotEventName(eventName)
 		hookEvent["hook_event_name"] = eventName
 	}
@@ -723,6 +724,16 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 				h.cancelIdleTimer(sessionID)
 				h.setSessionMode(sessionID, "idle", "event=Notification")
 			}
+		}
+	case "mode_changed":
+		// Direct mode update from ACP agent (idle/executing)
+		if mode, ok := hookEvent["mode"].(string); ok {
+			if mode == "idle" {
+				h.cancelIdleTimer(sessionID)
+			} else {
+				h.resetIdleTimer(sessionID)
+			}
+			h.setSessionMode(sessionID, mode, "event=mode_changed")
 		}
 	default:
 		// Use permission_mode from the event + reset inactivity timer

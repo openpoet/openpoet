@@ -18,7 +18,7 @@ func (b *ACPBackend) BinaryName() string         { return "" }
 func (b *ACPBackend) SupportsResume() bool       { return true }
 func (b *ACPBackend) SupportsOTEL() bool         { return false }
 func (b *ACPBackend) SupportsPlanCapture() bool  { return true }
-func (b *ACPBackend) SupportsAskUser() bool      { return true }
+func (b *ACPBackend) SupportsAskUser() bool      { return false }
 func (b *ACPBackend) PermissionSkipFlag() string { return "--auto-approve" }
 func (b *ACPBackend) HookFormat() string         { return "acp" }
 
