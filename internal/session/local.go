@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,10 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
-
-	"github.com/creack/pty"
 )
 
 type LocalRunner struct {
@@ -26,7 +22,7 @@ type LocalRunner struct {
 
 	mu     sync.Mutex
 	cmd    *exec.Cmd
-	ptmx   *os.File
+	ptmx   ptyHandle
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -121,8 +117,8 @@ func (r *LocalRunner) Start(ctx context.Context) error {
 		}
 	}
 
-	// Start with PTY
-	ptmx, err := pty.Start(r.cmd)
+	// Start with PTY (platform-specific: Unix pty or Windows ConPTY+WSL)
+	ptmx, err := startPTY(r.cmd, 24, 80)
 	if err != nil {
 		errMsg := fmt.Sprintf("\r\n\x1b[31mError starting %s: %v\x1b[0m\r\n", binaryName, err)
 		if r.outputHandler != nil {
@@ -131,12 +127,6 @@ func (r *LocalRunner) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start PTY: %w", err)
 	}
 	r.ptmx = ptmx
-
-	// Set initial terminal size
-	pty.Setsize(ptmx, &pty.Winsize{
-		Rows: 24,
-		Cols: 80,
-	})
 
 	// Start reading output
 	go r.readOutput()
@@ -158,8 +148,8 @@ func (r *LocalRunner) readOutput() {
 			}
 		}
 		if err != nil {
-			// EIO is the normal signal when the PTY child process exits — suppress it.
-			if err != io.EOF && !errors.Is(err, syscall.EIO) && r.outputHandler != nil {
+			// Normal PTY exit errors are suppressed (EIO on Unix, broken pipe on Windows).
+			if err != io.EOF && !isNormalExitError(err) && r.outputHandler != nil {
 				errMsg := fmt.Sprintf("\r\n\x1b[31mSession read error: %v\x1b[0m\r\n", err)
 				r.outputHandler([]byte(errMsg))
 			}
@@ -177,22 +167,22 @@ func (r *LocalRunner) Stop() error {
 	}
 
 	if r.cmd != nil && r.cmd.Process != nil {
-		// Send SIGTERM first for graceful shutdown
-		r.cmd.Process.Signal(syscall.SIGTERM)
+		// Send graceful termination signal first
+		sendTermSignal(r.cmd.Process)
 
 		// Wait for process exit, then close the PTY.
-		// Closing the PTY master before the process exits causes spurious EIO
+		// Closing the PTY master before the process exits causes spurious
 		// errors in the child (e.g. copilot's "Error: read EIO").
 		go func() {
 			select {
 			case <-r.done:
 				// Process exited gracefully
 			case <-time.After(5 * time.Second):
-				// Force kill — process didn't respond to SIGTERM
+				// Force kill — process didn't respond to term signal
 				r.mu.Lock()
 				if r.cmd != nil && r.cmd.Process != nil {
-					log.Printf("[local] Process %d did not exit after SIGTERM, sending SIGKILL", r.cmd.Process.Pid)
-					r.cmd.Process.Signal(syscall.SIGKILL)
+					log.Printf("[local] Process %d did not exit after term signal, sending kill", r.cmd.Process.Pid)
+					sendKillSignal(r.cmd.Process)
 				}
 				r.mu.Unlock()
 				// Wait for the kill to take effect
@@ -233,10 +223,7 @@ func (r *LocalRunner) Resize(rows, cols uint16) error {
 		return fmt.Errorf("session not started")
 	}
 
-	return pty.Setsize(ptmx, &pty.Winsize{
-		Rows: rows,
-		Cols: cols,
-	})
+	return ptmx.Resize(rows, cols)
 }
 
 func (r *LocalRunner) Wait() error {

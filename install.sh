@@ -251,13 +251,6 @@ main() {
             ;;
     esac
 
-    # Check for Node.js
-    if ! command -v node >/dev/null 2>&1; then
-        warn ""
-        warn "Node.js not found. The Claude Agent SDK provider requires Node.js 18+."
-        warn "Install from: https://nodejs.org"
-    fi
-
     info ""
     info "Run 'openpoet' to start. Web UI: http://localhost:8080"
 }
