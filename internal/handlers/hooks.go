@@ -95,6 +95,22 @@ type HookHandler struct {
 	modeIdleTimers    map[string]*time.Timer            // sessionID -> inactivity timer that sets mode to idle
 	imagePromptMeta   map[string]string                 // sessionID -> user's text prompt when images were included
 	evalTimers        map[string]*time.Timer            // sessionID -> debounced evaluation timer
+	acpUsage          map[string]*ACPUsageInfo          // sessionID -> ACP usage tracking (model, premium requests)
+}
+
+// ACPUsageInfo holds Copilot ACP usage tracking data for a session.
+type ACPUsageInfo struct {
+	CurrentModel    string              `json:"current_model"`
+	ModelMultiplier string              `json:"model_multiplier"`
+	PremiumRequests int                 `json:"premium_requests"`
+	AvailableModels []ACPAvailableModel `json:"available_models,omitempty"`
+}
+
+// ACPAvailableModel describes a model available in the Copilot ACP session.
+type ACPAvailableModel struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Multiplier string `json:"multiplier"`
 }
 
 // NewHookHandler creates a new hook handler
@@ -115,6 +131,7 @@ func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, ses
 		modeIdleTimers:    make(map[string]*time.Timer),
 		imagePromptMeta:   make(map[string]string),
 		evalTimers:        make(map[string]*time.Timer),
+		acpUsage:          make(map[string]*ACPUsageInfo),
 	}
 }
 
@@ -725,6 +742,9 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 				h.setSessionMode(sessionID, "idle", "event=Notification")
 			}
 		}
+	case "acp_session_info", "acp_usage_update":
+		// Track ACP usage info (model, premium requests)
+		h.updateACPUsage(sessionID, hookEvent)
 	case "mode_changed":
 		// Direct mode update from ACP agent (idle/executing)
 		if mode, ok := hookEvent["mode"].(string); ok {
@@ -882,6 +902,59 @@ func (h *HookHandler) triggerSessionEvaluation(sessionID, trigger string) (bool,
 	return true, resultCh
 }
 
+// updateACPUsage extracts ACP model/usage data from a hook event and stores it.
+func (h *HookHandler) updateACPUsage(sessionID string, hookEvent map[string]interface{}) {
+	h.mu.Lock()
+	info := h.acpUsage[sessionID]
+	if info == nil {
+		info = &ACPUsageInfo{}
+		h.acpUsage[sessionID] = info
+	}
+
+	if model, ok := hookEvent["current_model"].(string); ok && model != "" {
+		info.CurrentModel = model
+	}
+	if mult, ok := hookEvent["model_multiplier"].(string); ok && mult != "" {
+		info.ModelMultiplier = mult
+	}
+	if pr, ok := hookEvent["premium_requests"].(float64); ok {
+		info.PremiumRequests = int(pr)
+	}
+	if models, ok := hookEvent["available_models"].([]interface{}); ok && len(models) > 0 {
+		info.AvailableModels = make([]ACPAvailableModel, 0, len(models))
+		for _, m := range models {
+			if mm, ok := m.(map[string]interface{}); ok {
+				am := ACPAvailableModel{}
+				if id, ok := mm["id"].(string); ok {
+					am.ID = id
+				}
+				if name, ok := mm["name"].(string); ok {
+					am.Name = name
+				}
+				if mult, ok := mm["multiplier"].(string); ok {
+					am.Multiplier = mult
+				}
+				info.AvailableModels = append(info.AvailableModels, am)
+			}
+		}
+	}
+	h.mu.Unlock()
+
+	// Broadcast the updated usage info to the frontend
+	h.hub.BroadcastStateUpdate("session", map[string]interface{}{
+		"action":     "acp_usage",
+		"session_id": sessionID,
+		"acp_usage":  info,
+	})
+}
+
+// GetACPUsage returns the current ACP usage info for a session.
+func (h *HookHandler) GetACPUsage(sessionID string) *ACPUsageInfo {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.acpUsage[sessionID]
+}
+
 // ClearSession removes all state for a session (call when session ends)
 func (h *HookHandler) ClearSession(sessionID string) {
 	h.mu.Lock()
@@ -894,6 +967,7 @@ func (h *HookHandler) ClearSession(sessionID string) {
 	delete(h.lastActivityTouch, sessionID)
 	delete(h.sessionMode, sessionID)
 	delete(h.imagePromptMeta, sessionID)
+	delete(h.acpUsage, sessionID)
 	if t, ok := h.evalTimers[sessionID]; ok {
 		t.Stop()
 		delete(h.evalTimers, sessionID)

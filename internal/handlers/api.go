@@ -1148,15 +1148,16 @@ func (a *API) ListSessions(w http.ResponseWriter, r *http.Request) {
 // ActiveSessionDetail is the enriched response for a single active session.
 type ActiveSessionDetail struct {
 	database.Session
-	ProjectName          string  `json:"project_name"`
-	ProjectType          string  `json:"project_type"`
-	ProjectSSHHost       string  `json:"project_ssh_host,omitempty"`
-	TaskTitle            string  `json:"task_title,omitempty"`
-	TotalInputTokens     int64   `json:"total_input_tokens"`
-	TotalOutputTokens    int64   `json:"total_output_tokens"`
-	TotalCost            float64 `json:"total_cost"`
-	HasPendingPermission bool    `json:"has_pending_permission"`
-	ExecutionMode        string  `json:"execution_mode"`
+	ProjectName          string        `json:"project_name"`
+	ProjectType          string        `json:"project_type"`
+	ProjectSSHHost       string        `json:"project_ssh_host,omitempty"`
+	TaskTitle            string        `json:"task_title,omitempty"`
+	TotalInputTokens     int64         `json:"total_input_tokens"`
+	TotalOutputTokens    int64         `json:"total_output_tokens"`
+	TotalCost            float64       `json:"total_cost"`
+	HasPendingPermission bool          `json:"has_pending_permission"`
+	ExecutionMode        string        `json:"execution_mode"`
+	ACPUsage             *ACPUsageInfo `json:"acp_usage,omitempty"`
 }
 
 func (a *API) GetActiveSessionDetails(w http.ResponseWriter, r *http.Request) {
@@ -1211,6 +1212,7 @@ func (a *API) GetActiveSessionDetails(w http.ResponseWriter, r *http.Request) {
 		if a.hookHandler != nil {
 			d.HasPendingPermission = a.hookHandler.HasPendingPermission(s.ID)
 			d.ExecutionMode = a.hookHandler.GetSessionMode(s.ID)
+			d.ACPUsage = a.hookHandler.GetACPUsage(s.ID)
 		}
 
 		details = append(details, d)

@@ -535,6 +535,28 @@ class OpenPoet {
                 break;
             case 'session':
                 // Handle real-time mode changes without full re-fetch
+                if (data.data?.action === 'acp_usage' && data.data?.session_id && data.data?.acp_usage) {
+                    // Update ACP usage in cached session data and re-render card stats
+                    const sid = data.data.session_id;
+                    const sess = this.sessions.find(s => s.id === sid);
+                    if (sess) sess.acp_usage = data.data.acp_usage;
+                    // Update the stat element in the card if visible
+                    const card = document.querySelector(`.session-card[onclick*="${sid}"]`);
+                    if (card) {
+                        const statsDiv = card.querySelector('.session-card-stats');
+                        if (statsDiv && sess) {
+                            // Replace ACP stat or append
+                            const existing = statsDiv.querySelector('.session-card-stat[title*="Premium"]');
+                            const newHtml = this.renderACPUsageStat(sess);
+                            if (existing) {
+                                existing.outerHTML = newHtml;
+                            } else if (newHtml) {
+                                statsDiv.insertAdjacentHTML('beforeend', newHtml);
+                            }
+                        }
+                    }
+                    break;
+                }
                 if (data.data?.action === 'mode_changed' && data.data?.session_id && data.data?.mode) {
                     const badge = document.querySelector(`[data-session-mode="${data.data.session_id}"]`);
                     if (badge) {
@@ -2861,6 +2883,7 @@ class OpenPoet {
                             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
                             ${tokenLabel}${costLabel ? ` (${costLabel})` : ''}
                         </span>` : ''}
+                        ${isACP ? this.renderACPUsageStat(session) : ''}
                         ${lastActivity ? `<span class="session-card-stat" title="Last activity">${lastActivity}</span>` : ''}
                     </div>
                 </div>
@@ -5725,6 +5748,19 @@ class OpenPoet {
         if (diffMin < 60) return `${diffMin}m ago`;
         const hours = Math.floor(diffMin / 60);
         return `${hours}h ago`;
+    }
+
+    renderACPUsageStat(session) {
+        const u = session.acp_usage;
+        if (!u) return '';
+        const model = u.current_model || 'unknown';
+        const mult = u.model_multiplier || '?';
+        const reqs = u.premium_requests || 0;
+        const shortModel = model.replace('claude-', '').replace('gpt-', '');
+        return `<span class="session-card-stat" title="Model: ${model} (${mult} premium)\nPremium requests: ${reqs}">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+            ${reqs} req${reqs !== 1 ? 's' : ''} · ${shortModel} (${mult})
+        </span>`;
     }
 
     formatTokens(count) {

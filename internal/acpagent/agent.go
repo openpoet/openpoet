@@ -77,6 +77,20 @@ type sessionNewParams struct {
 
 type sessionNewResult struct {
 	SessionID string `json:"sessionId"`
+	Models    struct {
+		AvailableModels []acpModel `json:"availableModels"`
+		CurrentModelID  string     `json:"currentModelId"`
+	} `json:"models"`
+}
+
+type acpModel struct {
+	ModelID     string `json:"modelId"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Meta        struct {
+		CopilotUsage      string `json:"copilotUsage"`
+		CopilotEnablement string `json:"copilotEnablement"`
+	} `json:"_meta"`
 }
 
 type sessionPromptParams struct {
@@ -109,6 +123,11 @@ type sessionUpdate struct {
 	Steps []string `json:"steps,omitempty"`
 	// For tool_call_update
 	Output string `json:"output,omitempty"`
+	// For usage_update
+	Size int             `json:"size,omitempty"`
+	Used int             `json:"used,omitempty"`
+	Cost json.RawMessage `json:"cost,omitempty"`
+	Meta json.RawMessage `json:"_meta,omitempty"`
 }
 
 type toolFunction struct {
@@ -161,6 +180,11 @@ type CopilotAgent struct {
 
 	// injectCh allows goroutines (e.g., plan approval) to inject messages into the REPL.
 	injectCh chan string
+
+	// ACP usage tracking
+	currentModel    string // e.g. "claude-sonnet-4.5"
+	modelMultiplier string // e.g. "1x"
+	premiumRequests int    // number of prompt turns completed
 
 	done chan struct{}
 }
@@ -573,7 +597,7 @@ func (a *CopilotAgent) handleIncomingRequest(msg *jsonrpcMessage) {
 	case "session/request_permission":
 		a.handlePermissionRequest(msg)
 	default:
-		log.Printf("[acp] unknown incoming request: %s", msg.Method)
+		log.Printf("[acp] unknown incoming request: method=%s params=%s", msg.Method, string(msg.Params))
 		// Respond with method not found
 		if msg.ID != nil {
 			errResp := jsonrpcMessage{
@@ -986,7 +1010,8 @@ func (a *CopilotAgent) handleNotification(msg *jsonrpcMessage) {
 		}
 		a.handleSessionUpdate(&params)
 	default:
-		log.Printf("[acp] unknown notification: %s", msg.Method)
+		// Log unknown notifications with full params to discover undocumented events
+		log.Printf("[acp] notification: method=%s params=%s", msg.Method, string(msg.Params))
 	}
 }
 
@@ -1041,11 +1066,48 @@ func (a *CopilotAgent) handleSessionUpdate(params *sessionUpdateParams) {
 			})
 		}
 
+	case "usage_update":
+		// Context window usage + optional cost/quota data from Copilot
+		log.Printf("[acp] usage_update: size=%d used=%d cost=%s meta=%s",
+			params.Update.Size, params.Update.Used,
+			string(params.Update.Cost), string(params.Update.Meta))
+		a.handleUsageUpdate(params)
+
 	default:
 		a.emitPostToolUse()
 		a.collapseThinking()
 		a.renderContentChunks(params.Update.Content)
 	}
+}
+
+// handleUsageUpdate processes context window and quota usage from Copilot.
+func (a *CopilotAgent) handleUsageUpdate(params *sessionUpdateParams) {
+	data := map[string]interface{}{
+		"context_size": params.Update.Size,
+		"context_used": params.Update.Used,
+	}
+
+	// Parse cost if present: {amount: number, currency: string}
+	if len(params.Update.Cost) > 0 && string(params.Update.Cost) != "null" {
+		var cost struct {
+			Amount   float64 `json:"amount"`
+			Currency string  `json:"currency"`
+		}
+		if json.Unmarshal(params.Update.Cost, &cost) == nil {
+			data["cost_amount"] = cost.Amount
+			data["cost_currency"] = cost.Currency
+		}
+	}
+
+	// Parse _meta if present — may contain quota snapshots
+	if len(params.Update.Meta) > 0 && string(params.Update.Meta) != "null" {
+		var meta map[string]interface{}
+		if json.Unmarshal(params.Update.Meta, &meta) == nil {
+			data["_meta"] = meta
+		}
+	}
+
+	a.postHookEvent("acp_usage_update", data)
 }
 
 // emitPostToolUse posts a PostToolUse hook event if a tool was being tracked.
@@ -1233,7 +1295,34 @@ func (a *CopilotAgent) newSession(ctx context.Context) error {
 	}
 
 	a.sessionID = result.SessionID
+	a.currentModel = result.Models.CurrentModelID
+	for _, m := range result.Models.AvailableModels {
+		if m.ModelID == a.currentModel {
+			a.modelMultiplier = m.Meta.CopilotUsage
+			break
+		}
+	}
 	fmt.Printf("%sSession: %s%s\r\n", colorGray, a.sessionID, colorReset)
+	if a.currentModel != "" {
+		fmt.Printf("%sModel: %s (%s premium)%s\r\n", colorGray, a.currentModel, a.modelMultiplier, colorReset)
+	}
+
+	// Send model info + available models to OpenPoet UI
+	models := make([]map[string]string, 0, len(result.Models.AvailableModels))
+	for _, m := range result.Models.AvailableModels {
+		models = append(models, map[string]string{
+			"id":         m.ModelID,
+			"name":       m.Name,
+			"multiplier": m.Meta.CopilotUsage,
+		})
+	}
+	a.postHookEvent("acp_session_info", map[string]interface{}{
+		"current_model":    a.currentModel,
+		"model_multiplier": a.modelMultiplier,
+		"available_models": models,
+		"premium_requests": a.premiumRequests,
+	})
+
 	return nil
 }
 
@@ -1253,13 +1342,47 @@ func (a *CopilotAgent) loadSession(ctx context.Context, copilotSessionID string)
 		MCPServers: []interface{}{},
 	}
 
-	_, err := a.sendRequest(ctx, "session/load", params)
+	resp, err := a.sendRequest(ctx, "session/load", params)
 	if err != nil {
 		return err
 	}
 
 	a.sessionID = copilotSessionID
+
+	// Try to extract model info from load response (same format as session/new)
+	var loadResult sessionNewResult
+	if resp.Result != nil {
+		if json.Unmarshal(resp.Result, &loadResult) == nil && loadResult.Models.CurrentModelID != "" {
+			a.currentModel = loadResult.Models.CurrentModelID
+			for _, m := range loadResult.Models.AvailableModels {
+				if m.ModelID == a.currentModel {
+					a.modelMultiplier = m.Meta.CopilotUsage
+					break
+				}
+			}
+		}
+	}
+
 	fmt.Printf("%sSession loaded: %s%s\r\n", colorGray, a.sessionID, colorReset)
+	if a.currentModel != "" {
+		fmt.Printf("%sModel: %s (%s premium)%s\r\n", colorGray, a.currentModel, a.modelMultiplier, colorReset)
+
+		models := make([]map[string]string, 0, len(loadResult.Models.AvailableModels))
+		for _, m := range loadResult.Models.AvailableModels {
+			models = append(models, map[string]string{
+				"id":         m.ModelID,
+				"name":       m.Name,
+				"multiplier": m.Meta.CopilotUsage,
+			})
+		}
+		a.postHookEvent("acp_session_info", map[string]interface{}{
+			"current_model":    a.currentModel,
+			"model_multiplier": a.modelMultiplier,
+			"available_models": models,
+			"premium_requests": a.premiumRequests,
+		})
+	}
+
 	return nil
 }
 
@@ -1313,6 +1436,14 @@ func (a *CopilotAgent) prompt(ctx context.Context, text string) (*sessionPromptR
 			fmt.Print(block.Text)
 		}
 	}
+
+	// Track premium request usage
+	a.premiumRequests++
+	a.postHookEvent("acp_usage_update", map[string]interface{}{
+		"current_model":    a.currentModel,
+		"model_multiplier": a.modelMultiplier,
+		"premium_requests": a.premiumRequests,
+	})
 
 	return &result, nil
 }
