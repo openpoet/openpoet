@@ -84,13 +84,15 @@ release:
     curl -fsSL https://raw.githubusercontent.com/openpoet/openpoet/main/install.sh | sh
     ```
 
-    **Windows:**
-    Download the `.zip` from the [Releases page](https://github.com/openpoet/openpoet/releases).
+    **Windows (PowerShell):**
+    ```powershell
+    irm https://raw.githubusercontent.com/openpoet/openpoet/main/install.ps1 | iex
+    ```
   footer: |
     ---
     **Full Changelog**: https://github.com/openpoet/openpoet/compare/{{ .PreviousTag }}...{{ .Tag }}
 
-    > **Note**: Node.js 18+ is required for the Claude Agent SDK provider. The sidecar scripts are embedded in the binary and extracted automatically on first run.
+    > OpenPoet is a single binary with no runtime dependencies.
 
 brews:
   - repository:
@@ -114,8 +116,7 @@ brews:
       The web UI will be available at http://localhost:8080
       Data is stored in ~/.openpoet/
 
-      Note: Node.js 18+ is required for the Claude Agent SDK provider.
-      The sidecar scripts are embedded in the binary and auto-extracted on first run.
+      OpenPoet is a single binary with no runtime dependencies.
     test: |
       assert_match version.to_s, shell_output("#{bin}/openpoet version")
 
