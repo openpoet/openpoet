@@ -53,6 +53,10 @@ var migrations = []Migration{
 	{Version: 35, Description: "multi-backend: add backend and backend_config columns to projects and sessions", Up: migrateV35},
 	{Version: 36, Description: "sessions: add skip_permissions for auto-restore on restart", Up: migrateV36},
 	{Version: 37, Description: "docs: add session_id to temp_documents for session-document linking", Up: migrateV37},
+	{Version: 38, Description: "tags: add project_tags table for project tagging and grouping", Up: migrateV38},
+	{Version: 39, Description: "tools: add project_tools table for custom per-project tool definitions", Up: migrateV39},
+	{Version: 40, Description: "tags: add global tags table and migrate project_tags to use tag_id FK", Up: migrateV40},
+	{Version: 41, Description: "agents: add ai_agents table and agent_id column to ai_conversations", Up: migrateV41},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1001,6 +1005,116 @@ func migrateV37(tx *sqlx.Tx) error {
 	} {
 		if _, err := tx.Exec(q); err != nil {
 			return fmt.Errorf("migrateV37 failed: %w", err)
+		}
+	}
+	return nil
+}
+
+func migrateV38(tx *sqlx.Tx) error {
+	for _, q := range []string{
+		`CREATE TABLE IF NOT EXISTS project_tags (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			tag TEXT NOT NULL,
+			color TEXT NOT NULL DEFAULT '#7aa2f7',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(project_id, tag)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_tags_tag ON project_tags(tag)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_tags_project ON project_tags(project_id)`,
+	} {
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("migrateV38 failed: %w", err)
+		}
+	}
+	return nil
+}
+
+func migrateV39(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS project_tools (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			command TEXT NOT NULL,
+			parameters TEXT NOT NULL DEFAULT '{}',
+			confirm INTEGER NOT NULL DEFAULT 0,
+			working_dir TEXT NOT NULL DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 1,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(project_id, name),
+			FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_tools_project ON project_tools(project_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV39 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV40(tx *sqlx.Tx) error {
+	stmts := []string{
+		// Create global tags table
+		`CREATE TABLE IF NOT EXISTS tags (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT UNIQUE NOT NULL,
+			color TEXT NOT NULL DEFAULT '#7aa2f7',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		// Migrate existing tags from project_tags into global tags table
+		`INSERT OR IGNORE INTO tags (name, color)
+		 SELECT DISTINCT tag, color FROM project_tags`,
+		// Recreate project_tags with tag_id FK
+		`CREATE TABLE project_tags_new (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(project_id, tag_id)
+		)`,
+		// Migrate existing assignments
+		`INSERT INTO project_tags_new (project_id, tag_id, created_at)
+		 SELECT pt.project_id, t.id, pt.created_at
+		 FROM project_tags pt JOIN tags t ON pt.tag = t.name`,
+		// Swap tables
+		`DROP TABLE project_tags`,
+		`ALTER TABLE project_tags_new RENAME TO project_tags`,
+		`CREATE INDEX IF NOT EXISTS idx_project_tags_project ON project_tags(project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_tags_tag ON project_tags(tag_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV40 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV41(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS ai_agents (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL UNIQUE,
+			system_prompt TEXT NOT NULL DEFAULT '',
+			tool_policy TEXT NOT NULL DEFAULT '',
+			project_filter TEXT NOT NULL DEFAULT '',
+			is_default INTEGER NOT NULL DEFAULT 0,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`INSERT INTO ai_agents (name, system_prompt, tool_policy, project_filter, is_default, enabled)
+		 VALUES ('Default', '', '', '', 1, 1)`,
+		`ALTER TABLE ai_conversations ADD COLUMN agent_id INTEGER REFERENCES ai_agents(id) ON DELETE SET NULL`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV41 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

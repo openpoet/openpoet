@@ -691,7 +691,27 @@ func (a *API) ListProjects(w http.ResponseWriter, r *http.Request) {
 	if projects == nil {
 		projects = []database.Project{}
 	}
-	respondJSON(w, http.StatusOK, projects)
+
+	// Enrich with tags
+	allPT, _ := a.db.ListAllProjectTagDetails(r.Context())
+	tagMap := make(map[int64][]tagInfo)
+	for _, t := range allPT {
+		tagMap[t.ProjectID] = append(tagMap[t.ProjectID], tagInfo{ID: t.TagID, Name: t.Name, Color: t.Color})
+	}
+
+	type projectWithTags struct {
+		database.Project
+		Tags []tagInfo `json:"tags"`
+	}
+	result := make([]projectWithTags, len(projects))
+	for i, p := range projects {
+		tags := tagMap[p.ID]
+		if tags == nil {
+			tags = []tagInfo{}
+		}
+		result[i] = projectWithTags{Project: p, Tags: tags}
+	}
+	respondJSON(w, http.StatusOK, result)
 }
 
 func (a *API) CreateProject(w http.ResponseWriter, r *http.Request) {
@@ -2066,6 +2086,109 @@ func (a *API) DeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.hub.BroadcastStateUpdate("mcp", map[string]interface{}{"action": "deleted", "id": id})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ============ AI Agents ============
+
+func (a *API) ListAgents(w http.ResponseWriter, r *http.Request) {
+	agents, err := a.db.ListAIAgents(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if agents == nil {
+		agents = []database.AIAgent{}
+	}
+	respondJSON(w, http.StatusOK, agents)
+}
+
+func (a *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
+	var m database.AIAgent
+	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	m.IsDefault = false // never allow creating a default agent
+	if err := a.db.CreateAIAgent(r.Context(), &m); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	created, err := a.db.GetAIAgent(r.Context(), m.ID)
+	if err != nil {
+		created = &m
+	}
+	a.hub.BroadcastStateUpdate("agent", map[string]interface{}{"action": "created", "agent": created})
+	respondJSON(w, http.StatusCreated, created)
+}
+
+func (a *API) GetAgent(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid agent ID")
+		return
+	}
+	m, err := a.db.GetAIAgent(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Agent not found")
+		return
+	}
+	respondJSON(w, http.StatusOK, m)
+}
+
+func (a *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid agent ID")
+		return
+	}
+	existing, err := a.db.GetAIAgent(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Agent not found")
+		return
+	}
+	var m database.AIAgent
+	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	if existing.IsDefault {
+		m.Name = existing.Name // cannot rename default agent
+	}
+	m.ID = id
+	if err := a.db.UpdateAIAgent(r.Context(), &m); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Re-fetch to get accurate is_default and timestamps
+	updated, err := a.db.GetAIAgent(r.Context(), id)
+	if err != nil {
+		updated = &m
+	}
+	a.hub.BroadcastStateUpdate("agent", map[string]interface{}{"action": "updated", "agent": updated})
+	respondJSON(w, http.StatusOK, updated)
+}
+
+func (a *API) DeleteAgent(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid agent ID")
+		return
+	}
+	existing, err := a.db.GetAIAgent(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Agent not found")
+		return
+	}
+	if existing.IsDefault {
+		respondError(w, http.StatusBadRequest, "Cannot delete the default agent")
+		return
+	}
+	if err := a.db.DeleteAIAgent(r.Context(), id); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	a.hub.BroadcastStateUpdate("agent", map[string]interface{}{"action": "deleted", "id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -3757,6 +3880,160 @@ func (a *API) UpdateProjectShares(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// --- Tags ---
+
+type tagInfo struct {
+	ID    int64  `json:"id"`
+	Name  string `json:"name"`
+	Color string `json:"color"`
+}
+
+// Tag CRUD
+
+func (a *API) ListAllTags(w http.ResponseWriter, r *http.Request) {
+	tags, err := a.db.ListTags(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	result := make([]tagInfo, len(tags))
+	for i, t := range tags {
+		result[i] = tagInfo{ID: t.ID, Name: t.Name, Color: t.Color}
+	}
+	respondJSON(w, http.StatusOK, result)
+}
+
+func (a *API) CreateTag(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Name  string `json:"name"`
+		Color string `json:"color"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		respondError(w, http.StatusBadRequest, "Tag name is required")
+		return
+	}
+	color := strings.TrimSpace(input.Color)
+	if color == "" {
+		color = "#7aa2f7"
+	}
+
+	tag := &database.Tag{Name: name, Color: color}
+	if err := a.db.CreateTag(r.Context(), tag); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			respondError(w, http.StatusConflict, "A tag with this name already exists")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusCreated, tagInfo{ID: tag.ID, Name: tag.Name, Color: tag.Color})
+}
+
+func (a *API) UpdateTag(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid tag ID")
+		return
+	}
+
+	tag, err := a.db.GetTag(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Tag not found")
+		return
+	}
+
+	var input struct {
+		Name  *string `json:"name"`
+		Color *string `json:"color"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	if input.Name != nil {
+		name := strings.TrimSpace(*input.Name)
+		if name == "" {
+			respondError(w, http.StatusBadRequest, "Tag name cannot be empty")
+			return
+		}
+		tag.Name = name
+	}
+	if input.Color != nil {
+		tag.Color = *input.Color
+	}
+
+	if err := a.db.UpdateTag(r.Context(), tag); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			respondError(w, http.StatusConflict, "A tag with this name already exists")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, tagInfo{ID: tag.ID, Name: tag.Name, Color: tag.Color})
+}
+
+func (a *API) DeleteTagHandler(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid tag ID")
+		return
+	}
+	if err := a.db.DeleteTag(r.Context(), id); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// Project tag assignments
+
+func (a *API) GetProjectTags(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+	tags, err := a.db.ListProjectTagDetails(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	result := make([]tagInfo, len(tags))
+	for i, t := range tags {
+		result[i] = tagInfo{ID: t.TagID, Name: t.Name, Color: t.Color}
+	}
+	respondJSON(w, http.StatusOK, result)
+}
+
+func (a *API) UpdateProjectTags(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+
+	var input struct {
+		TagIDs []int64 `json:"tag_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if err := a.db.ReplaceProjectTagIDs(r.Context(), id, input.TagIDs); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 // --- Project Skills ---
 
 // GetProjectSkills returns global skills with per-project config + project-specific skills.
@@ -4270,6 +4547,184 @@ func (a *API) DeleteProjectMCPServerHandler(w http.ResponseWriter, r *http.Reque
 		"action": "deleted", "project_id": projectID, "id": mcpID,
 	})
 
+	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// --- Project Custom Tools ---
+
+func (a *API) ListProjectTools(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+	ctx := r.Context()
+	if _, err := a.db.GetProject(ctx, projectID); err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+	tools, err := a.db.ListProjectTools(ctx, projectID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, tools)
+}
+
+func (a *API) CreateProjectTool(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+	ctx := r.Context()
+	if _, err := a.db.GetProject(ctx, projectID); err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	var input struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Command     string `json:"command"`
+		Parameters  string `json:"parameters"`
+		Confirm     bool   `json:"confirm"`
+		WorkingDir  string `json:"working_dir"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	if input.Name == "" || input.Command == "" {
+		respondError(w, http.StatusBadRequest, "name and command are required")
+		return
+	}
+	if input.Parameters == "" {
+		input.Parameters = "{}"
+	}
+
+	t := &database.ProjectTool{
+		ProjectID:   projectID,
+		Name:        input.Name,
+		Description: input.Description,
+		Command:     input.Command,
+		Parameters:  input.Parameters,
+		Confirm:     input.Confirm,
+		WorkingDir:  input.WorkingDir,
+		Enabled:     true,
+	}
+	if err := a.db.CreateProjectTool(ctx, t); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			respondError(w, http.StatusConflict, "A tool with this name already exists for this project")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("project_tools", map[string]interface{}{
+		"action": "created", "project_id": projectID, "tool": t,
+	})
+	respondJSON(w, http.StatusCreated, t)
+}
+
+func (a *API) UpdateProjectTool(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+	toolID, err := strconv.ParseInt(chi.URLParam(r, "toolId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid tool ID")
+		return
+	}
+
+	ctx := r.Context()
+	t, err := a.db.GetProjectTool(ctx, toolID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Tool not found")
+		return
+	}
+	if t.ProjectID != projectID {
+		respondError(w, http.StatusNotFound, "Tool not found")
+		return
+	}
+
+	var input map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if v, ok := input["name"].(string); ok {
+		t.Name = v
+	}
+	if v, ok := input["description"].(string); ok {
+		t.Description = v
+	}
+	if v, ok := input["command"].(string); ok {
+		t.Command = v
+	}
+	if v, ok := input["parameters"].(string); ok {
+		t.Parameters = v
+	}
+	if v, ok := input["confirm"].(bool); ok {
+		t.Confirm = v
+	}
+	if v, ok := input["working_dir"].(string); ok {
+		t.WorkingDir = v
+	}
+	if v, ok := input["enabled"].(bool); ok {
+		t.Enabled = v
+	}
+
+	if err := a.db.UpdateProjectTool(ctx, t); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			respondError(w, http.StatusConflict, "A tool with this name already exists for this project")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("project_tools", map[string]interface{}{
+		"action": "updated", "project_id": projectID, "tool": t,
+	})
+	respondJSON(w, http.StatusOK, t)
+}
+
+func (a *API) DeleteProjectTool(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+	toolID, err := strconv.ParseInt(chi.URLParam(r, "toolId"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid tool ID")
+		return
+	}
+
+	ctx := r.Context()
+	t, err := a.db.GetProjectTool(ctx, toolID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Tool not found")
+		return
+	}
+	if t.ProjectID != projectID {
+		respondError(w, http.StatusNotFound, "Tool not found")
+		return
+	}
+
+	if err := a.db.DeleteProjectTool(ctx, toolID); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	a.hub.BroadcastStateUpdate("project_tools", map[string]interface{}{
+		"action": "deleted", "project_id": projectID, "id": toolID,
+	})
 	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 

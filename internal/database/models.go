@@ -43,6 +43,20 @@ type ProjectInput struct {
 	BackendConfig              string `json:"backend_config,omitempty"`
 }
 
+type Tag struct {
+	ID        int64     `db:"id" json:"id"`
+	Name      string    `db:"name" json:"name"`
+	Color     string    `db:"color" json:"color"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
+}
+
+type ProjectTag struct {
+	ID        int64     `db:"id" json:"id"`
+	ProjectID int64     `db:"project_id" json:"project_id"`
+	TagID     int64     `db:"tag_id" json:"tag_id"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
+}
+
 type Session struct {
 	ID              string        `db:"id" json:"id"`
 	ProjectID       int64         `db:"project_id" json:"project_id"`
@@ -138,6 +152,20 @@ type ProjectMCPServer struct {
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
 }
 
+type ProjectTool struct {
+	ID          int64     `db:"id" json:"id"`
+	ProjectID   int64     `db:"project_id" json:"project_id"`
+	Name        string    `db:"name" json:"name"`
+	Description string    `db:"description" json:"description"`
+	Command     string    `db:"command" json:"command"`
+	Parameters  string    `db:"parameters" json:"parameters"` // JSON schema for tool parameters
+	Confirm     bool      `db:"confirm" json:"confirm"`       // requires user approval
+	WorkingDir  string    `db:"working_dir" json:"working_dir"`
+	Enabled     bool      `db:"enabled" json:"enabled"`
+	CreatedAt   time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
+}
+
 type Setting struct {
 	Key   string `db:"key" json:"key"`
 	Value string `db:"value" json:"value"` // JSON
@@ -163,16 +191,29 @@ type Notification struct {
 }
 
 type AIConversation struct {
-	ID               int64     `db:"id" json:"id"`
-	Title            string    `db:"title" json:"title"`
-	Source           string    `db:"source" json:"source"`                       // 'user' or 'ai'
-	ProactiveLevel   string    `db:"proactive_level" json:"proactive_level"`     // 'critical', 'standard', 'subtle', or ''
-	ProactiveType    string    `db:"proactive_type" json:"proactive_type"`       // 'task_suggestion', 'memory_doc_update', 'insight', 'alert', or ''
-	ProactiveContext string    `db:"proactive_context" json:"proactive_context"` // JSON context for system prompt
-	IsRead           bool      `db:"is_read" json:"is_read"`
-	SessionID        string    `db:"session_id" json:"session_id"` // Claude Code session ID for resume across restarts
-	CreatedAt        time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt        time.Time `db:"updated_at" json:"updated_at"`
+	ID               int64         `db:"id" json:"id"`
+	Title            string        `db:"title" json:"title"`
+	Source           string        `db:"source" json:"source"`                       // 'user' or 'ai'
+	ProactiveLevel   string        `db:"proactive_level" json:"proactive_level"`     // 'critical', 'standard', 'subtle', or ''
+	ProactiveType    string        `db:"proactive_type" json:"proactive_type"`       // 'task_suggestion', 'memory_doc_update', 'insight', 'alert', or ''
+	ProactiveContext string        `db:"proactive_context" json:"proactive_context"` // JSON context for system prompt
+	IsRead           bool          `db:"is_read" json:"is_read"`
+	SessionID        string        `db:"session_id" json:"session_id"` // Claude Code session ID for resume across restarts
+	AgentID          sql.NullInt64 `db:"agent_id" json:"agent_id,omitempty"`
+	CreatedAt        time.Time     `db:"created_at" json:"created_at"`
+	UpdatedAt        time.Time     `db:"updated_at" json:"updated_at"`
+}
+
+type AIAgent struct {
+	ID            int64     `db:"id" json:"id"`
+	Name          string    `db:"name" json:"name"`
+	SystemPrompt  string    `db:"system_prompt" json:"system_prompt"`
+	ToolPolicy    string    `db:"tool_policy" json:"tool_policy"`       // JSON: {"allowed":["x"]} or {"denied":["y"]} or ""
+	ProjectFilter string    `db:"project_filter" json:"project_filter"` // JSON: {"project_ids":[1],"tag_ids":[2]} or ""
+	IsDefault     bool      `db:"is_default" json:"is_default"`
+	Enabled       bool      `db:"enabled" json:"enabled"`
+	CreatedAt     time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time `db:"updated_at" json:"updated_at"`
 }
 
 type AIMessage struct {

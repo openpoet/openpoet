@@ -30,12 +30,15 @@ class AIChatManager {
         this.conversations = [];
         this._toolsLoaded = false;
         this._toolsPanelOpen = false;
+        this.agents = [];
+        this.selectedAgentId = null;
 
         if (this.panel) {
             this.setupEventListeners();
             this.checkStatus();
             this.checkActiveStream();
             this.loadToolDefinitions();
+            this.loadAgents();
         }
     }
 
@@ -260,6 +263,23 @@ class AIChatManager {
         }
     }
 
+    async loadAgents() {
+        try {
+            const resp = await fetch('/api/config/agents');
+            if (!resp.ok) return;
+            const agents = await resp.json();
+            this.agents = (agents || []).filter(a => a.enabled);
+            // Re-render welcome if visible and agent picker not yet shown
+            if (!this.currentConversationId && this.agents.length > 1) {
+                const welcome = this.messagesContainer?.querySelector('.ai-chat-welcome');
+                if (welcome && !welcome.querySelector('#ai-agent-picker')) {
+                    this.messagesContainer.innerHTML = '';
+                    this.addWelcomeMessage();
+                }
+            }
+        } catch {}
+    }
+
     toggleToolsPanel() {
         if (!this.toolsPanel) return;
         this._toolsPanelOpen = !this._toolsPanelOpen;
@@ -275,13 +295,27 @@ class AIChatManager {
         }
     }
 
+    getActiveProjectId() {
+        // Get the project ID from the currently viewed project detail
+        if (window.app?._detailProject?.id) {
+            return window.app._detailProject.id;
+        }
+        // Get from the currently selected session's project
+        if (window.app?.currentSession?.project_id) {
+            return window.app.currentSession.project_id;
+        }
+        return 0;
+    }
+
     newConversation() {
         if (this._pollInterval) { clearInterval(this._pollInterval); this._pollInterval = null; }
         if (this.abortController) { this.abortController.abort(); this.abortController = null; }
         this.currentConversationId = null;
+        this.selectedAgentId = null;
         this._updateDeleteCurrentBtn();
         this.messagesContainer.innerHTML = '';
         this.hideHistory();
+        this.loadAgents(); // refresh enabled agents list
         this.addWelcomeMessage();
     }
 
@@ -307,6 +341,13 @@ class AIChatManager {
             </div>
             <h3>AI Assistant</h3>
             <p>Ask me to create skills, manage MCP servers, or configure your OpenPoet.</p>
+            ${this.agents.length > 1 ? `
+                <div class="ai-agent-picker-wrap" style="margin:8px 0;">
+                    <select id="ai-agent-picker" class="form-select" style="font-size:12px;padding:4px 8px;max-width:200px;" onchange="window.aiChat.selectedAgentId = this.value ? parseInt(this.value) : null">
+                        ${this.agents.map(a => `<option value="${a.id}" ${a.is_default ? 'selected' : ''}>${a.name}${a.is_default ? ' (default)' : ''}</option>`).join('')}
+                    </select>
+                </div>
+            ` : ''}
             <div id="ai-chat-pending-suggestions"></div>
             <div class="ai-chat-suggestions">
                 <button class="ai-chat-suggestion" onclick="window.aiChat?.sendPreset('Create a skill for Python best practices')">Create a Python skill</button>
@@ -415,6 +456,8 @@ class AIChatManager {
                 body: JSON.stringify({
                     conversation_id: this.currentConversationId || 0,
                     message: text,
+                    project_id: this.getActiveProjectId(),
+                    agent_id: !this.currentConversationId && this.selectedAgentId ? this.selectedAgentId : 0,
                 }),
                 signal: this.abortController.signal,
             });
@@ -780,6 +823,7 @@ class AIChatManager {
                 <div class="ai-chat-history-item ${c.id === this.currentConversationId ? 'active' : ''} ${isAI ? 'ai-initiated' : ''}" data-id="${c.id}">
                     <div class="ai-chat-history-item-content">
                         ${isAI ? '<span class="ai-chat-history-badge-ai">AI</span>' : ''}
+                        ${this._getAgentName(c.agent_id) ? `<span class="ai-chat-history-badge-agent">${this.escapeHtml(this._getAgentName(c.agent_id))}</span>` : ''}
                         <div class="ai-chat-history-title">${this.escapeHtml(c.title || 'Untitled')}</div>
                         ${isUnread ? '<span class="ai-chat-history-unread"></span>' : ''}
                     </div>
@@ -1139,6 +1183,19 @@ class AIChatManager {
     escapeHtml(str) {
         if (!str) return '';
         return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    _getAgentName(agentId) {
+        if (!agentId) return null;
+        // Handle sql.NullInt64 JSON format: {Int64: n, Valid: bool}
+        let id = agentId;
+        if (typeof agentId === 'object') {
+            if (!agentId.Valid) return null;
+            id = agentId.Int64;
+        }
+        if (!id) return null;
+        const agent = this.agents.find(a => a.id === id) || (window.app?.agents || []).find(a => a.id === id);
+        return agent && !agent.is_default ? agent.name : null;
     }
 
     formatDate(dateStr) {

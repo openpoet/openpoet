@@ -129,6 +129,98 @@ func (d *DB) HasProjectShare(ctx context.Context, projectID, sharedProjectID int
 	return count > 0, err
 }
 
+// Tag operations (global)
+
+func (d *DB) ListTags(ctx context.Context) ([]Tag, error) {
+	var tags []Tag
+	err := d.SelectContext(ctx, &tags, "SELECT * FROM tags ORDER BY name")
+	return tags, err
+}
+
+func (d *DB) GetTag(ctx context.Context, id int64) (*Tag, error) {
+	var tag Tag
+	err := d.GetContext(ctx, &tag, "SELECT * FROM tags WHERE id = ?", id)
+	return &tag, err
+}
+
+func (d *DB) CreateTag(ctx context.Context, tag *Tag) error {
+	result, err := d.ExecContext(ctx,
+		"INSERT INTO tags (name, color) VALUES (?, ?)", tag.Name, tag.Color)
+	if err != nil {
+		return err
+	}
+	tag.ID, _ = result.LastInsertId()
+	return nil
+}
+
+func (d *DB) UpdateTag(ctx context.Context, tag *Tag) error {
+	_, err := d.ExecContext(ctx,
+		"UPDATE tags SET name = ?, color = ? WHERE id = ?", tag.Name, tag.Color, tag.ID)
+	return err
+}
+
+func (d *DB) DeleteTag(ctx context.Context, id int64) error {
+	_, err := d.ExecContext(ctx, "DELETE FROM tags WHERE id = ?", id)
+	return err
+}
+
+// Project tag assignment operations
+
+type ProjectTagWithDetails struct {
+	TagID int64  `db:"tag_id" json:"tag_id"`
+	Name  string `db:"name" json:"name"`
+	Color string `db:"color" json:"color"`
+}
+
+func (d *DB) ListProjectTagDetails(ctx context.Context, projectID int64) ([]ProjectTagWithDetails, error) {
+	var tags []ProjectTagWithDetails
+	err := d.SelectContext(ctx, &tags,
+		`SELECT t.id as tag_id, t.name, t.color FROM project_tags pt
+		 JOIN tags t ON pt.tag_id = t.id
+		 WHERE pt.project_id = ? ORDER BY t.name`, projectID)
+	return tags, err
+}
+
+func (d *DB) ListAllProjectTagDetails(ctx context.Context) ([]struct {
+	ProjectID int64  `db:"project_id"`
+	TagID     int64  `db:"tag_id"`
+	Name      string `db:"name"`
+	Color     string `db:"color"`
+}, error) {
+	var tags []struct {
+		ProjectID int64  `db:"project_id"`
+		TagID     int64  `db:"tag_id"`
+		Name      string `db:"name"`
+		Color     string `db:"color"`
+	}
+	err := d.SelectContext(ctx, &tags,
+		`SELECT pt.project_id, t.id as tag_id, t.name, t.color FROM project_tags pt
+		 JOIN tags t ON pt.tag_id = t.id ORDER BY t.name`)
+	return tags, err
+}
+
+func (d *DB) ReplaceProjectTagIDs(ctx context.Context, projectID int64, tagIDs []int64) error {
+	tx, err := d.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM project_tags WHERE project_id = ?", projectID); err != nil {
+		return err
+	}
+
+	for _, tagID := range tagIDs {
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO project_tags (project_id, tag_id) VALUES (?, ?)",
+			projectID, tagID); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 // Session operations
 func (d *DB) CreateSession(ctx context.Context, s *Session) error {
 	query := `INSERT INTO sessions (id, project_id, status, pid, name, task_id, start_time, backend, skip_permissions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -520,6 +612,64 @@ func (d *DB) DeleteProjectMCPServer(ctx context.Context, id int64) error {
 	return err
 }
 
+// Project Tool operations
+
+func (d *DB) CreateProjectTool(ctx context.Context, t *ProjectTool) error {
+	query := `INSERT INTO project_tools (project_id, name, description, command, parameters, confirm, working_dir, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, t.ProjectID, t.Name, t.Description, t.Command, t.Parameters, t.Confirm, t.WorkingDir, t.Enabled)
+	if err != nil {
+		return err
+	}
+	t.ID, _ = result.LastInsertId()
+	fresh, err := d.GetProjectTool(ctx, t.ID)
+	if err == nil {
+		*t = *fresh
+	}
+	return nil
+}
+
+func (d *DB) GetProjectTool(ctx context.Context, id int64) (*ProjectTool, error) {
+	var t ProjectTool
+	err := d.GetContext(ctx, &t, "SELECT * FROM project_tools WHERE id = ?", id)
+	return &t, err
+}
+
+func (d *DB) GetProjectToolByName(ctx context.Context, projectID int64, name string) (*ProjectTool, error) {
+	var t ProjectTool
+	err := d.GetContext(ctx, &t, "SELECT * FROM project_tools WHERE project_id = ? AND name = ?", projectID, name)
+	return &t, err
+}
+
+func (d *DB) ListProjectTools(ctx context.Context, projectID int64) ([]ProjectTool, error) {
+	var tools []ProjectTool
+	err := d.SelectContext(ctx, &tools, "SELECT * FROM project_tools WHERE project_id = ? ORDER BY name", projectID)
+	return tools, err
+}
+
+func (d *DB) ListEnabledProjectTools(ctx context.Context, projectID int64) ([]ProjectTool, error) {
+	var tools []ProjectTool
+	err := d.SelectContext(ctx, &tools, "SELECT * FROM project_tools WHERE project_id = ? AND enabled = 1 ORDER BY name", projectID)
+	return tools, err
+}
+
+func (d *DB) UpdateProjectTool(ctx context.Context, t *ProjectTool) error {
+	query := `UPDATE project_tools SET name=?, description=?, command=?, parameters=?, confirm=?, working_dir=?, enabled=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, t.Name, t.Description, t.Command, t.Parameters, t.Confirm, t.WorkingDir, t.Enabled, time.Now(), t.ID)
+	if err != nil {
+		return err
+	}
+	fresh, err := d.GetProjectTool(ctx, t.ID)
+	if err == nil {
+		*t = *fresh
+	}
+	return nil
+}
+
+func (d *DB) DeleteProjectTool(ctx context.Context, id int64) error {
+	_, err := d.ExecContext(ctx, "DELETE FROM project_tools WHERE id = ?", id)
+	return err
+}
+
 // AI Config operations
 
 func (d *DB) CreateAIConfig(ctx context.Context, c *AIConfig) error {
@@ -712,6 +862,53 @@ func (d *DB) ListActiveNotifications(ctx context.Context) ([]Notification, error
 	return notifications, err
 }
 
+// AI Agent operations
+
+func (d *DB) CreateAIAgent(ctx context.Context, a *AIAgent) error {
+	query := `INSERT INTO ai_agents (name, system_prompt, tool_policy, project_filter, is_default, enabled) VALUES (?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, a.Name, a.SystemPrompt, a.ToolPolicy, a.ProjectFilter, a.IsDefault, a.Enabled)
+	if err != nil {
+		return err
+	}
+	a.ID, _ = result.LastInsertId()
+	return nil
+}
+
+func (d *DB) GetAIAgent(ctx context.Context, id int64) (*AIAgent, error) {
+	var a AIAgent
+	err := d.GetContext(ctx, &a, "SELECT * FROM ai_agents WHERE id = ?", id)
+	return &a, err
+}
+
+func (d *DB) GetDefaultAIAgent(ctx context.Context) (*AIAgent, error) {
+	var a AIAgent
+	err := d.GetContext(ctx, &a, "SELECT * FROM ai_agents WHERE is_default = 1 LIMIT 1")
+	return &a, err
+}
+
+func (d *DB) ListAIAgents(ctx context.Context) ([]AIAgent, error) {
+	var agents []AIAgent
+	err := d.SelectContext(ctx, &agents, "SELECT * FROM ai_agents ORDER BY is_default DESC, name")
+	return agents, err
+}
+
+func (d *DB) ListEnabledAIAgents(ctx context.Context) ([]AIAgent, error) {
+	var agents []AIAgent
+	err := d.SelectContext(ctx, &agents, "SELECT * FROM ai_agents WHERE enabled = 1 ORDER BY is_default DESC, name")
+	return agents, err
+}
+
+func (d *DB) UpdateAIAgent(ctx context.Context, a *AIAgent) error {
+	query := `UPDATE ai_agents SET name=?, system_prompt=?, tool_policy=?, project_filter=?, enabled=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, a.Name, a.SystemPrompt, a.ToolPolicy, a.ProjectFilter, a.Enabled, time.Now(), a.ID)
+	return err
+}
+
+func (d *DB) DeleteAIAgent(ctx context.Context, id int64) error {
+	_, err := d.ExecContext(ctx, "DELETE FROM ai_agents WHERE id = ? AND is_default = 0", id)
+	return err
+}
+
 // AI Conversation operations
 func (d *DB) CreateAIConversation(ctx context.Context, c *AIConversation) error {
 	if c.Source == "" {
@@ -727,8 +924,8 @@ func (d *DB) CreateAIConversation(ctx context.Context, c *AIConversation) error 
 	if c.IsRead {
 		isRead = 1
 	}
-	query := `INSERT INTO ai_conversations (title, source, proactive_level, proactive_type, proactive_context, is_read) VALUES (?, ?, ?, ?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, c.Title, c.Source, c.ProactiveLevel, c.ProactiveType, c.ProactiveContext, isRead)
+	query := `INSERT INTO ai_conversations (title, source, proactive_level, proactive_type, proactive_context, is_read, agent_id) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, c.Title, c.Source, c.ProactiveLevel, c.ProactiveType, c.ProactiveContext, isRead, c.AgentID)
 	if err != nil {
 		return err
 	}

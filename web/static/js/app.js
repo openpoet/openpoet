@@ -45,6 +45,7 @@ class OpenPoet {
         this.sessions = [];
         this.skills = [];
         this.mcpServers = [];
+        this.agents = [];
 
         // Tab management
         this.openTabs = new Map(); // sessionId -> { projectName, sessionName }
@@ -625,8 +626,10 @@ class OpenPoet {
                 break;
             case 'skill':
             case 'mcp':
+            case 'agent':
             case 'settings':
                 this.loadConfig();
+                if (data.entity === 'agent') window.aiChat?.loadAgents();
                 break;
             case 'update':
                 if (data.data?.action === 'available') {
@@ -644,6 +647,11 @@ class OpenPoet {
             case 'project_skill':
                 if (this.currentView === 'project-detail' && this._detailProject && data.data?.project_id === this._detailProject.id) {
                     this.loadProjectSkills(this._detailProject.id);
+                }
+                break;
+            case 'project_tools':
+                if (this.currentView === 'project-detail' && this._detailProject && data.data?.project_id === this._detailProject.id) {
+                    this.loadProjectCustomTools(this._detailProject.id);
                 }
                 break;
             case 'project_mcp':
@@ -778,11 +786,52 @@ class OpenPoet {
     async loadProjects() {
         try {
             this.projects = await this.api('GET', '/projects');
+            this._allTags = await this.api('GET', '/tags');
+            this.renderTagFilterBar();
             this.renderProjects();
             this._restoreScrollTop('projects-list', this._viewState['projects']?.scrollTop);
         } catch (error) {
             this._showApiError(error);
         }
+    }
+
+    _renderProjectCard(project) {
+        const tags = (project.tags || []);
+        const tagChips = tags.map(t =>
+            `<span class="tag-chip" style="background:${t.color}22;color:${t.color}">${this.escapeHtml(t.name)}</span>`
+        ).join('');
+
+        return `
+            <div class="card card-clickable" data-project-id="${project.id}" onclick="app.showProjectDetail(${project.id})">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">${this.escapeHtml(project.name)}</div>
+                        <div class="card-subtitle">${this.escapeHtml(project.path)}</div>
+                    </div>
+                    ${project.backend === 'copilot' ? '<span class="badge badge-copilot">Copilot</span>' : ''}
+                    ${project.backend === 'acp' ? '<span class="badge badge-acp">ACP</span>' : ''}
+                    <span class="badge badge-${project.type}">${project.type}</span>
+                </div>
+                ${tagChips ? `<div class="card-tags">${tagChips}</div>` : ''}
+                <div class="card-body">
+                    ${project.type === 'remote' ? `
+                        <div class="text-muted">
+                            ${this.escapeHtml(project.ssh_user?.String || '')}@${this.escapeHtml(project.ssh_host?.String || '')}
+                        </div>
+                    ` : ''}
+                </div>
+                <div class="card-actions">
+                    <button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); app.startSession(${project.id})">
+                        Start Session
+                    </button>
+                    <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); app.editProject(${project.id})">
+                        Edit
+                    </button>
+                    <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); app.syncProjectConfig(${project.id})">
+                        Sync
+                    </button>
+                </div>
+            </div>`;
     }
 
     renderProjects() {
@@ -802,37 +851,44 @@ class OpenPoet {
             return;
         }
 
-        container.innerHTML = this.projects.map(project => `
-            <div class="card card-clickable" data-project-id="${project.id}" onclick="app.showProjectDetail(${project.id})">
-                <div class="card-header">
-                    <div>
-                        <div class="card-title">${this.escapeHtml(project.name)}</div>
-                        <div class="card-subtitle">${this.escapeHtml(project.path)}</div>
-                    </div>
-                    ${project.backend === 'copilot' ? '<span class="badge badge-copilot">Copilot</span>' : ''}
-                    ${project.backend === 'acp' ? '<span class="badge badge-acp">ACP</span>' : ''}
-                    <span class="badge badge-${project.type}">${project.type}</span>
-                </div>
-                <div class="card-body">
-                    ${project.type === 'remote' ? `
-                        <div class="text-muted">
-                            ${this.escapeHtml(project.ssh_user?.String || '')}@${this.escapeHtml(project.ssh_host?.String || '')}
-                        </div>
-                    ` : ''}
-                </div>
-                <div class="card-actions">
-                    <button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); app.startSession(${project.id})">
-                        Start Session
-                    </button>
-                    <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); app.editProject(${project.id})">
-                        Edit
-                    </button>
-                    <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); app.syncProjectConfig(${project.id})">
-                        Sync
-                    </button>
-                </div>
-            </div>
-        `).join('');
+        const activeTag = this._activeTagFilter || null;
+        let filtered = this.projects;
+        if (activeTag) {
+            filtered = this.projects.filter(p => (p.tags || []).some(t => t.name === activeTag));
+        }
+
+        container.innerHTML = filtered.map(p => this._renderProjectCard(p)).join('');
+    }
+
+    renderTagFilterBar() {
+        const bar = document.getElementById('tag-filter-bar');
+        if (!bar) return;
+
+        const tags = this._allTags || [];
+        if (tags.length === 0) {
+            bar.style.display = 'none';
+            return;
+        }
+
+        bar.style.display = 'flex';
+        const active = this._activeTagFilter || null;
+
+        bar.innerHTML = `
+            <span class="tag-filter-chip ${!active ? 'active' : ''}"
+                  style="${!active ? 'background: var(--color-primary); color: var(--color-bg); border-color: transparent;' : ''}"
+                  onclick="app.filterByTag(null)">All</span>
+            ${tags.map(t => `
+                <span class="tag-filter-chip ${active === t.name ? 'active' : ''}"
+                      style="${active === t.name ? `background:${t.color}33;color:${t.color};border-color:${t.color}` : ''}"
+                      onclick="app.filterByTag('${this.escapeHtml(t.name)}')">${this.escapeHtml(t.name)}</span>
+            `).join('')}
+        `;
+    }
+
+    filterByTag(tag) {
+        this._activeTagFilter = tag;
+        this.renderTagFilterBar();
+        this.renderProjects();
     }
 
     async startSession(projectId) {
@@ -1536,6 +1592,13 @@ class OpenPoet {
                         <span class="project-detail-label">Type</span>
                         <span class="project-detail-value"><span class="badge badge-${project.type}">${project.type}</span></span>
                     </div>
+                    ${(project.tags || []).length > 0 ? `
+                    <div class="project-detail-field">
+                        <span class="project-detail-label">Tags</span>
+                        <span class="project-detail-value" style="display:flex;gap:4px;flex-wrap:wrap;">
+                            ${project.tags.map(t => `<span class="tag-chip" style="background:${t.color}22;color:${t.color}">${this.escapeHtml(t.name)}</span>`).join('')}
+                        </span>
+                    </div>` : ''}
                 </div>
         `;
 
@@ -1601,6 +1664,18 @@ class OpenPoet {
                         <span id="project-skills-summary" style="font-size: 11px; color: var(--color-text-muted);"></span>
                     </div>
                     <div id="project-skills-list" class="project-tools-list">
+                        <div class="meta-empty">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="project-detail-card">
+                <div class="project-detail-section">
+                    <div class="project-detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                        <span>Custom Tools</span>
+                        <span id="project-custom-tools-summary" style="font-size: 11px; color: var(--color-text-muted);"></span>
+                    </div>
+                    <div id="project-custom-tools-list" class="project-tools-list">
                         <div class="meta-empty">Loading...</div>
                     </div>
                 </div>
@@ -1683,6 +1758,7 @@ class OpenPoet {
         this.loadMemoryDoc(project.id);
         this.loadProjectTools(project.id);
         this.loadProjectSkills(project.id);
+        this.loadProjectCustomTools(project.id);
         this.loadProjectMCPServers(project.id);
         this.loadProjectShares(project.id);
         this.loadProjectTasks(project.id);
@@ -2176,6 +2252,157 @@ class OpenPoet {
     }
 
     // --- End Project Skills ---
+
+    // --- Project Custom Tools ---
+
+    async loadProjectCustomTools(projectId) {
+        const container = document.getElementById('project-custom-tools-list');
+        const summaryEl = document.getElementById('project-custom-tools-summary');
+        if (!container) return;
+
+        try {
+            const tools = await this.api('GET', `/projects/${projectId}/custom-tools`) || [];
+
+            if (summaryEl) {
+                const enabled = tools.filter(t => t.enabled).length;
+                summaryEl.textContent = tools.length ? `${enabled} active` : 'None';
+            }
+
+            container.innerHTML = `
+                <div style="font-size: 11px; color: var(--color-text-muted); margin-bottom: 8px;">
+                    Custom shell commands the AI assistant can execute in your project. Parameters are passed as TOOL_NAME environment variables.
+                </div>
+                <div id="project-custom-tools-items">
+                    ${tools.length ? tools.map(t => `
+                        <div class="tp-tool-item" style="justify-content: space-between;">
+                            <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0;">
+                                <input type="checkbox" ${t.enabled ? 'checked' : ''} onchange="app.toggleProjectCustomTool(${projectId}, ${t.id}, this.checked)">
+                                <span class="tp-tool-name" style="cursor:pointer;" onclick="app.showProjectCustomToolModal(${projectId}, ${t.id})">${this.escapeHtml(t.name)}</span>
+                                <span class="tp-tool-desc" style="flex:1;"><code style="font-size:11px;">${this.escapeHtml(t.command)}</code></span>
+                                ${t.confirm ? '<span style="font-size:10px;color:var(--color-warning);margin-left:4px;" title="Requires confirmation">&#x1f512;</span>' : ''}
+                            </div>
+                            <div style="display:flex;gap:4px;flex-shrink:0;">
+                                <button class="btn btn-sm btn-secondary" onclick="app.showProjectCustomToolModal(${projectId}, ${t.id})" title="Edit">Edit</button>
+                                <button class="btn btn-sm btn-danger" onclick="app.deleteProjectCustomTool(${projectId}, ${t.id}, '${this.escapeHtml(t.name)}')" title="Delete">Del</button>
+                            </div>
+                        </div>
+                    `).join('') : '<div class="meta-empty">No custom tools defined.</div>'}
+                </div>
+                <button class="btn btn-sm btn-secondary" style="margin-top: 8px;" onclick="app.showProjectCustomToolModal(${projectId})">+ Add Tool</button>
+            `;
+        } catch (e) {
+            container.innerHTML = '<div class="meta-empty">Failed to load custom tools.</div>';
+        }
+    }
+
+    async showProjectCustomToolModal(projectId, toolId) {
+        let tool = null;
+        if (toolId) {
+            const tools = await this.api('GET', `/projects/${projectId}/custom-tools`);
+            tool = tools.find(t => t.id === toolId);
+        }
+
+        const isEdit = !!tool;
+        const title = isEdit ? 'Edit Custom Tool' : 'New Custom Tool';
+
+        const content = `
+            <form id="project-custom-tool-form">
+                <div class="form-group">
+                    <label class="form-label">Name</label>
+                    <input type="text" class="form-input" name="name" value="${this.escapeHtml(tool?.name || '')}" required placeholder="e.g. run_tests">
+                    <div style="font-size:11px;color:var(--color-text-muted);">Alphanumeric and underscores. The AI will call this as "custom_name".</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Description</label>
+                    <input type="text" class="form-input" name="description" value="${this.escapeHtml(tool?.description || '')}" placeholder="What does this tool do?">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Command</label>
+                    <input type="text" class="form-input" name="command" value="${this.escapeHtml(tool?.command || '')}" required placeholder="e.g. make test">
+                    <div style="font-size:11px;color:var(--color-text-muted);">Shell command. Parameters available as $TOOL_PARAM_NAME env vars.</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Parameters (JSON)</label>
+                    <textarea class="form-input" name="parameters" rows="3" placeholder='{"filter": {"type": "string", "description": "Test filter", "required": false}}'>${this.escapeHtml(tool?.parameters || '{}')}</textarea>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Working Directory</label>
+                    <input type="text" class="form-input" name="working_dir" value="${this.escapeHtml(tool?.working_dir || '')}" placeholder="Relative to project root (empty = root)">
+                </div>
+                <div class="form-group" style="display:flex;align-items:center;gap:8px;">
+                    <input type="checkbox" name="confirm" ${tool?.confirm ? 'checked' : ''}>
+                    <label class="form-label" style="margin:0;">Require confirmation before execution</label>
+                </div>
+            </form>
+        `;
+
+        const actions = `
+            <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="withLoading(this, () => app.saveProjectCustomTool(${projectId}, ${toolId || 'null'}))">${isEdit ? 'Save' : 'Create'}</button>
+        `;
+
+        this.showModal(title, content, actions);
+    }
+
+    async saveProjectCustomTool(projectId, toolId) {
+        const form = document.getElementById('project-custom-tool-form');
+        const data = {
+            name: form.querySelector('input[name="name"]').value.trim(),
+            description: form.querySelector('input[name="description"]').value.trim(),
+            command: form.querySelector('input[name="command"]').value.trim(),
+            parameters: form.querySelector('textarea[name="parameters"]').value.trim() || '{}',
+            working_dir: form.querySelector('input[name="working_dir"]').value.trim(),
+            confirm: form.querySelector('input[name="confirm"]').checked,
+        };
+
+        if (!data.name || !data.command) {
+            this.showToast('Error', 'Name and command are required', 'error');
+            return;
+        }
+
+        // Validate parameters JSON
+        try {
+            JSON.parse(data.parameters);
+        } catch (e) {
+            this.showToast('Error', 'Parameters must be valid JSON', 'error');
+            return;
+        }
+
+        try {
+            if (toolId) {
+                await this.api('PUT', `/projects/${projectId}/custom-tools/${toolId}`, data);
+            } else {
+                await this.api('POST', `/projects/${projectId}/custom-tools`, data);
+            }
+            this.hideModal();
+            this.showToast('Success', toolId ? 'Tool updated' : 'Tool created', 'success');
+            this.loadProjectCustomTools(projectId);
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    async toggleProjectCustomTool(projectId, toolId, enabled) {
+        try {
+            await this.api('PUT', `/projects/${projectId}/custom-tools/${toolId}`, { enabled });
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+            this.loadProjectCustomTools(projectId);
+        }
+    }
+
+    async deleteProjectCustomTool(projectId, toolId, name) {
+        if (!confirm(`Delete custom tool "${name}"?`)) return;
+        try {
+            await this.api('DELETE', `/projects/${projectId}/custom-tools/${toolId}`);
+            this.showToast('Success', 'Tool deleted', 'success');
+            this.loadProjectCustomTools(projectId);
+        } catch (e) {
+            this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    // --- End Project Custom Tools ---
 
     // --- Project MCP Servers ---
 
@@ -4403,6 +4630,7 @@ class OpenPoet {
         try {
             this.skills = await this.api('GET', '/config/skills');
             this.mcpServers = await this.api('GET', '/config/mcps');
+            this.agents = await this.api('GET', '/config/agents');
             this.settings = await this.api('GET', '/config/settings');
             this.aiConfigs = await this.api('GET', '/config/ai-configs');
             const assignments = await this.api('GET', '/config/ai-config-assignments');
@@ -4432,6 +4660,9 @@ class OpenPoet {
                 break;
             case 'ai-providers':
                 content = this.renderAIProvidersConfig();
+                break;
+            case 'agents':
+                content = this.renderAgentsConfig();
                 break;
             case 'settings':
                 content = this.renderSettingsConfig();
@@ -4570,6 +4801,228 @@ class OpenPoet {
                 `).join('')}
             </div>
         `;
+    }
+
+    renderAgentsConfig() {
+        const agents = this.agents || [];
+        return `
+            <div class="mb-4">
+                <button class="btn btn-primary" onclick="app.showAgentModal()">Add Agent</button>
+            </div>
+            <div class="card-grid">
+                ${agents.map(agent => `
+                    <div class="card">
+                        <div class="card-header">
+                            <div class="card-title">
+                                ${this.escapeHtml(agent.name)}
+                                ${agent.is_default ? '<span class="badge badge-info" style="margin-left:6px;font-size:10px;">DEFAULT</span>' : ''}
+                            </div>
+                            <input type="checkbox" ${agent.enabled ? 'checked' : ''}
+                                onchange="app.toggleAgent(${agent.id}, this.checked)" title="Enable/Disable">
+                        </div>
+                        <div class="card-body" style="font-size:12px;color:var(--color-text-secondary,#999);">
+                            ${agent.system_prompt ? '<div style="margin-bottom:4px;"><strong>Prompt:</strong> ' + this.escapeHtml(agent.system_prompt.substring(0, 100)) + (agent.system_prompt.length > 100 ? '...' : '') + '</div>' : '<div style="margin-bottom:4px;color:var(--color-text-tertiary,#666);">No custom prompt</div>'}
+                            ${agent.tool_policy ? '<div style="margin-bottom:4px;"><strong>Tool policy:</strong> ' + this._agentToolPolicySummary(agent.tool_policy) + '</div>' : ''}
+                            ${agent.project_filter ? '<div><strong>Project filter:</strong> ' + this._agentProjectFilterSummary(agent.project_filter) + '</div>' : ''}
+                        </div>
+                        <div class="card-actions">
+                            <button class="btn btn-secondary btn-sm" onclick="app.editAgent(${agent.id})">Edit</button>
+                            ${!agent.is_default ? `<button class="btn btn-danger btn-sm" onclick="app.deleteAgent(${agent.id})">Delete</button>` : ''}
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
+
+    _agentToolPolicySummary(policyJSON) {
+        try {
+            const p = JSON.parse(policyJSON);
+            if (p.allowed && p.allowed.length) return `Allow ${p.allowed.length} tool(s)`;
+            if (p.denied && p.denied.length) return `Deny ${p.denied.length} tool(s)`;
+        } catch {}
+        return 'Custom';
+    }
+
+    _agentProjectFilterSummary(filterJSON) {
+        try {
+            const f = JSON.parse(filterJSON);
+            const parts = [];
+            if (f.project_ids && f.project_ids.length) parts.push(`${f.project_ids.length} project(s)`);
+            if (f.tag_ids && f.tag_ids.length) parts.push(`${f.tag_ids.length} tag(s)`);
+            return parts.join(', ') || 'All';
+        } catch {}
+        return 'Custom';
+    }
+
+    async showAgentModal(agent = null) {
+        const isEdit = !!agent;
+        const isDefault = agent && agent.is_default;
+
+        // Load available tools and projects for the form
+        let tools = [];
+        try { tools = await this.api('GET', '/config/mcp-tools?context=chat'); } catch {}
+        let projects = this.projects || [];
+        let tags = [];
+        try { tags = await this.api('GET', '/tags'); } catch {}
+
+        // Parse existing policy/filter
+        let policyMode = 'all';
+        let selectedTools = [];
+        if (agent && agent.tool_policy) {
+            try {
+                const p = JSON.parse(agent.tool_policy);
+                if (p.allowed && p.allowed.length) { policyMode = 'allowed'; selectedTools = p.allowed; }
+                else if (p.denied && p.denied.length) { policyMode = 'denied'; selectedTools = p.denied; }
+            } catch {}
+        }
+
+        let filterProjectIds = [];
+        let filterTagIds = [];
+        if (agent && agent.project_filter) {
+            try {
+                const f = JSON.parse(agent.project_filter);
+                filterProjectIds = f.project_ids || [];
+                filterTagIds = f.tag_ids || [];
+            } catch {}
+        }
+
+        const html = `
+            <div class="modal-content" style="max-width:560px;">
+                <h3>${isEdit ? 'Edit' : 'Create'} Agent</h3>
+                <div class="form-group">
+                    <label>Name</label>
+                    <input type="text" id="agent-name" class="form-input" value="${this.escapeHtml(agent?.name || '')}" ${isDefault ? 'disabled' : ''}>
+                </div>
+                <div class="form-group">
+                    <label>System Prompt</label>
+                    <textarea id="agent-system-prompt" class="form-input" rows="5" placeholder="Extra instructions for this agent...">${this.escapeHtml(agent?.system_prompt || '')}</textarea>
+                </div>
+                <div class="form-group">
+                    <label>Tool Policy</label>
+                    <div style="display:flex;gap:8px;margin-bottom:8px;">
+                        <label style="font-size:12px;cursor:pointer;"><input type="radio" name="agent-tool-mode" value="all" ${policyMode === 'all' ? 'checked' : ''} onchange="document.getElementById('agent-tools-list').style.display=this.value==='all'?'none':'block'"> All tools</label>
+                        <label style="font-size:12px;cursor:pointer;"><input type="radio" name="agent-tool-mode" value="allowed" ${policyMode === 'allowed' ? 'checked' : ''} onchange="document.getElementById('agent-tools-list').style.display='block'"> Allow only</label>
+                        <label style="font-size:12px;cursor:pointer;"><input type="radio" name="agent-tool-mode" value="denied" ${policyMode === 'denied' ? 'checked' : ''} onchange="document.getElementById('agent-tools-list').style.display='block'"> Deny</label>
+                    </div>
+                    <div id="agent-tools-list" style="display:${policyMode === 'all' ? 'none' : 'block'};max-height:160px;overflow-y:auto;border:1px solid var(--color-border,#30363d);border-radius:6px;padding:6px;">
+                        ${tools.map(t => `
+                            <label style="display:block;font-size:11px;padding:2px 4px;cursor:pointer;">
+                                <input type="checkbox" class="agent-tool-cb" value="${this.escapeHtml(t.name)}" ${selectedTools.includes(t.name) ? 'checked' : ''}>
+                                ${this.escapeHtml(t.name)}
+                            </label>
+                        `).join('')}
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Project Filter</label>
+                    <div style="max-height:140px;overflow-y:auto;border:1px solid var(--color-border,#30363d);border-radius:6px;padding:6px;">
+                        <div style="font-size:11px;font-weight:600;margin-bottom:4px;">Projects</div>
+                        ${projects.map(p => `
+                            <label style="display:block;font-size:11px;padding:2px 4px;cursor:pointer;">
+                                <input type="checkbox" class="agent-project-cb" value="${p.id}" ${filterProjectIds.includes(p.id) ? 'checked' : ''}>
+                                ${this.escapeHtml(p.name)}
+                            </label>
+                        `).join('')}
+                        ${tags.length ? `
+                            <div style="font-size:11px;font-weight:600;margin:8px 0 4px;">Tags</div>
+                            ${tags.map(t => `
+                                <label style="display:block;font-size:11px;padding:2px 4px;cursor:pointer;">
+                                    <input type="checkbox" class="agent-tag-cb" value="${t.id}" ${filterTagIds.includes(t.id) ? 'checked' : ''}>
+                                    <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${t.color || '#666'};margin-right:4px;"></span>
+                                    ${this.escapeHtml(t.name)}
+                                </label>
+                            `).join('')}
+                        ` : ''}
+                    </div>
+                    <div style="font-size:10px;color:var(--color-text-tertiary,#666);margin-top:4px;">Leave all unchecked for access to all projects.</div>
+                </div>
+                <div class="form-group" style="display:flex;align-items:center;gap:8px;">
+                    <label style="margin:0;">Enabled</label>
+                    <input type="checkbox" id="agent-enabled" ${agent ? (agent.enabled ? 'checked' : '') : 'checked'}>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="app.saveAgent(${agent ? agent.id : 'null'})">${isEdit ? 'Save' : 'Create'}</button>
+                </div>
+            </div>
+        `;
+        this.showModal(html);
+    }
+
+    async editAgent(id) {
+        const agent = this.agents.find(a => a.id === id);
+        if (agent) this.showAgentModal(agent);
+    }
+
+    async saveAgent(id) {
+        const name = document.getElementById('agent-name').value.trim();
+        const systemPrompt = document.getElementById('agent-system-prompt').value;
+        const enabled = document.getElementById('agent-enabled').checked;
+
+        if (!name) {
+            this.showToast('Error', 'Agent name is required', 'error');
+            return;
+        }
+
+        // Build tool policy
+        const toolMode = document.querySelector('input[name="agent-tool-mode"]:checked')?.value || 'all';
+        let toolPolicy = '';
+        if (toolMode !== 'all') {
+            const checked = Array.from(document.querySelectorAll('.agent-tool-cb:checked')).map(cb => cb.value);
+            if (checked.length) {
+                toolPolicy = JSON.stringify({ [toolMode]: checked });
+            }
+        }
+
+        // Build project filter
+        const projectIds = Array.from(document.querySelectorAll('.agent-project-cb:checked')).map(cb => parseInt(cb.value));
+        const tagIds = Array.from(document.querySelectorAll('.agent-tag-cb:checked')).map(cb => parseInt(cb.value));
+        let projectFilter = '';
+        if (projectIds.length || tagIds.length) {
+            const filter = {};
+            if (projectIds.length) filter.project_ids = projectIds;
+            if (tagIds.length) filter.tag_ids = tagIds;
+            projectFilter = JSON.stringify(filter);
+        }
+
+        const body = { name, system_prompt: systemPrompt, tool_policy: toolPolicy, project_filter: projectFilter, enabled };
+
+        try {
+            if (id) {
+                await this.api('PUT', `/config/agents/${id}`, body);
+            } else {
+                await this.api('POST', '/config/agents', body);
+            }
+            this.hideModal();
+            await this.loadConfig();
+            this.showToast('Success', `Agent ${id ? 'updated' : 'created'}`, 'success');
+        } catch (err) {
+            this._showApiError(err);
+        }
+    }
+
+    async toggleAgent(id, enabled) {
+        const agent = this.agents.find(a => a.id === id);
+        if (!agent) return;
+        try {
+            await this.api('PUT', `/config/agents/${id}`, { ...agent, enabled });
+            agent.enabled = enabled;
+        } catch (err) {
+            this._showApiError(err);
+            this.renderConfig();
+        }
+    }
+
+    async deleteAgent(id) {
+        if (!confirm('Delete this agent?')) return;
+        try {
+            await this.api('DELETE', `/config/agents/${id}`);
+            await this.loadConfig();
+            this.showToast('Success', 'Agent deleted', 'success');
+        } catch (err) {
+            this._showApiError(err);
+        }
     }
 
     renderSettingsConfig() {
@@ -4922,6 +5375,21 @@ class OpenPoet {
                     </select>
                 </div>
                 <div class="form-group">
+                    <label class="form-label">Tags</label>
+                    <div id="project-tag-select" class="tag-select-container">
+                        ${(this._allTags || []).length === 0
+                            ? '<span style="color:var(--color-text-muted);font-size:12px;">No tags yet. Create tags using the Manage Tags button on the Projects page.</span>'
+                            : (this._allTags || []).map(t => `
+                                <label class="tag-select-option" style="--tag-color:${t.color}">
+                                    <input type="checkbox" name="project_tags" value="${t.id}"
+                                           ${(project?.tags || []).some(pt => pt.id === t.id) ? 'checked' : ''}>
+                                    <span class="tag-chip" style="background:${t.color}22;color:${t.color}">${this.escapeHtml(t.name)}</span>
+                                </label>
+                            `).join('')
+                        }
+                    </div>
+                </div>
+                <div class="form-group">
                     <label class="form-label" style="display: flex; align-items: center; gap: 8px;">
                         Tool Policy
                         <span style="font-size: 11px; font-weight: normal; color: var(--color-text-muted);">(click to expand)</span>
@@ -5140,10 +5608,17 @@ class OpenPoet {
         };
 
         try {
+            let savedProject;
             if (projectId) {
-                await this.api('PUT', `/projects/${projectId}`, data);
+                savedProject = await this.api('PUT', `/projects/${projectId}`, data);
             } else {
-                await this.api('POST', '/projects', data);
+                savedProject = await this.api('POST', '/projects', data);
+            }
+            const pid = projectId || savedProject?.id;
+            if (pid) {
+                const tagCheckboxes = document.querySelectorAll('#project-tag-select input[name="project_tags"]:checked');
+                const tagIds = Array.from(tagCheckboxes).map(cb => parseInt(cb.value));
+                await this.api('PUT', `/projects/${pid}/tags`, { tag_ids: tagIds });
             }
             this.hideModal();
             this.showToast('Success', 'Project saved', 'success');
@@ -5189,6 +5664,165 @@ class OpenPoet {
             field.removeEventListener('input', clearError);
         };
         field.addEventListener('input', clearError);
+    }
+
+    _getTagColors() {
+        return [
+            '#7aa2f7', '#9ece6a', '#f7768e', '#e0af68', '#bb9af7',
+            '#7dcfff', '#ff9e64', '#73daca', '#c0caf5', '#565f89',
+        ];
+    }
+
+    showManageTagsModal() {
+        const tags = this._allTags || [];
+        const colors = this._getTagColors();
+
+        const renderTagList = () => {
+            const list = document.getElementById('manage-tags-list');
+            if (!list) return;
+            if (tags.length === 0) {
+                list.innerHTML = '<div style="color:var(--color-text-muted);padding:12px 0;">No tags yet. Create one below.</div>';
+                return;
+            }
+            list.innerHTML = tags.map(t => `
+                <div class="manage-tag-row" data-tag-id="${t.id}">
+                    <span class="tag-chip" style="background:${t.color}22;color:${t.color}">${this.escapeHtml(t.name)}</span>
+                    <div style="display:flex;gap:4px;margin-left:auto;">
+                        <button class="btn btn-secondary btn-sm" onclick="app._editTag(${t.id})" title="Edit">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                        </button>
+                        <button class="btn btn-danger btn-sm" onclick="app._deleteTag(${t.id})" title="Delete">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+        };
+
+        const content = `
+            <div id="manage-tags-list" style="margin-bottom:16px;"></div>
+            <div style="border-top:1px solid var(--color-border);padding-top:12px;">
+                <div style="font-weight:600;margin-bottom:8px;font-size:13px;">New Tag</div>
+                <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+                    <input type="text" id="new-tag-name" class="form-input" placeholder="Tag name" style="flex:1;">
+                    <button class="btn btn-primary btn-sm" onclick="app._createTag()">Add</button>
+                </div>
+                <div class="tag-color-picker" id="new-tag-colors">
+                    ${colors.map((c, i) =>
+                        `<span class="tag-color-dot ${i === 0 ? 'active' : ''}" style="background:${c}" data-color="${c}" onclick="app._selectNewTagColor(this)"></span>`
+                    ).join('')}
+                </div>
+            </div>
+        `;
+
+        const actions = `<button class="btn btn-secondary" onclick="app.hideModal()">Close</button>`;
+        this.showModal('Manage Tags', content, actions);
+        this._newTagColor = colors[0];
+        renderTagList();
+    }
+
+    _selectNewTagColor(el) {
+        document.querySelectorAll('#new-tag-colors .tag-color-dot').forEach(d => d.classList.remove('active'));
+        el.classList.add('active');
+        this._newTagColor = el.dataset.color;
+    }
+
+    async _createTag() {
+        const input = document.getElementById('new-tag-name');
+        const name = input?.value?.trim();
+        if (!name) return;
+
+        try {
+            const tag = await this.api('POST', '/tags', { name, color: this._newTagColor });
+            this._allTags.push(tag);
+            input.value = '';
+            this.showManageTagsModal();
+            this.renderTagFilterBar();
+        } catch (error) {
+            this._showApiError(error);
+        }
+    }
+
+    async _editTag(tagId) {
+        const tag = this._allTags.find(t => t.id === tagId);
+        if (!tag) return;
+
+        const colors = this._getTagColors();
+        const content = `
+            <div class="form-group">
+                <label class="form-label">Name</label>
+                <input type="text" id="edit-tag-name" class="form-input" value="${this.escapeHtml(tag.name)}">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Color</label>
+                <div class="tag-color-picker" id="edit-tag-colors">
+                    ${colors.map(c =>
+                        `<span class="tag-color-dot ${c === tag.color ? 'active' : ''}" style="background:${c}" data-color="${c}" onclick="app._selectEditTagColor(this)"></span>`
+                    ).join('')}
+                </div>
+            </div>
+            <div style="margin-top:12px;">
+                <span>Preview: </span><span class="tag-chip" id="edit-tag-preview" style="background:${tag.color}22;color:${tag.color}">${this.escapeHtml(tag.name)}</span>
+            </div>
+        `;
+
+        const actions = `
+            <button class="btn btn-secondary" onclick="app.showManageTagsModal()">Back</button>
+            <button class="btn btn-primary" onclick="app._saveEditTag(${tagId})">Save</button>
+        `;
+        this.showModal('Edit Tag', content, actions);
+        this._editTagColor = tag.color;
+
+        // Live preview
+        const nameInput = document.getElementById('edit-tag-name');
+        if (nameInput) {
+            nameInput.addEventListener('input', () => {
+                const preview = document.getElementById('edit-tag-preview');
+                if (preview) preview.textContent = nameInput.value || tag.name;
+            });
+        }
+    }
+
+    _selectEditTagColor(el) {
+        document.querySelectorAll('#edit-tag-colors .tag-color-dot').forEach(d => d.classList.remove('active'));
+        el.classList.add('active');
+        this._editTagColor = el.dataset.color;
+        const preview = document.getElementById('edit-tag-preview');
+        if (preview) {
+            preview.style.background = el.dataset.color + '22';
+            preview.style.color = el.dataset.color;
+        }
+    }
+
+    async _saveEditTag(tagId) {
+        const name = document.getElementById('edit-tag-name')?.value?.trim();
+        if (!name) return;
+
+        try {
+            const updated = await this.api('PUT', `/tags/${tagId}`, { name, color: this._editTagColor });
+            const idx = this._allTags.findIndex(t => t.id === tagId);
+            if (idx >= 0) this._allTags[idx] = updated;
+            this.showManageTagsModal();
+            this.renderTagFilterBar();
+            this.renderProjects();
+        } catch (error) {
+            this._showApiError(error);
+        }
+    }
+
+    async _deleteTag(tagId) {
+        const tag = this._allTags.find(t => t.id === tagId);
+        if (!confirm(`Delete tag "${tag?.name}"? It will be removed from all projects.`)) return;
+
+        try {
+            await this.api('DELETE', `/tags/${tagId}`);
+            this._allTags = this._allTags.filter(t => t.id !== tagId);
+            this.showManageTagsModal();
+            this.renderTagFilterBar();
+            this.loadProjects();
+        } catch (error) {
+            this._showApiError(error);
+        }
     }
 
     _clearFieldErrors() {
@@ -7151,7 +7785,7 @@ class OpenPoet {
         `;
 
         this.showModal('Create Skill with AI', modalContent, `
-            <button class="btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+            <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
             <button id="ai-skill-generate-btn" class="btn btn-primary" onclick="app.generateAISkill()">Generate</button>
             <button id="ai-skill-save-btn" class="btn btn-success hidden" onclick="app.saveAIGeneratedSkill()">Save Skill</button>
         `);
@@ -7252,7 +7886,7 @@ class OpenPoet {
             });
 
             this.showToast('Success', `Skill "${skillData.name}" created`, 'success');
-            this.closeModal();
+            this.hideModal();
             this.loadConfig();
         } catch (e) {
             this.showToast('Error', e.message, 'error');
