@@ -2,6 +2,7 @@ package files
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"openpoet/internal/database"
@@ -465,6 +466,48 @@ func (m *RemoteFileManager) Grep(pattern string, searchPath string, fileGlob str
 // GetBasePath returns the project path
 func (m *RemoteFileManager) GetBasePath() string {
 	return m.project.Path
+}
+
+// RunCommand executes a shell command on the remote host via SSH.
+// Returns combined stdout and stderr output.
+func (m *RemoteFileManager) RunCommand(command string) (string, error) {
+	sshClient, _, err := m.connect()
+	if err != nil {
+		return "", err
+	}
+	defer sshClient.Close()
+
+	session, err := sshClient.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer session.Close()
+
+	var stdout, stderr bytes.Buffer
+	session.Stdout = &stdout
+	session.Stderr = &stderr
+
+	err = session.Run(command)
+
+	var result strings.Builder
+	if stdout.Len() > 0 {
+		result.WriteString(stdout.String())
+	}
+	if stderr.Len() > 0 {
+		if result.Len() > 0 {
+			result.WriteString("\n--- stderr ---\n")
+		}
+		result.WriteString(stderr.String())
+	}
+
+	if err != nil {
+		if result.Len() == 0 {
+			return "", fmt.Errorf("command failed: %w", err)
+		}
+		result.WriteString(fmt.Sprintf("\n[exit code: %s]", err.Error()))
+	}
+
+	return result.String(), nil
 }
 
 // SFTPConnectorAdapter wraps RemoteFileManager to provide SSH+SFTP connections.
