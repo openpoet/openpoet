@@ -864,6 +864,65 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return string(body), nil
 
+	// ---- Project custom tools management ----
+
+	case "openpoet_list_project_custom_tools":
+		projectID := getProjectID(params)
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		body, err := client.Get(fmt.Sprintf("/api/projects/%d/custom-tools", projectID))
+		if err != nil {
+			return "", err
+		}
+		return formatCustomToolsList(body)
+
+	case "openpoet_create_project_custom_tool":
+		projectID := getProjectID(params)
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		delete(params, "project_id")
+		payload, _ := json.Marshal(params)
+		body, err := client.Post(fmt.Sprintf("/api/projects/%d/custom-tools", projectID), string(payload))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Custom tool created: %s", string(body)), nil
+
+	case "openpoet_update_project_custom_tool":
+		projectID := getProjectID(params)
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		id, ok := getID(params)
+		if !ok {
+			return "", fmt.Errorf("id is required")
+		}
+		delete(params, "project_id")
+		delete(params, "id")
+		payload, _ := json.Marshal(params)
+		body, err := client.Put(fmt.Sprintf("/api/projects/%d/custom-tools/%d", projectID, id), string(payload))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Custom tool updated: %s", string(body)), nil
+
+	case "openpoet_delete_project_custom_tool":
+		projectID := getProjectID(params)
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		id, ok := getID(params)
+		if !ok {
+			return "", fmt.Errorf("id is required")
+		}
+		_, err := client.Delete(fmt.Sprintf("/api/projects/%d/custom-tools/%d", projectID, id))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Custom tool %d deleted", id), nil
+
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
@@ -1551,6 +1610,36 @@ func formatMCPsList(body []byte) (string, error) {
 			status = "disabled"
 		}
 		result += fmt.Sprintf("- [%d] %s: %s (%s)\n", m.ID, m.Name, m.Command, status)
+	}
+	return result, nil
+}
+
+func formatCustomToolsList(body []byte) (string, error) {
+	var tools []struct {
+		ID          int64  `json:"id"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Command     string `json:"command"`
+		Enabled     bool   `json:"enabled"`
+		Confirm     bool   `json:"confirm"`
+	}
+	if err := json.Unmarshal(body, &tools); err != nil {
+		return string(body), nil
+	}
+	if len(tools) == 0 {
+		return "No custom tools found for this project.", nil
+	}
+	result := ""
+	for _, t := range tools {
+		status := "enabled"
+		if !t.Enabled {
+			status = "disabled"
+		}
+		confirm := ""
+		if t.Confirm {
+			confirm = ", requires confirmation"
+		}
+		result += fmt.Sprintf("- [%d] %s (%s%s): %s\n  Command: %s\n", t.ID, t.Name, status, confirm, t.Description, t.Command)
 	}
 	return result, nil
 }

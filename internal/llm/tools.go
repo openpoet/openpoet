@@ -31,7 +31,7 @@ type MCPToolDef struct {
 }
 
 // AllToolDefs returns the complete unified tool registry.
-// All 33 tools are defined here — chat, session, and shared.
+// All 37 tools are defined here — chat, session, and shared.
 func AllToolDefs() []ToolDef {
 	return []ToolDef{
 		// ──── Shared tools (both chat + session) ────
@@ -568,6 +568,73 @@ func AllToolDefs() []ToolDef {
 				Required: []string{"project_id", "src_path", "dest_path"},
 			},
 			Context: ToolContextSession,
+		},
+
+		// ──── Project custom tools management ────
+
+		{
+			Name:           "list_project_custom_tools",
+			Description:    "List all custom tools defined for a project. Custom tools are shell commands that the AI assistant can execute in the project context.",
+			MCPDescription: "List all custom tools for a project. Returns tool names, descriptions, commands, and enabled status.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+				},
+				Required: []string{"project_id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "create_project_custom_tool",
+			Description: "Create a custom tool for a project. Custom tools are shell commands executed in the project directory. Parameters are passed as TOOL_<NAME> environment variables.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id":  {Type: "string", Description: "The project ID (number)"},
+					"name":        {Type: "string", Description: "Tool name (lowercase, underscores). Example: search_code"},
+					"description": {Type: "string", Description: "What the tool does — the AI reads this to decide when to use it"},
+					"command":     {Type: "string", Description: "Shell command to execute. Use $TOOL_<PARAM> for parameters (e.g. $TOOL_PATTERN)"},
+					"parameters":  {Type: "string", Description: "JSON array of parameters: [{\"name\": \"pattern\", \"description\": \"Search pattern\", \"required\": true}]"},
+					"working_dir": {Type: "string", Description: "Override working directory (optional, defaults to project path)"},
+					"confirm":     {Type: "boolean", Description: "Require user confirmation before execution (default: false)"},
+				},
+				Required: []string{"project_id", "name", "description", "command"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "update_project_custom_tool",
+			Description: "Update an existing custom tool by ID.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id":  {Type: "string", Description: "The project ID (number)"},
+					"id":          {Type: "string", Description: "The custom tool ID (number)"},
+					"name":        {Type: "string", Description: "New tool name"},
+					"description": {Type: "string", Description: "New description"},
+					"command":     {Type: "string", Description: "New shell command"},
+					"parameters":  {Type: "string", Description: "New JSON array of parameters"},
+					"working_dir": {Type: "string", Description: "New working directory"},
+					"confirm":     {Type: "boolean", Description: "Require user confirmation"},
+					"enabled":     {Type: "boolean", Description: "Whether the tool is enabled"},
+				},
+				Required: []string{"project_id", "id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "delete_project_custom_tool",
+			Description: "Delete a custom tool by ID.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"id":         {Type: "string", Description: "The custom tool ID (number)"},
+				},
+				Required: []string{"project_id", "id"},
+			},
+			Context: ToolContextBoth,
 		},
 
 		// ──── Chat-only tools ────
