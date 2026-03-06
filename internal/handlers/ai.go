@@ -633,6 +633,8 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		ConversationID int64  `json:"conversation_id"`
 		Message        string `json:"message"`
+		ProjectID      int64  `json:"project_id"`
+		AgentID        int64  `json:"agent_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
@@ -661,6 +663,12 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusNotFound, "Conversation not found")
 			return
 		}
+		// Update project context if provided and not already set
+		if input.ProjectID > 0 && (conv.ProactiveContext == "" || conv.ProactiveContext == "{}") {
+			ctx := fmt.Sprintf(`{"project_id":%d}`, input.ProjectID)
+			h.api.db.ExecContext(r.Context(), "UPDATE ai_conversations SET proactive_context = ? WHERE id = ? AND (proactive_context = '' OR proactive_context = '{}')", ctx, conv.ID)
+			conv.ProactiveContext = ctx
+		}
 	} else {
 		// Create new conversation
 		title := input.Message
@@ -668,6 +676,14 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			title = title[:100] + "..."
 		}
 		conv = &database.AIConversation{Title: title}
+		// Set agent if provided
+		if input.AgentID > 0 {
+			conv.AgentID = sql.NullInt64{Int64: input.AgentID, Valid: true}
+		}
+		// Set project context if provided
+		if input.ProjectID > 0 {
+			conv.ProactiveContext = fmt.Sprintf(`{"project_id":%d}`, input.ProjectID)
+		}
 		if err := h.api.db.CreateAIConversation(ctx, conv); err != nil {
 			respondError(w, http.StatusInternalServerError, "Failed to create conversation")
 			return
@@ -757,7 +773,32 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	_, isSessionProvider := p.(llm.SessionProvider)
 
-	systemPrompt := h.buildSystemPromptWithContext(ctx, proactiveCtx, isSessionProvider)
+	// Load the agent for this conversation
+	var agent *database.AIAgent
+	if conv.AgentID.Valid {
+		agent, _ = h.api.db.GetAIAgent(ctx, conv.AgentID.Int64)
+	}
+	if agent == nil {
+		agent, _ = h.api.db.GetDefaultAIAgent(ctx)
+	}
+
+	systemPrompt := h.buildSystemPromptWithContext(ctx, proactiveCtx, isSessionProvider, agent)
+
+	// Append agent identity and restrictions to system prompt
+	if agent != nil && !agent.IsDefault {
+		systemPrompt += "\n\n## Agent Identity\nYou are the \"" + agent.Name + "\" agent."
+		if agent.SystemPrompt != "" {
+			systemPrompt += "\n\n### Instructions\n" + agent.SystemPrompt
+		}
+		if agent.ProjectFilter != "" {
+			systemPrompt += "\n\n### Project Access\nYou only have access to the projects listed above. Do not reference or attempt to access any other projects."
+		}
+		if agent.ToolPolicy != "" {
+			systemPrompt += "\n\n### Tool Restrictions\nYou only have access to a subset of tools. Do not attempt to perform actions outside your available tools."
+		}
+	} else if agent != nil && agent.SystemPrompt != "" {
+		systemPrompt += "\n\n## Additional Instructions\n" + agent.SystemPrompt
+	}
 
 	model := h.getSlotModel(llm.SlotChat)
 
@@ -767,6 +808,18 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	var tools []llm.ToolDefinition
 	if !isSessionProvider {
 		tools = llm.ChatTools()
+		// Merge project custom tools if conversation has a project context
+		if projectID := h.getProjectIDFromConversation(ctx, conv.ID); projectID > 0 {
+			if customTools, err := h.api.db.ListEnabledProjectTools(ctx, projectID); err == nil {
+				for _, ct := range customTools {
+					tools = append(tools, projectToolToDefinition(ct))
+				}
+			}
+		}
+		// Apply agent tool policy filtering
+		if agent != nil && agent.ToolPolicy != "" {
+			tools = filterToolsByPolicy(tools, agent.ToolPolicy)
+		}
 	}
 
 	// Set SSE headers
@@ -1611,6 +1664,22 @@ func (h *AIHandler) ExecuteTool(ctx context.Context, name string, input map[stri
 
 // executeTool runs a tool and returns the result as a string.
 func (h *AIHandler) executeTool(ctx context.Context, name string, input map[string]interface{}, conversationID int64, messageID int64, collector *planningCollector, proactiveType string) (string, error) {
+	// Agent project filter enforcement: block access to projects not in the agent's filter
+	if pidRaw, ok := input["project_id"]; ok && conversationID > 0 {
+		if allowed := h.getAgentAllowedProjectIDs(ctx, conversationID); allowed != nil {
+			pid, _ := parseIDParam(input, "project_id")
+			if pid > 0 && !allowed[pid] {
+				log.Printf("[AI-Agent] BLOCKED tool %q: project %d not in allowed set for conv %d", name, pid, conversationID)
+				return "", fmt.Errorf("this agent does not have access to project %d", pid)
+			}
+			// If project_id is present but couldn't be parsed, block by default
+			if pid == 0 && pidRaw != nil {
+				log.Printf("[AI-Agent] BLOCKED tool %q: unparseable project_id %v for conv %d", name, pidRaw, conversationID)
+				return "", fmt.Errorf("this agent does not have access to the requested project")
+			}
+		}
+	}
+
 	switch name {
 	case "create_skill":
 		skillName, _ := input["name"].(string)
@@ -1938,6 +2007,16 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		projects, err := h.api.db.ListProjects(ctx)
 		if err != nil {
 			return "", err
+		}
+		// Apply agent project filter
+		if allowed := h.getAgentAllowedProjectIDs(ctx, conversationID); allowed != nil {
+			var filtered []database.Project
+			for _, p := range projects {
+				if allowed[p.ID] {
+					filtered = append(filtered, p)
+				}
+			}
+			projects = filtered
 		}
 		if len(projects) == 0 {
 			return "No projects found.", nil
@@ -2941,8 +3020,171 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		return sb.String(), nil
 
 	default:
+		// Check if this is a custom project tool (prefixed with "custom_")
+		if strings.HasPrefix(name, "custom_") {
+			return h.executeCustomProjectTool(ctx, name, input, conversationID)
+		}
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
+}
+
+// projectToolToDefinition converts a ProjectTool DB model to an LLM ToolDefinition.
+// Tool names are prefixed with "custom_" to avoid collisions with built-in tools.
+func projectToolToDefinition(t database.ProjectTool) llm.ToolDefinition {
+	props := make(map[string]llm.ToolPropertySchema)
+	var required []string
+
+	// Parse parameters JSON: {"param_name": {"type": "string", "description": "...", "required": true}}
+	var params map[string]struct {
+		Type        string `json:"type"`
+		Description string `json:"description"`
+		Required    bool   `json:"required"`
+	}
+	if json.Unmarshal([]byte(t.Parameters), &params) == nil {
+		for pname, p := range params {
+			ptype := p.Type
+			if ptype == "" {
+				ptype = "string"
+			}
+			props[pname] = llm.ToolPropertySchema{
+				Type:        ptype,
+				Description: p.Description,
+			}
+			if p.Required {
+				required = append(required, pname)
+			}
+		}
+	}
+
+	desc := t.Description
+	if desc == "" {
+		desc = fmt.Sprintf("Custom project tool: %s", t.Name)
+	}
+
+	return llm.ToolDefinition{
+		Name:        "custom_" + t.Name,
+		Description: desc,
+		InputSchema: llm.ToolDefinitionInput{
+			Type:       "object",
+			Properties: props,
+			Required:   required,
+		},
+	}
+}
+
+// executeCustomProjectTool runs a custom project tool by executing its shell command.
+// Parameters are passed as environment variables with TOOL_ prefix.
+func (h *AIHandler) executeCustomProjectTool(ctx context.Context, name string, input map[string]interface{}, conversationID int64) (string, error) {
+	toolName := strings.TrimPrefix(name, "custom_")
+
+	projectID := h.getProjectIDFromConversation(ctx, conversationID)
+	if projectID == 0 {
+		return "", fmt.Errorf("no project context for custom tool execution")
+	}
+
+	project, err := h.api.db.GetProject(ctx, projectID)
+	if err != nil {
+		return "", fmt.Errorf("project not found")
+	}
+
+	tool, err := h.api.db.GetProjectToolByName(ctx, projectID, toolName)
+	if err != nil {
+		return "", fmt.Errorf("custom tool %q not found for project", toolName)
+	}
+
+	if !tool.Enabled {
+		return "", fmt.Errorf("custom tool %q is disabled", toolName)
+	}
+
+	// Build working directory
+	workDir := project.Path
+	if tool.WorkingDir != "" {
+		workDir = project.Path + "/" + tool.WorkingDir
+	}
+
+	// For remote projects, execute via SSH
+	if project.Type != "local" {
+		return h.executeCustomToolSSH(ctx, project, tool, input, workDir)
+	}
+
+	// Build environment variables from parameters
+	env := os.Environ()
+	for k, v := range input {
+		envKey := "TOOL_" + strings.ToUpper(k)
+		env = append(env, fmt.Sprintf("%s=%v", envKey, v))
+	}
+
+	// Execute command with a timeout
+	cmdCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, "sh", "-c", tool.Command)
+	cmd.Dir = workDir
+	cmd.Env = env
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+
+	var result strings.Builder
+	if stdout.Len() > 0 {
+		result.WriteString(stdout.String())
+	}
+	if stderr.Len() > 0 {
+		if result.Len() > 0 {
+			result.WriteString("\n--- stderr ---\n")
+		}
+		result.WriteString(stderr.String())
+	}
+
+	if err != nil {
+		if result.Len() == 0 {
+			return "", fmt.Errorf("command failed: %w", err)
+		}
+		result.WriteString(fmt.Sprintf("\n[exit code: %s]", err.Error()))
+	}
+
+	// Truncate output if too large
+	output := result.String()
+	const maxOutput = 100_000
+	if len(output) > maxOutput {
+		output = output[:maxOutput] + "\n... (output truncated)"
+	}
+
+	return output, nil
+}
+
+// executeCustomToolSSH runs a custom project tool on a remote project via SSH.
+func (h *AIHandler) executeCustomToolSSH(ctx context.Context, project *database.Project, tool *database.ProjectTool, input map[string]interface{}, workDir string) (string, error) {
+	fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
+
+	// Build env exports + command
+	var cmdBuilder strings.Builder
+	cmdBuilder.WriteString(fmt.Sprintf("cd %s && ", shellQuote(workDir)))
+	for k, v := range input {
+		envKey := "TOOL_" + strings.ToUpper(k)
+		cmdBuilder.WriteString(fmt.Sprintf("export %s=%s && ", envKey, shellQuote(fmt.Sprintf("%v", v))))
+	}
+	cmdBuilder.WriteString(tool.Command)
+
+	output, err := fm.RunCommand(cmdBuilder.String())
+	if err != nil {
+		return "", err
+	}
+
+	const maxOutput = 100_000
+	if len(output) > maxOutput {
+		output = output[:maxOutput] + "\n... (output truncated)"
+	}
+
+	return output, nil
+}
+
+// shellQuote wraps a string in single quotes for safe shell usage.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // HandleExecuteTool is an HTTP endpoint that Node.js SDK sidecar calls to execute
@@ -3081,7 +3323,8 @@ func (h *AIHandler) buildSystemPrompt(ctx context.Context) string {
 
 // buildSystemPromptWithContext builds system prompt, optionally with proactive conversation context.
 // When forMCP is true, adapts the prompt for GoSDK/session providers (MCP tool naming convention).
-func (h *AIHandler) buildSystemPromptWithContext(ctx context.Context, proactiveCtx string, forMCP ...bool) string {
+// The optional agent parameter filters projects based on the agent's project_filter.
+func (h *AIHandler) buildSystemPromptWithContext(ctx context.Context, proactiveCtx string, forMCP bool, agent ...*database.AIAgent) string {
 	var skillNames []string
 	skills, _ := h.api.db.ListSkills(ctx)
 	for _, s := range skills {
@@ -3092,8 +3335,14 @@ func (h *AIHandler) buildSystemPromptWithContext(ctx context.Context, proactiveC
 		skillNames = append(skillNames, fmt.Sprintf("[%d] %s (%s, %s)", s.ID, s.Name, s.Category, status))
 	}
 
-	var projectNames []string
 	projects, _ := h.api.db.ListProjects(ctx)
+
+	// Apply agent project filter if present
+	if len(agent) > 0 && agent[0] != nil && agent[0].ProjectFilter != "" {
+		projects = h.filterProjectsByAgent(ctx, projects, agent[0].ProjectFilter)
+	}
+
+	var projectNames []string
 	for _, p := range projects {
 		projectNames = append(projectNames, fmt.Sprintf("[%d] %s (%s)", p.ID, p.Name, p.Type))
 	}
@@ -3104,7 +3353,7 @@ func (h *AIHandler) buildSystemPromptWithContext(ctx context.Context, proactiveC
 		mcpNames = append(mcpNames, fmt.Sprintf("[%d] %s", m.ID, m.Name))
 	}
 
-	return llm.ChatSystemPromptWithProactiveContext(skillNames, projectNames, mcpNames, proactiveCtx, forMCP...)
+	return llm.ChatSystemPromptWithProactiveContext(skillNames, projectNames, mcpNames, proactiveCtx, forMCP)
 }
 
 // HandleInitiateMemoryDocEdit creates an AI-initiated conversation for editing a project's memory doc.
@@ -5236,6 +5485,114 @@ func (h *AIHandler) persistVerificationDoc(ctx context.Context, task *database.P
 	}, "ai", "")
 
 	log.Printf("[AI-Verification] Created verification doc %s for task %d", docID, task.ID)
+}
+
+// getAgentAllowedProjectIDs returns the set of allowed project IDs for a conversation's agent.
+// Returns nil if no filter is set (all projects allowed).
+func (h *AIHandler) getAgentAllowedProjectIDs(ctx context.Context, conversationID int64) map[int64]bool {
+	if conversationID <= 0 {
+		return nil
+	}
+	conv, err := h.api.db.GetAIConversation(ctx, conversationID)
+	if err != nil || !conv.AgentID.Valid {
+		return nil
+	}
+	agent, err := h.api.db.GetAIAgent(ctx, conv.AgentID.Int64)
+	if err != nil || agent.ProjectFilter == "" {
+		return nil
+	}
+	projects, _ := h.api.db.ListProjects(ctx)
+	filtered := h.filterProjectsByAgent(ctx, projects, agent.ProjectFilter)
+	if len(filtered) == len(projects) {
+		return nil // no restriction
+	}
+	allowed := make(map[int64]bool, len(filtered))
+	for _, p := range filtered {
+		allowed[p.ID] = true
+	}
+	return allowed
+}
+
+// filterToolsByPolicy filters tools based on an agent's tool policy JSON.
+// Policy format: {"allowed":["tool1","tool2"]} or {"denied":["tool3"]}. Empty means all tools.
+func filterToolsByPolicy(tools []llm.ToolDefinition, policyJSON string) []llm.ToolDefinition {
+	var policy struct {
+		Allowed []string `json:"allowed"`
+		Denied  []string `json:"denied"`
+	}
+	if err := json.Unmarshal([]byte(policyJSON), &policy); err != nil {
+		return tools
+	}
+	if len(policy.Allowed) > 0 {
+		allowSet := make(map[string]bool, len(policy.Allowed))
+		for _, name := range policy.Allowed {
+			allowSet[name] = true
+		}
+		var filtered []llm.ToolDefinition
+		for _, t := range tools {
+			if allowSet[t.Name] {
+				filtered = append(filtered, t)
+			}
+		}
+		return filtered
+	}
+	if len(policy.Denied) > 0 {
+		denySet := make(map[string]bool, len(policy.Denied))
+		for _, name := range policy.Denied {
+			denySet[name] = true
+		}
+		var filtered []llm.ToolDefinition
+		for _, t := range tools {
+			if !denySet[t.Name] {
+				filtered = append(filtered, t)
+			}
+		}
+		return filtered
+	}
+	return tools
+}
+
+// filterProjectsByAgent filters projects based on an agent's project_filter JSON.
+// Format: {"project_ids":[1,2],"tag_ids":[3,4]}. Projects matching either criterion are included.
+func (h *AIHandler) filterProjectsByAgent(ctx context.Context, projects []database.Project, filterJSON string) []database.Project {
+	var filter struct {
+		ProjectIDs []int64 `json:"project_ids"`
+		TagIDs     []int64 `json:"tag_ids"`
+	}
+	if err := json.Unmarshal([]byte(filterJSON), &filter); err != nil {
+		return projects
+	}
+	if len(filter.ProjectIDs) == 0 && len(filter.TagIDs) == 0 {
+		return projects
+	}
+
+	// Build set of allowed project IDs
+	allowed := make(map[int64]bool)
+	for _, pid := range filter.ProjectIDs {
+		allowed[pid] = true
+	}
+
+	// If tag IDs specified, find projects with those tags
+	if len(filter.TagIDs) > 0 {
+		tagSet := make(map[int64]bool, len(filter.TagIDs))
+		for _, tid := range filter.TagIDs {
+			tagSet[tid] = true
+		}
+		allPT, _ := h.api.db.ListAllProjectTagDetails(ctx)
+		for _, pt := range allPT {
+			if tagSet[pt.TagID] {
+				allowed[pt.ProjectID] = true
+			}
+		}
+	}
+
+	var filtered []database.Project
+	for _, p := range projects {
+		if allowed[p.ID] {
+			filtered = append(filtered, p)
+		}
+	}
+	return filtered
 }
 
 // sendSSE writes an SSE event to the response.

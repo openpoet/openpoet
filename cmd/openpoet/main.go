@@ -644,6 +644,13 @@ func main() {
 		r.Get("/config/ai-config-assignments", api.GetAIConfigAssignments)
 		r.Put("/config/ai-config-assignments", api.UpdateAIConfigAssignments)
 
+		// Config - Agents
+		r.Get("/config/agents", api.ListAgents)
+		r.Post("/config/agents", api.CreateAgent)
+		r.Get("/config/agents/{id}", api.GetAgent)
+		r.Put("/config/agents/{id}", api.UpdateAgent)
+		r.Delete("/config/agents/{id}", api.DeleteAgent)
+
 		// Config - Settings
 		r.Get("/config/settings", api.GetSettings)
 		r.Put("/config/settings", api.UpdateSettings)
@@ -688,6 +695,16 @@ func main() {
 		r.Get("/projects/{id}/shares", api.GetProjectShares)
 		r.Put("/projects/{id}/shares", api.UpdateProjectShares)
 
+		// Tags (global CRUD)
+		r.Get("/tags", api.ListAllTags)
+		r.Post("/tags", api.CreateTag)
+		r.Put("/tags/{id}", api.UpdateTag)
+		r.Delete("/tags/{id}", api.DeleteTagHandler)
+
+		// Project tag assignments
+		r.Get("/projects/{id}/tags", api.GetProjectTags)
+		r.Put("/projects/{id}/tags", api.UpdateProjectTags)
+
 		// Project Skills
 		r.Get("/projects/{id}/skills", api.GetProjectSkills)
 		r.Put("/projects/{id}/skill-config", api.SaveProjectSkillConfig)
@@ -701,6 +718,12 @@ func main() {
 		r.Post("/projects/{id}/mcp-servers", api.CreateProjectMCPServerHandler)
 		r.Put("/projects/{id}/mcp-servers/{mcpId}", api.UpdateProjectMCPServerHandler)
 		r.Delete("/projects/{id}/mcp-servers/{mcpId}", api.DeleteProjectMCPServerHandler)
+
+		// Project custom tools
+		r.Get("/projects/{id}/custom-tools", api.ListProjectTools)
+		r.Post("/projects/{id}/custom-tools", api.CreateProjectTool)
+		r.Put("/projects/{id}/custom-tools/{toolId}", api.UpdateProjectTool)
+		r.Delete("/projects/{id}/custom-tools/{toolId}", api.DeleteProjectTool)
 
 		// Voice
 		r.Post("/voice/transcribe", voiceHandler.Transcribe)

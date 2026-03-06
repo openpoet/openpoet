@@ -658,6 +658,181 @@ body {
     color: var(--color-danger);
 }
 
+/* Project Tags */
+.tag-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1.4;
+    white-space: nowrap;
+}
+
+.card-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 0 16px 8px;
+}
+
+.tag-filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0;
+    flex-wrap: wrap;
+}
+
+.tag-filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border-radius: 14px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid var(--color-border);
+    background: var(--color-surface);
+    color: var(--color-text-secondary);
+    transition: all var(--transition);
+}
+
+.tag-filter-chip:hover {
+    border-color: var(--color-primary);
+}
+
+.tag-filter-chip.active {
+    border-color: transparent;
+}
+
+/* Tag multi-select in project form */
+.tag-select-container {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 160px;
+    overflow-y: auto;
+    border: 1px solid var(--color-border);
+    border-radius: var(--border-radius);
+    background: var(--color-bg);
+    padding: 4px;
+}
+
+.tag-select-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--color-text);
+    transition: background var(--transition);
+}
+
+.tag-select-option:hover {
+    background: var(--color-surface-hover);
+}
+
+.tag-select-option input[type="checkbox"] {
+    margin: 0;
+    cursor: pointer;
+}
+
+.tag-select-option .tag-chip {
+    pointer-events: none;
+}
+
+.tag-select-empty {
+    padding: 12px 8px;
+    color: var(--color-text-muted);
+    font-size: 12px;
+    text-align: center;
+}
+
+/* Tag management modal */
+.manage-tag-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--border-radius);
+    margin-bottom: 6px;
+    background: var(--color-surface);
+}
+
+.manage-tag-row .tag-chip {
+    flex: 1;
+}
+
+.manage-tag-row .btn-icon {
+    flex-shrink: 0;
+}
+
+.manage-tag-create {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.manage-tag-create input {
+    flex: 1;
+}
+
+.manage-tag-edit-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--color-primary);
+    border-radius: var(--border-radius);
+    margin-bottom: 6px;
+    background: var(--color-surface);
+}
+
+.manage-tag-edit-row .edit-fields {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.manage-tag-edit-row input {
+    flex: 1;
+}
+
+.manage-tag-edit-row .edit-actions {
+    display: flex;
+    gap: 4px;
+    justify-content: flex-end;
+}
+
+.tag-color-picker {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    padding: 8px 0 4px;
+}
+
+.tag-color-dot {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: border-color var(--transition);
+}
+
+.tag-color-dot:hover,
+.tag-color-dot.active {
+    border-color: var(--color-text);
+}
+
 /* Sessions List */
 .session-list {
     padding: 24px;
@@ -6178,6 +6353,18 @@ body {
     border-radius: 3px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    flex-shrink: 0;
+}
+
+.ai-chat-history-badge-agent {
+    display: inline-block;
+    background: var(--color-accent, #7aa2f7);
+    color: white;
+    font-size: 9px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 3px;
+    letter-spacing: 0.3px;
     flex-shrink: 0;
 }
 
