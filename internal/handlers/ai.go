@@ -3019,6 +3019,123 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		}
 		return sb.String(), nil
 
+	// ---- Project custom tools CRUD ----
+
+	case "list_project_custom_tools":
+		projectID, _ := parseIDParam(input, "project_id")
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		tools, err := h.api.db.ListProjectTools(ctx, projectID)
+		if err != nil {
+			return "", err
+		}
+		if len(tools) == 0 {
+			return "No custom tools found for this project.", nil
+		}
+		var sb strings.Builder
+		for _, t := range tools {
+			status := "enabled"
+			if !t.Enabled {
+				status = "disabled"
+			}
+			confirm := ""
+			if t.Confirm {
+				confirm = ", requires confirmation"
+			}
+			sb.WriteString(fmt.Sprintf("- [%d] %s (%s%s): %s\n  Command: %s\n", t.ID, t.Name, status, confirm, t.Description, t.Command))
+		}
+		return sb.String(), nil
+
+	case "create_project_custom_tool":
+		projectID, _ := parseIDParam(input, "project_id")
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		toolName, _ := input["name"].(string)
+		desc, _ := input["description"].(string)
+		command, _ := input["command"].(string)
+		if toolName == "" || desc == "" || command == "" {
+			return "", fmt.Errorf("name, description, and command are required")
+		}
+		tool := &database.ProjectTool{
+			ProjectID:   projectID,
+			Name:        toolName,
+			Description: desc,
+			Command:     command,
+			Enabled:     true,
+		}
+		if params, ok := input["parameters"].(string); ok {
+			tool.Parameters = params
+		}
+		if wd, ok := input["working_dir"].(string); ok {
+			tool.WorkingDir = wd
+		}
+		if confirm, ok := input["confirm"].(bool); ok {
+			tool.Confirm = confirm
+		}
+		if err := h.api.db.CreateProjectTool(ctx, tool); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Custom tool '%s' created (ID: %d)", tool.Name, tool.ID), nil
+
+	case "update_project_custom_tool":
+		projectID, _ := parseIDParam(input, "project_id")
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		toolID, _ := parseIDParam(input, "id")
+		if toolID == 0 {
+			return "", fmt.Errorf("id is required")
+		}
+		tool, err := h.api.db.GetProjectTool(ctx, toolID)
+		if err != nil || tool.ProjectID != projectID {
+			return "", fmt.Errorf("tool not found")
+		}
+		if v, ok := input["name"].(string); ok && v != "" {
+			tool.Name = v
+		}
+		if v, ok := input["description"].(string); ok && v != "" {
+			tool.Description = v
+		}
+		if v, ok := input["command"].(string); ok && v != "" {
+			tool.Command = v
+		}
+		if v, ok := input["parameters"].(string); ok {
+			tool.Parameters = v
+		}
+		if v, ok := input["working_dir"].(string); ok {
+			tool.WorkingDir = v
+		}
+		if v, ok := input["confirm"].(bool); ok {
+			tool.Confirm = v
+		}
+		if v, ok := input["enabled"].(bool); ok {
+			tool.Enabled = v
+		}
+		if err := h.api.db.UpdateProjectTool(ctx, tool); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Custom tool '%s' updated", tool.Name), nil
+
+	case "delete_project_custom_tool":
+		projectID, _ := parseIDParam(input, "project_id")
+		if projectID == 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		toolID, _ := parseIDParam(input, "id")
+		if toolID == 0 {
+			return "", fmt.Errorf("id is required")
+		}
+		tool, err := h.api.db.GetProjectTool(ctx, toolID)
+		if err != nil || tool.ProjectID != projectID {
+			return "", fmt.Errorf("tool not found")
+		}
+		if err := h.api.db.DeleteProjectTool(ctx, toolID); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Custom tool '%s' deleted", tool.Name), nil
+
 	default:
 		// Check if this is a custom project tool (prefixed with "custom_")
 		if strings.HasPrefix(name, "custom_") {
@@ -3620,6 +3737,25 @@ func (h *AIHandler) getProjectIDFromConversation(ctx context.Context, conversati
 		return int64(pidF)
 	}
 	return 0
+}
+
+// GetCustomToolsForConversation implements llm.CustomToolsProvider.
+// Returns custom project tool definitions for the conversation's project context.
+func (h *AIHandler) GetCustomToolsForConversation(conversationID int64) []llm.ToolDefinition {
+	ctx := context.Background()
+	projectID := h.getProjectIDFromConversation(ctx, conversationID)
+	if projectID <= 0 {
+		return nil
+	}
+	customTools, err := h.api.db.ListEnabledProjectTools(ctx, projectID)
+	if err != nil || len(customTools) == 0 {
+		return nil
+	}
+	var defs []llm.ToolDefinition
+	for _, ct := range customTools {
+		defs = append(defs, projectToolToDefinition(ct))
+	}
+	return defs
 }
 
 // HandleInitiateSkillCustomization creates a proactive AI conversation to help customize a global skill for a project.
