@@ -1774,6 +1774,15 @@ class OpenPoet {
                     </svg>
                     Start Session
                 </button>
+                <button class="btn btn-secondary btn-sm" onclick="window.gitViewer?.open(${project.id})" title="Git History">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="6" y1="3" x2="6" y2="15"></line>
+                        <circle cx="18" cy="6" r="3"></circle>
+                        <circle cx="6" cy="6" r="3"></circle>
+                        <path d="M18 9a9 9 0 0 1-9 9"></path>
+                    </svg>
+                    Git
+                </button>
                 <button class="btn btn-secondary btn-sm" onclick="app.editProject(${project.id})">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
@@ -3279,6 +3288,15 @@ class OpenPoet {
         }
 
         await doStop();
+    }
+
+    // ==================== SESSION GIT ====================
+
+    openSessionGit() {
+        if (!this.currentSession) return;
+        const tabData = this.openTabs.get(this.currentSession);
+        if (!tabData?.projectId) return;
+        window.gitViewer?.open(tabData.projectId);
     }
 
     // ==================== SESSION TOOLS ====================
