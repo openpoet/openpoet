@@ -589,7 +589,6 @@ func (p *GoSDKProvider) streamInteractive(ctx context.Context, prompt string, re
 				p.disconnectSession(convID)
 				return nil, fmt.Errorf("gosdk: client disconnected during response")
 			}
-
 			switch m := msg.(type) {
 			case *claudecode.AssistantMessage:
 				if m.HasError() {
