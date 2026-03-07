@@ -269,13 +269,15 @@ func main() {
 	// Wire AI handler into API for AI chat functionality
 	api.SetAIHandler(aiHandler)
 
-	// Wire tool executor into SDK providers (lazy binding — provider created before handler)
+	// Wire tool executor and custom tools provider into SDK providers (lazy binding — provider created before handler)
 	providerMgr.SetToolExecutor(aiHandler)
+	providerMgr.SetCustomToolsProvider(aiHandler)
 
 	// Wire AI provider reinitialization callbacks
 	api.ReinitAIProviders = func() {
 		newMgr := initProviderManager(db, encryptor, apiURL)
 		newMgr.SetToolExecutor(aiHandler)
+		newMgr.SetCustomToolsProvider(aiHandler)
 		aiHandler.SetProviderManager(newMgr)
 		providerMgr = newMgr
 		log.Printf("[AI] All providers reinitialized after config change")
