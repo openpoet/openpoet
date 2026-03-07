@@ -310,7 +310,8 @@
 }
 .git-diff-files {
     flex: 1;
-    overflow-y: auto;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
     padding: 0;
 }
 
@@ -352,9 +353,6 @@
 .diff-file-path {
     font-family: var(--font-mono, 'SF Mono', monospace);
     font-size: 12px;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
 }
 .diff-file-stats-inline {
@@ -378,14 +376,13 @@
 /* Diff table */
 .diff-table-wrapper {
     overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
 }
 .diff-table {
-    width: 100%;
     border-collapse: collapse;
     font-family: var(--font-mono, 'SF Mono', monospace);
     font-size: 12px;
     line-height: 1.5;
-    table-layout: fixed;
 }
 .diff-table td {
     padding: 0 8px;
@@ -401,10 +398,16 @@
     user-select: none;
     padding-right: 8px;
     border-right: 1px solid var(--color-border-subtle, rgba(128,128,128,0.1));
+    position: sticky;
+    left: 0;
+    background: inherit;
 }
+.diff-line-addition .line-num { background: rgba(158, 206, 106, 0.08); }
+.diff-line-deletion .line-num { background: rgba(247, 118, 142, 0.08); }
+.diff-line-hunk .line-num { background: rgba(122, 162, 247, 0.06); }
+.diff-line-context .line-num { background: var(--color-bg, #1a1b26); }
 .diff-table .line-content {
-    overflow: hidden;
-    text-overflow: ellipsis;
+    /* No overflow hidden — show full content, scroll horizontally */
 }
 
 /* Diff line types */
@@ -511,9 +514,5 @@
         flex: 1;
         text-align: center;
     }
-    .diff-table .line-num {
-        width: 35px;
-        min-width: 35px;
-        font-size: 10px;
-    }
+    /* Keep desktop-sized diff on mobile — scrollable */
 }
