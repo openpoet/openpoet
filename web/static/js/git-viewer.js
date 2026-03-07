@@ -106,6 +106,7 @@ class GitViewer {
         this.page = 0;
         this.commits = [];
         this.hasMore = false;
+        this.graphState = '';
         this.selectedCommitHash = null;
         this.selectedBranches = new Set(); // default: all
 
@@ -165,6 +166,11 @@ class GitViewer {
                 limit: 50,
             });
 
+            // Pass graph state continuation for paginated graph
+            if (append && this.graphState) {
+                params.set('graph_state', this.graphState);
+            }
+
             // Multi-branch support: if none selected, use "all"
             if (this.selectedBranches.size === 0) {
                 params.set('branch', 'all');
@@ -192,6 +198,7 @@ class GitViewer {
             }
 
             this.hasMore = data.has_more;
+            this.graphState = data.graph_state || '';
 
             // Calculate max graph columns
             if (!append) this.maxGraphCols = 0;
@@ -306,6 +313,7 @@ class GitViewer {
     _reloadLog() {
         this.page = 0;
         this.commits = [];
+        this.graphState = '';
         this.logList.innerHTML = '';
         this.loadLog();
     }

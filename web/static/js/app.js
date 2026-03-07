@@ -1184,35 +1184,39 @@ class OpenPoet {
     }
 
     async _updateLinkTaskButton(sessionId) {
-        const linkBtn = document.getElementById('btn-link-task');
-        const viewBtn = document.getElementById('btn-view-task');
-        const unlinkBtn = document.getElementById('btn-unlink-task');
+        const wrapper = document.getElementById('task-menu-wrapper');
+        const menuLabel = document.getElementById('btn-task-menu-label');
+        const viewItem = document.getElementById('task-menu-view');
+        const linkItem = document.getElementById('task-menu-link');
+        const unlinkItem = document.getElementById('task-menu-unlink');
 
         if (!sessionId) {
-            if (linkBtn) linkBtn.style.display = 'none';
-            if (viewBtn) viewBtn.style.display = 'none';
-            if (unlinkBtn) unlinkBtn.style.display = 'none';
+            if (wrapper) wrapper.style.display = 'none';
             return;
         }
 
+        if (wrapper) wrapper.style.display = '';
+
         try {
             const task = await this.api('GET', `/sessions/${sessionId}/task`);
-            if (linkBtn) linkBtn.style.display = 'none';
-            if (viewBtn) {
-                viewBtn.style.display = '';
-                viewBtn.dataset.projectId = task.project_id;
-                viewBtn.dataset.taskId = task.id;
-                const label = document.getElementById('btn-view-task-label');
-                if (label) label.textContent = task.title;
+            if (viewItem) {
+                viewItem.style.display = '';
+                viewItem.dataset.projectId = task.project_id;
+                viewItem.dataset.taskId = task.id;
+                const label = document.getElementById('task-menu-view-label');
+                if (label) label.textContent = 'View Task';
             }
-            if (unlinkBtn) {
-                unlinkBtn.style.display = '';
-                unlinkBtn.dataset.sessionId = sessionId;
+            if (menuLabel) menuLabel.textContent = task.title;
+            if (linkItem) linkItem.style.display = 'none';
+            if (unlinkItem) {
+                unlinkItem.style.display = '';
+                unlinkItem.dataset.sessionId = sessionId;
             }
         } catch {
-            if (linkBtn) linkBtn.style.display = '';
-            if (viewBtn) viewBtn.style.display = 'none';
-            if (unlinkBtn) unlinkBtn.style.display = 'none';
+            if (viewItem) viewItem.style.display = 'none';
+            if (linkItem) linkItem.style.display = '';
+            if (unlinkItem) unlinkItem.style.display = 'none';
+            if (menuLabel) menuLabel.textContent = 'Task';
         }
     }
 
@@ -4560,8 +4564,8 @@ class OpenPoet {
                 e.preventDefault();
                 const activeSessionId = window.terminalManager?.activeSessionId;
                 if (activeSessionId) {
-                    const linkBtn = document.getElementById('btn-link-task');
-                    if (linkBtn && linkBtn.style.display !== 'none') {
+                    const linkItem = document.getElementById('task-menu-link');
+                    if (linkItem && linkItem.style.display !== 'none') {
                         this.showLinkTaskModal(activeSessionId);
                     }
                 }
@@ -6517,22 +6521,38 @@ class OpenPoet {
             this.showView('sessions');
         });
 
-        // Link Task button
-        document.getElementById('btn-link-task')?.addEventListener('click', () => {
+        // Task menu dropdown
+        const taskMenuBtn = document.getElementById('btn-task-menu');
+        const taskMenuDropdown = document.getElementById('task-menu-dropdown');
+        taskMenuBtn?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            taskMenuDropdown?.classList.toggle('hidden');
+        });
+        // Close task menu on outside click
+        document.addEventListener('click', () => {
+            taskMenuDropdown?.classList.add('hidden');
+        });
+        taskMenuDropdown?.addEventListener('click', (e) => e.stopPropagation());
+
+        // Task menu: View Task
+        document.getElementById('task-menu-view')?.addEventListener('click', () => {
+            taskMenuDropdown?.classList.add('hidden');
+            const item = document.getElementById('task-menu-view');
+            const projectId = parseInt(item.dataset.projectId, 10);
+            const taskId = parseInt(item.dataset.taskId, 10);
+            if (projectId && taskId) this.viewTaskDetail(projectId, taskId);
+        });
+
+        // Task menu: Link Task
+        document.getElementById('task-menu-link')?.addEventListener('click', () => {
+            taskMenuDropdown?.classList.add('hidden');
             const sessionId = window.terminalManager?.activeSessionId || this.currentSession;
             if (sessionId) this.showLinkTaskModal(sessionId);
         });
 
-        // View Task button (navigate from session to linked task)
-        document.getElementById('btn-view-task')?.addEventListener('click', () => {
-            const btn = document.getElementById('btn-view-task');
-            const projectId = parseInt(btn.dataset.projectId, 10);
-            const taskId = parseInt(btn.dataset.taskId, 10);
-            if (projectId && taskId) this.viewTaskDetail(projectId, taskId);
-        });
-
-        // Unlink Task button
-        document.getElementById('btn-unlink-task')?.addEventListener('click', () => {
+        // Task menu: Unlink Task
+        document.getElementById('task-menu-unlink')?.addEventListener('click', () => {
+            taskMenuDropdown?.classList.add('hidden');
             const sessionId = window.terminalManager?.activeSessionId || this.currentSession;
             if (!sessionId) return;
             showConfirmModal(

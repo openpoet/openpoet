@@ -305,27 +305,39 @@
                                     <path d="M18 9a9 9 0 0 1-9 9"></path>
                                 </svg>
                             </button>
-                            <button id="btn-view-task" class="btn btn-sm btn-outline" title="View Task" style="display:none;">
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M9 11l3 3L22 4"></path>
-                                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
-                                </svg>
-                                <span class="desktop-only" id="btn-view-task-label">Task</span>
-                            </button>
-                            <button id="btn-unlink-task" class="btn btn-sm btn-outline" title="Unlink Task" style="display:none;">
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
-                                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
-                                    <line x1="4" y1="20" x2="20" y2="4" stroke-width="2.5"></line>
-                                </svg>
-                            </button>
-                            <button id="btn-link-task" class="btn btn-sm btn-outline" title="Link Task (Ctrl+Shift+L)" style="display:none;">
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
-                                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
-                                </svg>
-                                <span class="desktop-only">Link Task</span>
-                            </button>
+                            <div id="task-menu-wrapper" class="task-menu-wrapper" style="display:none;">
+                                <button id="btn-task-menu" class="btn btn-sm btn-outline" title="Task">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M9 11l3 3L22 4"></path>
+                                        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+                                    </svg>
+                                    <span class="desktop-only" id="btn-task-menu-label">Task</span>
+                                </button>
+                                <div id="task-menu-dropdown" class="task-menu-dropdown hidden">
+                                    <div id="task-menu-view" class="task-menu-item" style="display:none;">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                                            <circle cx="12" cy="12" r="3"></circle>
+                                        </svg>
+                                        <span id="task-menu-view-label">View Task</span>
+                                    </div>
+                                    <div id="task-menu-link" class="task-menu-item" style="display:none;">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+                                            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+                                        </svg>
+                                        <span>Link Task</span>
+                                    </div>
+                                    <div id="task-menu-unlink" class="task-menu-item task-menu-item-danger" style="display:none;">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+                                            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+                                            <line x1="4" y1="20" x2="20" y2="4" stroke-width="2.5"></line>
+                                        </svg>
+                                        <span>Unlink Task</span>
+                                    </div>
+                                </div>
+                            </div>
                             <button id="btn-stop-session" class="btn btn-danger btn-sm" title="End session">
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
                                     <line x1="18" y1="6" x2="6" y2="18"/>
