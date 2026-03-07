@@ -507,11 +507,17 @@ func computeGraph(commits []CommitInfo) {
 		if !isRoot {
 			matchPost := preToPost[matchIdx]
 
-			// First parent line: from commit pre-column to its post-column
+			// First parent line: from commit pre-column to its post-column.
+			// New branches only draw bottom half (fork indicator provides the top connection).
+			firstParentHalf := ""
+			if isNewBranch {
+				firstParentHalf = "bottom"
+			}
 			lines = append(lines, GraphLine{
 				From:  matchIdx,
 				To:    matchPost,
 				Color: commitColor,
+				Half:  firstParentHalf,
 			})
 
 			// Merge convergence lines: merging rails curve into commit column
