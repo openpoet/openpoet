@@ -554,6 +554,9 @@ func main() {
 		// Skill proposal approval (create/update project skill)
 		r.Post("/skill-proposal/approve/{docId}", api.ApproveSkillProposal)
 		r.Post("/skill-proposal/reject/{docId}", api.RejectSkillProposal)
+		// Tool execution proposal approval
+		r.Post("/tool-proposal/approve/{docId}", api.ApproveToolProposal)
+		r.Post("/tool-proposal/reject/{docId}", api.RejectToolProposal)
 		// Project Tasks
 		r.Get("/projects/{id}/tasks", api.ListProjectTasks)
 		r.Post("/projects/{id}/tasks", api.CreateProjectTask)
