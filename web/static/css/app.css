@@ -3768,6 +3768,46 @@ body {
 .session-tools-panel-list {
     padding: 6px 8px;
 }
+
+/* Task menu dropdown */
+.task-menu-wrapper {
+    position: relative;
+}
+.task-menu-dropdown {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    min-width: 180px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+    z-index: 50;
+    padding: 4px 0;
+}
+.task-menu-dropdown.hidden {
+    display: none;
+}
+.task-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--color-text);
+    transition: background 0.1s;
+}
+.task-menu-item:hover {
+    background: var(--color-hover);
+}
+.task-menu-item-danger {
+    color: var(--color-danger, #e55);
+}
+.task-menu-item-danger:hover {
+    background: rgba(238, 85, 85, 0.1);
+}
 .session-tool-item {
     display: flex;
     align-items: center;
@@ -6553,7 +6593,7 @@ body {
 
 /* ============ Link Task Modal ============ */
 
-#btn-link-task {
+#btn-task-menu {
     background: transparent;
     border: 1px solid var(--color-border);
     color: var(--color-text-secondary);
@@ -6567,7 +6607,7 @@ body {
     transition: all 0.15s;
 }
 
-#btn-link-task:hover {
+#btn-task-menu:hover {
     border-color: var(--color-primary);
     color: var(--color-primary);
 }

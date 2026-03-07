@@ -3,6 +3,8 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os/exec"
@@ -179,10 +181,11 @@ type CommitInfo struct {
 }
 
 type LogResponse struct {
-	Commits []CommitInfo `json:"commits"`
-	Total   int          `json:"total"`
-	Page    int          `json:"page"`
-	HasMore bool         `json:"has_more"`
+	Commits    []CommitInfo `json:"commits"`
+	Total      int          `json:"total"`
+	Page       int          `json:"page"`
+	HasMore    bool         `json:"has_more"`
+	GraphState string       `json:"graph_state,omitempty"` // continuation token for next page
 }
 
 func (h *GitHandler) GetLog(w http.ResponseWriter, r *http.Request) {
@@ -296,8 +299,9 @@ func (h *GitHandler) GetLog(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Compute graph
-	computeGraph(commits)
+	// Compute graph (with continuation from previous page if available)
+	graphStateIn := r.URL.Query().Get("graph_state")
+	graphStateOut := computeGraph(commits, graphStateIn)
 
 	// Get total count (approximate, cached for UX)
 	total := page*limit + len(commits)
@@ -318,10 +322,11 @@ func (h *GitHandler) GetLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, LogResponse{
-		Commits: commits,
-		Total:   total,
-		Page:    page,
-		HasMore: hasMore,
+		Commits:    commits,
+		Total:      total,
+		Page:       page,
+		HasMore:    hasMore,
+		GraphState: graphStateOut,
 	})
 }
 
@@ -339,7 +344,33 @@ type GraphLine struct {
 	Half  string `json:"half,omitempty"` // "top" = y:0→mid (ends at dot), "" = full height
 }
 
-func computeGraph(commits []CommitInfo) {
+// graphState holds the continuation state for paginated graph computation.
+type graphState struct {
+	Rails     []railState    `json:"r"`
+	NextColor int            `json:"nc"`
+	Processed map[string]int `json:"p"`
+}
+type railState struct {
+	Hash  string `json:"h"`
+	Color int    `json:"c"`
+}
+
+func encodeGraphState(gs graphState) string {
+	data, _ := json.Marshal(gs)
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeGraphState(s string) (graphState, error) {
+	data, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return graphState{}, err
+	}
+	var gs graphState
+	err = json.Unmarshal(data, &gs)
+	return gs, err
+}
+
+func computeGraph(commits []CommitInfo, initialState string) string {
 	// rails tracks active branch heads by commit hash.
 	// Index = column position. Lines map from pre-state columns (top of row)
 	// to post-state columns (bottom of row) so adjacent rows connect properly.
@@ -352,6 +383,19 @@ func computeGraph(commits []CommitInfo) {
 	nextColor := 0
 	// Track processed commits so we can detect already-rendered parents
 	processed := map[string]int{} // hash → column where commit was rendered
+
+	// Restore state from previous page if available
+	if initialState != "" {
+		if gs, err := decodeGraphState(initialState); err == nil {
+			for _, r := range gs.Rails {
+				rails = append(rails, rail{hash: r.Hash, color: r.Color})
+			}
+			nextColor = gs.NextColor
+			for k, v := range gs.Processed {
+				processed[k] = v
+			}
+		}
+	}
 
 	for i := range commits {
 		c := &commits[i]
@@ -600,6 +644,16 @@ func computeGraph(commits []CommitInfo) {
 
 		c.Graph.Lines = lines
 	}
+
+	// Serialize final state for pagination continuation
+	gs := graphState{
+		NextColor: nextColor,
+		Processed: processed,
+	}
+	for _, r := range rails {
+		gs.Rails = append(gs.Rails, railState{Hash: r.hash, Color: r.color})
+	}
+	return encodeGraphState(gs)
 }
 
 // --- Diff endpoint ---
