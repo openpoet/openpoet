@@ -751,6 +751,12 @@ func (p *GoSDKProvider) disconnectSession(conversationID int64) {
 	}
 }
 
+// DisconnectSession disconnects the client but preserves the session ID for resume.
+// Forces the MCP server to be rebuilt on the next query.
+func (p *GoSDKProvider) DisconnectSession(conversationID int64) {
+	p.disconnectSession(conversationID)
+}
+
 // HasActiveSession returns true if a session exists for the given conversation.
 func (p *GoSDKProvider) HasActiveSession(conversationID int64) bool {
 	p.mu.RLock()

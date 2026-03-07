@@ -3077,6 +3077,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if err := h.api.db.CreateProjectTool(ctx, tool); err != nil {
 			return "", err
 		}
+		h.invalidateProjectSessions(ctx, projectID)
 		return fmt.Sprintf("Custom tool '%s' created (ID: %d)", tool.Name, tool.ID), nil
 
 	case "update_project_custom_tool":
@@ -3116,6 +3117,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if err := h.api.db.UpdateProjectTool(ctx, tool); err != nil {
 			return "", err
 		}
+		h.invalidateProjectSessions(ctx, projectID)
 		return fmt.Sprintf("Custom tool '%s' updated", tool.Name), nil
 
 	case "delete_project_custom_tool":
@@ -3134,6 +3136,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if err := h.api.db.DeleteProjectTool(ctx, toolID); err != nil {
 			return "", err
 		}
+		h.invalidateProjectSessions(ctx, projectID)
 		return fmt.Sprintf("Custom tool '%s' deleted", tool.Name), nil
 
 	default:
@@ -3178,6 +3181,15 @@ func projectToolToDefinition(t database.ProjectTool) llm.ToolDefinition {
 		desc = fmt.Sprintf("Custom project tool: %s", t.Name)
 	}
 
+	// Add "approved" parameter for tools that require confirmation
+	if t.Confirm {
+		props["approved"] = llm.ToolPropertySchema{
+			Type:        "boolean",
+			Description: "Set to true after the user explicitly confirms execution. First call without this to get confirmation prompt.",
+		}
+		desc += " [requires user confirmation before execution]"
+	}
+
 	return llm.ToolDefinition{
 		Name:        "custom_" + t.Name,
 		Description: desc,
@@ -3211,6 +3223,20 @@ func (h *AIHandler) executeCustomProjectTool(ctx context.Context, name string, i
 
 	if !tool.Enabled {
 		return "", fmt.Errorf("custom tool %q is disabled", toolName)
+	}
+
+	// Enforce confirm flag: require explicit "approved" parameter
+	if tool.Confirm {
+		approved, _ := input["approved"].(bool)
+		if !approved {
+			return fmt.Sprintf(
+				"Tool '%s' requires user confirmation before execution.\n"+
+					"Command: `%s`\nDescription: %s\n\n"+
+					"Ask the user to confirm. When they approve, call this tool again with the parameter `approved: true`.",
+				tool.Name, tool.Command, tool.Description), nil
+		}
+		// Remove the approved flag so it's not passed as an env var
+		delete(input, "approved")
 	}
 
 	// Build working directory
@@ -3435,7 +3461,7 @@ func (h *AIHandler) buildSystemPrompt(ctx context.Context) string {
 		mcpNames = append(mcpNames, fmt.Sprintf("[%d] %s", m.ID, m.Name))
 	}
 
-	return llm.ChatSystemPrompt(skillNames, projectNames, mcpNames)
+	return llm.ChatSystemPrompt(skillNames, projectNames, mcpNames, nil)
 }
 
 // buildSystemPromptWithContext builds system prompt, optionally with proactive conversation context.
@@ -3470,7 +3496,38 @@ func (h *AIHandler) buildSystemPromptWithContext(ctx context.Context, proactiveC
 		mcpNames = append(mcpNames, fmt.Sprintf("[%d] %s", m.ID, m.Name))
 	}
 
-	return llm.ChatSystemPromptWithProactiveContext(skillNames, projectNames, mcpNames, proactiveCtx, forMCP)
+	// Extract project_id from proactive context to fetch custom tools
+	var customToolNames []string
+	if proactiveCtx != "" {
+		var ctxData map[string]interface{}
+		if json.Unmarshal([]byte(proactiveCtx), &ctxData) == nil {
+			if pidF, ok := ctxData["project_id"].(float64); ok {
+				projectID := int64(pidF)
+				if tools, err := h.api.db.ListEnabledProjectTools(ctx, projectID); err == nil {
+					for _, t := range tools {
+						desc := fmt.Sprintf("custom_%s: %s", t.Name, t.Description)
+						if t.Confirm {
+							desc += " [requires confirmation]"
+						}
+						// Parse parameters to show param names
+						var params map[string]struct {
+							Type string `json:"type"`
+						}
+						if json.Unmarshal([]byte(t.Parameters), &params) == nil && len(params) > 0 {
+							var pnames []string
+							for pname := range params {
+								pnames = append(pnames, pname)
+							}
+							desc += fmt.Sprintf(" (params: %s)", strings.Join(pnames, ", "))
+						}
+						customToolNames = append(customToolNames, desc)
+					}
+				}
+			}
+		}
+	}
+
+	return llm.ChatSystemPromptWithProactiveContext(skillNames, projectNames, mcpNames, customToolNames, proactiveCtx, forMCP)
 }
 
 // HandleInitiateMemoryDocEdit creates an AI-initiated conversation for editing a project's memory doc.
@@ -3718,6 +3775,20 @@ func (h *AIHandler) HandleInitiateTaskDiscussion(w http.ResponseWriter, r *http.
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"conversation_id": conv.ID,
 	})
+}
+
+// invalidateProjectSessions disconnects all chat sessions linked to a project,
+// forcing the MCP server to rebuild with updated custom tools on the next query.
+func (h *AIHandler) invalidateProjectSessions(ctx context.Context, projectID int64) {
+	pattern := fmt.Sprintf(`%%"project_id":%d%%`, projectID)
+	var convIDs []int64
+	if err := h.api.db.SelectContext(ctx, &convIDs,
+		`SELECT id FROM ai_conversations WHERE proactive_context LIKE ?`, pattern); err != nil {
+		return
+	}
+	for _, cid := range convIDs {
+		h.providerMgr.DisconnectSession(cid)
+	}
 }
 
 // getProjectIDFromConversation extracts the project_id from a conversation's proactive context JSON.
