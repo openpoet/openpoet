@@ -228,6 +228,7 @@ func main() {
 
 	// Initialize other handlers
 	fileHandler := handlers.NewFileHandler(api)
+	gitHandler := handlers.NewGitHandler(api)
 	voiceHandler := handlers.NewVoiceHandler(api, func() (voice.ProviderType, string, string) {
 		// Get provider type from settings, default to openai
 		providerSetting, _ := db.GetSetting(context.Background(), "whisper_provider")
@@ -588,6 +589,12 @@ func main() {
 		r.Post("/projects/{id}/files/write", fileHandler.WriteProjectFile)
 		r.Get("/projects/{id}/files/raw/*", fileHandler.DownloadProjectFile)
 		r.Post("/projects/{id}/files/raw", fileHandler.UploadProjectFile)
+
+		// Git
+		r.Get("/projects/{id}/git/branches", gitHandler.GetBranches)
+		r.Get("/projects/{id}/git/log", gitHandler.GetLog)
+		r.Get("/projects/{id}/git/diff", gitHandler.GetDiff)
+		r.Get("/projects/{id}/git/show", gitHandler.GetShow)
 
 		// Sessions
 		r.Get("/sessions", api.ListSessions)

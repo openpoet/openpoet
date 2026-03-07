@@ -16,6 +16,7 @@
     <link rel="stylesheet" href="/static/css/mobile.css?v=__BUILD_VERSION__">
     <link rel="stylesheet" href="/static/css/structured-view.css?v=__BUILD_VERSION__">
     <link rel="stylesheet" href="/static/css/themes.css?v=__BUILD_VERSION__">
+    <link rel="stylesheet" href="/static/css/git.css?v=__BUILD_VERSION__">
 </head>
 <body>
     <!-- Network Feedback -->
@@ -294,6 +295,14 @@
                             <button id="btn-file-browser" class="btn-icon" title="File Browser">
                                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                                </svg>
+                            </button>
+                            <button id="btn-session-git" class="btn-icon" title="Git History" onclick="app.openSessionGit()">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="6" y1="3" x2="6" y2="15"></line>
+                                    <circle cx="18" cy="6" r="3"></circle>
+                                    <circle cx="6" cy="6" r="3"></circle>
+                                    <path d="M18 9a9 9 0 0 1-9 9"></path>
                                 </svg>
                             </button>
                             <button id="btn-view-task" class="btn btn-sm btn-outline" title="View Task" style="display:none;">
@@ -1193,6 +1202,69 @@
         </div>
     </div>
 
+    <!-- Git Viewer Overlay -->
+    <div id="git-viewer-overlay" class="git-viewer-overlay hidden">
+        <div class="git-viewer-header">
+            <div class="git-viewer-title">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="6" y1="3" x2="6" y2="15"></line>
+                    <circle cx="18" cy="6" r="3"></circle>
+                    <circle cx="6" cy="6" r="3"></circle>
+                    <path d="M18 9a9 9 0 0 1-9 9"></path>
+                </svg>
+                <span id="git-viewer-project-name">Git</span>
+            </div>
+            <div class="git-viewer-tabs">
+                <button class="git-tab active" data-tab="log" title="Commit Log">Log</button>
+                <button class="git-tab" data-tab="diff" title="Diff Viewer">Diff</button>
+                <button class="git-tab" data-tab="branches" title="Branches">Branches</button>
+            </div>
+            <div class="git-viewer-actions">
+                <button id="git-viewer-close" class="btn-icon" title="Close">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+        </div>
+        <div class="git-viewer-content">
+            <!-- Log panel -->
+            <div id="git-panel-log" class="git-panel">
+                <div class="git-log-toolbar">
+                    <div id="git-branch-filter" class="git-branch-dropdown">
+                        <button id="git-branch-toggle" class="git-branch-toggle" title="Filter branches">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="6" y1="3" x2="6" y2="15"></line>
+                                <circle cx="18" cy="6" r="3"></circle>
+                                <circle cx="6" cy="6" r="3"></circle>
+                                <path d="M18 9a9 9 0 0 1-9 9"></path>
+                            </svg>
+                            <span id="git-branch-label">All branches</span>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                        </button>
+                        <div id="git-branch-menu" class="git-branch-menu hidden"></div>
+                    </div>
+                    <input id="git-search" type="text" placeholder="Search commits..." title="Search commits">
+                </div>
+                <div id="git-log-list" class="git-log-list"></div>
+            </div>
+            <!-- Diff panel -->
+            <div id="git-panel-diff" class="git-panel hidden">
+                <div class="git-diff-toolbar">
+                    <button class="git-diff-back" onclick="window.gitViewer?.switchTab('log')" title="Back to log">← Log</button>
+                    <span id="git-diff-title" class="git-diff-title"></span>
+                    <span id="git-diff-stats-summary" class="git-diff-stats"></span>
+                </div>
+                <div id="git-diff-files" class="git-diff-files"></div>
+            </div>
+            <!-- Branches panel -->
+            <div id="git-panel-branches" class="git-panel hidden">
+                <div id="git-branches-content" class="git-branches-content"></div>
+            </div>
+        </div>
+    </div>
+
     <script src="/static/vendor/xterm.js"></script>
     <script src="/static/vendor/xterm-addon-fit.js"></script>
     <script src="/static/vendor/xterm-addon-web-links.js"></script>
@@ -1214,5 +1286,6 @@
     <script src="/static/js/notif-badge.js?v=__BUILD_VERSION__"></script>
     <script src="/static/js/doc-viewer.js?v=__BUILD_VERSION__"></script>
     <script src="/static/js/ai-chat.js?v=__BUILD_VERSION__"></script>
+    <script src="/static/js/git-viewer.js?v=__BUILD_VERSION__"></script>
 </body>
 </html>
