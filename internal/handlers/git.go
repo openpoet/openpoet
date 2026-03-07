@@ -333,9 +333,10 @@ type GraphNode struct {
 }
 
 type GraphLine struct {
-	From  int `json:"from"`
-	To    int `json:"to"`
-	Color int `json:"color"`
+	From  int    `json:"from"`
+	To    int    `json:"to"`
+	Color int    `json:"color"`
+	Half  string `json:"half,omitempty"` // "top" = y:0→mid (ends at dot), "" = full height
 }
 
 func computeGraph(commits []CommitInfo) {
@@ -514,11 +515,13 @@ func computeGraph(commits []CommitInfo) {
 			})
 
 			// Merge convergence lines: merging rails curve into commit column
+			// Half:"top" — these lines terminate at the dot, not below it
 			for _, j := range mergeIndices {
 				lines = append(lines, GraphLine{
 					From:  j,
 					To:    matchPost,
 					Color: preRails[j].color,
+					Half:  "top",
 				})
 			}
 
@@ -540,12 +543,14 @@ func computeGraph(commits []CommitInfo) {
 			}
 
 			// Fork indicator: new branch shows derivation from existing rail
+			// Half:"top" — the fork curve terminates at the dot
 			if isNewBranch && forkFromRail >= 0 {
 				if forkFromRail != matchPost {
 					lines = append(lines, GraphLine{
 						From:  forkFromRail,
 						To:    matchPost,
 						Color: commitColor,
+						Half:  "top",
 					})
 				}
 			}

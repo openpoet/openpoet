@@ -402,21 +402,23 @@ class GitViewer {
             const x1 = line.from * CW + CW / 2;
             const x2 = line.to * CW + CW / 2;
             const color = colors[line.color % colors.length];
+            const endY = line.half === 'top' ? midY : GitViewer.ROW_HEIGHT;
 
             if (line.from === line.to) {
-                // Straight vertical pass-through
+                // Straight vertical line
                 const el = document.createElementNS(ns, 'line');
                 el.setAttribute('x1', x1);
                 el.setAttribute('y1', 0);
                 el.setAttribute('x2', x2);
-                el.setAttribute('y2', GitViewer.ROW_HEIGHT);
+                el.setAttribute('y2', endY);
                 el.setAttribute('stroke', color);
                 el.setAttribute('stroke-width', '2');
                 svg.appendChild(el);
             } else {
-                // Curved line (branch/merge/fork) — S-curve from top to bottom
+                // Curved line (branch/merge/fork)
+                const cpY = line.half === 'top' ? midY * 0.6 : midY;
                 const path = document.createElementNS(ns, 'path');
-                path.setAttribute('d', `M ${x1},0 C ${x1},${midY} ${x2},${midY} ${x2},${GitViewer.ROW_HEIGHT}`);
+                path.setAttribute('d', `M ${x1},0 C ${x1},${cpY} ${x2},${cpY} ${x2},${endY}`);
                 path.setAttribute('stroke', color);
                 path.setAttribute('stroke-width', '2');
                 path.setAttribute('fill', 'none');
