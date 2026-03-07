@@ -414,9 +414,9 @@ class GitViewer {
                 el.setAttribute('stroke-width', '2');
                 svg.appendChild(el);
             } else {
-                // Curved line (branch/merge)
+                // Curved line (branch/merge/fork) — S-curve from top to bottom
                 const path = document.createElementNS(ns, 'path');
-                path.setAttribute('d', `M ${x1},${midY} C ${x1},${GitViewer.ROW_HEIGHT} ${x2},0 ${x2},${midY}`);
+                path.setAttribute('d', `M ${x1},0 C ${x1},${midY} ${x2},${midY} ${x2},${GitViewer.ROW_HEIGHT}`);
                 path.setAttribute('stroke', color);
                 path.setAttribute('stroke-width', '2');
                 path.setAttribute('fill', 'none');
