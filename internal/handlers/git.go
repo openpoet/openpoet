@@ -364,11 +364,32 @@ func computeGraph(commits []CommitInfo) {
 			}
 		}
 
-		if matchIdx == -1 {
+		// Track whether this is a brand-new branch appearing for the first time
+		isNewBranch := matchIdx == -1
+		forkFromRail := -1
+
+		if isNewBranch {
 			// New branch — add a rail
 			matchIdx = len(rails)
 			rails = append(rails, rail{hash: hash, color: nextColor})
 			nextColor++
+
+			// Determine which existing rail this branch likely forked from.
+			// Check if the first parent is tracked by an existing rail (immediate fork).
+			// Otherwise use the leftmost rail as a heuristic.
+			if len(rails) > 1 && len(c.Parents) > 0 {
+				parentHash := c.Parents[0]
+				for j, r := range rails {
+					if j != matchIdx && r.hash == parentHash {
+						forkFromRail = j
+						break
+					}
+				}
+				if forkFromRail == -1 {
+					// Heuristic: fork from the leftmost (primary) rail
+					forkFromRail = 0
+				}
+			}
 		}
 
 		c.Graph.Column = matchIdx
@@ -507,6 +528,20 @@ func computeGraph(commits []CommitInfo) {
 						Color: rails[ep.postIdx].color,
 					})
 				}
+			}
+		}
+
+		// Fork indicator: when a new branch appears, show where it forked from
+		if isNewBranch && forkFromRail >= 0 && !isRoot {
+			matchPost := preToPost[matchIdx]
+			// From = forkFromRail (pre-state / top of row)
+			// To = matchPost (post-state / bottom of row)
+			if forkFromRail != matchPost {
+				lines = append(lines, GraphLine{
+					From:  forkFromRail,
+					To:    matchPost,
+					Color: commitColor,
+				})
 			}
 		}
 
