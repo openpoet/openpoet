@@ -1367,15 +1367,8 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Process custom tool execution proposals (confirm-required tools)
-		// Deduplicate — Claude sometimes calls the same tool multiple times in one turn
-		seenToolActions := make(map[string]bool)
 		for _, ta := range toolExecActions {
 			toolName, _ := ta.Extra["tool_name"].(string)
-			dedupeKey := fmt.Sprintf("%d_%s", ta.ProjectID, toolName)
-			if seenToolActions[dedupeKey] {
-				continue
-			}
-			seenToolActions[dedupeKey] = true
 			command, _ := ta.Extra["command"].(string)
 			description, _ := ta.Extra["description"].(string)
 			inputParams, _ := ta.Extra["input"].(map[string]interface{})
@@ -1461,14 +1454,25 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 				cardType = "tool_proposal"
 			} else if strings.HasPrefix(doc.Title, "Skill:") {
 				cardType = "skill_proposal"
+			} else if strings.HasPrefix(doc.Title, "File:") {
+				cardType = "file"
 			}
-			safeSendSSE("doc_card", map[string]interface{}{
+			card := map[string]interface{}{
 				"doc_id":  doc.ID,
 				"type":    cardType,
 				"title":   doc.Title,
 				"summary": doc.Summary,
 				"status":  doc.Status,
-			})
+			}
+			if cardType == "file" {
+				card["title"] = strings.TrimPrefix(doc.Title, "File:")
+				var meta map[string]interface{}
+				if err := json.Unmarshal([]byte(doc.Content), &meta); err == nil {
+					card["project_id"] = meta["project_id"]
+					card["path"] = meta["path"]
+				}
+			}
+			safeSendSSE("doc_card", card)
 		}
 	}
 
@@ -1651,6 +1655,9 @@ func (h *AIHandler) handleToolLoop(
 			if card := h.buildDocCard(block.Name, result, inputMap); card != nil {
 				sendSSE("doc_card", card)
 			}
+
+			// File cards for open_file are emitted via WebSocket broadcast
+			// from executeTool() and persisted as TempDocuments.
 
 			toolResults = append(toolResults, llm.ContentBlock{
 				Type:      "tool_result",
@@ -3099,6 +3106,51 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		}
 		return sb.String(), nil
 
+	case "open_file":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		project, err := h.api.db.GetProject(ctx, projectID)
+		if err != nil {
+			return "", fmt.Errorf("project not found")
+		}
+		pathsRaw, _ := input["paths"]
+		paths := toStringSlice(pathsRaw)
+		if len(paths) == 0 {
+			return "", fmt.Errorf("paths is required and must contain at least one file path")
+		}
+		// Persist file cards as TempDocuments (rendered on stream end + conversation reload)
+		for _, p := range paths {
+			fileName := p
+			if idx := strings.LastIndex(p, "/"); idx >= 0 {
+				fileName = p[idx+1:]
+			}
+			docID := uuid.New().String()[:8]
+			contentJSON, _ := json.Marshal(map[string]interface{}{
+				"project_id": fmt.Sprintf("%d", projectID),
+				"path":       p,
+			})
+			tempDoc := &database.TempDocument{
+				ID:      docID,
+				Title:   fmt.Sprintf("File:%s", fileName),
+				Content: string(contentJSON),
+				Summary: p,
+				ConversationID: sql.NullInt64{
+					Int64: conversationID,
+					Valid: conversationID > 0,
+				},
+				MessageID: messageID,
+				Status:    "file",
+			}
+			_ = h.api.db.CreateTempDocument(ctx, tempDoc)
+		}
+		var fileList strings.Builder
+		for _, p := range paths {
+			fileList.WriteString("  - " + p + "\n")
+		}
+		return fmt.Sprintf("Done. %d file card(s) displayed to user:\n%sProject: %s. Do not call open_file again for these files.", len(paths), fileList.String(), project.Name), nil
+
 	// ---- Project custom tools CRUD ----
 
 	case "list_project_custom_tools":
@@ -3538,6 +3590,24 @@ func (h *AIHandler) buildDocCard(toolName, result string, input map[string]inter
 			"type":   "document",
 			"title":  title,
 		}
+	default:
+		return nil
+	}
+}
+
+// toStringSlice converts an interface{} (typically []interface{} from JSON) to []string.
+func toStringSlice(v interface{}) []string {
+	switch val := v.(type) {
+	case []interface{}:
+		var result []string
+		for _, item := range val {
+			if s, ok := item.(string); ok {
+				result = append(result, s)
+			}
+		}
+		return result
+	case []string:
+		return val
 	default:
 		return nil
 	}

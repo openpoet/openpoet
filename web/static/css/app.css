@@ -3936,6 +3936,16 @@ body {
 .ai-chat-doc-card-task_proposal .ai-chat-doc-card-btn {
     background: #22c55e;
 }
+.ai-chat-doc-card-file {
+    border-left-color: #6366f1;
+    background: color-mix(in srgb, #6366f1 5%, var(--color-surface));
+}
+.ai-chat-doc-card-file .ai-chat-doc-card-icon {
+    color: #6366f1;
+}
+.ai-chat-doc-card-file .ai-chat-doc-card-btn {
+    background: #6366f1;
+}
 .ai-chat-doc-card-task-count {
     font-size: 11px;
     color: var(--color-text-secondary);
