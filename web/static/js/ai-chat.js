@@ -691,6 +691,15 @@ class AIChatManager {
             });
         }
 
+        // Make approved/rejected badges clickable to review the document
+        const badge = card.querySelector('.ai-chat-doc-card-badge');
+        if (badge && data.doc_id) {
+            badge.style.cursor = 'pointer';
+            badge.addEventListener('click', () => {
+                if (window.docViewer) window.docViewer.open(data.doc_id);
+            });
+        }
+
         contentEl.appendChild(card);
         this.scrollToBottom();
     }

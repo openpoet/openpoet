@@ -183,12 +183,12 @@ class DocViewer {
                                     const r = await fetch(`/api/tool-proposal/approve/${docId}`, { method: 'POST' });
                                     if (r.ok) {
                                         const data = await r.json();
-                                        this.close();
                                         window.aiChat?.updateDocCardStatus(docId, 'approved');
-                                        window.app?.showToast(
-                                            data.output ? 'Tool executed successfully.' : 'Tool executed.',
-                                            'success'
-                                        );
+                                        // Show execution output in the doc viewer
+                                        const outputContent = data.error
+                                            ? `# Tool Error — ${doc.title?.replace('Tool: ', '') || 'Tool'}\n\n**Error:**\n\`\`\`\n${data.error}\n\`\`\``
+                                            : `# Tool Executed — ${doc.title?.replace('Tool: ', '') || 'Tool'}\n\n**Output:**\n\`\`\`\n${data.output || '(no output)'}\n\`\`\``;
+                                        this.openWithContent(doc.title, outputContent);
                                     } else {
                                         const err = await r.json();
                                         window.app?.showToast(err.error || 'Error executing tool', 'error');
