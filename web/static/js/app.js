@@ -4102,7 +4102,7 @@ class OpenPoet {
         this.setupMobileSpecialKeys();
 
         // Setup quick commands popup
-        this.setupQuickCommands();
+
     }
 
     setupMobileEditor() {
@@ -4322,44 +4322,6 @@ class OpenPoet {
                     });
                     setTimeout(() => disp.dispose(), 2000);
                 }
-            }
-        });
-    }
-
-    setupQuickCommands() {
-        const btn = document.getElementById('btn-quick-commands');
-        const popup = document.getElementById('quick-commands-popup');
-        const closeBtn = document.getElementById('quick-commands-close');
-        if (!btn || !popup) return;
-
-        // Toggle popup on button click
-        btn.addEventListener('click', () => {
-            popup.classList.toggle('hidden');
-        });
-
-        // Close popup
-        closeBtn?.addEventListener('click', () => {
-            popup.classList.add('hidden');
-        });
-
-        // Handle command clicks
-        popup.addEventListener('click', (e) => {
-            const item = e.target.closest('.quick-cmd-item');
-            if (!item) return;
-
-            const cmd = item.dataset.cmd;
-            if (cmd) {
-                this.sendQuickCommand(cmd);
-                popup.classList.add('hidden');
-            }
-        });
-
-        // Close popup when tapping outside
-        document.addEventListener('click', (e) => {
-            if (!popup.classList.contains('hidden') &&
-                !popup.contains(e.target) &&
-                !btn.contains(e.target)) {
-                popup.classList.add('hidden');
             }
         });
     }
