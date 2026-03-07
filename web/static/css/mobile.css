@@ -1413,8 +1413,8 @@
         text-overflow: ellipsis;
     }
 
-    /* Link Task button: icon only on mobile */
-    #btn-link-task {
+    /* Task menu button: icon only on mobile */
+    #btn-task-menu {
         padding: 6px;
     }
 
