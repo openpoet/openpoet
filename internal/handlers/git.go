@@ -339,7 +339,8 @@ type GraphLine struct {
 
 func computeGraph(commits []CommitInfo) {
 	// rails tracks active branch heads by commit hash.
-	// Index = column position.
+	// Index = column position. Lines map from pre-state columns (top of row)
+	// to post-state columns (bottom of row) so adjacent rows connect properly.
 	type rail struct {
 		hash  string
 		color int
@@ -347,6 +348,8 @@ func computeGraph(commits []CommitInfo) {
 
 	rails := []rail{}
 	nextColor := 0
+	// Track processed commits so we can detect already-rendered parents
+	processed := map[string]int{} // hash → column where commit was rendered
 
 	for i := range commits {
 		c := &commits[i]
@@ -370,90 +373,160 @@ func computeGraph(commits []CommitInfo) {
 
 		c.Graph.Column = matchIdx
 		commitColor := rails[matchIdx].color
+		processed[hash] = matchIdx
 
-		// Collect additional merging rails (same hash, different columns)
+		// Collect merge rails (same hash, different columns) — these are
+		// fork points going back in time: multiple branches converge here.
 		mergeIndices := []int{}
-		for j := len(rails) - 1; j >= 0; j-- {
+		for j := range rails {
 			if j != matchIdx && rails[j].hash == hash {
 				mergeIndices = append(mergeIndices, j)
 			}
 		}
 
-		// Remove merging rails (highest index first to preserve indices)
+		// Save pre-state for line computation
+		preRails := make([]rail, len(rails))
+		copy(preRails, rails)
+
+		// Build the set of rails to remove
+		removed := map[int]bool{}
 		for _, j := range mergeIndices {
-			rails = append(rails[:j], rails[j+1:]...)
-			// Adjust matchIdx if needed
-			if j < matchIdx {
-				matchIdx--
-			}
+			removed[j] = true
+		}
+		isRoot := len(c.Parents) == 0
+		if isRoot {
+			removed[matchIdx] = true
 		}
 
-		// Now replace the matched rail with first parent, add new rails for extra parents
-		if len(c.Parents) == 0 {
-			// Root commit — remove the rail
-			rails = append(rails[:matchIdx], rails[matchIdx+1:]...)
-		} else {
-			// First parent takes over this rail
-			rails[matchIdx] = rail{hash: c.Parents[0], color: commitColor}
-
-			// Additional parents get new rails (branching)
+		// Determine which extra parents are already processed (rendered above)
+		// vs which need new rails. Already-processed parents get a line to their
+		// column instead of a new rail (avoids ghost rails from topo-sort ordering).
+		type extraParentInfo struct {
+			alreadyProcessed bool
+			targetCol        int // pre-state column to draw line to
+			postIdx          int // post-state rail index (only if not already processed)
+			color            int
+		}
+		var extraParents []extraParentInfo
+		if len(c.Parents) > 1 {
 			for p := 1; p < len(c.Parents); p++ {
-				newRail := rail{hash: c.Parents[p], color: nextColor}
-				nextColor++
-				// Insert after matchIdx
-				insertPos := matchIdx + 1
-				if insertPos > len(rails) {
-					insertPos = len(rails)
+				parentHash := c.Parents[p]
+				if _, ok := processed[parentHash]; ok {
+					// Parent already rendered — find the rail currently at its column
+					// and draw a line to that column (no new rail needed)
+					targetCol := -1
+					for j, r := range preRails {
+						if r.hash == parentHash {
+							targetCol = j
+							break
+						}
+					}
+					if targetCol == -1 {
+						// Parent was processed but no rail tracks it; use its rendered column
+						targetCol = processed[parentHash]
+					}
+					extraParents = append(extraParents, extraParentInfo{
+						alreadyProcessed: true,
+						targetCol:        targetCol,
+						color:            nextColor,
+					})
+					nextColor++
+				} else {
+					extraParents = append(extraParents, extraParentInfo{
+						alreadyProcessed: false,
+						color:            nextColor,
+					})
+					nextColor++
 				}
-				rails = append(rails[:insertPos], append([]rail{newRail}, rails[insertPos:]...)...)
 			}
 		}
 
-		// Build lines from pre-state to post-state
-		// Each active rail continues as a vertical line from its column to its new column
-		lines := []GraphLine{}
+		// Build post-state rails and pre→post column mapping
+		postRails := []rail{}
+		preToPost := make(map[int]int)
 
-		// The commit node's line goes from its column to the first parent's new position
-		if len(c.Parents) > 0 {
-			// First parent line
+		for preIdx, r := range preRails {
+			if removed[preIdx] {
+				continue
+			}
+			if preIdx == matchIdx && !isRoot {
+				// Matched rail → update to first parent
+				preToPost[preIdx] = len(postRails)
+				postRails = append(postRails, rail{hash: c.Parents[0], color: commitColor})
+
+				// Insert new rails only for extra parents NOT already processed
+				for ep := range extraParents {
+					if !extraParents[ep].alreadyProcessed {
+						extraParents[ep].postIdx = len(postRails)
+						postRails = append(postRails, rail{hash: c.Parents[ep+1], color: extraParents[ep].color})
+					}
+				}
+			} else {
+				preToPost[preIdx] = len(postRails)
+				postRails = append(postRails, r)
+			}
+		}
+		rails = postRails
+
+		// Build lines
+		var lines []GraphLine
+
+		if !isRoot {
+			matchPost := preToPost[matchIdx]
+
+			// First parent line: from commit pre-column to its post-column
 			lines = append(lines, GraphLine{
-				From:  c.Graph.Column,
-				To:    matchIdx,
+				From:  matchIdx,
+				To:    matchPost,
 				Color: commitColor,
 			})
 
-			// Extra parent lines (merge lines)
-			for p := 1; p < len(c.Parents); p++ {
-				parentHash := c.Parents[p]
-				// Find the rail for this parent
-				for j, r := range rails {
-					if r.hash == parentHash {
-						lines = append(lines, GraphLine{
-							From:  c.Graph.Column,
-							To:    j,
-							Color: r.color,
-						})
-						break
-					}
+			// Merge convergence lines: merging rails curve into commit column
+			// This visualizes fork points (where branches diverged going forward in time)
+			for _, j := range mergeIndices {
+				lines = append(lines, GraphLine{
+					From:  j,
+					To:    matchPost,
+					Color: preRails[j].color,
+				})
+			}
+
+			// Extra parent lines
+			for _, ep := range extraParents {
+				if ep.alreadyProcessed {
+					// Line from commit to the already-processed parent's column
+					lines = append(lines, GraphLine{
+						From:  matchIdx,
+						To:    ep.targetCol,
+						Color: ep.color,
+					})
+				} else {
+					lines = append(lines, GraphLine{
+						From:  matchIdx,
+						To:    ep.postIdx,
+						Color: rails[ep.postIdx].color,
+					})
 				}
 			}
 		}
 
-		// Pass-through lines for rails that are not this commit
-		for j, r := range rails {
-			isParentRail := false
-			for _, line := range lines {
-				if line.To == j {
-					isParentRail = true
-					break
-				}
+		// Pass-through lines for rails unrelated to this commit
+		occupiedTo := map[int]bool{}
+		for _, line := range lines {
+			occupiedTo[line.To] = true
+		}
+		for preIdx := range preRails {
+			if preIdx == matchIdx || removed[preIdx] {
+				continue
 			}
-			if !isParentRail {
+			postIdx := preToPost[preIdx]
+			if !occupiedTo[postIdx] {
 				lines = append(lines, GraphLine{
-					From:  j,
-					To:    j,
-					Color: r.color,
+					From:  preIdx,
+					To:    postIdx,
+					Color: preRails[preIdx].color,
 				})
+				occupiedTo[postIdx] = true
 			}
 		}
 
