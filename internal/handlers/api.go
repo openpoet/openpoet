@@ -98,6 +98,12 @@ type pendingTaskProposal struct {
 	Summary string
 }
 
+// pendingToolProposal holds a custom tool execution proposal awaiting user approval.
+type pendingToolProposal struct {
+	Action         PlanningTaskAction
+	ConversationID int64
+}
+
 // pendingSkillProposal holds a skill proposal awaiting user approval.
 type pendingSkillProposal struct {
 	ProjectID int64  `json:"project_id"`
@@ -132,6 +138,9 @@ type API struct {
 
 	pendingSkillProposalsMu sync.Mutex
 	pendingSkillProposals   map[string]*pendingSkillProposal // docID -> pending skill
+
+	pendingToolProposalsMu sync.Mutex
+	pendingToolProposals   map[string]*pendingToolProposal // docID -> pending tool execution
 
 	// Binary auto-updater
 	updater *updater.Updater
@@ -523,6 +532,91 @@ func (a *API) RejectSkillProposal(w http.ResponseWriter, r *http.Request) {
 
 	if !ok {
 		respondError(w, http.StatusNotFound, "No pending skill proposal found for this document")
+		return
+	}
+
+	a.db.UpdateTempDocumentStatus(r.Context(), docID, "rejected")
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
+}
+
+// storePendingToolProposal stores a proposed tool execution for later approval.
+func (a *API) storePendingToolProposal(docID string, proposal *pendingToolProposal) {
+	a.pendingToolProposalsMu.Lock()
+	defer a.pendingToolProposalsMu.Unlock()
+	if a.pendingToolProposals == nil {
+		a.pendingToolProposals = make(map[string]*pendingToolProposal)
+	}
+	a.pendingToolProposals[docID] = proposal
+}
+
+// ApproveToolProposal executes a pending custom tool and returns the output.
+func (a *API) ApproveToolProposal(w http.ResponseWriter, r *http.Request) {
+	docID := chi.URLParam(r, "docId")
+
+	a.pendingToolProposalsMu.Lock()
+	pending, ok := a.pendingToolProposals[docID]
+	if ok {
+		delete(a.pendingToolProposals, docID)
+	}
+	a.pendingToolProposalsMu.Unlock()
+
+	if !ok {
+		respondError(w, http.StatusNotFound, "No pending tool proposal found for this document")
+		return
+	}
+
+	a.db.UpdateTempDocumentStatus(r.Context(), docID, "approved")
+
+	// Execute the tool
+	toolName, _ := pending.Action.Extra["tool_name"].(string)
+	input, _ := pending.Action.Extra["input"].(map[string]interface{})
+
+	// Call executeCustomProjectTool with nil collector to bypass confirm check
+	output, err := a.aiHandler.executeCustomProjectTool(
+		r.Context(),
+		"custom_"+toolName,
+		input,
+		pending.ConversationID,
+		nil, // nil collector = execute immediately
+	)
+	if err != nil {
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"status": "approved",
+			"error":  err.Error(),
+		})
+		return
+	}
+
+	// Update the temp document with execution output
+	truncated := output
+	if len(truncated) > 2000 {
+		truncated = truncated[:2000] + "\n... (output truncated)"
+	}
+	a.db.ExecContext(r.Context(),
+		"UPDATE temp_documents SET content = ? WHERE id = ?",
+		fmt.Sprintf("# Tool Executed — %s\n\n**Output:**\n```\n%s\n```", toolName, truncated),
+		docID)
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"status": "approved",
+		"output": truncated,
+	})
+}
+
+// RejectToolProposal discards a pending tool execution proposal.
+func (a *API) RejectToolProposal(w http.ResponseWriter, r *http.Request) {
+	docID := chi.URLParam(r, "docId")
+
+	a.pendingToolProposalsMu.Lock()
+	_, ok := a.pendingToolProposals[docID]
+	if ok {
+		delete(a.pendingToolProposals, docID)
+	}
+	a.pendingToolProposalsMu.Unlock()
+
+	if !ok {
+		respondError(w, http.StatusNotFound, "No pending tool proposal found for this document")
 		return
 	}
 

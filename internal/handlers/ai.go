@@ -1057,13 +1057,17 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 		allActions := collector.getActions()
 
-		// Separate task actions from skill actions
+		// Separate task, skill, and tool execution actions
 		var taskActions []PlanningTaskAction
 		var skillActions []PlanningTaskAction
+		var toolExecActions []PlanningTaskAction
 		for _, a := range allActions {
-			if a.Action == "create_project_skill" || a.Action == "update_project_skill" {
+			switch a.Action {
+			case "create_project_skill", "update_project_skill":
 				skillActions = append(skillActions, a)
-			} else {
+			case "execute_custom_tool":
+				toolExecActions = append(toolExecActions, a)
+			default:
 				taskActions = append(taskActions, a)
 			}
 		}
@@ -1361,6 +1365,71 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 		}
+
+		// Process custom tool execution proposals (confirm-required tools)
+		for _, ta := range toolExecActions {
+			toolName, _ := ta.Extra["tool_name"].(string)
+			command, _ := ta.Extra["command"].(string)
+			description, _ := ta.Extra["description"].(string)
+			inputParams, _ := ta.Extra["input"].(map[string]interface{})
+
+			var contentBuilder strings.Builder
+			contentBuilder.WriteString(fmt.Sprintf("# Tool Execution — %s\n\n", toolName))
+			if description != "" {
+				contentBuilder.WriteString(fmt.Sprintf("**Description:** %s\n\n", description))
+			}
+			contentBuilder.WriteString(fmt.Sprintf("**Command:** `%s`\n\n", command))
+			if len(inputParams) > 0 {
+				contentBuilder.WriteString("**Parameters:**\n")
+				for k, v := range inputParams {
+					contentBuilder.WriteString(fmt.Sprintf("- **%s:** %v\n", k, v))
+				}
+			}
+
+			docID := uuid.New().String()[:8]
+			summary := fmt.Sprintf("Run '%s'", toolName)
+			docTitle := fmt.Sprintf("Tool: %s", toolName)
+
+			tempDoc := &database.TempDocument{
+				ID:             docID,
+				Title:          docTitle,
+				Content:        contentBuilder.String(),
+				ConversationID: sql.NullInt64{Int64: conv.ID, Valid: conv.ID > 0},
+				Summary:        summary,
+				MessageID:      assistantMsg.ID,
+			}
+			if err := h.api.db.CreateTempDocument(proposalCtx, tempDoc); err != nil {
+				log.Printf("[ToolProposal] Failed to create temp document: %v", err)
+				continue
+			}
+
+			h.api.storePendingToolProposal(docID, &pendingToolProposal{
+				Action:         ta,
+				ConversationID: conv.ID,
+			})
+
+			if !isSessionProvider {
+				safeSendSSE("doc_card", map[string]interface{}{
+					"doc_id":  docID,
+					"type":    "tool_proposal",
+					"title":   docTitle,
+					"summary": summary,
+				})
+			}
+
+			sseMu.Lock()
+			disconnected := sseDisconnected
+			sseMu.Unlock()
+			if disconnected {
+				h.api.hub.BroadcastChatDocCard(map[string]interface{}{
+					"doc_id":          docID,
+					"type":            "tool_proposal",
+					"title":           docTitle,
+					"summary":         summary,
+					"conversation_id": conv.ID,
+				})
+			}
+		}
 	}
 
 	// Session providers handle tools internally — emit doc_card SSE events for
@@ -1381,6 +1450,10 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			} else if strings.HasPrefix(doc.Title, "Task:") || strings.HasPrefix(doc.Title, "Planning:") ||
 				strings.HasPrefix(doc.Title, "Update Task:") || strings.HasPrefix(doc.Title, "Delete Task:") {
 				cardType = "task_proposal"
+			} else if strings.HasPrefix(doc.Title, "Tool:") {
+				cardType = "tool_proposal"
+			} else if strings.HasPrefix(doc.Title, "Skill:") {
+				cardType = "skill_proposal"
 			}
 			safeSendSSE("doc_card", map[string]interface{}{
 				"doc_id":  doc.ID,
@@ -3142,7 +3215,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 	default:
 		// Check if this is a custom project tool (prefixed with "custom_")
 		if strings.HasPrefix(name, "custom_") {
-			return h.executeCustomProjectTool(ctx, name, input, conversationID)
+			return h.executeCustomProjectTool(ctx, name, input, conversationID, collector)
 		}
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
@@ -3181,14 +3254,16 @@ func projectToolToDefinition(t database.ProjectTool) llm.ToolDefinition {
 		desc = fmt.Sprintf("Custom project tool: %s", t.Name)
 	}
 
-	// Add "approved" parameter for tools that require confirmation
 	if t.Confirm {
-		props["approved"] = llm.ToolPropertySchema{
-			Type:        "boolean",
-			Description: "Set to true after the user explicitly confirms execution. First call without this to get confirmation prompt.",
-		}
 		desc += " [requires user confirmation before execution]"
 	}
+
+	// Always include project_id so the tool can be called from any conversation context
+	props["project_id"] = llm.ToolPropertySchema{
+		Type:        "integer",
+		Description: fmt.Sprintf("The project ID this tool belongs to (default: %d)", t.ProjectID),
+	}
+	required = append(required, "project_id")
 
 	return llm.ToolDefinition{
 		Name:        "custom_" + t.Name,
@@ -3203,12 +3278,28 @@ func projectToolToDefinition(t database.ProjectTool) llm.ToolDefinition {
 
 // executeCustomProjectTool runs a custom project tool by executing its shell command.
 // Parameters are passed as environment variables with TOOL_ prefix.
-func (h *AIHandler) executeCustomProjectTool(ctx context.Context, name string, input map[string]interface{}, conversationID int64) (string, error) {
+// When collector is non-nil and tool.Confirm is true, the execution is deferred to a
+// proposal card for user approval instead of running immediately.
+func (h *AIHandler) executeCustomProjectTool(ctx context.Context, name string, input map[string]interface{}, conversationID int64, collector *planningCollector) (string, error) {
 	toolName := strings.TrimPrefix(name, "custom_")
 
+	// Try conversation project context first, then fall back to project_id from input
 	projectID := h.getProjectIDFromConversation(ctx, conversationID)
 	if projectID == 0 {
-		return "", fmt.Errorf("no project context for custom tool execution")
+		// Accept project_id from tool input (passed by AI when calling from any context)
+		if pidF, ok := input["project_id"].(float64); ok && pidF > 0 {
+			projectID = int64(pidF)
+		}
+	}
+	if projectID == 0 {
+		return "", fmt.Errorf("no project context for custom tool execution — provide project_id")
+	}
+
+	// Strip numeric project prefix from tool name if present (e.g. "1_run_tests" -> "run_tests")
+	if idx := strings.Index(toolName, "_"); idx > 0 {
+		if _, err := strconv.ParseInt(toolName[:idx], 10, 64); err == nil {
+			toolName = toolName[idx+1:]
+		}
 	}
 
 	project, err := h.api.db.GetProject(ctx, projectID)
@@ -3225,24 +3316,32 @@ func (h *AIHandler) executeCustomProjectTool(ctx context.Context, name string, i
 		return "", fmt.Errorf("custom tool %q is disabled", toolName)
 	}
 
-	// Enforce confirm flag: require explicit "approved" parameter
-	if tool.Confirm {
-		approved, _ := input["approved"].(bool)
-		if !approved {
-			return fmt.Sprintf(
-				"Tool '%s' requires user confirmation before execution.\n"+
-					"Command: `%s`\nDescription: %s\n\n"+
-					"Ask the user to confirm. When they approve, call this tool again with the parameter `approved: true`.",
-				tool.Name, tool.Command, tool.Description), nil
-		}
-		// Remove the approved flag so it's not passed as an env var
-		delete(input, "approved")
-	}
-
 	// Build working directory
 	workDir := project.Path
 	if tool.WorkingDir != "" {
 		workDir = project.Path + "/" + tool.WorkingDir
+	}
+
+	// Defer to proposal card if tool requires confirmation
+	if tool.Confirm && collector != nil {
+		collector.add(PlanningTaskAction{
+			Action:    "execute_custom_tool",
+			ProjectID: projectID,
+			Title:     tool.Name,
+			Extra: map[string]interface{}{
+				"tool_id":      tool.ID,
+				"tool_name":    tool.Name,
+				"command":      tool.Command,
+				"description":  tool.Description,
+				"input":        input,
+				"working_dir":  workDir,
+				"project_type": project.Type,
+			},
+		})
+		return fmt.Sprintf(
+			"IMPORTANT: Tool '%s' requires user confirmation and has NOT been executed yet. "+
+				"A confirmation card will appear for user approval. Do NOT say the tool was executed.",
+			tool.Name), nil
 	}
 
 	// For remote projects, execute via SSH
@@ -3811,20 +3910,46 @@ func (h *AIHandler) getProjectIDFromConversation(ctx context.Context, conversati
 }
 
 // GetCustomToolsForConversation implements llm.CustomToolsProvider.
-// Returns custom project tool definitions for the conversation's project context.
+// Returns custom project tool definitions. If the conversation has a project context,
+// returns tools for that project. Otherwise returns tools from all projects so the
+// AI can call any tool when given a project_id.
 func (h *AIHandler) GetCustomToolsForConversation(conversationID int64) []llm.ToolDefinition {
 	ctx := context.Background()
-	projectID := h.getProjectIDFromConversation(ctx, conversationID)
-	if projectID <= 0 {
+
+	// Try conversation-specific project first
+	if projectID := h.getProjectIDFromConversation(ctx, conversationID); projectID > 0 {
+		customTools, err := h.api.db.ListEnabledProjectTools(ctx, projectID)
+		if err == nil && len(customTools) > 0 {
+			var defs []llm.ToolDefinition
+			for _, ct := range customTools {
+				defs = append(defs, projectToolToDefinition(ct))
+			}
+			return defs
+		}
+	}
+
+	// No project context — load tools from all projects
+	projects, err := h.api.db.ListProjects(ctx)
+	if err != nil {
 		return nil
 	}
-	customTools, err := h.api.db.ListEnabledProjectTools(ctx, projectID)
-	if err != nil || len(customTools) == 0 {
-		return nil
-	}
+	seen := make(map[string]bool) // avoid duplicate tool names
 	var defs []llm.ToolDefinition
-	for _, ct := range customTools {
-		defs = append(defs, projectToolToDefinition(ct))
+	for _, p := range projects {
+		tools, err := h.api.db.ListEnabledProjectTools(ctx, p.ID)
+		if err != nil {
+			continue
+		}
+		for _, ct := range tools {
+			key := "custom_" + ct.Name
+			if seen[key] {
+				// If multiple projects have the same tool name, make it unique
+				key = fmt.Sprintf("custom_%d_%s", ct.ProjectID, ct.Name)
+				ct.Name = fmt.Sprintf("%d_%s", ct.ProjectID, ct.Name)
+			}
+			seen[key] = true
+			defs = append(defs, projectToolToDefinition(ct))
+		}
 	}
 	return defs
 }

@@ -158,6 +158,48 @@ class DocViewer {
                         }
                     ]
                 });
+            } else if (doc.title && doc.title.startsWith('Tool:')) {
+                this.openWithContent(doc.title, doc.content, {
+                    actions: [
+                        {
+                            label: 'Cancel',
+                            class: 'btn btn-secondary',
+                            onClick: async () => {
+                                try {
+                                    await fetch(`/api/tool-proposal/reject/${docId}`, { method: 'POST' });
+                                    this.close();
+                                    window.aiChat?.updateDocCardStatus(docId, 'rejected');
+                                    window.app?.showToast('Tool execution cancelled.', 'info');
+                                } catch (e) {
+                                    this.close();
+                                }
+                            }
+                        },
+                        {
+                            label: 'Run Tool',
+                            class: 'btn btn-primary',
+                            onClick: async () => {
+                                try {
+                                    const r = await fetch(`/api/tool-proposal/approve/${docId}`, { method: 'POST' });
+                                    if (r.ok) {
+                                        const data = await r.json();
+                                        this.close();
+                                        window.aiChat?.updateDocCardStatus(docId, 'approved');
+                                        window.app?.showToast(
+                                            data.output ? 'Tool executed successfully.' : 'Tool executed.',
+                                            'success'
+                                        );
+                                    } else {
+                                        const err = await r.json();
+                                        window.app?.showToast(err.error || 'Error executing tool', 'error');
+                                    }
+                                } catch (e) {
+                                    window.app?.showToast('Error executing tool', 'error');
+                                }
+                            }
+                        }
+                    ]
+                });
             } else if (isSkillProposal) {
                 this.openWithContent(doc.title, doc.content, {
                     actions: [
