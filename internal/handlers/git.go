@@ -232,6 +232,7 @@ func (h *GitHandler) GetLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	args = append(args,
+		"--topo-order",
 		"--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%s%x00%D",
 		fmt.Sprintf("--skip=%d", page*limit),
 		fmt.Sprintf("--max-count=%d", limit+1), // +1 to detect has_more
@@ -488,6 +489,17 @@ func computeGraph(commits []CommitInfo) {
 		}
 		rails = postRails
 
+		// Ghost rail cleanup: detect post-state rails pointing to already-processed
+		// commits. These will never match a future row, so remove them now.
+		// This can happen when date ordering causes a parent to be rendered before
+		// all its children (topo-order prevents most cases, but this is a safety net).
+		ghostRails := map[int]int{} // post-index → column where the ghost target was rendered
+		for postIdx, r := range rails {
+			if col, ok := processed[r.hash]; ok {
+				ghostRails[postIdx] = col
+			}
+		}
+
 		// Build lines
 		var lines []GraphLine
 
@@ -539,7 +551,41 @@ func computeGraph(commits []CommitInfo) {
 			}
 		}
 
-		// NOTE: No pass-through lines — lines only connect to commit dots
+		// Pass-through lines for rails unrelated to this commit
+		// These maintain visual continuity for branches passing through this row.
+		// Skip ghost rails — they point to already-processed commits and should end here.
+		occupiedTo := map[int]bool{}
+		for _, line := range lines {
+			occupiedTo[line.To] = true
+		}
+		for preIdx := range preRails {
+			if preIdx == matchIdx || removed[preIdx] {
+				continue
+			}
+			postIdx := preToPost[preIdx]
+			if _, isGhost := ghostRails[postIdx]; isGhost {
+				continue
+			}
+			if !occupiedTo[postIdx] {
+				lines = append(lines, GraphLine{
+					From:  preIdx,
+					To:    postIdx,
+					Color: preRails[preIdx].color,
+				})
+				occupiedTo[postIdx] = true
+			}
+		}
+
+		// Remove ghost rails from post-state so they don't persist
+		if len(ghostRails) > 0 {
+			cleanRails := []rail{}
+			for postIdx, r := range rails {
+				if _, isGhost := ghostRails[postIdx]; !isGhost {
+					cleanRails = append(cleanRails, r)
+				}
+			}
+			rails = cleanRails
+		}
 
 		c.Graph.Lines = lines
 	}
