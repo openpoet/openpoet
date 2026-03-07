@@ -158,7 +158,7 @@ class DocViewer {
                         }
                     ]
                 });
-            } else if (doc.title && doc.title.startsWith('Tool:')) {
+            } else if (doc.title && doc.title.startsWith('Tool:') && doc.status !== 'approved' && doc.status !== 'rejected') {
                 this.openWithContent(doc.title, doc.content, {
                     actions: [
                         {
@@ -179,22 +179,48 @@ class DocViewer {
                             label: 'Run Tool',
                             class: 'btn btn-primary',
                             onClick: async () => {
+                                this.close();
+                                window.aiChat?.setDocCardRunning(docId);
                                 try {
-                                    const r = await fetch(`/api/tool-proposal/approve/${docId}`, { method: 'POST' });
-                                    if (r.ok) {
-                                        const data = await r.json();
-                                        window.aiChat?.updateDocCardStatus(docId, 'approved');
-                                        // Show execution output in the doc viewer
-                                        const outputContent = data.error
-                                            ? `# Tool Error — ${doc.title?.replace('Tool: ', '') || 'Tool'}\n\n**Error:**\n\`\`\`\n${data.error}\n\`\`\``
-                                            : `# Tool Executed — ${doc.title?.replace('Tool: ', '') || 'Tool'}\n\n**Output:**\n\`\`\`\n${data.output || '(no output)'}\n\`\`\``;
-                                        this.openWithContent(doc.title, outputContent);
-                                    } else {
-                                        const err = await r.json();
-                                        window.app?.showToast(err.error || 'Error executing tool', 'error');
+                                    const resp = await fetch(`/api/tool-proposal/approve/${docId}`, { method: 'POST' });
+                                    const reader = resp.body.getReader();
+                                    const decoder = new TextDecoder();
+                                    let buffer = '';
+                                    let fullOutput = '';
+
+                                    while (true) {
+                                        const { done, value } = await reader.read();
+                                        if (done) break;
+                                        buffer += decoder.decode(value, { stream: true });
+                                        const events = buffer.split('\n\n');
+                                        buffer = events.pop();
+                                        for (const evt of events) {
+                                            let evtType = '', evtData = '';
+                                            for (const line of evt.split('\n')) {
+                                                if (line.startsWith('event: ')) evtType = line.slice(7);
+                                                else if (line.startsWith('data: ')) evtData = line.slice(6);
+                                            }
+                                            if (!evtData) continue;
+                                            try {
+                                                const d = JSON.parse(evtData);
+                                                if (evtType === 'output') {
+                                                    fullOutput += d.line + '\n';
+                                                    window.aiChat?.setDocCardOutputLine(docId, d.line);
+                                                } else if (evtType === 'done') {
+                                                    fullOutput = d.output || fullOutput;
+                                                    window.aiChat?.setDocCardCompleted(docId, fullOutput, d.exit_code);
+                                                } else if (evtType === 'error') {
+                                                    window.aiChat?.setDocCardError(docId, d.message);
+                                                }
+                                            } catch (_) {}
+                                        }
+                                    }
+                                    // If stream ended without a done event
+                                    if (fullOutput && !document.querySelector(`.ai-chat-doc-card[data-doc-id="${docId}"] .ai-chat-doc-card-badge-approved`)) {
+                                        window.aiChat?.setDocCardCompleted(docId, fullOutput, 0);
                                     }
                                 } catch (e) {
-                                    window.app?.showToast('Error executing tool', 'error');
+                                    window.aiChat?.setDocCardError(docId, 'Connection error');
                                 }
                             }
                         }

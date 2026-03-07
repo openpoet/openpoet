@@ -3885,6 +3885,47 @@ body {
     background: rgba(239, 68, 68, 0.15);
     color: #dc2626;
 }
+.ai-chat-doc-card-badge-running {
+    background: rgba(59, 130, 246, 0.15);
+    color: #3b82f6;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.spinner-dots::after {
+    content: '';
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin-dots 0.8s linear infinite;
+}
+@keyframes spin-dots {
+    to { transform: rotate(360deg); }
+}
+.ai-chat-doc-card-output-line {
+    font-size: 0.75rem;
+    color: var(--color-text-secondary, #888);
+    margin-top: 2px;
+    font-family: monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 280px;
+}
+.ai-chat-doc-card-actions-row {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+    flex-shrink: 0;
+}
+.ai-chat-doc-card-btn-output {
+    font-size: 0.7rem;
+    padding: 2px 8px;
+}
 .ai-chat-doc-card-task_proposal {
     border-left-color: #22c55e;
     background: color-mix(in srgb, #22c55e 5%, var(--color-surface));
