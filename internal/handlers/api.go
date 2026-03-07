@@ -603,7 +603,7 @@ func (a *API) ApproveToolProposal(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			sendSSE("error", map[string]string{"message": err.Error()})
 		} else {
-			sendSSE("done", map[string]interface{}{"output": output, "exit_code": 0})
+			sendSSE("done", map[string]interface{}{"exit_code": 0})
 		}
 		a.updateToolDoc(docID, toolName, output)
 		return
@@ -640,6 +640,7 @@ func (a *API) ApproveToolProposal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	scanner := bufio.NewScanner(stdoutPipe)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line length
 	var fullOutput strings.Builder
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -657,20 +658,16 @@ func (a *API) ApproveToolProposal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	output := fullOutput.String()
-	sendSSE("done", map[string]interface{}{"output": output, "exit_code": exitCode})
+	sendSSE("done", map[string]interface{}{"exit_code": exitCode})
 
 	a.updateToolDoc(docID, toolName, output)
 }
 
 // updateToolDoc updates the TempDocument with execution output.
 func (a *API) updateToolDoc(docID, toolName, output string) {
-	truncated := output
-	if len(truncated) > 10000 {
-		truncated = truncated[:10000] + "\n... (output truncated)"
-	}
 	a.db.ExecContext(context.Background(),
 		"UPDATE temp_documents SET content = ? WHERE id = ?",
-		fmt.Sprintf("# Tool Executed — %s\n\n**Output:**\n```\n%s\n```", toolName, truncated),
+		fmt.Sprintf("# Tool Executed — %s\n\n**Output:**\n```\n%s\n```", toolName, output),
 		docID)
 }
 
