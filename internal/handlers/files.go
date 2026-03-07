@@ -563,7 +563,7 @@ func (h *FileHandler) DownloadProjectFile(w http.ResponseWriter, r *http.Request
 		}
 		defer reader.Close()
 
-		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Type", fm.GetMimeType(filePath))
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", fileInfo.Size))
 		io.Copy(w, reader)
 	} else {
@@ -577,7 +577,7 @@ func (h *FileHandler) DownloadProjectFile(w http.ResponseWriter, r *http.Request
 		defer sftpClient.Close()
 		defer sshClient.Close()
 
-		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Type", fm.GetMimeType(filePath))
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", fileInfo.Size))
 		io.Copy(w, file)
 	}

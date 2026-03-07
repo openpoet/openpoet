@@ -668,6 +668,23 @@ func AllToolDefs() []ToolDef {
 			Context: ToolContextChat,
 		},
 		{
+			Name:        "open_file",
+			Description: "Open one or more project files for the user to view. Creates clickable file cards in chat. Does NOT return file content (saves context). Use read_file if you need to analyze content yourself.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"paths": {
+						Type:        "array",
+						Description: "File paths relative to the project root",
+						Items:       &ToolPropertySchema{Type: "string"},
+					},
+				},
+				Required: []string{"project_id", "paths"},
+			},
+			Context: ToolContextChat,
+		},
+		{
 			Name:        "get_task_report",
 			Description: "Get a task summary report for a project. Shows status counts, overdue tasks, and recommends the next task to work on.",
 			InputSchema: ToolDefinitionInput{

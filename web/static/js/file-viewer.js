@@ -298,7 +298,61 @@ class FileViewer {
 
             // Render content
             if (FileViewer.isMarkdown(data.name)) {
-                this.renderMarkdown(data.content);
+                const dir = filePath.includes('/') ? filePath.substring(0, filePath.lastIndexOf('/')) : '';
+                const rawBase = dir ? `/api/sessions/${sessionId}/files/${dir}` : `/api/sessions/${sessionId}/files`;
+                this.renderMarkdown(data.content, rawBase);
+            } else {
+                this.renderCode(data.content);
+            }
+        } catch (error) {
+            console.error('FileViewer error:', error);
+            this.showError('Failed to load file: ' + error.message);
+        }
+    }
+
+    async showForProject(projectId, filePath) {
+        this.currentPath = filePath;
+        this._currentProjectId = projectId;
+
+        this.overlay.classList.remove('hidden');
+        this.showState('loading');
+
+        const filename = filePath.split('/').pop();
+        this.nameEl.textContent = filename;
+        this.sizeEl.textContent = '';
+
+        if (FileViewer.isImage(filename)) {
+            const url = `/api/projects/${projectId}/files/raw/${filePath}`;
+            this.renderImage(url);
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/projects/${projectId}/files/view/${filePath}`);
+            if (!response.ok) {
+                const ct = response.headers.get('content-type') || '';
+                let errorMsg = 'Failed to load file';
+                if (ct.includes('application/json')) {
+                    const err = await response.json();
+                    errorMsg = err.error || errorMsg;
+                }
+                if (response.status === 413) {
+                    errorMsg = 'File is too large to view (max 2MB). Use download instead.';
+                } else if (response.status === 415) {
+                    errorMsg = 'Binary file cannot be viewed. Use download instead.';
+                }
+                this.showError(errorMsg);
+                return;
+            }
+
+            const data = await response.json();
+            this.nameEl.textContent = data.name;
+            this.sizeEl.textContent = this.formatSize(data.size);
+
+            if (FileViewer.isMarkdown(data.name)) {
+                const dir = filePath.includes('/') ? filePath.substring(0, filePath.lastIndexOf('/')) : '';
+                const rawBase = dir ? `/api/projects/${projectId}/files/raw/${dir}` : `/api/projects/${projectId}/files/raw`;
+                this.renderMarkdown(data.content, rawBase);
             } else {
                 this.renderCode(data.content);
             }
@@ -320,10 +374,19 @@ class FileViewer {
         this.showState('image');
     }
 
-    renderMarkdown(content) {
+    renderMarkdown(content, rawBaseUrl) {
         if (typeof marked !== 'undefined') {
             FileViewer._initMarked();
             this.markdownEl.innerHTML = marked.parse(content);
+            // Rewrite relative image src to go through the file API
+            if (rawBaseUrl) {
+                this.markdownEl.querySelectorAll('img').forEach(img => {
+                    const src = img.getAttribute('src');
+                    if (src && !src.startsWith('http://') && !src.startsWith('https://') && !src.startsWith('data:') && !src.startsWith('/')) {
+                        img.src = rawBaseUrl + '/' + src;
+                    }
+                });
+            }
             FileViewer.renderMermaid(this.markdownEl);
         } else {
             // Fallback: render as code if marked is not available
@@ -403,11 +466,79 @@ class FileViewer {
 
     download() {
         if (!this.currentPath) return;
+
+        // For markdown with rendered images, download as self-contained HTML
+        if (FileViewer.isMarkdown(this.currentPath) && !this.markdownEl.classList.contains('hidden')) {
+            this.downloadMarkdownWithImages();
+            return;
+        }
+
+        if (this._currentProjectId) {
+            const url = `/api/projects/${this._currentProjectId}/files/raw/${this.currentPath}`;
+            window.open(url, '_blank');
+            return;
+        }
         const sessionId = app.currentSession;
         if (!sessionId) return;
 
         const url = `/api/sessions/${sessionId}/files/${this.currentPath}`;
         window.open(url, '_blank');
+    }
+
+    async downloadMarkdownWithImages() {
+        const clone = this.markdownEl.cloneNode(true);
+        const images = clone.querySelectorAll('img');
+
+        // Convert all images to base64 data URIs
+        for (const img of images) {
+            const src = img.getAttribute('src');
+            if (!src || src.startsWith('data:')) continue;
+            try {
+                const response = await fetch(src);
+                const blob = await response.blob();
+                const dataUri = await new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result);
+                    reader.readAsDataURL(blob);
+                });
+                img.src = dataUri;
+            } catch (e) {
+                console.warn('Failed to embed image:', src, e);
+            }
+        }
+
+        const title = this.escapeHtml(this.nameEl.textContent);
+        const filename = this.currentPath.split('/').pop().replace(/\.(md|markdown)$/i, '.html');
+        const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>${title}</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #333; }
+img { max-width: 100%; }
+pre { background: #f5f5f5; padding: 12px; border-radius: 4px; overflow-x: auto; }
+code { background: #f5f5f5; padding: 2px 4px; border-radius: 3px; font-size: 0.9em; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+th { background: #f5f5f5; }
+blockquote { border-left: 4px solid #ddd; margin: 0; padding-left: 16px; color: #666; }
+h1, h2, h3, h4, h5, h6 { margin-top: 1.5em; margin-bottom: 0.5em; }
+</style>
+</head>
+<body>
+${clone.innerHTML}
+</body>
+</html>`;
+
+        const blob = new Blob([html], { type: 'text/html' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
     }
 
     showPlanContent(content, title) {
@@ -428,6 +559,7 @@ class FileViewer {
         this.imageEl.onerror = null;
         this.resetImageZoom();
         this.currentPath = '';
+        this._currentProjectId = null;
 
         // Refocus terminal
         if (window.terminalManager) {
