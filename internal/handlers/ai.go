@@ -1367,8 +1367,15 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Process custom tool execution proposals (confirm-required tools)
+		// Deduplicate — Claude sometimes calls the same tool multiple times in one turn
+		seenToolActions := make(map[string]bool)
 		for _, ta := range toolExecActions {
 			toolName, _ := ta.Extra["tool_name"].(string)
+			dedupeKey := fmt.Sprintf("%d_%s", ta.ProjectID, toolName)
+			if seenToolActions[dedupeKey] {
+				continue
+			}
+			seenToolActions[dedupeKey] = true
 			command, _ := ta.Extra["command"].(string)
 			description, _ := ta.Extra["description"].(string)
 			inputParams, _ := ta.Extra["input"].(map[string]interface{})
