@@ -203,6 +203,7 @@ func (r *BenchmarkRunner) runScenario(ctx context.Context, s Scenario) *Scenario
 		r.project.Skills(),
 		r.project.Projects(),
 		[]string{},
+		nil,
 	)
 
 	// Start with the scenario's messages

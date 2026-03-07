@@ -6,14 +6,14 @@ import (
 )
 
 // ChatSystemPrompt builds the system prompt for the AI chat assistant.
-// It injects current state (skills, projects, MCPs) dynamically.
+// It injects current state (skills, projects, MCPs, custom tools) dynamically.
 // All providers support tools (via native API or MCP).
 //
 // When forMCP is true (GoSDK/session providers), the prompt adapts for the MCP context:
 //   - Removes the "Available Tools" section (Claude CLI already provides tool descriptions)
 //   - Adds a tool naming convention note so the model maps prompt references (e.g. "list_tasks")
 //     to actual MCP tool names (e.g. "mcp__openpoet__list_tasks")
-func ChatSystemPrompt(skills []string, projects []string, mcps []string, forMCP ...bool) string {
+func ChatSystemPrompt(skills []string, projects []string, mcps []string, customTools []string, forMCP ...bool) string {
 	isMCP := len(forMCP) > 0 && forMCP[0]
 	var sb strings.Builder
 
@@ -172,6 +172,22 @@ When creating subtasks: first call = umbrella (parent), subsequent calls use par
 - If unsure about what the user wants, ask — don't guess.
 `)
 
+	if len(customTools) > 0 {
+		sb.WriteString(`
+## Custom Project Tools
+This conversation is linked to a project with custom executable tools.
+When the user's request matches a tool's purpose, call it directly.
+Do NOT suggest starting a Claude Code session — you can execute these tools yourself.
+Tools prefixed with "custom_" run shell commands in the project directory. Parameters are passed to the command.
+Tools marked [requires confirmation] need explicit user approval before execution.
+
+Available custom tools:
+`)
+		for _, t := range customTools {
+			sb.WriteString(fmt.Sprintf("- %s\n", t))
+		}
+	}
+
 	if len(skills) > 0 {
 		sb.WriteString("\n## Current Skills in OpenPoet\n")
 		for _, s := range skills {
@@ -204,8 +220,8 @@ When creating subtasks: first call = umbrella (parent), subsequent calls use par
 
 // ChatSystemPromptWithProactiveContext wraps ChatSystemPrompt and appends proactive conversation context.
 // Used when the user is responding to an AI-initiated conversation.
-func ChatSystemPromptWithProactiveContext(skills, projects, mcps []string, proactiveCtx string, forMCP ...bool) string {
-	base := ChatSystemPrompt(skills, projects, mcps, forMCP...)
+func ChatSystemPromptWithProactiveContext(skills, projects, mcps, customTools []string, proactiveCtx string, forMCP ...bool) string {
+	base := ChatSystemPrompt(skills, projects, mcps, customTools, forMCP...)
 	if proactiveCtx == "" {
 		return base
 	}

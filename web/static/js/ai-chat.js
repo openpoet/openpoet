@@ -763,8 +763,17 @@ class AIChatManager {
             'read_file': 'Reading file',
             'find_files': 'Searching files',
             'grep_content': 'Searching content',
+            'list_project_custom_tools': 'Listing custom tools',
+            'create_project_custom_tool': 'Creating custom tool',
+            'update_project_custom_tool': 'Updating custom tool',
+            'delete_project_custom_tool': 'Deleting custom tool',
         };
-        return labels[name] || name;
+        if (labels[name]) return labels[name];
+        // Dynamic label for custom project tools (custom_run_test → Running run test)
+        if (name.startsWith('custom_')) {
+            return 'Running ' + name.slice(7).replace(/_/g, ' ');
+        }
+        return name;
     }
 
     setStreaming(streaming) {

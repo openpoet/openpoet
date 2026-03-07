@@ -24,6 +24,9 @@ type SessionProvider interface {
 	CloseSession(conversationID int64) error
 	// CloseAllSessions terminates all active sessions (used during shutdown).
 	CloseAllSessions()
+	// DisconnectSession disconnects the client but preserves session ID for resume.
+	// Used to force MCP server rebuild on next query (e.g., after custom tools change).
+	DisconnectSession(conversationID int64)
 }
 
 // ToolExecutor executes OpenPoet tools. Shared between ai.go tool loop
