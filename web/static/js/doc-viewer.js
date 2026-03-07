@@ -186,7 +186,6 @@ class DocViewer {
                                     const reader = resp.body.getReader();
                                     const decoder = new TextDecoder();
                                     let buffer = '';
-                                    let fullOutput = '';
 
                                     while (true) {
                                         const { done, value } = await reader.read();
@@ -204,11 +203,9 @@ class DocViewer {
                                             try {
                                                 const d = JSON.parse(evtData);
                                                 if (evtType === 'output') {
-                                                    fullOutput += d.line + '\n';
                                                     window.aiChat?.setDocCardOutputLine(docId, d.line);
                                                 } else if (evtType === 'done') {
-                                                    fullOutput = d.output || fullOutput;
-                                                    window.aiChat?.setDocCardCompleted(docId, fullOutput, d.exit_code);
+                                                    window.aiChat?.setDocCardCompleted(docId, d.exit_code);
                                                 } else if (evtType === 'error') {
                                                     window.aiChat?.setDocCardError(docId, d.message);
                                                 }
@@ -216,8 +213,8 @@ class DocViewer {
                                         }
                                     }
                                     // If stream ended without a done event
-                                    if (fullOutput && !document.querySelector(`.ai-chat-doc-card[data-doc-id="${docId}"] .ai-chat-doc-card-badge-approved`)) {
-                                        window.aiChat?.setDocCardCompleted(docId, fullOutput, 0);
+                                    if (!document.querySelector(`.ai-chat-doc-card[data-doc-id="${docId}"] .ai-chat-doc-card-badge-approved`)) {
+                                        window.aiChat?.setDocCardCompleted(docId, 0);
                                     }
                                 } catch (e) {
                                     window.aiChat?.setDocCardError(docId, 'Connection error');

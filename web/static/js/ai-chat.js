@@ -650,7 +650,12 @@ class AIChatManager {
         const taskCount = data.task_count ? `<div class="ai-chat-doc-card-task-count">${data.task_count} action(s)</div>` : '';
 
         let actionHtml;
-        if (status === 'approved') {
+        if (status === 'approved' && isToolProposal) {
+            actionHtml = '<div class="ai-chat-doc-card-actions-row">' +
+                '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-approved">Approved</span>' +
+                '<button class="ai-chat-doc-card-btn ai-chat-doc-card-btn-output">View Output</button>' +
+                '</div>';
+        } else if (status === 'approved') {
             actionHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-approved">Approved</span>';
         } else if (status === 'rejected') {
             actionHtml = '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-rejected">Rejected</span>';
@@ -761,7 +766,7 @@ class AIChatManager {
     }
 
     // Set a tool card to "completed" state with badge + View Output button.
-    setDocCardCompleted(docId, output, exitCode) {
+    setDocCardCompleted(docId, exitCode) {
         const card = this.messagesContainer?.querySelector(`.ai-chat-doc-card[data-doc-id="${docId}"]`);
         if (!card) return;
         // Clear all existing action elements
@@ -779,8 +784,6 @@ class AIChatManager {
         card.querySelector('.ai-chat-doc-card-btn-output')?.addEventListener('click', () => {
             if (window.docViewer) window.docViewer.open(docId);
         });
-        // Store output for potential reuse
-        card.dataset.toolOutput = output || '';
         this.scrollToBottom();
     }
 
