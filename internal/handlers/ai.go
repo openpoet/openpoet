@@ -808,14 +808,10 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	var tools []llm.ToolDefinition
 	if !isSessionProvider {
 		tools = llm.ChatTools()
-		// Merge project custom tools if conversation has a project context
-		if projectID := h.getProjectIDFromConversation(ctx, conv.ID); projectID > 0 {
-			if customTools, err := h.api.db.ListEnabledProjectTools(ctx, projectID); err == nil {
-				for _, ct := range customTools {
-					tools = append(tools, projectToolToDefinition(ct))
-				}
-			}
-		}
+		// Merge project custom tools — uses same fallback as GoSDK path:
+		// project-specific tools if conversation has context, otherwise all project tools
+		customToolDefs := h.GetCustomToolsForConversation(conv.ID)
+		tools = append(tools, customToolDefs...)
 		// Apply agent tool policy filtering
 		if agent != nil && agent.ToolPolicy != "" {
 			tools = filterToolsByPolicy(tools, agent.ToolPolicy)
@@ -862,6 +858,15 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		"id":    conv.ID,
 		"title": conv.Title,
 	})
+
+	// Log tool names being sent to the model
+	if len(tools) > 0 {
+		var tnames []string
+		for _, t := range tools {
+			tnames = append(tnames, t.Name)
+		}
+		log.Printf("[AI] Sending %d tools to model: %v", len(tools), tnames)
+	}
 
 	req := &llm.Request{
 		System:         systemPrompt,
@@ -1432,10 +1437,11 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Session providers handle tools internally — emit doc_card SSE events for
-	// any documents created during this stream (the tool loop that normally does
-	// this is skipped for session providers).
-	if isSessionProvider {
+	// Emit doc_card SSE events for TempDocuments created during this stream.
+	// - Session providers: emit ALL cards (tool loop is skipped, this is the only source)
+	// - Non-session providers: only emit "file" cards (other types are already emitted
+	//   inline by buildDocCard and the collector code above)
+	{
 		docCtx, docCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		docs, _ := h.api.db.ListTempDocumentsByConversation(docCtx, conv.ID)
 		docCancel()
@@ -1457,6 +1463,12 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			} else if strings.HasPrefix(doc.Title, "File:") {
 				cardType = "file"
 			}
+
+			// Non-session providers already emit non-file cards inline; skip to avoid duplicates
+			if !isSessionProvider && cardType != "file" {
+				continue
+			}
+
 			card := map[string]interface{}{
 				"doc_id":  doc.ID,
 				"type":    cardType,
@@ -3672,32 +3684,51 @@ func (h *AIHandler) buildSystemPromptWithContext(ctx context.Context, proactiveC
 		mcpNames = append(mcpNames, fmt.Sprintf("[%d] %s", m.ID, m.Name))
 	}
 
-	// Extract project_id from proactive context to fetch custom tools
+	// Collect custom tool names for the system prompt.
+	// If conversation has proactive context with project_id, show that project's tools.
+	// Otherwise, show tools from all projects so the model knows they exist.
 	var customToolNames []string
+	var customToolProjectID int64
 	if proactiveCtx != "" {
 		var ctxData map[string]interface{}
 		if json.Unmarshal([]byte(proactiveCtx), &ctxData) == nil {
 			if pidF, ok := ctxData["project_id"].(float64); ok {
-				projectID := int64(pidF)
-				if tools, err := h.api.db.ListEnabledProjectTools(ctx, projectID); err == nil {
-					for _, t := range tools {
-						desc := fmt.Sprintf("custom_%s: %s", t.Name, t.Description)
-						if t.Confirm {
-							desc += " [requires confirmation]"
-						}
-						// Parse parameters to show param names
-						var params map[string]struct {
-							Type string `json:"type"`
-						}
-						if json.Unmarshal([]byte(t.Parameters), &params) == nil && len(params) > 0 {
-							var pnames []string
-							for pname := range params {
-								pnames = append(pnames, pname)
-							}
-							desc += fmt.Sprintf(" (params: %s)", strings.Join(pnames, ", "))
-						}
-						customToolNames = append(customToolNames, desc)
-					}
+				customToolProjectID = int64(pidF)
+			}
+		}
+	}
+
+	buildToolDesc := func(t database.ProjectTool) string {
+		desc := fmt.Sprintf("custom_%s: %s", t.Name, t.Description)
+		if t.Confirm {
+			desc += " [requires confirmation]"
+		}
+		var params map[string]struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal([]byte(t.Parameters), &params) == nil && len(params) > 0 {
+			var pnames []string
+			for pname := range params {
+				pnames = append(pnames, pname)
+			}
+			desc += fmt.Sprintf(" (params: %s)", strings.Join(pnames, ", "))
+		}
+		return desc
+	}
+
+	if customToolProjectID > 0 {
+		if tools, err := h.api.db.ListEnabledProjectTools(ctx, customToolProjectID); err == nil {
+			for _, t := range tools {
+				customToolNames = append(customToolNames, buildToolDesc(t))
+			}
+		}
+	} else {
+		// No project context — include tools from all projects
+		for _, p := range projects {
+			if tools, err := h.api.db.ListEnabledProjectTools(ctx, p.ID); err == nil {
+				for _, t := range tools {
+					desc := buildToolDesc(t) + fmt.Sprintf(" [project: %s, id: %d]", p.Name, p.ID)
+					customToolNames = append(customToolNames, desc)
 				}
 			}
 		}

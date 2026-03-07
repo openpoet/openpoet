@@ -74,6 +74,7 @@ Do NOT call the same tool more than once with the same arguments. If you already
 **Memory**: get_memory_doc, update_memory_doc (proposals only — require user approval)
 **Tasks**: list_tasks, create_task, update_task, delete_task, get_task_report
 **Search**: find_files, grep_content
+**Files**: open_file (opens file viewer cards in chat — does NOT read content, use read_file for that)
 **Other**: update_setting, sync_config, create_document
 `)
 	}
