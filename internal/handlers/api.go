@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -21,6 +22,7 @@ import (
 	"openpoet/internal/updater"
 	"openpoet/internal/websocket"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -550,7 +552,7 @@ func (a *API) storePendingToolProposal(docID string, proposal *pendingToolPropos
 	a.pendingToolProposals[docID] = proposal
 }
 
-// ApproveToolProposal executes a pending custom tool and returns the output.
+// ApproveToolProposal executes a pending custom tool and streams the output via SSE.
 func (a *API) ApproveToolProposal(w http.ResponseWriter, r *http.Request) {
 	docID := chi.URLParam(r, "docId")
 
@@ -568,40 +570,108 @@ func (a *API) ApproveToolProposal(w http.ResponseWriter, r *http.Request) {
 
 	a.db.UpdateTempDocumentStatus(r.Context(), docID, "approved")
 
-	// Execute the tool
 	toolName, _ := pending.Action.Extra["tool_name"].(string)
+	command, _ := pending.Action.Extra["command"].(string)
+	workDir, _ := pending.Action.Extra["working_dir"].(string)
+	projectType, _ := pending.Action.Extra["project_type"].(string)
 	input, _ := pending.Action.Extra["input"].(map[string]interface{})
 
-	// Call executeCustomProjectTool with nil collector to bypass confirm check
-	output, err := a.aiHandler.executeCustomProjectTool(
-		r.Context(),
-		"custom_"+toolName,
-		input,
-		pending.ConversationID,
-		nil, // nil collector = execute immediately
-	)
-	if err != nil {
-		respondJSON(w, http.StatusOK, map[string]interface{}{
-			"status": "approved",
-			"error":  err.Error(),
-		})
+	// Set SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		respondError(w, http.StatusInternalServerError, "Streaming not supported")
 		return
 	}
 
-	// Update the temp document with execution output
-	truncated := output
-	if len(truncated) > 2000 {
-		truncated = truncated[:2000] + "\n... (output truncated)"
+	sendSSE := func(event string, data interface{}) {
+		jsonData, _ := json.Marshal(data)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, jsonData)
+		flusher.Flush()
 	}
-	a.db.ExecContext(r.Context(),
+
+	sendSSE("started", map[string]string{"tool": toolName})
+
+	// For remote projects, fall back to non-streaming execution
+	if projectType != "local" {
+		output, err := a.aiHandler.executeCustomProjectTool(
+			r.Context(), "custom_"+toolName, input, pending.ConversationID, nil)
+		if err != nil {
+			sendSSE("error", map[string]string{"message": err.Error()})
+		} else {
+			sendSSE("done", map[string]interface{}{"output": output, "exit_code": 0})
+		}
+		a.updateToolDoc(docID, toolName, output)
+		return
+	}
+
+	// Local execution with streaming output
+	env := os.Environ()
+	for k, v := range input {
+		if k == "project_id" {
+			continue
+		}
+		envKey := "TOOL_" + strings.ToUpper(k)
+		env = append(env, fmt.Sprintf("%s=%v", envKey, v))
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Dir = workDir
+	cmd.Env = env
+
+	// Pipe stdout+stderr for line-by-line streaming
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		sendSSE("error", map[string]string{"message": err.Error()})
+		return
+	}
+	cmd.Stderr = cmd.Stdout // merge stderr into stdout pipe
+
+	if err := cmd.Start(); err != nil {
+		sendSSE("error", map[string]string{"message": err.Error()})
+		return
+	}
+
+	scanner := bufio.NewScanner(stdoutPipe)
+	var fullOutput strings.Builder
+	for scanner.Scan() {
+		line := scanner.Text()
+		fullOutput.WriteString(line + "\n")
+		sendSSE("output", map[string]string{"line": line})
+	}
+
+	exitCode := 0
+	if err := cmd.Wait(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+
+	output := fullOutput.String()
+	sendSSE("done", map[string]interface{}{"output": output, "exit_code": exitCode})
+
+	a.updateToolDoc(docID, toolName, output)
+}
+
+// updateToolDoc updates the TempDocument with execution output.
+func (a *API) updateToolDoc(docID, toolName, output string) {
+	truncated := output
+	if len(truncated) > 10000 {
+		truncated = truncated[:10000] + "\n... (output truncated)"
+	}
+	a.db.ExecContext(context.Background(),
 		"UPDATE temp_documents SET content = ? WHERE id = ?",
 		fmt.Sprintf("# Tool Executed — %s\n\n**Output:**\n```\n%s\n```", toolName, truncated),
 		docID)
-
-	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"status": "approved",
-		"output": truncated,
-	})
 }
 
 // RejectToolProposal discards a pending tool execution proposal.

@@ -728,6 +728,76 @@ class AIChatManager {
         }
     }
 
+    // Set a tool card to "running" state with a spinner.
+    setDocCardRunning(docId) {
+        const card = this.messagesContainer?.querySelector(`.ai-chat-doc-card[data-doc-id="${docId}"]`);
+        if (!card) return;
+        const btn = card.querySelector('.ai-chat-doc-card-btn');
+        if (btn) btn.remove();
+        const oldBadge = card.querySelector('.ai-chat-doc-card-badge');
+        if (oldBadge) oldBadge.remove();
+        // Remove any existing output line
+        const oldLine = card.querySelector('.ai-chat-doc-card-output-line');
+        if (oldLine) oldLine.remove();
+        card.insertAdjacentHTML('beforeend',
+            '<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-running"><span class="spinner-dots"></span> Running...</span>');
+        this.scrollToBottom();
+    }
+
+    // Update the card's subtitle with the latest output line (real-time streaming).
+    setDocCardOutputLine(docId, line) {
+        const card = this.messagesContainer?.querySelector(`.ai-chat-doc-card[data-doc-id="${docId}"]`);
+        if (!card) return;
+        const info = card.querySelector('.ai-chat-doc-card-info');
+        if (!info) return;
+        let lineEl = info.querySelector('.ai-chat-doc-card-output-line');
+        if (!lineEl) {
+            lineEl = document.createElement('div');
+            lineEl.className = 'ai-chat-doc-card-output-line';
+            info.appendChild(lineEl);
+        }
+        lineEl.textContent = line.length > 80 ? line.slice(0, 80) + '…' : line;
+        this.scrollToBottom();
+    }
+
+    // Set a tool card to "completed" state with badge + View Output button.
+    setDocCardCompleted(docId, output, exitCode) {
+        const card = this.messagesContainer?.querySelector(`.ai-chat-doc-card[data-doc-id="${docId}"]`);
+        if (!card) return;
+        // Clear all existing action elements
+        card.querySelectorAll('.ai-chat-doc-card-btn, .ai-chat-doc-card-badge, .ai-chat-doc-card-badge-running, .ai-chat-doc-card-output-line, .ai-chat-doc-card-actions-row').forEach(el => el.remove());
+
+        const isError = exitCode !== 0 && exitCode !== undefined;
+        const badgeClass = isError ? 'ai-chat-doc-card-badge-rejected' : 'ai-chat-doc-card-badge-approved';
+        const badgeText = isError ? `Exit ${exitCode}` : 'Approved';
+
+        card.insertAdjacentHTML('beforeend',
+            `<div class="ai-chat-doc-card-actions-row">` +
+            `<span class="ai-chat-doc-card-badge ${badgeClass}">${badgeText}</span>` +
+            `<button class="ai-chat-doc-card-btn ai-chat-doc-card-btn-output">View Output</button>` +
+            `</div>`);
+        card.querySelector('.ai-chat-doc-card-btn-output')?.addEventListener('click', () => {
+            if (window.docViewer) window.docViewer.open(docId);
+        });
+        // Store output for potential reuse
+        card.dataset.toolOutput = output || '';
+        this.scrollToBottom();
+    }
+
+    // Set a tool card to error state.
+    setDocCardError(docId, message) {
+        const card = this.messagesContainer?.querySelector(`.ai-chat-doc-card[data-doc-id="${docId}"]`);
+        if (!card) return;
+        const running = card.querySelector('.ai-chat-doc-card-badge-running');
+        if (running) running.remove();
+        const oldBadge = card.querySelector('.ai-chat-doc-card-badge');
+        if (oldBadge) oldBadge.remove();
+        const lineEl = card.querySelector('.ai-chat-doc-card-output-line');
+        if (lineEl) lineEl.remove();
+        card.insertAdjacentHTML('beforeend',
+            `<span class="ai-chat-doc-card-badge ai-chat-doc-card-badge-rejected">Error: ${this.escapeHtml(message || 'Unknown')}</span>`);
+    }
+
     // Called by WebSocket handler when a chat_doc_card event arrives (e.g. from MCP propose endpoint).
     // Queues the card for injection when the stream ends (to avoid being wiped by innerHTML updates).
     injectDocCardFromWS(data) {
