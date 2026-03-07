@@ -126,6 +126,19 @@ func (pm *ProviderManager) SetCustomToolsProvider(provider CustomToolsProvider) 
 	}
 }
 
+// DisconnectSession disconnects a specific conversation session on the chat provider,
+// preserving the session ID for resume. Forces MCP server rebuild on next query.
+func (pm *ProviderManager) DisconnectSession(conversationID int64) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	if p, ok := pm.providers[SlotChat]; ok {
+		if sp, ok := p.(SessionProvider); ok {
+			sp.DisconnectSession(conversationID)
+		}
+	}
+}
+
 // ReinitAll clears all cached providers, forcing them to be recreated on next access.
 func (pm *ProviderManager) ReinitAll() {
 	pm.mu.Lock()
