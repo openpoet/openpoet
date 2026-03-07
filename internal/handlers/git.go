@@ -367,6 +367,7 @@ func computeGraph(commits []CommitInfo) {
 		// Track whether this is a brand-new branch appearing for the first time
 		isNewBranch := matchIdx == -1
 		forkFromRail := -1
+		forkExact := false // true when parent hash exactly matches an existing rail
 
 		if isNewBranch {
 			// New branch — add a rail
@@ -374,20 +375,17 @@ func computeGraph(commits []CommitInfo) {
 			rails = append(rails, rail{hash: hash, color: nextColor})
 			nextColor++
 
-			// Determine which existing rail this branch likely forked from.
-			// Check if the first parent is tracked by an existing rail (immediate fork).
-			// Otherwise use the leftmost rail as a heuristic.
+			// Check if the first parent is already tracked by an existing rail.
+			// Only show a fork indicator when the parent hash exactly matches,
+			// to avoid misleading curves when the fork point is far away.
 			if len(rails) > 1 && len(c.Parents) > 0 {
 				parentHash := c.Parents[0]
 				for j, r := range rails {
 					if j != matchIdx && r.hash == parentHash {
 						forkFromRail = j
+						forkExact = true
 						break
 					}
-				}
-				if forkFromRail == -1 {
-					// Heuristic: fork from the leftmost (primary) rail
-					forkFromRail = 0
 				}
 			}
 		}
@@ -416,6 +414,12 @@ func computeGraph(commits []CommitInfo) {
 		}
 		isRoot := len(c.Parents) == 0
 		if isRoot {
+			removed[matchIdx] = true
+		}
+		// When a new branch's parent is already tracked by another rail,
+		// remove the new branch rail to prevent ghost rails going forward.
+		// The line will converge back into the fork source rail.
+		if isNewBranch && forkExact && !isRoot {
 			removed[matchIdx] = true
 		}
 
@@ -493,55 +497,50 @@ func computeGraph(commits []CommitInfo) {
 		var lines []GraphLine
 
 		if !isRoot {
-			matchPost := preToPost[matchIdx]
-
-			// First parent line: from commit pre-column to its post-column
-			lines = append(lines, GraphLine{
-				From:  matchIdx,
-				To:    matchPost,
-				Color: commitColor,
-			})
-
-			// Merge convergence lines: merging rails curve into commit column
-			// This visualizes fork points (where branches diverged going forward in time)
-			for _, j := range mergeIndices {
+			if isNewBranch && forkExact {
+				// New branch whose parent is already tracked — converge into fork source
+				forkPost := preToPost[forkFromRail]
 				lines = append(lines, GraphLine{
-					From:  j,
-					To:    matchPost,
-					Color: preRails[j].color,
+					From:  matchIdx,
+					To:    forkPost,
+					Color: commitColor,
 				})
-			}
+			} else {
+				matchPost := preToPost[matchIdx]
 
-			// Extra parent lines
-			for _, ep := range extraParents {
-				if ep.alreadyProcessed {
-					// Line from commit to the already-processed parent's column
-					lines = append(lines, GraphLine{
-						From:  matchIdx,
-						To:    ep.targetCol,
-						Color: ep.color,
-					})
-				} else {
-					lines = append(lines, GraphLine{
-						From:  matchIdx,
-						To:    ep.postIdx,
-						Color: rails[ep.postIdx].color,
-					})
-				}
-			}
-		}
-
-		// Fork indicator: when a new branch appears, show where it forked from
-		if isNewBranch && forkFromRail >= 0 && !isRoot {
-			matchPost := preToPost[matchIdx]
-			// From = forkFromRail (pre-state / top of row)
-			// To = matchPost (post-state / bottom of row)
-			if forkFromRail != matchPost {
+				// First parent line: from commit pre-column to its post-column
 				lines = append(lines, GraphLine{
-					From:  forkFromRail,
+					From:  matchIdx,
 					To:    matchPost,
 					Color: commitColor,
 				})
+
+				// Merge convergence lines: merging rails curve into commit column
+				for _, j := range mergeIndices {
+					lines = append(lines, GraphLine{
+						From:  j,
+						To:    matchPost,
+						Color: preRails[j].color,
+					})
+				}
+
+				// Extra parent lines
+				for _, ep := range extraParents {
+					if ep.alreadyProcessed {
+						lines = append(lines, GraphLine{
+							From:  matchIdx,
+							To:    ep.targetCol,
+							Color: ep.color,
+						})
+					} else {
+						lines = append(lines, GraphLine{
+							From:  matchIdx,
+							To:    ep.postIdx,
+							Color: rails[ep.postIdx].color,
+						})
+					}
+				}
+
 			}
 		}
 
