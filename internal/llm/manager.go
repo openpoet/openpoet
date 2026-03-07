@@ -32,11 +32,12 @@ type extraConfig struct {
 // ProviderManager manages per-slot providers, creating/caching them as needed.
 // It replaces the single global provider from the old architecture.
 type ProviderManager struct {
-	mu           sync.RWMutex
-	configs      map[Slot]*ProviderConfig
-	providers    map[Slot]Provider
-	apiURL       string
-	toolExecutor ToolExecutor
+	mu                  sync.RWMutex
+	configs             map[Slot]*ProviderConfig
+	providers           map[Slot]Provider
+	apiURL              string
+	toolExecutor        ToolExecutor
+	customToolsProvider CustomToolsProvider
 }
 
 // NewProviderManager creates a new ProviderManager.
@@ -112,6 +113,19 @@ func (pm *ProviderManager) SetToolExecutor(executor ToolExecutor) {
 	}
 }
 
+// SetCustomToolsProvider stores the custom tools provider and wires it into any existing GoSDK providers.
+func (pm *ProviderManager) SetCustomToolsProvider(provider CustomToolsProvider) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.customToolsProvider = provider
+
+	for _, p := range pm.providers {
+		if goSDK, ok := p.(*GoSDKProvider); ok {
+			goSDK.SetCustomToolsProvider(provider)
+		}
+	}
+}
+
 // ReinitAll clears all cached providers, forcing them to be recreated on next access.
 func (pm *ProviderManager) ReinitAll() {
 	pm.mu.Lock()
@@ -172,6 +186,9 @@ func (pm *ProviderManager) createProvider(config *ProviderConfig, slot Slot) Pro
 		if pm.toolExecutor != nil {
 			p.SetToolExecutor(pm.toolExecutor)
 		}
+		if pm.customToolsProvider != nil {
+			p.SetCustomToolsProvider(pm.customToolsProvider)
+		}
 		log.Printf("[ProviderMgr] Slot %s: using Go Agent SDK provider", slot)
 		return p
 
@@ -222,6 +239,9 @@ func (pm *ProviderManager) createProvider(config *ProviderConfig, slot Slot) Pro
 		if pm.toolExecutor != nil {
 			p.SetToolExecutor(pm.toolExecutor)
 		}
+		if pm.customToolsProvider != nil {
+			p.SetCustomToolsProvider(pm.customToolsProvider)
+		}
 		log.Printf("[ProviderMgr] Slot %s: using Ollama via Go Agent SDK at %s model=%s", slot, baseURL, model)
 		return p
 
@@ -237,6 +257,9 @@ func (pm *ProviderManager) autoDetect(slot Slot) Provider {
 		p := NewGoSDKProvider(pm.apiURL)
 		if pm.toolExecutor != nil {
 			p.SetToolExecutor(pm.toolExecutor)
+		}
+		if pm.customToolsProvider != nil {
+			p.SetCustomToolsProvider(pm.customToolsProvider)
 		}
 		log.Printf("[ProviderMgr] Slot %s: auto-detected Go Agent SDK (Claude CLI)", slot)
 		return p

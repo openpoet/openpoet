@@ -46,13 +46,20 @@ func isRetryableOneShotError(err error) bool {
 //   - MCP server with OpenPoet tools, budget control, session resume
 //   - Used for: AI assistant chat panel
 type GoSDKProvider struct {
-	apiURL       string
-	budgetUSD    float64 // max budget per interactive query (0 = unlimited)
-	toolExecutor ToolExecutor
-	extraEnv     map[string]string // extra env vars for the Claude CLI subprocess
-	providerName string            // override Name() return value (e.g. "ollama-sdk")
-	sessions     map[int64]*goSDKSession
-	mu           sync.RWMutex
+	apiURL              string
+	budgetUSD           float64 // max budget per interactive query (0 = unlimited)
+	toolExecutor        ToolExecutor
+	customToolsProvider CustomToolsProvider // provides custom project tools for a conversation
+	extraEnv            map[string]string   // extra env vars for the Claude CLI subprocess
+	providerName        string              // override Name() return value (e.g. "ollama-sdk")
+	sessions            map[int64]*goSDKSession
+	mu                  sync.RWMutex
+}
+
+// CustomToolsProvider returns custom tool definitions for a given conversation ID.
+// Used by GoSDKProvider to inject project-specific tools into the MCP server.
+type CustomToolsProvider interface {
+	GetCustomToolsForConversation(conversationID int64) []ToolDefinition
 }
 
 // goSDKSession holds a persistent Client connection for an interactive conversation.
@@ -80,6 +87,11 @@ func NewGoSDKProvider(apiURL string, toolExecutor ...ToolExecutor) *GoSDKProvide
 // SetToolExecutor sets the tool executor after creation (for lazy wiring).
 func (p *GoSDKProvider) SetToolExecutor(executor ToolExecutor) {
 	p.toolExecutor = executor
+}
+
+// SetCustomToolsProvider sets the provider for custom project tools.
+func (p *GoSDKProvider) SetCustomToolsProvider(provider CustomToolsProvider) {
+	p.customToolsProvider = provider
 }
 
 // SetBudgetUSD sets the maximum budget in USD per interactive query.
@@ -114,7 +126,16 @@ func (p *GoSDKProvider) buildMCPServer(convID int64) *claudecode.McpSdkServerCon
 	}
 
 	var tools []*claudecode.McpTool
-	for _, td := range ChatTools() {
+
+	// Add built-in chat tools
+	allDefs := ChatTools()
+
+	// Add custom project tools if provider is set
+	if p.customToolsProvider != nil {
+		allDefs = append(allDefs, p.customToolsProvider.GetCustomToolsForConversation(convID)...)
+	}
+
+	for _, td := range allDefs {
 		toolName := td.Name
 		tools = append(tools, claudecode.NewTool(
 			toolName,
