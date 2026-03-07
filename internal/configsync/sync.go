@@ -47,6 +47,97 @@ func (cs *ConfigSyncer) reportProgress(projectID int64, step, status, detail str
 	}
 }
 
+// syncDirection compares file mtime vs DB updated_at with 1-second tolerance.
+// Returns "file" if file is newer, "db" if DB is newer, "equal" if within tolerance.
+func syncDirection(fileMtime, dbUpdatedAt time.Time) string {
+	if fileMtime.After(dbUpdatedAt.Add(time.Second)) {
+		return "file"
+	}
+	if dbUpdatedAt.After(fileMtime.Add(time.Second)) {
+		return "db"
+	}
+	return "equal"
+}
+
+// syncMemoryDocLocal syncs a memory doc file (CLAUDE.md / AGENTS.md) bidirectionally
+// with the database, keeping the newest version based on timestamp comparison.
+func (cs *ConfigSyncer) syncMemoryDocLocal(ctx context.Context, project *database.Project, mdPath string) {
+	fileInfo, fileErr := os.Stat(mdPath)
+	dbDoc, dbErr := cs.db.GetMemoryDoc(ctx, project.ID)
+	baseName := filepath.Base(mdPath)
+
+	switch {
+	case fileErr == nil && dbErr == nil:
+		// Both exist — compare timestamps
+		dir := syncDirection(fileInfo.ModTime(), dbDoc.UpdatedAt)
+		if dir == "file" {
+			data, _ := os.ReadFile(mdPath)
+			cs.db.UpsertMemoryDoc(ctx, project.ID, string(data), "sync", "Synced from "+baseName)
+			log.Printf("[configsync] memory doc project %d: %s newer, updated DB", project.ID, baseName)
+			cs.reportProgress(project.ID, "memory_doc", "done", baseName+" newer, updated memory doc")
+		} else if dir == "db" {
+			os.WriteFile(mdPath, []byte(dbDoc.Content), 0644)
+			log.Printf("[configsync] memory doc project %d: DB newer, wrote %s", project.ID, baseName)
+			cs.reportProgress(project.ID, "memory_doc", "done", "Memory doc newer, updated "+baseName)
+		} else {
+			cs.reportProgress(project.ID, "memory_doc", "done", baseName+" in sync")
+		}
+	case fileErr == nil:
+		// File exists, no DB doc → import
+		data, _ := os.ReadFile(mdPath)
+		cs.db.UpsertMemoryDoc(ctx, project.ID, string(data), "sync", "Synced from "+baseName)
+		cs.reportProgress(project.ID, "memory_doc", "done", baseName+" imported to memory doc")
+	case dbErr == nil:
+		// DB exists, no file → write file
+		os.WriteFile(mdPath, []byte(dbDoc.Content), 0644)
+		cs.reportProgress(project.ID, "memory_doc", "done", "Memory doc written to "+baseName)
+	default:
+		cs.reportProgress(project.ID, "memory_doc", "done", "No "+baseName+" found")
+	}
+}
+
+// syncMemoryDocRemote syncs a memory doc file bidirectionally via SFTP,
+// keeping the newest version based on timestamp comparison.
+func (cs *ConfigSyncer) syncMemoryDocRemote(ctx context.Context, sftpClient *sftp.Client, project *database.Project, mdPath string) {
+	fileInfo, fileErr := sftpClient.Stat(mdPath)
+	dbDoc, dbErr := cs.db.GetMemoryDoc(ctx, project.ID)
+	baseName := filepath.Base(mdPath)
+
+	switch {
+	case fileErr == nil && dbErr == nil:
+		dir := syncDirection(fileInfo.ModTime(), dbDoc.UpdatedAt)
+		if dir == "file" {
+			rf, _ := sftpClient.Open(mdPath)
+			data, _ := io.ReadAll(rf)
+			rf.Close()
+			cs.db.UpsertMemoryDoc(ctx, project.ID, string(data), "sync", "Synced from "+baseName)
+			log.Printf("[configsync] memory doc project %d: %s newer, updated DB", project.ID, baseName)
+			cs.reportProgress(project.ID, "memory_doc", "done", baseName+" newer, updated memory doc")
+		} else if dir == "db" {
+			f, _ := sftpClient.Create(mdPath)
+			f.Write([]byte(dbDoc.Content))
+			f.Close()
+			log.Printf("[configsync] memory doc project %d: DB newer, wrote %s", project.ID, baseName)
+			cs.reportProgress(project.ID, "memory_doc", "done", "Memory doc newer, updated "+baseName)
+		} else {
+			cs.reportProgress(project.ID, "memory_doc", "done", baseName+" in sync")
+		}
+	case fileErr == nil:
+		rf, _ := sftpClient.Open(mdPath)
+		data, _ := io.ReadAll(rf)
+		rf.Close()
+		cs.db.UpsertMemoryDoc(ctx, project.ID, string(data), "sync", "Synced from "+baseName)
+		cs.reportProgress(project.ID, "memory_doc", "done", baseName+" imported to memory doc")
+	case dbErr == nil:
+		f, _ := sftpClient.Create(mdPath)
+		f.Write([]byte(dbDoc.Content))
+		f.Close()
+		cs.reportProgress(project.ID, "memory_doc", "done", "Memory doc written to "+baseName)
+	default:
+		cs.reportProgress(project.ID, "memory_doc", "done", "No "+baseName+" found")
+	}
+}
+
 // SyncToProject syncs global configuration to a project
 func (cs *ConfigSyncer) SyncToProject(ctx context.Context, project *database.Project) error {
 	if project.Type == "local" {
@@ -121,18 +212,9 @@ func (cs *ConfigSyncer) syncToLocal(ctx context.Context, project *database.Proje
 	}
 	cs.reportProgress(project.ID, "settings", "done", "Hooks synced")
 
-	// Sync CLAUDE.md → memory doc
-	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing CLAUDE.md to memory doc...")
-	claudeMDPath := filepath.Join(projectPath, "CLAUDE.md")
-	if data, err := os.ReadFile(claudeMDPath); err == nil {
-		if _, err := cs.db.UpsertMemoryDoc(ctx, project.ID, string(data), "sync", "Synced from CLAUDE.md"); err != nil {
-			cs.reportProgress(project.ID, "memory_doc", "error", err.Error())
-		} else {
-			cs.reportProgress(project.ID, "memory_doc", "done", "CLAUDE.md synced to memory doc")
-		}
-	} else {
-		cs.reportProgress(project.ID, "memory_doc", "done", "No CLAUDE.md found")
-	}
+	// Sync CLAUDE.md ↔ memory doc (keep newest)
+	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing CLAUDE.md...")
+	cs.syncMemoryDocLocal(ctx, project, filepath.Join(projectPath, "CLAUDE.md"))
 
 	return nil
 }
@@ -178,24 +260,15 @@ func (cs *ConfigSyncer) syncToLocalCopilot(ctx context.Context, project *databas
 	cs.importMCPsFromDisk(ctx, projectPath, project)
 	cs.reportProgress(project.ID, "mcps", "done", "MCP servers configured via CLI flag at session start")
 
-	// Sync AGENTS.md → memory doc (Copilot's equivalent of CLAUDE.md)
-	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing AGENTS.md to memory doc...")
+	// Sync AGENTS.md / CLAUDE.md ↔ memory doc (keep newest)
+	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing memory doc...")
 	agentsMDPath := filepath.Join(projectPath, "AGENTS.md")
 	claudeMDPath := filepath.Join(projectPath, "CLAUDE.md")
-	// Try AGENTS.md first, fallback to CLAUDE.md
 	mdPath := agentsMDPath
 	if _, err := os.Stat(agentsMDPath); os.IsNotExist(err) {
 		mdPath = claudeMDPath
 	}
-	if data, err := os.ReadFile(mdPath); err == nil {
-		if _, err := cs.db.UpsertMemoryDoc(ctx, project.ID, string(data), "sync", "Synced from "+filepath.Base(mdPath)); err != nil {
-			cs.reportProgress(project.ID, "memory_doc", "error", err.Error())
-		} else {
-			cs.reportProgress(project.ID, "memory_doc", "done", filepath.Base(mdPath)+" synced to memory doc")
-		}
-	} else {
-		cs.reportProgress(project.ID, "memory_doc", "done", "No AGENTS.md or CLAUDE.md found")
-	}
+	cs.syncMemoryDocLocal(ctx, project, mdPath)
 
 	return nil
 }
@@ -278,24 +351,9 @@ func (cs *ConfigSyncer) syncToRemote(ctx context.Context, project *database.Proj
 	f.Close()
 	cs.reportProgress(project.ID, "settings", "done", "Hooks synced")
 
-	// Sync CLAUDE.md → memory doc (remote)
-	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing CLAUDE.md to memory doc...")
-	claudeMDPath := filepath.Join(project.Path, "CLAUDE.md")
-	if rf, err := sftpClient.Open(claudeMDPath); err == nil {
-		data, readErr := io.ReadAll(rf)
-		rf.Close()
-		if readErr == nil {
-			if _, err := cs.db.UpsertMemoryDoc(ctx, project.ID, string(data), "sync", "Synced from CLAUDE.md"); err != nil {
-				cs.reportProgress(project.ID, "memory_doc", "error", err.Error())
-			} else {
-				cs.reportProgress(project.ID, "memory_doc", "done", "CLAUDE.md synced to memory doc")
-			}
-		} else {
-			cs.reportProgress(project.ID, "memory_doc", "error", readErr.Error())
-		}
-	} else {
-		cs.reportProgress(project.ID, "memory_doc", "done", "No CLAUDE.md found")
-	}
+	// Sync CLAUDE.md ↔ memory doc (keep newest)
+	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing CLAUDE.md...")
+	cs.syncMemoryDocRemote(ctx, sftpClient, project, filepath.Join(project.Path, "CLAUDE.md"))
 
 	return nil
 }
@@ -403,52 +461,54 @@ func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string,
 		}
 	}
 
-	// Build synced_at lookup for timestamp comparison
-	syncedAtByFile := make(map[string]time.Time)
-	for _, sf := range syncedFiles {
-		syncedAtByFile[sf.FileName] = sf.SyncedAt
-	}
-
 	// Write skills as <name>/SKILL.md
 	for _, skill := range skills {
 		skillDirPath := filepath.Join(skillsDir, skill.Name)
 		skillFilePath := filepath.Join(skillDirPath, "SKILL.md")
 		trackedName := skill.Name + "/SKILL.md"
 
-		// For project skills only: check if file was externally modified since last sync
+		shouldWriteFile := true // default for new skills or global skills
+
+		// For project skills: compare file mtime vs DB updated_at, keep newest
 		if skill.ProjectSkillID > 0 {
 			if info, err := os.Stat(skillFilePath); err == nil {
-				if syncedAt, ok := syncedAtByFile[trackedName]; ok {
-					if info.ModTime().After(syncedAt.Add(time.Second)) {
-						// File was edited after OpenPoet last wrote it — update DB from file
-						if raw, readErr := os.ReadFile(skillFilePath); readErr == nil {
-							name, content, category := parseSkillMD(string(raw), skill.Name)
-							if dbSkill, getErr := cs.db.GetProjectSkill(ctx, skill.ProjectSkillID); getErr == nil {
-								dbSkill.Content = content
-								dbSkill.Name = name
-								if category != "" {
-									dbSkill.Category = category
-								}
-								cs.db.UpdateProjectSkill(ctx, dbSkill)
-								skill.Content = content
-								log.Printf("[configsync] project skill '%s' updated from disk (file newer than synced_at)", name)
+				dir := syncDirection(info.ModTime(), skill.UpdatedAt)
+				if dir == "file" {
+					// File newer → update DB, skip file write
+					if raw, readErr := os.ReadFile(skillFilePath); readErr == nil {
+						name, content, category := parseSkillMD(string(raw), skill.Name)
+						if dbSkill, getErr := cs.db.GetProjectSkill(ctx, skill.ProjectSkillID); getErr == nil {
+							dbSkill.Content = content
+							dbSkill.Name = name
+							if category != "" {
+								dbSkill.Category = category
 							}
+							cs.db.UpdateProjectSkill(ctx, dbSkill)
+							skill.Content = content
+							log.Printf("[configsync] project skill '%s' updated from disk (file newer)", name)
 						}
 					}
+					shouldWriteFile = false
+				} else if dir == "equal" {
+					shouldWriteFile = false // already in sync
 				}
+				// dir == "db" → shouldWriteFile stays true
+			}
+			// File doesn't exist → shouldWriteFile stays true (first sync)
+		}
+
+		if shouldWriteFile {
+			if err := os.MkdirAll(skillDirPath, 0755); err != nil {
+				return fmt.Errorf("failed to create skill dir %s: %w", skill.Name, err)
+			}
+
+			content := buildSkillMD(skill.Name, skill.Content)
+			if err := os.WriteFile(skillFilePath, []byte(content), 0644); err != nil {
+				return fmt.Errorf("failed to write skill %s: %w", skill.Name, err)
 			}
 		}
 
-		if err := os.MkdirAll(skillDirPath, 0755); err != nil {
-			return fmt.Errorf("failed to create skill dir %s: %w", skill.Name, err)
-		}
-
-		content := buildSkillMD(skill.Name, skill.Content)
-		if err := os.WriteFile(skillFilePath, []byte(content), 0644); err != nil {
-			return fmt.Errorf("failed to write skill %s: %w", skill.Name, err)
-		}
-
-		// Also clean up legacy flat file if it exists
+		// Clean up legacy flat file if it exists
 		legacyPath := filepath.Join(skillsDir, skill.Name+".md")
 		os.Remove(legacyPath)
 
@@ -458,7 +518,6 @@ func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string,
 				cs.db.UpsertSyncedSkillFile(ctx, projectID, skill.GlobalSkillID, trackedName)
 				cs.db.IncrementSkillSyncCount(ctx, skill.GlobalSkillID)
 			} else {
-				// Project skill — track with skill_id 0 (NULL)
 				cs.db.UpsertSyncedSkillFile(ctx, projectID, 0, trackedName)
 				cs.db.IncrementProjectSkillSyncCount(ctx, skill.ProjectSkillID)
 			}
@@ -504,55 +563,57 @@ func (cs *ConfigSyncer) syncSkillsToRemote(ctx context.Context, sftpClient *sftp
 		}
 	}
 
-	// Build synced_at lookup for timestamp comparison
-	syncedAtByFile := make(map[string]time.Time)
-	for _, sf := range syncedFiles {
-		syncedAtByFile[sf.FileName] = sf.SyncedAt
-	}
-
 	// Write skills as <name>/SKILL.md
 	for _, skill := range skills {
 		skillDirPath := filepath.Join(skillsDir, skill.Name)
 		skillFilePath := filepath.Join(skillDirPath, "SKILL.md")
 		trackedName := skill.Name + "/SKILL.md"
 
-		// For project skills only: check if remote file was externally modified since last sync
+		shouldWriteFile := true // default for new skills or global skills
+
+		// For project skills: compare file mtime vs DB updated_at, keep newest
 		if skill.ProjectSkillID > 0 {
 			if info, err := sftpClient.Stat(skillFilePath); err == nil {
-				if syncedAt, ok := syncedAtByFile[trackedName]; ok {
-					if info.ModTime().After(syncedAt.Add(time.Second)) {
-						// File was edited after OpenPoet last wrote it — update DB from file
-						if f, readErr := sftpClient.Open(skillFilePath); readErr == nil {
-							raw, ioErr := io.ReadAll(f)
-							f.Close()
-							if ioErr == nil {
-								name, content, category := parseSkillMD(string(raw), skill.Name)
-								if dbSkill, getErr := cs.db.GetProjectSkill(ctx, skill.ProjectSkillID); getErr == nil {
-									dbSkill.Content = content
-									dbSkill.Name = name
-									if category != "" {
-										dbSkill.Category = category
-									}
-									cs.db.UpdateProjectSkill(ctx, dbSkill)
-									skill.Content = content
-									log.Printf("[configsync] project skill '%s' updated from remote disk (file newer than synced_at)", name)
+				dir := syncDirection(info.ModTime(), skill.UpdatedAt)
+				if dir == "file" {
+					// File newer → update DB, skip file write
+					if f, readErr := sftpClient.Open(skillFilePath); readErr == nil {
+						raw, ioErr := io.ReadAll(f)
+						f.Close()
+						if ioErr == nil {
+							name, content, category := parseSkillMD(string(raw), skill.Name)
+							if dbSkill, getErr := cs.db.GetProjectSkill(ctx, skill.ProjectSkillID); getErr == nil {
+								dbSkill.Content = content
+								dbSkill.Name = name
+								if category != "" {
+									dbSkill.Category = category
 								}
+								cs.db.UpdateProjectSkill(ctx, dbSkill)
+								skill.Content = content
+								log.Printf("[configsync] project skill '%s' updated from remote disk (file newer)", name)
 							}
 						}
 					}
+					shouldWriteFile = false
+				} else if dir == "equal" {
+					shouldWriteFile = false // already in sync
 				}
+				// dir == "db" → shouldWriteFile stays true
 			}
+			// File doesn't exist → shouldWriteFile stays true (first sync)
 		}
 
-		sftpClient.MkdirAll(skillDirPath)
+		if shouldWriteFile {
+			sftpClient.MkdirAll(skillDirPath)
 
-		content := buildSkillMD(skill.Name, skill.Content)
-		f, err := sftpClient.Create(skillFilePath)
-		if err != nil {
-			return fmt.Errorf("failed to create skill file: %w", err)
+			content := buildSkillMD(skill.Name, skill.Content)
+			f, err := sftpClient.Create(skillFilePath)
+			if err != nil {
+				return fmt.Errorf("failed to create skill file: %w", err)
+			}
+			f.Write([]byte(content))
+			f.Close()
 		}
-		f.Write([]byte(content))
-		f.Close()
 
 		// Clean up legacy flat file
 		sftpClient.Remove(filepath.Join(skillsDir, skill.Name+".md"))
@@ -1215,7 +1276,7 @@ func (cs *ConfigSyncer) syncToLocalACP(ctx context.Context, project *database.Pr
 	cs.importMCPsFromDisk(ctx, projectPath, project)
 	cs.reportProgress(project.ID, "mcps", "done", "MCP servers configured at session start")
 
-	// Sync CLAUDE.md or AGENTS.md → memory doc
+	// Sync AGENTS.md / CLAUDE.md ↔ memory doc (keep newest)
 	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing memory doc...")
 	claudeMDPath := filepath.Join(projectPath, "CLAUDE.md")
 	agentsMDPath := filepath.Join(projectPath, "AGENTS.md")
@@ -1223,15 +1284,7 @@ func (cs *ConfigSyncer) syncToLocalACP(ctx context.Context, project *database.Pr
 	if _, err := os.Stat(agentsMDPath); os.IsNotExist(err) {
 		mdPath = claudeMDPath
 	}
-	if data, err := os.ReadFile(mdPath); err == nil {
-		if _, err := cs.db.UpsertMemoryDoc(ctx, project.ID, string(data), "sync", "Synced from "+filepath.Base(mdPath)); err != nil {
-			cs.reportProgress(project.ID, "memory_doc", "error", err.Error())
-		} else {
-			cs.reportProgress(project.ID, "memory_doc", "done", filepath.Base(mdPath)+" synced to memory doc")
-		}
-	} else {
-		cs.reportProgress(project.ID, "memory_doc", "done", "No AGENTS.md or CLAUDE.md found")
-	}
+	cs.syncMemoryDocLocal(ctx, project, mdPath)
 
 	return nil
 }
