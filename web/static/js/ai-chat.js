@@ -629,6 +629,7 @@ class AIChatManager {
         const isProposal = data.type === 'proposal';
         const isTaskProposal = data.type === 'task_proposal';
         const isSkillProposal = data.type === 'skill_proposal';
+        const isToolProposal = data.type === 'tool_proposal';
         const status = data.status || 'pending';
 
         let icon;
@@ -638,6 +639,8 @@ class AIChatManager {
             icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
         } else if (isSkillProposal) {
             icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>';
+        } else if (isToolProposal) {
+            icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
         } else {
             icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="11" x2="15" y2="11"/></svg>';
         }
@@ -657,6 +660,8 @@ class AIChatManager {
                 if (data.title && data.title.startsWith('Delete Task:')) btnLabel = 'Review Deletion';
                 else if (data.title && data.title.startsWith('Update Task:')) btnLabel = 'Review Change';
                 else btnLabel = 'Review Task';
+            } else if (isToolProposal) {
+                btnLabel = 'Review Tool';
             } else if (isSkillProposal) {
                 btnLabel = 'Review Skill';
             } else if (isProposal) {
@@ -937,6 +942,7 @@ class AIChatManager {
                     else if (doc.title && (doc.title.startsWith('Task:') ||
                         doc.title.startsWith('Update Task:') ||
                         doc.title.startsWith('Delete Task:'))) type = 'task_proposal';
+                    else if (doc.title && doc.title.startsWith('Tool:')) type = 'tool_proposal';
 
                     // Find the specific assistant message this doc card belongs to
                     let targetContent = null;
