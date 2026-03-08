@@ -897,7 +897,7 @@ class GitViewer {
         if (this.diffFiles) this.diffFiles.innerHTML = '<div class="git-loading"><div class="spinner"></div><span>Loading diff...</span></div>';
 
         try {
-            const resp = await fetch(`/api/projects/${this.currentProjectId}/git/diff?ref=HEAD&file=${encodeURIComponent(file)}`);
+            const resp = await fetch(`/api/projects/${this.currentProjectId}/git/diff?file=${encodeURIComponent(file)}`);
             if (!resp.ok) throw new Error((await resp.json()).error);
             const data = await resp.json();
             if (this.diffStats) {
