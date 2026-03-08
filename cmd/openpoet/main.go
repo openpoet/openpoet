@@ -592,6 +592,10 @@ func main() {
 
 		// Git
 		r.Get("/projects/{id}/git/branches", gitHandler.GetBranches)
+		r.Get("/projects/{id}/git/status", gitHandler.GetStatus)
+		r.Post("/projects/{id}/git/stage", gitHandler.StageFiles)
+		r.Post("/projects/{id}/git/unstage", gitHandler.UnstageFiles)
+		r.Post("/projects/{id}/git/commit", gitHandler.Commit)
 		r.Get("/projects/{id}/git/log", gitHandler.GetLog)
 		r.Get("/projects/{id}/git/diff", gitHandler.GetDiff)
 		r.Get("/projects/{id}/git/show", gitHandler.GetShow)

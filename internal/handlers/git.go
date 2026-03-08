@@ -108,6 +108,7 @@ type BranchInfo struct {
 type BranchesResponse struct {
 	Local   []BranchInfo `json:"local"`
 	Remote  []BranchInfo `json:"remote"`
+	Tags    []BranchInfo `json:"tags"`
 	Current string       `json:"current"`
 }
 
@@ -163,7 +164,210 @@ func (h *GitHandler) GetBranches(w http.ResponseWriter, r *http.Request) {
 		resp.Remote = []BranchInfo{}
 	}
 
+	// Fetch tags
+	tagOut, err := h.runGit(r.Context(), path,
+		"tag", "--sort=-creatordate",
+		"--format=%(refname:short)%00%(objectname:short)%00%(creatordate:iso-strict)",
+	)
+	if err == nil && strings.TrimSpace(tagOut) != "" {
+		for _, line := range strings.Split(strings.TrimSpace(tagOut), "\n") {
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "\x00", 3)
+			if len(parts) < 3 {
+				continue
+			}
+			resp.Tags = append(resp.Tags, BranchInfo{
+				Name: parts[0],
+				Hash: parts[1],
+				Date: parts[2],
+			})
+		}
+	}
+	if resp.Tags == nil {
+		resp.Tags = []BranchInfo{}
+	}
+
 	respondJSON(w, http.StatusOK, resp)
+}
+
+// --- Status endpoint ---
+
+type FileStatus struct {
+	Path    string `json:"path"`
+	Index   string `json:"index"`              // staging area status: M, A, D, R, C, ?
+	Work    string `json:"work"`               // working tree status: M, D, ?
+	OldPath string `json:"old_path,omitempty"` // for renames
+}
+
+type StatusResponse struct {
+	Branch    string       `json:"branch"`
+	Staged    []FileStatus `json:"staged"`
+	Unstaged  []FileStatus `json:"unstaged"`
+	Untracked []FileStatus `json:"untracked"`
+}
+
+func (h *GitHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
+	path, ok := h.getProjectPath(w, r)
+	if !ok {
+		return
+	}
+
+	// Get current branch name
+	branchOut, _ := h.runGit(r.Context(), path, "rev-parse", "--abbrev-ref", "HEAD")
+	branch := strings.TrimSpace(branchOut)
+
+	// Get porcelain status
+	out, err := h.runGit(r.Context(), path, "status", "--porcelain=v1", "-uall")
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	resp := StatusResponse{
+		Branch:    branch,
+		Staged:    []FileStatus{},
+		Unstaged:  []FileStatus{},
+		Untracked: []FileStatus{},
+	}
+
+	for _, line := range strings.Split(out, "\n") {
+		if len(line) < 4 {
+			continue
+		}
+		x := string(line[0]) // index status
+		y := string(line[1]) // working tree status
+		file := line[3:]
+
+		// Handle renames: "R  old -> new"
+		var oldPath string
+		if x == "R" || x == "C" {
+			if parts := strings.SplitN(file, " -> ", 2); len(parts) == 2 {
+				oldPath = parts[0]
+				file = parts[1]
+			}
+		}
+
+		if x == "?" && y == "?" {
+			resp.Untracked = append(resp.Untracked, FileStatus{Path: file, Index: "?", Work: "?"})
+			continue
+		}
+
+		// Staged changes (index has a meaningful status)
+		if x != " " && x != "?" {
+			resp.Staged = append(resp.Staged, FileStatus{
+				Path:    file,
+				Index:   x,
+				OldPath: oldPath,
+			})
+		}
+
+		// Unstaged changes (working tree has a meaningful status)
+		if y != " " && y != "?" {
+			resp.Unstaged = append(resp.Unstaged, FileStatus{
+				Path: file,
+				Work: y,
+			})
+		}
+	}
+
+	respondJSON(w, http.StatusOK, resp)
+}
+
+// StageFiles stages files for commit (git add).
+func (h *GitHandler) StageFiles(w http.ResponseWriter, r *http.Request) {
+	path, ok := h.getProjectPath(w, r)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		Files []string `json:"files"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if len(req.Files) == 0 {
+		respondError(w, http.StatusBadRequest, "No files specified")
+		return
+	}
+
+	args := append([]string{"add", "--"}, req.Files...)
+	if _, err := h.runGit(r.Context(), path, args...); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// UnstageFiles unstages files (git reset HEAD).
+func (h *GitHandler) UnstageFiles(w http.ResponseWriter, r *http.Request) {
+	path, ok := h.getProjectPath(w, r)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		Files []string `json:"files"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if len(req.Files) == 0 {
+		respondError(w, http.StatusBadRequest, "No files specified")
+		return
+	}
+
+	args := append([]string{"reset", "HEAD", "--"}, req.Files...)
+	if _, err := h.runGit(r.Context(), path, args...); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// Commit creates a git commit with the staged changes.
+func (h *GitHandler) Commit(w http.ResponseWriter, r *http.Request) {
+	path, ok := h.getProjectPath(w, r)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if strings.TrimSpace(req.Message) == "" {
+		respondError(w, http.StatusBadRequest, "Commit message is required")
+		return
+	}
+
+	out, err := h.runGit(r.Context(), path, "commit", "-m", req.Message)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Extract commit hash from output
+	hash := ""
+	hashOut, err := h.runGit(r.Context(), path, "rev-parse", "HEAD")
+	if err == nil {
+		hash = strings.TrimSpace(hashOut)
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{
+		"status":  "ok",
+		"message": strings.TrimSpace(out),
+		"hash":    hash,
+	})
 }
 
 // --- Log endpoint ---
@@ -701,13 +905,44 @@ func (h *GitHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ref := r.URL.Query().Get("ref")
+	staged := r.URL.Query().Get("staged") == "true"
+	fileFilter := r.URL.Query().Get("file")
+	statOnly := r.URL.Query().Get("stat_only") == "true"
+
+	// Staged diff mode: git diff --cached
+	if staged {
+		args := []string{"diff", "--cached", "--unified=3", "-M"}
+		if statOnly {
+			args = []string{"diff", "--cached", "--numstat"}
+		}
+		if fileFilter != "" {
+			args = append(args, "--", fileFilter)
+		}
+		out, err := h.runGit(r.Context(), path, args...)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		var files []DiffFile
+		if statOnly {
+			files = parseNumstat(out)
+		} else {
+			files = parseUnifiedDiff(out)
+		}
+		resp := DiffResponse{Ref: "staged", Files: files}
+		for _, f := range files {
+			resp.Stats.FilesChanged++
+			resp.Stats.Additions += f.Additions
+			resp.Stats.Deletions += f.Deletions
+		}
+		respondJSON(w, http.StatusOK, resp)
+		return
+	}
+
 	if err := validateRef(ref); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	fileFilter := r.URL.Query().Get("file")
-	statOnly := r.URL.Query().Get("stat_only") == "true"
 
 	// Determine diff range
 	var diffRef string
