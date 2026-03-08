@@ -12,7 +12,7 @@ import (
 
 // RestartSelf replaces the current process with the (potentially updated) binary.
 // On Unix: uses syscall.Exec for seamless in-place replacement.
-// On Windows: launches a new subprocess and exits the current one.
+// On Windows: launches a new subprocess and exits the current one (experimental, not officially supported).
 func RestartSelf() error {
 	execPath, err := os.Executable()
 	if err != nil {

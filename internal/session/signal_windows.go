@@ -1,5 +1,9 @@
 //go:build windows
 
+// NOTE: Windows support is experimental and not functional.
+// This code is retained for potential future use but is not built,
+// tested, or supported. Windows users should use WSL instead.
+
 package session
 
 import (
