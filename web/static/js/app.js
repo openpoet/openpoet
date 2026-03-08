@@ -1183,9 +1183,22 @@ class OpenPoet {
         });
     }
 
+    _setTaskMenuIcon(linked) {
+        const icon = document.getElementById('btn-task-menu-icon');
+        if (!icon) return;
+        if (linked) {
+            // Checkmark + box icon (task linked)
+            icon.innerHTML = '<path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>';
+        } else {
+            // Link icon (no task)
+            icon.innerHTML = '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>';
+        }
+    }
+
     async _updateLinkTaskButton(sessionId) {
         const wrapper = document.getElementById('task-menu-wrapper');
         const menuLabel = document.getElementById('btn-task-menu-label');
+        const menuBtn = document.getElementById('btn-task-menu');
         const viewItem = document.getElementById('task-menu-view');
         const linkItem = document.getElementById('task-menu-link');
         const unlinkItem = document.getElementById('task-menu-unlink');
@@ -1203,10 +1216,11 @@ class OpenPoet {
                 viewItem.style.display = '';
                 viewItem.dataset.projectId = task.project_id;
                 viewItem.dataset.taskId = task.id;
-                const label = document.getElementById('task-menu-view-label');
-                if (label) label.textContent = 'View Task';
             }
             if (menuLabel) menuLabel.textContent = task.title;
+            if (menuBtn) menuBtn.title = task.title;
+            if (wrapper) wrapper.dataset.linked = '1';
+            this._setTaskMenuIcon(true);
             if (linkItem) linkItem.style.display = 'none';
             if (unlinkItem) {
                 unlinkItem.style.display = '';
@@ -1216,7 +1230,10 @@ class OpenPoet {
             if (viewItem) viewItem.style.display = 'none';
             if (linkItem) linkItem.style.display = '';
             if (unlinkItem) unlinkItem.style.display = 'none';
-            if (menuLabel) menuLabel.textContent = 'Task';
+            if (menuLabel) menuLabel.textContent = 'Link Task';
+            if (menuBtn) menuBtn.title = 'Link Task (Ctrl+Shift+L)';
+            if (wrapper) wrapper.dataset.linked = '';
+            this._setTaskMenuIcon(false);
         }
     }
 
@@ -6526,6 +6543,13 @@ class OpenPoet {
         const taskMenuDropdown = document.getElementById('task-menu-dropdown');
         taskMenuBtn?.addEventListener('click', (e) => {
             e.stopPropagation();
+            const wrapper = document.getElementById('task-menu-wrapper');
+            if (!wrapper?.dataset.linked) {
+                // No task linked — directly open link modal
+                const sessionId = window.terminalManager?.activeSessionId || this.currentSession;
+                if (sessionId) this.showLinkTaskModal(sessionId);
+                return;
+            }
             taskMenuDropdown?.classList.toggle('hidden');
         });
         // Close task menu on outside click
