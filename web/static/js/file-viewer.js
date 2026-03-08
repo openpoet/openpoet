@@ -1,17 +1,30 @@
 // File Viewer - displays text files in an overlay with Markdown rendering or line numbers
 class FileViewer {
-    static VIEWABLE_EXTENSIONS = new Set([
-        '.md', '.markdown', '.txt', '.log', '.csv',
-        '.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs',
-        '.go', '.py', '.rb', '.java', '.c', '.cpp', '.h', '.cs', '.rs', '.swift',
-        '.sh', '.bash', '.zsh', '.fish',
-        '.yaml', '.yml', '.toml', '.json', '.xml', '.html', '.css', '.scss', '.less',
-        '.sql', '.lua', '.php', '.vue', '.svelte',
-        '.dockerfile', '.makefile', '.gitignore',
-        '.ini', '.conf', '.cfg', '.env.example',
-        '.r', '.m', '.kt', '.scala', '.zig', '.nim',
-        '.graphql', '.proto', '.tf', '.hcl',
-        '.bat', '.ps1', '.cmd',
+    static BINARY_EXTENSIONS = new Set([
+        // Executables and libraries
+        '.exe', '.dll', '.so', '.dylib', '.bin', '.com',
+        // Object files and compiled code
+        '.o', '.obj', '.a', '.lib', '.class', '.pyc', '.pyo', '.wasm',
+        // Archives and compressed
+        '.zip', '.tar', '.gz', '.bz2', '.xz', '.7z', '.rar', '.jar', '.war', '.ear', '.zst', '.lz4', '.lzma',
+        // Disk images and installers
+        '.dmg', '.iso', '.img', '.msi', '.deb', '.rpm', '.apk', '.ipa', '.pkg', '.cab', '.snap', '.flatpak',
+        // Binary documents
+        '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods', '.odp',
+        // Databases
+        '.sqlite', '.db', '.mdb', '.sqlite3',
+        // Audio
+        '.mp3', '.wav', '.ogg', '.flac', '.aac', '.wma', '.m4a', '.opus',
+        // Video
+        '.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv', '.webm', '.m4v', '.3gp',
+        // Fonts
+        '.ttf', '.otf', '.woff', '.woff2', '.eot',
+        // Design files
+        '.psd', '.ai', '.sketch', '.fig', '.xd',
+        // Package formats
+        '.crx', '.nupkg', '.gem', '.egg', '.whl',
+        // Misc binary
+        '.dat',
     ]);
 
     static MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown']);
@@ -213,19 +226,14 @@ class FileViewer {
         if (!filename) return false;
         if (FileViewer.isImage(filename)) return true;
         const lower = filename.toLowerCase();
-        // Check for exact filenames (Dockerfile, Makefile, etc.)
         const baseName = lower.split('/').pop();
-        if (baseName === 'dockerfile' || baseName === 'makefile' || baseName === '.gitignore' || baseName === '.env.example') {
-            return true;
-        }
-        const ext = '.' + baseName.split('.').slice(1).join('.');
-        if (FileViewer.VIEWABLE_EXTENSIONS.has(ext)) return true;
-        // Try just the last extension
         const lastDotIdx = baseName.lastIndexOf('.');
         if (lastDotIdx >= 0) {
-            return FileViewer.VIEWABLE_EXTENSIONS.has(baseName.substring(lastDotIdx));
+            const ext = baseName.substring(lastDotIdx);
+            if (FileViewer.BINARY_EXTENSIONS.has(ext)) return false;
         }
-        return false;
+        // Default: attempt to view. Backend null-byte check is the safety net.
+        return true;
     }
 
     static isImage(filename) {
