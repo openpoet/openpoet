@@ -200,7 +200,7 @@ func (u *Updater) DownloadAndApply(ctx context.Context, status *UpdateStatus) er
 
 	// Extract binary from archive
 	binaryName := "openpoet"
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" { // experimental, Windows not officially supported
 		binaryName = "openpoet.exe"
 	}
 	newBinaryPath := filepath.Join(tmpDir, "extracted-"+binaryName)
@@ -258,7 +258,7 @@ func (u *Updater) DetectPackageManager() string {
 		return "homebrew"
 	}
 
-	// Winget: binary in typical Windows package manager paths
+	// Winget: binary in typical Windows package manager paths (experimental, not officially supported)
 	if runtime.GOOS == "windows" {
 		lower := strings.ToLower(resolved)
 		if strings.Contains(lower, "\\windowsapps\\") || strings.Contains(lower, "\\winget\\") {
@@ -273,7 +273,7 @@ func (u *Updater) DetectPackageManager() string {
 func AssetName(version string) string {
 	version = strings.TrimPrefix(version, "v")
 	ext := "tar.gz"
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" { // experimental, Windows not officially supported
 		ext = "zip"
 	}
 	return fmt.Sprintf("openpoet_%s_%s_%s.%s", version, runtime.GOOS, runtime.GOARCH, ext)

@@ -63,32 +63,6 @@ Uninstall:
 curl -fsSL https://raw.githubusercontent.com/openpoet/openpoet/main/install.sh | sh -s -- --uninstall
 ```
 
-### PowerShell (Windows)
-
-```powershell
-irm https://raw.githubusercontent.com/openpoet/openpoet/main/install.ps1 | iex
-```
-
-Installs to `~\.local\bin` by default (no Administrator required). The installer will offer to add it to your PATH.
-
-Install a specific version:
-
-```powershell
-$env:OPENPOET_VERSION = "1.0.0"; irm https://raw.githubusercontent.com/openpoet/openpoet/main/install.ps1 | iex
-```
-
-Install to a custom directory:
-
-```powershell
-$env:OPENPOET_INSTALL = "C:\custom\path"; irm https://raw.githubusercontent.com/openpoet/openpoet/main/install.ps1 | iex
-```
-
-Uninstall:
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/openpoet/openpoet/main/install.ps1))) --uninstall
-```
-
 ### Manual download
 
 Download the binary for your platform from the [Releases page](https://github.com/openpoet/openpoet/releases).
@@ -99,8 +73,6 @@ Download the binary for your platform from the [Releases page](https://github.co
 | macOS | Intel | `openpoet_VERSION_darwin_amd64.tar.gz` |
 | Linux | x86_64 | `openpoet_VERSION_linux_amd64.tar.gz` |
 | Linux | ARM64 | `openpoet_VERSION_linux_arm64.tar.gz` |
-| Windows | x86_64 | `openpoet_VERSION_windows_amd64.zip` |
-| Windows | ARM64 | `openpoet_VERSION_windows_arm64.zip` |
 
 ## Quick Start
 
@@ -127,23 +99,9 @@ openpoet benchmark     Run benchmarks
 | `-mcp-http` | `false` | Enable MCP HTTP endpoint at /mcp |
 
 
-### Windows Support
+### Windows
 
-OpenPoet runs natively on Windows. Backend availability depends on whether WSL is installed:
-
-| Backend | WSL Required? | Notes |
-|---|---|---|
-| **ACP (Copilot)** | No | Runs entirely as a native Windows process (`openpoet.exe acp-agent` + `copilot.exe --acp`). |
-| **Copilot (direct)** | No | Works natively if `copilot.exe` is in your PATH. |
-| **Claude Code** | Yes | Claude Code is a Node.js CLI that requires a Unix environment. OpenPoet automatically wraps it through `wsl.exe` using Windows ConPTY. |
-
-**To use Claude Code sessions on Windows:**
-
-1. Install [WSL 2](https://learn.microsoft.com/en-us/windows/wsl/install) (`wsl --install` in PowerShell)
-2. Install Claude Code inside WSL: `npm install -g @anthropic-ai/claude-code`
-3. Start OpenPoet normally on Windows — sessions targeting Claude Code will automatically run through WSL
-
-Windows 10 version 1809 or later is required (ConPTY support).
+OpenPoet does not support Windows natively. Windows users should install and run OpenPoet inside [WSL 2](https://learn.microsoft.com/en-us/windows/wsl/install) as a regular Linux binary.
 
 ## Features
 

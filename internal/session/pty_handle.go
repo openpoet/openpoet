@@ -1,7 +1,8 @@
 package session
 
-// ptyHandle abstracts a pseudo-terminal across platforms.
-// On Unix it wraps creack/pty, on Windows it wraps ConPTY (+ WSL).
+// ptyHandle abstracts a pseudo-terminal.
+// On Unix (macOS/Linux) it wraps creack/pty.
+// Windows support (ConPTY + WSL) is experimental and non-functional.
 type ptyHandle interface {
 	Read(p []byte) (n int, err error)
 	Write(p []byte) (n int, err error)
@@ -10,16 +11,9 @@ type ptyHandle interface {
 }
 
 // startPTY creates a PTY and starts cmd inside it.
-// Implemented per-platform in pty_unix.go and pty_windows.go.
+// Implemented in pty_unix.go (pty_windows.go exists but is experimental/non-functional).
 
-// sendTermSignal sends a graceful termination signal (SIGTERM on Unix,
-// TerminateProcess on Windows).
-// Implemented per-platform in signal_unix.go and signal_windows.go.
-
-// sendKillSignal sends a forceful kill signal (SIGKILL on Unix,
-// TerminateProcess on Windows).
-// Implemented per-platform in signal_unix.go and signal_windows.go.
-
-// isNormalExitError returns true if the error is expected when a PTY child
-// exits (EIO on Unix, broken pipe / closed handle on Windows).
-// Implemented per-platform in signal_unix.go and signal_windows.go.
+// sendTermSignal sends a graceful termination signal (SIGTERM).
+// sendKillSignal sends a forceful kill signal (SIGKILL).
+// isNormalExitError returns true if the error is expected when a PTY child exits (EIO).
+// Implemented in signal_unix.go.
