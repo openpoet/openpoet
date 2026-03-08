@@ -939,6 +939,36 @@ func (h *GitHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Working tree diff mode: no ref, no staged — git diff [-- file]
+	if ref == "" {
+		args := []string{"diff", "--unified=3", "-M"}
+		if statOnly {
+			args = []string{"diff", "--numstat"}
+		}
+		if fileFilter != "" {
+			args = append(args, "--", fileFilter)
+		}
+		out, err := h.runGit(r.Context(), path, args...)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		var files []DiffFile
+		if statOnly {
+			files = parseNumstat(out)
+		} else {
+			files = parseUnifiedDiff(out)
+		}
+		resp := DiffResponse{Ref: "working", Files: files}
+		for _, f := range files {
+			resp.Stats.FilesChanged++
+			resp.Stats.Additions += f.Additions
+			resp.Stats.Deletions += f.Deletions
+		}
+		respondJSON(w, http.StatusOK, resp)
+		return
+	}
+
 	if err := validateRef(ref); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
