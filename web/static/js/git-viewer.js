@@ -14,6 +14,7 @@ class GitViewer {
         this.panels = {
             log: document.getElementById('git-panel-log'),
             diff: document.getElementById('git-panel-diff'),
+            status: document.getElementById('git-panel-status'),
             branches: document.getElementById('git-panel-branches'),
         };
         this.branchToggle = document.getElementById('git-branch-toggle');
@@ -25,6 +26,17 @@ class GitViewer {
         this.diffTitle = document.getElementById('git-diff-title');
         this.diffStats = document.getElementById('git-diff-stats-summary');
         this.branchesContent = document.getElementById('git-branches-content');
+        this.statusContent = document.getElementById('git-status-content');
+        this.statusBranch = document.getElementById('git-status-branch');
+        this.commitBox = document.getElementById('git-commit-box');
+        this.commitMessage = document.getElementById('git-commit-message');
+        this.commitBtn = document.getElementById('git-commit-btn');
+        this.commitAiBtn = document.getElementById('git-commit-ai');
+        this.commitVoiceBtn = document.getElementById('git-commit-voice');
+        this.commitExpandBtn = document.getElementById('git-commit-expand');
+        this.compareBar = document.getElementById('git-compare-bar');
+        this.compareFrom = document.getElementById('git-compare-from');
+        this.compareTo = document.getElementById('git-compare-to');
 
         this.currentProjectId = null;
         this.currentTab = 'log';
@@ -77,6 +89,40 @@ class GitViewer {
             }
         });
 
+        // Status tab buttons
+        document.getElementById('git-status-refresh')?.addEventListener('click', () => this.loadStatus());
+        this.commitBtn?.addEventListener('click', () => this.doCommit());
+        this.commitAiBtn?.addEventListener('click', () => this.generateCommitMessage());
+
+        // Expand/collapse commit message textarea
+        this.commitExpandBtn?.addEventListener('click', () => this.toggleCommitExpand());
+
+        // Expanded header buttons — wire to same actions
+        document.getElementById('git-commit-collapse')?.addEventListener('click', () => this.toggleCommitExpand());
+        this.commitBox?.querySelector('.git-commit-btn-exp')?.addEventListener('click', () => this.doCommit());
+        this.commitBox?.querySelector('.git-commit-ai-exp')?.addEventListener('click', () => this.generateCommitMessage());
+
+        // Voice input handler (shared between collapsed and expanded)
+        const handleVoice = (btn) => {
+            if (!window.voiceInput) return;
+            if (window.voiceInput.isRecording) {
+                window.voiceInput.stopRecording();
+                btn.classList.remove('recording');
+                return;
+            }
+            btn.classList.add('recording');
+            window.voiceInput.startRecordingWithCallback((text) => {
+                btn.classList.remove('recording');
+                const ta = this.commitMessage;
+                if (ta) {
+                    ta.value = (ta.value ? ta.value + ' ' : '') + text;
+                    ta.focus();
+                }
+            });
+        };
+        this.commitVoiceBtn?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); handleVoice(e.currentTarget); });
+        this.commitBox?.querySelector('.git-commit-voice-exp')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); handleVoice(e.currentTarget); });
+
         // Search with debounce
         this.searchInput?.addEventListener('input', () => {
             clearTimeout(this._searchTimeout);
@@ -125,6 +171,13 @@ class GitViewer {
     hide() {
         this.overlay?.classList.add('hidden');
         this.branchMenu?.classList.add('hidden');
+        // Restore body scroll if commit editor was expanded
+        if (this.commitBox?.classList.contains('expanded')) {
+            this.commitBox.classList.remove('expanded');
+            this.panels.status?.classList.remove('commit-expanded');
+            document.body.style.overflow = '';
+            document.documentElement.style.overflow = '';
+        }
     }
 
     switchTab(tab) {
@@ -133,6 +186,11 @@ class GitViewer {
         Object.entries(this.panels).forEach(([key, panel]) => {
             panel?.classList.toggle('hidden', key !== tab);
         });
+        if (tab === 'status') this.loadStatus();
+        // Hide compare bar when not explicitly comparing
+        if (tab !== 'diff') {
+            this.compareBar?.classList.add('hidden');
+        }
     }
 
     // --- API calls ---
@@ -225,6 +283,7 @@ class GitViewer {
 
     async loadDiff(ref) {
         this.selectedCommitHash = ref;
+        this.compareBar?.classList.add('hidden');
         this.switchTab('diff');
 
         const commit = this.commits.find(c => c.hash === ref);
@@ -656,6 +715,16 @@ class GitViewer {
             }
         }
 
+        if (this.branches.tags && this.branches.tags.length > 0) {
+            html += '<div class="git-branches-section-title">Tags</div>';
+            for (const t of this.branches.tags) {
+                html += `<div class="git-branch-item" data-branch="${this.escapeHtml(t.name)}">
+                    <span>${this.escapeHtml(t.name)}</span>
+                    <span class="branch-hash">${this.escapeHtml(t.hash)}</span>
+                </div>`;
+            }
+        }
+
         this.branchesContent.innerHTML = html;
 
         // Click handler — toggle branch in the multi-select and switch to log
@@ -695,6 +764,370 @@ class GitViewer {
     escapeHtml(str) {
         if (!str) return '';
         return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // --- Status tab ---
+
+    async loadStatus() {
+        if (!this.statusContent) return;
+        this.statusContent.innerHTML = '<div class="git-loading"><div class="spinner"></div><span>Loading...</span></div>';
+
+        try {
+            const resp = await fetch(`/api/projects/${this.currentProjectId}/git/status`);
+            if (!resp.ok) throw new Error((await resp.json()).error || 'Failed to load status');
+            const data = await resp.json();
+            this.statusData = data;
+
+            if (this.statusBranch) {
+                this.statusBranch.textContent = `On branch ${data.branch}`;
+            }
+
+            const hasStaged = data.staged.length > 0;
+            this.commitBox?.classList.toggle('hidden', !hasStaged);
+
+            if (!data.staged.length && !data.unstaged.length && !data.untracked.length) {
+                this.statusContent.innerHTML = '<div class="git-empty">Working tree clean — nothing to commit</div>';
+                return;
+            }
+
+            let html = '';
+
+            if (data.staged.length) {
+                html += this._renderStatusSection('Staged Changes', 'staged', data.staged, true);
+            }
+            if (data.unstaged.length) {
+                html += this._renderStatusSection('Changes Not Staged', 'unstaged', data.unstaged, false);
+            }
+            if (data.untracked.length) {
+                html += this._renderStatusSection('Untracked Files', 'untracked', data.untracked, false);
+            }
+
+            this.statusContent.innerHTML = html;
+
+            // Wire up stage/unstage buttons
+            this.statusContent.querySelectorAll('[data-action]').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const action = btn.dataset.action;
+                    const file = btn.dataset.file;
+                    if (action === 'unstage') this.unstageFile(file);
+                    else if (action === 'stage') this.stageFile(file);
+                });
+            });
+
+            // Wire up file click to show diff
+            this.statusContent.querySelectorAll('.git-status-file').forEach(row => {
+                row.addEventListener('click', (e) => {
+                    if (e.target.closest('[data-action]')) return; // don't trigger on button clicks
+                    const file = row.dataset.file;
+                    const section = row.dataset.section;
+                    if (section === 'staged') {
+                        this.loadStagedDiff(file);
+                    } else {
+                        this.loadWorkingDiff(file);
+                    }
+                });
+            });
+        } catch (e) {
+            this.statusContent.innerHTML = `<div class="git-error">${this.escapeHtml(e.message)}</div>`;
+        }
+    }
+
+    _renderStatusSection(title, section, files, isStaged) {
+        const actionLabel = isStaged ? 'Unstage' : 'Stage';
+        const actionType = isStaged ? 'unstage' : 'stage';
+
+        let html = `<div class="git-status-section">`;
+        html += `<h4>${this.escapeHtml(title)} <span class="count">(${files.length})</span></h4>`;
+
+        for (const f of files) {
+            const status = f.index || f.work || '?';
+            const badgeClass = status === '?' ? 'Q' : status;
+            html += `<div class="git-status-file" data-file="${this.escapeHtml(f.path)}" data-section="${section}" title="Click to view diff">`;
+            html += `<span class="git-status-badge ${badgeClass}">${status}</span>`;
+            html += `<span class="git-status-path">${this.escapeHtml(f.path)}</span>`;
+            if (section !== 'untracked') {
+                html += `<div class="git-status-actions"><button data-action="${actionType}" data-file="${this.escapeHtml(f.path)}" title="${actionLabel} this file">${actionLabel}</button></div>`;
+            } else {
+                html += `<div class="git-status-actions"><button data-action="stage" data-file="${this.escapeHtml(f.path)}" title="Stage this file">Stage</button></div>`;
+            }
+            html += `</div>`;
+        }
+
+        html += `</div>`;
+        return html;
+    }
+
+    async stageFile(file) {
+        try {
+            const resp = await fetch(`/api/projects/${this.currentProjectId}/git/stage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ files: [file] }),
+            });
+            if (!resp.ok) throw new Error((await resp.json()).error);
+            this.loadStatus();
+        } catch (e) {
+            alert('Stage failed: ' + e.message);
+        }
+    }
+
+    async unstageFile(file) {
+        try {
+            const resp = await fetch(`/api/projects/${this.currentProjectId}/git/unstage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ files: [file] }),
+            });
+            if (!resp.ok) throw new Error((await resp.json()).error);
+            this.loadStatus();
+        } catch (e) {
+            alert('Unstage failed: ' + e.message);
+        }
+    }
+
+    async loadWorkingDiff(file) {
+        // Show unstaged diff for a working tree file
+        this.selectedCommitHash = null;
+        this.switchTab('diff');
+        if (this.diffTitle) this.diffTitle.textContent = `Working changes — ${file}`;
+        if (this.diffStats) this.diffStats.textContent = '';
+        if (this.diffFiles) this.diffFiles.innerHTML = '<div class="git-loading"><div class="spinner"></div><span>Loading diff...</span></div>';
+
+        try {
+            const resp = await fetch(`/api/projects/${this.currentProjectId}/git/diff?ref=HEAD&file=${encodeURIComponent(file)}`);
+            if (!resp.ok) throw new Error((await resp.json()).error);
+            const data = await resp.json();
+            if (this.diffStats) {
+                this.diffStats.textContent = `${data.stats.files_changed} file(s), +${data.stats.additions} −${data.stats.deletions}`;
+            }
+            this.renderDiff(data.files);
+        } catch (e) {
+            if (this.diffFiles) this.diffFiles.innerHTML = `<div class="git-error">${this.escapeHtml(e.message)}</div>`;
+        }
+    }
+
+    async loadStagedDiff(file) {
+        // Show staged diff for a file
+        this.selectedCommitHash = null;
+        this.switchTab('diff');
+        if (this.diffTitle) this.diffTitle.textContent = `Staged changes — ${file}`;
+        if (this.diffStats) this.diffStats.textContent = '';
+        if (this.diffFiles) this.diffFiles.innerHTML = '<div class="git-loading"><div class="spinner"></div><span>Loading diff...</span></div>';
+
+        try {
+            const params = new URLSearchParams({ staged: 'true' });
+            if (file) params.set('file', file);
+            const resp = await fetch(`/api/projects/${this.currentProjectId}/git/diff?${params}`);
+            if (!resp.ok) throw new Error((await resp.json()).error);
+            const data = await resp.json();
+            if (this.diffStats) {
+                this.diffStats.textContent = `${data.stats.files_changed} file(s), +${data.stats.additions} −${data.stats.deletions}`;
+            }
+            this.renderDiff(data.files);
+        } catch (e) {
+            if (this.diffFiles) this.diffFiles.innerHTML = `<div class="git-error">${this.escapeHtml(e.message)}</div>`;
+        }
+    }
+
+    async doCommit() {
+        const msg = this.commitMessage?.value?.trim();
+        if (!msg) {
+            this.commitMessage?.focus();
+            return;
+        }
+
+        this.commitBtn.disabled = true;
+        this.commitBtn.textContent = 'Committing...';
+
+        try {
+            const resp = await fetch(`/api/projects/${this.currentProjectId}/git/commit`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: msg }),
+            });
+            if (!resp.ok) throw new Error((await resp.json()).error);
+            this.commitMessage.value = '';
+            this.loadStatus();
+        } catch (e) {
+            alert('Commit failed: ' + e.message);
+        } finally {
+            this.commitBtn.disabled = false;
+            this.commitBtn.textContent = 'Commit';
+        }
+    }
+
+    toggleCommitExpand() {
+        if (!this.commitBox || !this.commitMessage) return;
+        const isExpanded = this.commitBox.classList.toggle('expanded');
+        this.panels.status?.classList.toggle('commit-expanded', isExpanded);
+        // Lock body scroll on mobile to prevent keyboard from pushing the overlay
+        document.body.style.overflow = isExpanded ? 'hidden' : '';
+        document.documentElement.style.overflow = isExpanded ? 'hidden' : '';
+        if (isExpanded) this.commitMessage.focus();
+    }
+
+    async generateCommitMessage() {
+        if (!this.commitMessage) return;
+        const aiBtns = [this.commitAiBtn, this.commitBox?.querySelector('.git-commit-ai-exp')].filter(Boolean);
+        aiBtns.forEach(b => { b.disabled = true; b.classList.add('loading'); });
+        this.commitMessage.value = '';
+        this.commitMessage.placeholder = 'Generating commit message...';
+
+        try {
+            // Get the staged diff for context
+            const diffResp = await fetch(`/api/projects/${this.currentProjectId}/git/diff?staged=true`);
+            if (!diffResp.ok) throw new Error('Failed to get staged diff');
+            const diffData = await diffResp.json();
+
+            if (!diffData.files || diffData.files.length === 0) {
+                this.commitMessage.placeholder = 'No staged changes to describe';
+                return;
+            }
+
+            // Build a summary of changes including actual diff content
+            const fileSummaries = diffData.files.map(f => {
+                let summary = `File: ${f.path} (${f.status}) +${f.additions} -${f.deletions}`;
+                for (const hunk of (f.hunks || [])) {
+                    for (const line of (hunk.lines || [])) {
+                        if (line.type === 'addition') summary += `\n+${line.content}`;
+                        else if (line.type === 'deletion') summary += `\n-${line.content}`;
+                    }
+                }
+                return summary;
+            }).join('\n\n');
+
+            // Call AI assistant with SSE streaming
+            const aiResp = await fetch('/api/ai/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    message: `Generate a concise git commit message (conventional commits format like "feat:", "fix:", "refactor:" etc.) for the following staged changes. Return ONLY the commit message, no explanation, no markdown, no quotes.\n\nStaged diff:\n${fileSummaries}\n\nFiles changed: ${diffData.stats?.files_changed || 0}, +${diffData.stats?.additions || 0} -${diffData.stats?.deletions || 0}`,
+                    slot: 'ai_background',
+                }),
+            });
+            if (!aiResp.ok) throw new Error('AI request failed');
+
+            // Consume SSE stream
+            const reader = aiResp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let fullText = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    try {
+                        const event = JSON.parse(line.slice(6));
+                        if (event.type === 'text') {
+                            fullText += event.data.text;
+                            this.commitMessage.value = fullText.trim();
+                        }
+                    } catch { /* skip non-JSON SSE lines */ }
+                }
+            }
+
+            this.commitMessage.focus();
+        } catch (e) {
+            console.error('AI commit message error:', e);
+            this.commitMessage.placeholder = 'Failed to generate — try manually';
+        } finally {
+            aiBtns.forEach(b => { b.disabled = false; b.classList.remove('loading'); });
+            if (!this.commitMessage.value) {
+                this.commitMessage.placeholder = 'Commit message...';
+            }
+        }
+    }
+
+    // --- Compare Refs ---
+
+    openCompare() {
+        this.switchTab('diff');
+        if (this.compareBar) {
+            this.compareBar.classList.remove('hidden');
+        }
+        if (this.diffTitle) this.diffTitle.textContent = 'Compare refs';
+        if (this.diffStats) this.diffStats.textContent = '';
+        if (this.diffFiles) this.diffFiles.innerHTML = '<div class="git-empty">Select two refs and click Compare</div>';
+
+        // Populate dropdowns with branches + tags
+        this._populateCompareSelects();
+    }
+
+    _populateCompareSelects() {
+        if (!this.compareFrom || !this.compareTo) return;
+
+        let options = '';
+
+        // Tags (most useful for version comparisons)
+        if (this.branches.tags && this.branches.tags.length > 0) {
+            options += '<optgroup label="Tags">';
+            for (const t of this.branches.tags) {
+                options += `<option value="${this.escapeHtml(t.name)}">${this.escapeHtml(t.name)}</option>`;
+            }
+            options += '</optgroup>';
+        }
+
+        // Local branches
+        if (this.branches.local.length > 0) {
+            options += '<optgroup label="Local">';
+            for (const b of this.branches.local) {
+                options += `<option value="${this.escapeHtml(b.name)}"${b.is_head ? ' selected' : ''}>${this.escapeHtml(b.name)}</option>`;
+            }
+            options += '</optgroup>';
+        }
+
+        // Remote branches
+        if (this.branches.remote.length > 0) {
+            options += '<optgroup label="Remote">';
+            for (const b of this.branches.remote) {
+                options += `<option value="${this.escapeHtml(b.name)}">${this.escapeHtml(b.name)}</option>`;
+            }
+            options += '</optgroup>';
+        }
+
+        this.compareFrom.innerHTML = options;
+        this.compareTo.innerHTML = options;
+
+        // Default: from = first tag (if any), to = HEAD branch
+        if (this.branches.tags && this.branches.tags.length > 0) {
+            this.compareFrom.value = this.branches.tags[0].name;
+        }
+        const headBranch = this.branches.local.find(b => b.is_head);
+        if (headBranch) {
+            this.compareTo.value = headBranch.name;
+        }
+    }
+
+    async runCompare() {
+        const from = this.compareFrom?.value;
+        const to = this.compareTo?.value;
+        if (!from || !to) return;
+
+        const ref = `${from}..${to}`;
+        if (this.diffTitle) this.diffTitle.textContent = `${from} → ${to}`;
+        if (this.diffStats) this.diffStats.textContent = '';
+        if (this.diffFiles) this.diffFiles.innerHTML = '<div class="git-loading"><div class="spinner"></div><span>Loading diff...</span></div>';
+
+        try {
+            const resp = await fetch(`/api/projects/${this.currentProjectId}/git/diff?ref=${encodeURIComponent(ref)}`);
+            if (!resp.ok) {
+                const err = await resp.json();
+                throw new Error(err.error || 'Failed to load diff');
+            }
+            const data = await resp.json();
+            if (this.diffStats) {
+                this.diffStats.textContent = `${data.stats.files_changed} files, +${data.stats.additions} −${data.stats.deletions}`;
+            }
+            this.renderDiff(data.files);
+        } catch (e) {
+            if (this.diffFiles) this.diffFiles.innerHTML = `<div class="git-error">${this.escapeHtml(e.message)}</div>`;
+        }
     }
 }
 

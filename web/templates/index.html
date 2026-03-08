@@ -1183,6 +1183,7 @@
             <div class="git-viewer-tabs">
                 <button class="git-tab active" data-tab="log" title="Commit Log">Log</button>
                 <button class="git-tab" data-tab="diff" title="Diff Viewer">Diff</button>
+                <button class="git-tab" data-tab="status" title="Working Tree Status">Status</button>
                 <button class="git-tab" data-tab="branches" title="Branches">Branches</button>
             </div>
             <div class="git-viewer-actions">
@@ -1212,6 +1213,7 @@
                         <div id="git-branch-menu" class="git-branch-menu hidden"></div>
                     </div>
                     <input id="git-search" type="text" placeholder="Search commits..." title="Search commits">
+                    <button id="git-compare-btn" class="btn btn-sm" onclick="window.gitViewer?.openCompare()" title="Compare refs">Compare</button>
                 </div>
                 <div id="git-log-list" class="git-log-list"></div>
             </div>
@@ -1222,7 +1224,83 @@
                     <span id="git-diff-title" class="git-diff-title"></span>
                     <span id="git-diff-stats-summary" class="git-diff-stats"></span>
                 </div>
+                <div id="git-compare-bar" class="git-compare-bar hidden">
+                    <label>From</label>
+                    <select id="git-compare-from" title="From ref"></select>
+                    <span class="compare-arrow">→</span>
+                    <label>To</label>
+                    <select id="git-compare-to" title="To ref"></select>
+                    <button class="btn btn-primary btn-sm" onclick="window.gitViewer?.runCompare()" title="Run comparison">Compare</button>
+                </div>
                 <div id="git-diff-files" class="git-diff-files"></div>
+            </div>
+            <!-- Status panel -->
+            <div id="git-panel-status" class="git-panel hidden">
+                <div class="git-status-toolbar">
+                    <button id="git-status-refresh" class="btn btn-sm" title="Refresh status">↻ Refresh</button>
+                    <span id="git-status-branch" class="git-status-branch"></span>
+                </div>
+                <div id="git-status-content" class="git-status-content"></div>
+                <div id="git-commit-box" class="git-commit-box hidden">
+                    <!-- Expanded header (hidden in collapsed mode) -->
+                    <div class="git-commit-header">
+                        <button id="git-commit-collapse" class="btn-icon" title="Collapse editor">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="4 14 10 14 10 20"></polyline>
+                                <polyline points="20 10 14 10 14 4"></polyline>
+                                <line x1="14" y1="10" x2="21" y2="3"></line>
+                                <line x1="3" y1="21" x2="10" y2="14"></line>
+                            </svg>
+                        </button>
+                        <span class="git-commit-title">Commit message</span>
+                        <div class="git-commit-header-actions">
+                            <button class="git-commit-action-btn git-commit-voice-exp" title="Voice input">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                    <line x1="12" y1="19" x2="12" y2="23"></line>
+                                    <line x1="8" y1="23" x2="16" y2="23"></line>
+                                </svg>
+                            </button>
+                            <button class="git-commit-action-btn git-commit-ai-exp" title="Generate commit message with AI">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9.5 2l1 3.5L14 6.5l-3.5 1L9.5 11l-1-3.5L5 6.5l3.5-1z"/><path d="M17 12l.75 2.25L20 15l-2.25.75L17 18l-.75-2.25L14 15l2.25-.75z"/></svg>
+                            </button>
+                            <button class="git-commit-send-btn git-commit-btn-exp" title="Commit staged changes">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20 6 9 17 4 12"></polyline>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <!-- Inline controls (collapsed mode) -->
+                    <textarea id="git-commit-message" placeholder="Commit message..." rows="1" title="Commit message"></textarea>
+                    <div class="git-commit-inline-btns">
+                        <button id="git-commit-expand" class="git-commit-action-btn" title="Expand editor">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="15 3 21 3 21 9"></polyline>
+                                <polyline points="9 21 3 21 3 15"></polyline>
+                                <line x1="21" y1="3" x2="14" y2="10"></line>
+                                <line x1="3" y1="21" x2="10" y2="14"></line>
+                            </svg>
+                        </button>
+                        <button id="git-commit-voice" class="git-commit-action-btn" title="Voice input">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                <line x1="12" y1="19" x2="12" y2="23"></line>
+                                <line x1="8" y1="23" x2="16" y2="23"></line>
+                            </svg>
+                        </button>
+                        <button id="git-commit-ai" class="git-commit-action-btn" title="Generate commit message with AI">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9.5 2l1 3.5L14 6.5l-3.5 1L9.5 11l-1-3.5L5 6.5l3.5-1z"/><path d="M17 12l.75 2.25L20 15l-2.25.75L17 18l-.75-2.25L14 15l2.25-.75z"/></svg>
+                        </button>
+                        <button id="git-commit-btn" class="git-commit-send-btn" title="Commit staged changes">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="20 6 9 17 4 12"></polyline>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
             </div>
             <!-- Branches panel -->
             <div id="git-panel-branches" class="git-panel hidden">
