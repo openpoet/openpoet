@@ -608,11 +608,13 @@ class GitViewer {
     renderBranchFilter() {
         if (!this.branchMenu) return;
 
+        const checkSvg = '<div class="check-icon"><svg viewBox="0 0 12 12" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="2.5 6 5 8.5 9.5 3.5"/></svg></div>';
+
         let html = '';
 
         // "All branches" toggle
         html += `<label class="git-branch-menu-item">
-            <input type="checkbox" data-branch="__all__" checked>
+            <input type="checkbox" data-branch="__all__" checked>${checkSvg}
             <span>All branches</span>
         </label>`;
         html += '<div class="git-branch-menu-divider"></div>';
@@ -622,7 +624,7 @@ class GitViewer {
             for (const b of this.branches.local) {
                 const cls = b.is_head ? ' current' : '';
                 html += `<label class="git-branch-menu-item${cls}">
-                    <input type="checkbox" data-branch="${this.escapeHtml(b.name)}" checked>
+                    <input type="checkbox" data-branch="${this.escapeHtml(b.name)}" checked>${checkSvg}
                     <span>${b.is_head ? '● ' : ''}${this.escapeHtml(b.name)}</span>
                 </label>`;
             }
@@ -633,7 +635,7 @@ class GitViewer {
             html += '<div class="git-branch-menu-section">Remote</div>';
             for (const b of this.branches.remote) {
                 html += `<label class="git-branch-menu-item">
-                    <input type="checkbox" data-branch="${this.escapeHtml(b.name)}" checked>
+                    <input type="checkbox" data-branch="${this.escapeHtml(b.name)}" checked>${checkSvg}
                     <span>${this.escapeHtml(b.name)}</span>
                 </label>`;
             }

@@ -150,17 +150,50 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 12px;
+    padding: 7px 12px;
     cursor: pointer;
     font-size: 13px;
     transition: background 0.1s;
+    -webkit-tap-highlight-color: transparent;
 }
 .git-branch-menu-item:hover {
     background: var(--color-hover);
 }
 .git-branch-menu-item input[type="checkbox"] {
-    margin: 0;
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+    pointer-events: none;
+}
+.git-branch-menu-item .check-icon {
+    width: 16px;
+    height: 16px;
     flex-shrink: 0;
+    border: 1.5px solid var(--color-text-muted, #888);
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.git-branch-menu-item input[type="checkbox"]:checked + .check-icon {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+}
+.git-branch-menu-item .check-icon svg {
+    width: 10px;
+    height: 10px;
+    display: none;
+}
+.git-branch-menu-item input[type="checkbox"]:checked + .check-icon svg {
+    display: block;
+}
+.git-branch-menu-item span {
+    flex: 1;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .git-branch-menu-item.current {
     font-weight: 600;
