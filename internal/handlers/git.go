@@ -14,6 +14,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"openpoet/internal/database"
+	"openpoet/internal/files"
 )
 
 // GitHandler serves git-related endpoints for project repositories.
@@ -43,7 +46,7 @@ const (
 	maxOutputLen = 5 * 1024 * 1024 // 5MB
 )
 
-// runGit executes a git command in the project directory (local only for now).
+// runGit executes a git command in a local project directory.
 func (h *GitHandler) runGit(ctx context.Context, projectPath string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
@@ -66,33 +69,61 @@ func (h *GitHandler) runGit(ctx context.Context, projectPath string, args ...str
 	return stdout.String(), nil
 }
 
-// getProjectPath resolves project ID from URL and returns its path (local only).
-func (h *GitHandler) getProjectPath(w http.ResponseWriter, r *http.Request) (string, bool) {
+// runGitRemote executes a git command on a remote project via SSH.
+func (h *GitHandler) runGitRemote(ctx context.Context, project *database.Project, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+
+	fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
+
+	// Build shell command: cd '/path' && git 'arg1' 'arg2' ...
+	parts := make([]string, len(args))
+	for i, a := range args {
+		parts[i] = shellQuote(a)
+	}
+	cmd := fmt.Sprintf("cd %s && git %s", shellQuote(project.Path), strings.Join(parts, " "))
+
+	stdout, stderr, err := fm.RunCommandSeparate(ctx, cmd)
+	if err != nil {
+		return "", fmt.Errorf("git %s: %s (stderr: %s)", args[0], err, strings.TrimSpace(stderr))
+	}
+
+	if len(stdout) > maxOutputLen {
+		return stdout[:maxOutputLen], nil
+	}
+	return stdout, nil
+}
+
+// runGitCmd dispatches a git command to local or remote execution based on project type.
+func (h *GitHandler) runGitCmd(ctx context.Context, project *database.Project, args ...string) (string, error) {
+	if project.Type == "local" {
+		return h.runGit(ctx, project.Path, args...)
+	}
+	return h.runGitRemote(ctx, project, args...)
+}
+
+// getProject resolves project ID from URL and validates it's a git repository.
+func (h *GitHandler) getProject(w http.ResponseWriter, r *http.Request) (*database.Project, bool) {
 	id, err := parseID(chi.URLParam(r, "id"))
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
-		return "", false
+		return nil, false
 	}
 
 	project, err := h.api.db.GetProject(r.Context(), id)
 	if err != nil {
 		respondError(w, http.StatusNotFound, "Project not found")
-		return "", false
-	}
-
-	if project.Type != "local" {
-		respondError(w, http.StatusBadRequest, "Git operations are only available for local projects")
-		return "", false
+		return nil, false
 	}
 
 	// Verify it's a git repo
-	out, err := h.runGit(r.Context(), project.Path, "rev-parse", "--is-inside-work-tree")
+	out, err := h.runGitCmd(r.Context(), project, "rev-parse", "--is-inside-work-tree")
 	if err != nil || strings.TrimSpace(out) != "true" {
 		respondError(w, http.StatusBadRequest, "Project directory is not a git repository")
-		return "", false
+		return nil, false
 	}
 
-	return project.Path, true
+	return project, true
 }
 
 // --- Branches endpoint ---
@@ -113,12 +144,12 @@ type BranchesResponse struct {
 }
 
 func (h *GitHandler) GetBranches(w http.ResponseWriter, r *http.Request) {
-	path, ok := h.getProjectPath(w, r)
+	project, ok := h.getProject(w, r)
 	if !ok {
 		return
 	}
 
-	out, err := h.runGit(r.Context(), path,
+	out, err := h.runGitCmd(r.Context(), project,
 		"branch", "-a",
 		"--format=%(refname:short)%00%(objectname:short)%00%(HEAD)%00%(upstream:short)%00%(committerdate:iso-strict)",
 	)
@@ -165,7 +196,7 @@ func (h *GitHandler) GetBranches(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch tags
-	tagOut, err := h.runGit(r.Context(), path,
+	tagOut, err := h.runGitCmd(r.Context(), project,
 		"tag", "--sort=-creatordate",
 		"--format=%(refname:short)%00%(objectname:short)%00%(creatordate:iso-strict)",
 	)
@@ -209,17 +240,17 @@ type StatusResponse struct {
 }
 
 func (h *GitHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
-	path, ok := h.getProjectPath(w, r)
+	project, ok := h.getProject(w, r)
 	if !ok {
 		return
 	}
 
 	// Get current branch name
-	branchOut, _ := h.runGit(r.Context(), path, "rev-parse", "--abbrev-ref", "HEAD")
+	branchOut, _ := h.runGitCmd(r.Context(), project, "rev-parse", "--abbrev-ref", "HEAD")
 	branch := strings.TrimSpace(branchOut)
 
 	// Get porcelain status
-	out, err := h.runGit(r.Context(), path, "status", "--porcelain=v1", "-uall")
+	out, err := h.runGitCmd(r.Context(), project, "status", "--porcelain=v1", "-uall")
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -277,7 +308,7 @@ func (h *GitHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 
 // StageFiles stages files for commit (git add).
 func (h *GitHandler) StageFiles(w http.ResponseWriter, r *http.Request) {
-	path, ok := h.getProjectPath(w, r)
+	project, ok := h.getProject(w, r)
 	if !ok {
 		return
 	}
@@ -295,7 +326,7 @@ func (h *GitHandler) StageFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	args := append([]string{"add", "--"}, req.Files...)
-	if _, err := h.runGit(r.Context(), path, args...); err != nil {
+	if _, err := h.runGitCmd(r.Context(), project, args...); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -305,7 +336,7 @@ func (h *GitHandler) StageFiles(w http.ResponseWriter, r *http.Request) {
 
 // UnstageFiles unstages files (git reset HEAD).
 func (h *GitHandler) UnstageFiles(w http.ResponseWriter, r *http.Request) {
-	path, ok := h.getProjectPath(w, r)
+	project, ok := h.getProject(w, r)
 	if !ok {
 		return
 	}
@@ -323,7 +354,7 @@ func (h *GitHandler) UnstageFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	args := append([]string{"reset", "HEAD", "--"}, req.Files...)
-	if _, err := h.runGit(r.Context(), path, args...); err != nil {
+	if _, err := h.runGitCmd(r.Context(), project, args...); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -333,7 +364,7 @@ func (h *GitHandler) UnstageFiles(w http.ResponseWriter, r *http.Request) {
 
 // Commit creates a git commit with the staged changes.
 func (h *GitHandler) Commit(w http.ResponseWriter, r *http.Request) {
-	path, ok := h.getProjectPath(w, r)
+	project, ok := h.getProject(w, r)
 	if !ok {
 		return
 	}
@@ -350,7 +381,7 @@ func (h *GitHandler) Commit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := h.runGit(r.Context(), path, "commit", "-m", req.Message)
+	out, err := h.runGitCmd(r.Context(), project, "commit", "-m", req.Message)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -358,7 +389,7 @@ func (h *GitHandler) Commit(w http.ResponseWriter, r *http.Request) {
 
 	// Extract commit hash from output
 	hash := ""
-	hashOut, err := h.runGit(r.Context(), path, "rev-parse", "HEAD")
+	hashOut, err := h.runGitCmd(r.Context(), project, "rev-parse", "HEAD")
 	if err == nil {
 		hash = strings.TrimSpace(hashOut)
 	}
@@ -393,7 +424,7 @@ type LogResponse struct {
 }
 
 func (h *GitHandler) GetLog(w http.ResponseWriter, r *http.Request) {
-	path, ok := h.getProjectPath(w, r)
+	project, ok := h.getProject(w, r)
 	if !ok {
 		return
 	}
@@ -452,7 +483,7 @@ func (h *GitHandler) GetLog(w http.ResponseWriter, r *http.Request) {
 		args = append(args, "--author="+author)
 	}
 
-	out, err := h.runGit(r.Context(), path, args...)
+	out, err := h.runGitCmd(r.Context(), project, args...)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -517,7 +548,7 @@ func (h *GitHandler) GetLog(w http.ResponseWriter, r *http.Request) {
 		} else {
 			countArgs = append(countArgs, "--all")
 		}
-		countOut, err := h.runGit(r.Context(), path, countArgs...)
+		countOut, err := h.runGitCmd(r.Context(), project, countArgs...)
 		if err == nil {
 			if n, err := strconv.Atoi(strings.TrimSpace(countOut)); err == nil {
 				total = n
@@ -899,7 +930,7 @@ type DiffResponse struct {
 }
 
 func (h *GitHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
-	path, ok := h.getProjectPath(w, r)
+	project, ok := h.getProject(w, r)
 	if !ok {
 		return
 	}
@@ -918,7 +949,7 @@ func (h *GitHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
 		if fileFilter != "" {
 			args = append(args, "--", fileFilter)
 		}
-		out, err := h.runGit(r.Context(), path, args...)
+		out, err := h.runGitCmd(r.Context(), project, args...)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -948,7 +979,7 @@ func (h *GitHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
 		if fileFilter != "" {
 			args = append(args, "--", fileFilter)
 		}
-		out, err := h.runGit(r.Context(), path, args...)
+		out, err := h.runGitCmd(r.Context(), project, args...)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -985,7 +1016,7 @@ func (h *GitHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
 
 	if statOnly {
 		args := []string{"diff", "--stat", "--numstat", diffRef}
-		out, err := h.runGit(r.Context(), path, args...)
+		out, err := h.runGitCmd(r.Context(), project, args...)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1006,7 +1037,7 @@ func (h *GitHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
 	if fileFilter != "" {
 		args = append(args, "--", fileFilter)
 	}
-	out, err := h.runGit(r.Context(), path, args...)
+	out, err := h.runGitCmd(r.Context(), project, args...)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1210,7 +1241,7 @@ func parseHunkHeader(header string, hunk *DiffHunk) {
 // --- Show endpoint ---
 
 func (h *GitHandler) GetShow(w http.ResponseWriter, r *http.Request) {
-	path, ok := h.getProjectPath(w, r)
+	project, ok := h.getProject(w, r)
 	if !ok {
 		return
 	}
@@ -1227,7 +1258,7 @@ func (h *GitHandler) GetShow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := h.runGit(r.Context(), path, "show", ref+":"+filePath)
+	out, err := h.runGitCmd(r.Context(), project, "show", ref+":"+filePath)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return

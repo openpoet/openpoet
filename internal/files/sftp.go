@@ -3,6 +3,7 @@ package files
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"openpoet/internal/database"
@@ -508,6 +509,51 @@ func (m *RemoteFileManager) RunCommand(command string) (string, error) {
 	}
 
 	return result.String(), nil
+}
+
+// ConnectSSH returns an SSH client without creating an SFTP session.
+func (m *RemoteFileManager) ConnectSSH() (*ssh.Client, error) {
+	config, err := m.buildSSHConfig()
+	if err != nil {
+		return nil, err
+	}
+	addr := fmt.Sprintf("%s:%d", m.project.SSHHost.String, m.project.SSHPort.Int64)
+	sshClient, err := ssh.Dial("tcp", addr, config)
+	if err != nil {
+		return nil, fmt.Errorf("SSH connection failed: %w", err)
+	}
+	return sshClient, nil
+}
+
+// RunCommandSeparate executes a shell command via SSH and returns stdout and stderr separately.
+// Supports context cancellation for timeouts.
+func (m *RemoteFileManager) RunCommandSeparate(ctx context.Context, command string) (stdout, stderr string, err error) {
+	sshClient, err := m.ConnectSSH()
+	if err != nil {
+		return "", "", err
+	}
+	defer sshClient.Close()
+
+	session, err := sshClient.NewSession()
+	if err != nil {
+		return "", "", err
+	}
+	defer session.Close()
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	session.Stdout = &stdoutBuf
+	session.Stderr = &stderrBuf
+
+	done := make(chan error, 1)
+	go func() { done <- session.Run(command) }()
+
+	select {
+	case err = <-done:
+		return stdoutBuf.String(), stderrBuf.String(), err
+	case <-ctx.Done():
+		session.Close()
+		return "", "", ctx.Err()
+	}
 }
 
 // SFTPConnectorAdapter wraps RemoteFileManager to provide SSH+SFTP connections.
