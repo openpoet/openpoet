@@ -126,10 +126,16 @@ func (h *HTTPHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if handler == nil {
-		// No session — create a stateless handler
+		// Session expired or unknown — recover session_id from query parameter
+		// (always present in the URL for remote Claude Code sessions via tunnel).
+		openpoetSessionID := r.URL.Query().Get("session_id")
+		mcpContext := "http"
+		if openpoetSessionID != "" {
+			mcpContext = "session"
+		}
 		policy := h.getPolicy()
 		client := NewAPIClient(h.apiURL)
-		handler = NewRequestHandler(client, "", "http", "", policy)
+		handler = NewRequestHandler(client, openpoetSessionID, mcpContext, "", policy)
 	}
 
 	resp := handler.Handle(&req)
@@ -183,7 +189,7 @@ func (h *HTTPHandler) cleanupLoop() {
 		h.mu.Lock()
 		now := time.Now()
 		for id, sess := range h.sessions {
-			if now.Sub(sess.lastUsed) > 30*time.Minute {
+			if now.Sub(sess.lastUsed) > 4*time.Hour {
 				delete(h.sessions, id)
 				log.Printf("[mcp-http] cleaned up stale session %s", id[:8])
 			}
