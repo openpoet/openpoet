@@ -3091,66 +3091,106 @@ class OpenPoet {
             return;
         }
 
-        container.innerHTML = activeSessions.map(session => {
-            const displayName = session.name || session.project_name || 'Unknown';
-            const projectLabel = session.project_name || 'Unknown';
-            const hostLabel = session.project_type === 'remote' && session.project_ssh_host
-                ? ` @ ${this.escapeHtml(session.project_ssh_host)}` : '';
-            const elapsed = this.formatElapsed(session.start_time);
-            const totalTokens = (session.total_input_tokens || 0) + (session.total_output_tokens || 0);
-            const tokenLabel = totalTokens > 0 ? this.formatTokens(totalTokens) : '--';
-            const costLabel = session.total_cost > 0 ? `$${session.total_cost.toFixed(3)}` : '';
-            const lastActivity = session.last_activity_at?.Valid
-                ? this.formatTimeAgo(session.last_activity_at.Time) : '';
-            const taskLabel = session.task_title
-                ? `<span class="session-card-task" title="${this.escapeHtml(session.task_title)}">${this.escapeHtml(this.truncateStr(session.task_title, 40))}</span>`
-                : '';
-            const pendingBadge = session.has_pending_permission
-                ? '<span class="badge badge-pending-perm" title="Awaiting input">!</span>' : '';
-            const mode = session.execution_mode || 'idle';
-            const modeLabels = { plan_mode: 'Plan', executing: 'Exec', idle: 'Idle' };
-            const modeLabel = modeLabels[mode] || mode;
+        // Group sessions by project_id
+        const projectGroups = {};
+        for (const session of activeSessions) {
+            const pid = session.project_id;
+            if (!projectGroups[pid]) projectGroups[pid] = [];
+            projectGroups[pid].push(session);
+        }
 
-            const isCopilot = session.backend === 'copilot';
-            const isACP = session.backend === 'acp';
-            const backendBadge = isCopilot ? '<span class="badge badge-copilot" style="margin-left:4px;">Copilot</span>'
-                : isACP ? '<span class="badge badge-acp" style="margin-left:4px;">ACP</span>' : '';
+        // Sort groups alphabetically by project name
+        const sortedPids = Object.keys(projectGroups).sort((a, b) => {
+            const nameA = (projectGroups[a][0].project_name || '').toLowerCase();
+            const nameB = (projectGroups[b][0].project_name || '').toLowerCase();
+            return nameA.localeCompare(nameB);
+        });
 
-            return `
-                <div class="session-card" onclick="app.openTerminal('${session.id}')">
-                    <div class="session-card-header">
-                        <span class="badge badge-mode-${mode}" data-session-mode="${session.id}">${modeLabel}</span>
-                        ${backendBadge}
-                        ${pendingBadge}
-                        <span class="session-card-name">${this.escapeHtml(displayName)}</span>
-                        <button class="btn btn-danger btn-sm session-card-stop" onclick="event.stopPropagation(); app.stopSession('${session.id}')">
-                            Stop
-                        </button>
-                    </div>
-                    <div class="session-card-meta">
-                        <span class="session-card-project">${this.escapeHtml(projectLabel)}${hostLabel}</span>
-                        ${taskLabel}
-                    </div>
-                    <div class="session-card-stats">
-                        <span class="session-card-stat" title="Elapsed time">
-                            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                            <span class="session-elapsed" data-start="${session.start_time}">${elapsed}</span>
-                        </span>
-                        ${!isCopilot && !isACP ? `<span class="session-card-stat" title="Tokens used">
-                            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-                            ${tokenLabel}${costLabel ? ` (${costLabel})` : ''}
-                        </span>` : ''}
-                        ${isACP ? this.renderACPUsageStat(session) : ''}
-                        ${lastActivity ? `<span class="session-card-stat" title="Last activity">${lastActivity}</span>` : ''}
-                    </div>
+        let html = '';
+        for (const pid of sortedPids) {
+            const sessions = projectGroups[pid];
+            const firstSession = sessions[0];
+            const projectName = firstSession.project_name || `Project #${pid}`;
+            const hostLabel = firstSession.project_type === 'remote' && firstSession.project_ssh_host
+                ? ` @ ${this.escapeHtml(firstSession.project_ssh_host)}` : '';
+            const projectId = parseInt(pid);
+            const isCollapsed = this._collapsedProjectGroups.has(projectId);
+            const sessionCount = sessions.length;
+
+            html += `
+            <div class="project-group" data-project-id="${pid}">
+                <div class="project-group-header" onclick="app.toggleProjectGroup(${pid})">
+                    <svg class="project-group-chevron${isCollapsed ? ' collapsed' : ''}" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                    <span class="project-group-name">${this.escapeHtml(projectName)}${hostLabel}</span>
+                    <span class="project-group-count">${sessionCount}</span>
                 </div>
-            `;
-        }).join('');
+                <div class="project-group-body${isCollapsed ? ' collapsed' : ''}">`;
+
+            for (const session of sessions) {
+                html += this._renderSessionCard(session);
+            }
+
+            html += `</div></div>`;
+        }
+
+        container.innerHTML = html;
 
         // Attach tooltip to truncated session names
         container.querySelectorAll('.session-card-name').forEach(nameEl => {
             this._attachSessionNameTooltip(nameEl, nameEl.textContent);
         });
+    }
+
+    _renderSessionCard(session) {
+        const displayName = session.name || session.project_name || 'Unknown';
+        const elapsed = this.formatElapsed(session.start_time);
+        const totalTokens = (session.total_input_tokens || 0) + (session.total_output_tokens || 0);
+        const tokenLabel = totalTokens > 0 ? this.formatTokens(totalTokens) : '--';
+        const costLabel = session.total_cost > 0 ? `$${session.total_cost.toFixed(3)}` : '';
+        const lastActivity = session.last_activity_at?.Valid
+            ? this.formatTimeAgo(session.last_activity_at.Time) : '';
+        const taskLabel = session.task_title
+            ? `<span class="session-card-task" title="${this.escapeHtml(session.task_title)}">${this.escapeHtml(this.truncateStr(session.task_title, 40))}</span>`
+            : '';
+        const pendingBadge = session.has_pending_permission
+            ? '<span class="badge badge-pending-perm" title="Awaiting input">!</span>' : '';
+        const mode = session.execution_mode || 'idle';
+        const modeLabels = { plan_mode: 'Plan', executing: 'Exec', idle: 'Idle' };
+        const modeLabel = modeLabels[mode] || mode;
+
+        const isCopilot = session.backend === 'copilot';
+        const isACP = session.backend === 'acp';
+        const backendBadge = isCopilot ? '<span class="badge badge-copilot" style="margin-left:4px;">Copilot</span>'
+            : isACP ? '<span class="badge badge-acp" style="margin-left:4px;">ACP</span>' : '';
+
+        return `
+            <div class="session-card" onclick="app.openTerminal('${session.id}')">
+                <div class="session-card-header">
+                    <span class="badge badge-mode-${mode}" data-session-mode="${session.id}">${modeLabel}</span>
+                    ${backendBadge}
+                    ${pendingBadge}
+                    <span class="session-card-name">${this.escapeHtml(displayName)}</span>
+                    <button class="btn btn-danger btn-sm session-card-stop" onclick="event.stopPropagation(); app.stopSession('${session.id}')">
+                        Stop
+                    </button>
+                </div>
+                <div class="session-card-meta">
+                    ${taskLabel}
+                </div>
+                <div class="session-card-stats">
+                    <span class="session-card-stat" title="Elapsed time">
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                        <span class="session-elapsed" data-start="${session.start_time}">${elapsed}</span>
+                    </span>
+                    ${!isCopilot && !isACP ? `<span class="session-card-stat" title="Tokens used">
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                        ${tokenLabel}${costLabel ? ` (${costLabel})` : ''}
+                    </span>` : ''}
+                    ${isACP ? this.renderACPUsageStat(session) : ''}
+                    ${lastActivity ? `<span class="session-card-stat" title="Last activity">${lastActivity}</span>` : ''}
+                </div>
+            </div>
+        `;
     }
 
     async openTerminal(sessionId, sessionData = null, customName = null) {
@@ -4446,11 +4486,25 @@ class OpenPoet {
             });
         });
 
-        localStorage.setItem('openpoet-tabs-state', JSON.stringify({
-            tabs: tabsState,
-            activeSessionId: window.terminalManager.activeSessionId,
-            timestamp: Date.now()
-        }));
+        try {
+            localStorage.setItem('openpoet-tabs-state', JSON.stringify({
+                tabs: tabsState,
+                activeSessionId: window.terminalManager.activeSessionId,
+                timestamp: Date.now()
+            }));
+        } catch (e) {
+            console.warn('saveTabsToStorage: localStorage quota exceeded, cleaning up stale data');
+            window.hookManager?.cleanupStaleToolEvents(10);
+            try {
+                localStorage.setItem('openpoet-tabs-state', JSON.stringify({
+                    tabs: tabsState,
+                    activeSessionId: window.terminalManager.activeSessionId,
+                    timestamp: Date.now()
+                }));
+            } catch (e2) {
+                console.error('saveTabsToStorage: still failed after cleanup', e2);
+            }
+        }
     }
 
     async restoreTabsFromStorage() {

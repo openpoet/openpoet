@@ -25,6 +25,7 @@ class HookManager {
     // Validates with backend before reopening to avoid showing stale dialogs
     async _autoReopenDismissed() {
         this.cleanupStaleDismissedRequests();
+        this.cleanupStaleToolEvents();
 
         if (this.dismissedRequests.length === 0) return;
 
@@ -66,11 +67,18 @@ class HookManager {
         }
     }
 
-    _saveToolEvents() {
+    _saveToolEvents(retrying) {
         try {
             localStorage.setItem(this.storageKeyEvents, JSON.stringify(this.toolEventsBySession));
         } catch (e) {
-            console.warn('Failed to save tool events:', e);
+            if (retrying) {
+                console.error('Still failed after pruning tool events:', e);
+                return;
+            }
+            // Quota exceeded — aggressively prune and retry once
+            console.warn('Tool events storage quota exceeded, pruning stale sessions');
+            this._pruneStaleToolEvents(5);
+            this._saveToolEvents(true);
         }
     }
 
@@ -95,6 +103,46 @@ class HookManager {
             this._saveDismissedRequests();
             this.renderToolPanel();
             this.updateToolBadge();
+        }
+    }
+
+    // Remove tool events for sessions that are no longer active (in-memory only, no save).
+    // Keeps the most recent inactive sessions up to maxKept.
+    // Returns the number of sessions removed.
+    _pruneStaleToolEvents(maxKept = 20) {
+        const sessions = window.app?.sessions || [];
+        const activeSessionIds = new Set(
+            sessions.filter(s => s.status === 'running' || s.status === 'starting').map(s => s.id)
+        );
+
+        const storedSessionIds = Object.keys(this.toolEventsBySession);
+        const inactiveIds = storedSessionIds.filter(id => !activeSessionIds.has(id));
+
+        if (inactiveIds.length <= maxKept) return 0;
+
+        // Sort inactive sessions by most recent event timestamp (descending)
+        inactiveIds.sort((a, b) => {
+            const aTs = this.toolEventsBySession[a]?.[0]?.timestamp || 0;
+            const bTs = this.toolEventsBySession[b]?.[0]?.timestamp || 0;
+            return bTs - aTs;
+        });
+
+        // Remove the oldest inactive sessions beyond maxKept
+        const toRemove = inactiveIds.slice(maxKept);
+        for (const id of toRemove) {
+            delete this.toolEventsBySession[id];
+        }
+
+        if (toRemove.length > 0) {
+            console.log(`[HookManager] Cleaned up ${toRemove.length} stale session(s) from tool events storage`);
+        }
+        return toRemove.length;
+    }
+
+    // Prune stale tool events and persist
+    cleanupStaleToolEvents(maxKept = 20) {
+        if (this._pruneStaleToolEvents(maxKept) > 0) {
+            this._saveToolEvents();
         }
     }
 
