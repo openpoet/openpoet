@@ -64,7 +64,14 @@ func (d *DB) GetProjectByName(ctx context.Context, name string) (*Project, error
 
 func (d *DB) ListProjects(ctx context.Context) ([]Project, error) {
 	var projects []Project
-	err := d.SelectContext(ctx, &projects, "SELECT * FROM projects ORDER BY name")
+	err := d.SelectContext(ctx, &projects, `
+		SELECT p.* FROM projects p
+		LEFT JOIN (
+			SELECT project_id, MAX(COALESCE(last_activity_at, start_time)) AS latest_activity
+			FROM sessions
+			GROUP BY project_id
+		) s ON s.project_id = p.id
+		ORDER BY s.latest_activity IS NULL, s.latest_activity DESC, p.name`)
 	for i := range projects {
 		projects[i].HasCredential = projects[i].SSHCredentialEncrypted.Valid && projects[i].SSHCredentialEncrypted.String != ""
 	}

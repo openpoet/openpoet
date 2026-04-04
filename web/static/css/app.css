@@ -5663,6 +5663,60 @@ body {
     }
 }
 
+/* ============ Project Select Filters ============ */
+
+.project-select-filters {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.project-select-search {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--color-border, #e0e0e0);
+    border-radius: 6px;
+    font-size: 13px;
+    background: var(--color-surface, #fff);
+    color: var(--color-text, #333);
+    outline: none;
+    box-sizing: border-box;
+}
+
+.project-select-search:focus {
+    border-color: var(--color-primary, #7aa2f7);
+}
+
+.project-select-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.project-select-tags:empty {
+    display: none;
+}
+
+.project-select-tag-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1.5px solid transparent;
+    transition: opacity 0.15s, border-color 0.15s;
+    opacity: 0.55;
+    user-select: none;
+}
+
+.project-select-tag-chip.active {
+    opacity: 1;
+    border-color: currentColor;
+}
+
 /* ============ Task Select Modal ============ */
 
 .task-select-list {
@@ -6018,6 +6072,21 @@ body {
 
 .project-group-body .task-card {
     border-radius: 6px;
+}
+
+/* Session cards inside project groups */
+.project-group-body .session-card {
+    border-radius: 6px;
+    margin-bottom: 4px;
+}
+
+.project-group-body .session-card:last-child {
+    margin-bottom: 0;
+}
+
+/* Hide empty meta row when no task label */
+.project-group-body .session-card-meta:empty {
+    display: none;
 }
 
 /* Hide project badge in grouped view (redundant with group header) */
