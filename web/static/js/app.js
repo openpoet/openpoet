@@ -960,6 +960,8 @@ class OpenPoet {
             const modal = document.getElementById('project-select-modal');
             const listEl = document.getElementById('project-select-list');
             const cancelBtn = document.getElementById('project-select-cancel');
+            const searchInput = document.getElementById('project-select-search');
+            const tagsEl = document.getElementById('project-select-tags');
 
             let resolved = false;
             const finish = (value) => {
@@ -971,6 +973,7 @@ class OpenPoet {
 
             const cleanup = () => {
                 modal.classList.add('hidden');
+                searchInput.removeEventListener('input', renderFiltered);
                 cancelBtn.removeEventListener('click', handleCancel);
                 document.removeEventListener('keydown', handleKeydown);
             };
@@ -980,11 +983,80 @@ class OpenPoet {
                 if (e.key === 'Escape') finish(null);
             };
 
+            // State
+            const projects = this.projects || [];
+            const allTags = this._allTags || [];
+            let activeTagIds = new Set();
+
+            // Render tag filter chips
+            tagsEl.innerHTML = allTags.map(t =>
+                `<span class="project-select-tag-chip" data-tag-id="${t.id}" style="background:${t.color}22;color:${t.color}">${this.escapeHtml(t.name)}</span>`
+            ).join('');
+
+            tagsEl.querySelectorAll('.project-select-tag-chip').forEach(chip => {
+                chip.addEventListener('click', () => {
+                    const tagId = Number(chip.dataset.tagId);
+                    if (activeTagIds.has(tagId)) {
+                        activeTagIds.delete(tagId);
+                        chip.classList.remove('active');
+                    } else {
+                        activeTagIds.add(tagId);
+                        chip.classList.add('active');
+                    }
+                    renderFiltered();
+                });
+            });
+
+            const renderFiltered = () => {
+                const query = searchInput.value.trim().toLowerCase();
+                const filtered = projects.filter(p => {
+                    if (query && !p.name.toLowerCase().includes(query)) return false;
+                    if (activeTagIds.size > 0) {
+                        const pTagIds = (p.tags || []).map(t => t.id);
+                        for (const tid of activeTagIds) {
+                            if (!pTagIds.includes(tid)) return false;
+                        }
+                    }
+                    return true;
+                });
+
+                if (filtered.length === 0) {
+                    listEl.innerHTML = `<div style="text-align:center;padding:20px 0;color:var(--color-text-secondary,#666);font-size:13px;">No projects match your filters.</div>`;
+                    return;
+                }
+
+                listEl.innerHTML = filtered.map(project => {
+                    const typeIcon = project.type === 'remote'
+                        ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>'
+                        : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>';
+                    const pathDisplay = project.type === 'remote'
+                        ? `${project.ssh_user?.String || ''}@${project.ssh_host?.String || ''}:${project.path}`
+                        : project.path;
+                    const tagChips = (project.tags || []).map(t =>
+                        `<span class="tag-chip" style="background:${t.color}22;color:${t.color}">${this.escapeHtml(t.name)}</span>`
+                    ).join('');
+                    return `
+                        <div class="task-select-item" style="cursor: pointer;" onclick="(() => { document.getElementById('project-select-modal').classList.add('hidden'); app.startSession(${project.id}); })()">
+                            <div class="task-select-item-body" style="gap: 2px;">
+                                <div class="task-select-item-title" style="display: flex; align-items: center; gap: 6px;">
+                                    ${typeIcon}
+                                    ${this.escapeHtml(project.name)}
+                                    ${tagChips}
+                                </div>
+                                <div class="task-select-item-meta">
+                                    <span>${this.escapeHtml(pathDisplay)}</span>
+                                </div>
+                            </div>
+                        </div>`;
+                }).join('');
+            };
+
+            // Initialize
+            searchInput.value = '';
             modal.classList.remove('hidden');
             cancelBtn.addEventListener('click', handleCancel);
             document.addEventListener('keydown', handleKeydown);
-
-            const projects = this.projects || [];
+            searchInput.addEventListener('input', renderFiltered);
 
             if (projects.length === 0) {
                 listEl.innerHTML = `
@@ -998,26 +1070,8 @@ class OpenPoet {
                 return;
             }
 
-            listEl.innerHTML = projects.map(project => {
-                const typeIcon = project.type === 'remote'
-                    ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>'
-                    : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>';
-                const pathDisplay = project.type === 'remote'
-                    ? `${project.ssh_user?.String || ''}@${project.ssh_host?.String || ''}:${project.path}`
-                    : project.path;
-                return `
-                    <div class="task-select-item" style="cursor: pointer;" onclick="(() => { document.getElementById('project-select-modal').classList.add('hidden'); app.startSession(${project.id}); })()">
-                        <div class="task-select-item-body" style="gap: 2px;">
-                            <div class="task-select-item-title" style="display: flex; align-items: center; gap: 6px;">
-                                ${typeIcon}
-                                ${this.escapeHtml(project.name)}
-                            </div>
-                            <div class="task-select-item-meta">
-                                <span>${this.escapeHtml(pathDisplay)}</span>
-                            </div>
-                        </div>
-                    </div>`;
-            }).join('');
+            renderFiltered();
+            setTimeout(() => searchInput.focus(), 50);
         });
     }
 
