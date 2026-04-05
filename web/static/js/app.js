@@ -986,36 +986,39 @@ class OpenPoet {
             // State
             const projects = this.projects || [];
             const allTags = this._allTags || [];
-            let activeTagIds = new Set();
+            let activeTagName = null;
 
-            // Render tag filter chips
-            tagsEl.innerHTML = allTags.map(t =>
-                `<span class="project-select-tag-chip" data-tag-id="${t.id}" style="background:${t.color}22;color:${t.color}">${this.escapeHtml(t.name)}</span>`
-            ).join('');
-
-            tagsEl.querySelectorAll('.project-select-tag-chip').forEach(chip => {
-                chip.addEventListener('click', () => {
-                    const tagId = Number(chip.dataset.tagId);
-                    if (activeTagIds.has(tagId)) {
-                        activeTagIds.delete(tagId);
-                        chip.classList.remove('active');
-                    } else {
-                        activeTagIds.add(tagId);
-                        chip.classList.add('active');
-                    }
-                    renderFiltered();
+            // Render tag filter chips (single-select, same style as project list page)
+            const renderTagChips = () => {
+                if (allTags.length === 0) { tagsEl.innerHTML = ''; return; }
+                tagsEl.innerHTML = `
+                    <span class="tag-filter-chip ${!activeTagName ? 'active' : ''}"
+                          style="${!activeTagName ? 'background: var(--color-primary); color: var(--color-bg); border-color: transparent;' : ''}"
+                          data-tag="">All</span>
+                    ${allTags.map(t => `
+                        <span class="tag-filter-chip ${activeTagName === t.name ? 'active' : ''}"
+                              style="${activeTagName === t.name ? `background:${t.color}33;color:${t.color};border-color:${t.color}` : ''}"
+                              data-tag="${this.escapeHtml(t.name)}">${this.escapeHtml(t.name)}</span>
+                    `).join('')}
+                `;
+                tagsEl.querySelectorAll('.tag-filter-chip').forEach(chip => {
+                    chip.addEventListener('click', () => {
+                        const tag = chip.dataset.tag || null;
+                        activeTagName = (tag === activeTagName) ? null : tag;
+                        renderTagChips();
+                        renderFiltered();
+                    });
                 });
-            });
+            };
+            renderTagChips();
 
             const renderFiltered = () => {
                 const query = searchInput.value.trim().toLowerCase();
                 const filtered = projects.filter(p => {
                     if (query && !p.name.toLowerCase().includes(query)) return false;
-                    if (activeTagIds.size > 0) {
-                        const pTagIds = (p.tags || []).map(t => t.id);
-                        for (const tid of activeTagIds) {
-                            if (!pTagIds.includes(tid)) return false;
-                        }
+                    if (activeTagName) {
+                        const pTagNames = (p.tags || []).map(t => t.name);
+                        if (!pTagNames.includes(activeTagName)) return false;
                     }
                     return true;
                 });
