@@ -6654,13 +6654,6 @@ class OpenPoet {
         const taskMenuDropdown = document.getElementById('task-menu-dropdown');
         taskMenuBtn?.addEventListener('click', (e) => {
             e.stopPropagation();
-            const wrapper = document.getElementById('task-menu-wrapper');
-            if (!wrapper?.dataset.linked) {
-                // No task linked — directly open link modal
-                const sessionId = window.terminalManager?.activeSessionId || this.currentSession;
-                if (sessionId) this.showLinkTaskModal(sessionId);
-                return;
-            }
             taskMenuDropdown?.classList.toggle('hidden');
         });
         // Close task menu on outside click
@@ -6704,6 +6697,15 @@ class OpenPoet {
                 },
                 'Unlink'
             );
+        });
+
+        // Task menu: New Task
+        document.getElementById('task-menu-new')?.addEventListener('click', () => {
+            taskMenuDropdown?.classList.add('hidden');
+            const sessionId = window.terminalManager?.activeSessionId || this.currentSession;
+            if (!sessionId) return;
+            const tabData = this.openTabs.get(sessionId);
+            if (tabData?.projectId) this.showTaskModal(tabData.projectId);
         });
 
         // Stop session button
