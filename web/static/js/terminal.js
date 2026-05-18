@@ -995,11 +995,13 @@ class TerminalManager {
     // Claude Code TUI redraw the task list / status bar without emitting
     // clear-to-EOL. Sub-cell rows oscillations (e.g. scrollbar appearing,
     // 1px height shift from a panel) would otherwise accumulate visual
-    // garbage over the session.
+    // garbage over the session. The alternate buffer has no scrollback,
+    // so we apply a stricter threshold there.
     safeFit(termData) {
         if (!termData || !termData.fitAddon || !termData.terminal) return;
         const term = termData.terminal;
         const buf = term.buffer.active;
+        const isAlt = buf.type === 'alternate';
         const wasAtBottom = buf.viewportY >= buf.baseY;
         const prevViewportY = buf.viewportY;
 
@@ -1014,9 +1016,19 @@ class TerminalManager {
 
         const colsDelta = Math.abs(cols - term.cols);
         const rowsDelta = Math.abs(rows - term.rows);
-        if (colsDelta === 0 && rowsDelta < 2) return;
+        const minRowsDelta = isAlt ? 4 : 2;
+        if (colsDelta === 0 && rowsDelta < minRowsDelta) return;
 
-        term.resize(cols, rows);
+        // Use fit() rather than term.resize() so the render service is
+        // cleared before the resize — otherwise stale glyphs from the
+        // previous geometry can survive on the canvas, very visible in
+        // alternate buffer mode where there is no scrollback to mask it.
+        termData.fitAddon.fit();
+        if (window.innerWidth <= 768) {
+            const safeCols = Math.max(20, term.cols - 1);
+            if (safeCols !== term.cols) term.resize(safeCols, term.rows);
+        }
+
         this.syncViewport(termData);
 
         if (wasAtBottom) {
