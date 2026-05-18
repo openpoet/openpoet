@@ -990,21 +990,33 @@ class TerminalManager {
     // calculate 1-2 more columns than actually fit visually. When the PTY
     // has more cols than the rendered terminal, TUI redraws (ANSI escapes)
     // wrap at the wrong position, causing garbled/duplicated lines.
+    //
+    // Each term.resize() also triggers a PTY SIGWINCH, which makes the
+    // Claude Code TUI redraw the task list / status bar without emitting
+    // clear-to-EOL. Sub-cell rows oscillations (e.g. scrollbar appearing,
+    // 1px height shift from a panel) would otherwise accumulate visual
+    // garbage over the session.
     safeFit(termData) {
         if (!termData || !termData.fitAddon || !termData.terminal) return;
         const term = termData.terminal;
         const buf = term.buffer.active;
         const wasAtBottom = buf.viewportY >= buf.baseY;
         const prevViewportY = buf.viewportY;
-        termData.fitAddon.fit();
 
+        const proposed = termData.fitAddon.proposeDimensions();
+        if (!proposed) return;
+
+        let cols = proposed.cols;
+        let rows = proposed.rows;
         if (window.innerWidth <= 768) {
-            const safeCols = Math.max(20, term.cols - 1);
-            if (safeCols !== term.cols) {
-                term.resize(safeCols, term.rows);
-            }
+            cols = Math.max(20, cols - 1);
         }
 
+        const colsDelta = Math.abs(cols - term.cols);
+        const rowsDelta = Math.abs(rows - term.rows);
+        if (colsDelta === 0 && rowsDelta < 2) return;
+
+        term.resize(cols, rows);
         this.syncViewport(termData);
 
         if (wasAtBottom) {
