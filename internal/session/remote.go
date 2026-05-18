@@ -94,7 +94,14 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 		ssh.TTY_OP_ISPEED: 14400,
 		ssh.TTY_OP_OSPEED: 14400,
 	}
-	if err := session.RequestPty("xterm-256color", 24, 80, modes); err != nil {
+	// Initial PTY size matches the typical post-fit dimensions on a 1400px
+	// terminal wrapper with the default font metrics (~164 cols x 48 rows).
+	// This minimizes the SIGWINCH the remote PTY sees as soon as the client
+	// connects and applies the CSS cap — the Claude Code TUI on Windows
+	// ConPTY duplicates its task-list / footer when reflowing from a small
+	// initial size (24x80) to a wide terminal, leaving stale rows in the
+	// buffer. Starting close to the final size keeps the reflow minimal.
+	if err := session.RequestPty("xterm-256color", 48, 164, modes); err != nil {
 		session.Close()
 		client.Close()
 		return fmt.Errorf("failed to request PTY: %w", err)

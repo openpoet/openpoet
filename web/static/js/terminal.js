@@ -167,6 +167,23 @@ class TerminalManager {
             }, 800);
         }
 
+        // History replay from the WebSocket starts arriving immediately after
+        // setupWebSocket and lands on the still-default 80x24 grid before the
+        // double-rAF fit runs. xterm reflows the cells when we resize, but the
+        // canvas/texture-atlas keeps glyphs at the pre-resize positions, so
+        // the user sees mangled characters in cells that are themselves
+        // correct. Force a single texture-atlas drop + repaint a beat after
+        // the replay settles to clean it up. Cheap when there's nothing to
+        // fix (atlas is just rebuilt lazily on next render).
+        setTimeout(() => {
+            const td = this.terminals.get(sessionId);
+            if (!td?.terminal) return;
+            if (typeof td.terminal.clearTextureAtlas === 'function') {
+                td.terminal.clearTextureAtlas();
+            }
+            td.terminal.refresh(0, td.terminal.rows - 1);
+        }, 1500);
+
         // Setup mobile touch scroll with momentum
         if (window.innerWidth <= 768) {
             this.setupMobileTouchScroll(sessionId);
