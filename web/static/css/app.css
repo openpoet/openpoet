@@ -1217,6 +1217,7 @@ body {
     flex-direction: column;
     overflow: hidden;
     position: relative;
+    background-color: var(--color-terminal-bg);
 }
 
 .terminal-header {
@@ -1246,6 +1247,9 @@ body {
     position: relative;
     background-color: var(--color-terminal-bg);
     overflow: hidden;
+    width: 100%;
+    max-width: 1400px;
+    align-self: center;
 }
 
 /* Individual terminal containers (one per tab) */
