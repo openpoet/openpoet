@@ -113,7 +113,9 @@ class TerminalManager {
             ws,
             sessionName: sessionName || sessionId.substring(0, 8),
             fitAddon,
-            status: 'connecting'
+            status: 'connecting',
+            sessionId,
+            isRemote: window.app?._isRemoteSession?.(sessionId) || false
         });
 
         // Set up WebSocket handlers
@@ -996,12 +998,15 @@ class TerminalManager {
     // clear-to-EOL. Sub-cell rows oscillations (e.g. scrollbar appearing,
     // 1px height shift from a panel) would otherwise accumulate visual
     // garbage over the session. The alternate buffer has no scrollback,
-    // so we apply a stricter threshold there.
+    // and remote PTYs (especially Windows ConPTY over SSH) take longer
+    // to redraw cleanly after a window-change, so we apply progressively
+    // stricter thresholds.
     safeFit(termData) {
         if (!termData || !termData.fitAddon || !termData.terminal) return;
         const term = termData.terminal;
         const buf = term.buffer.active;
         const isAlt = buf.type === 'alternate';
+        const isRemote = !!termData.isRemote;
         const wasAtBottom = buf.viewportY >= buf.baseY;
         const prevViewportY = buf.viewportY;
 
@@ -1016,7 +1021,9 @@ class TerminalManager {
 
         const colsDelta = Math.abs(cols - term.cols);
         const rowsDelta = Math.abs(rows - term.rows);
-        const minRowsDelta = isAlt ? 4 : 2;
+        let minRowsDelta = 2;
+        if (isRemote && isAlt) minRowsDelta = 8;
+        else if (isRemote || isAlt) minRowsDelta = 4;
         if (colsDelta === 0 && rowsDelta < minRowsDelta) return;
 
         // Use fit() rather than term.resize() so the render service is
@@ -1028,6 +1035,18 @@ class TerminalManager {
             const safeCols = Math.max(20, term.cols - 1);
             if (safeCols !== term.cols) term.resize(safeCols, term.rows);
         }
+
+        // The render service clear above is not enough on its own: xterm's
+        // glyph texture atlas can still hold cached glyphs at positions
+        // that no longer match the new geometry, producing visually wrong
+        // characters in buffer cells that are themselves correct (e.g.
+        // "Conversa Portal" rendered as "Cousulta Postal"). Drop the atlas
+        // and force a full viewport repaint so the canvas re-tracks the
+        // buffer.
+        if (typeof term.clearTextureAtlas === 'function') {
+            term.clearTextureAtlas();
+        }
+        term.refresh(0, term.rows - 1);
 
         this.syncViewport(termData);
 
