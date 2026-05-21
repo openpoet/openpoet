@@ -193,7 +193,9 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	var err error
 
 	if project.Type == "local" {
+		dumper := newPTYDumper(sessionID, "local")
 		runner, err = NewLocalRunner(project.Path, envVars, func(data []byte) {
+			dumper.write(data)
 			outputBuffer.Write(data)
 			m.hub.BroadcastSessionOutput(sessionID, data)
 			m.checkForNotificationTriggers(sessionID, data)
@@ -320,7 +322,13 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	var runner Runner
 	var err error
 
+	dumperKind := "local"
+	if project.Type != "local" {
+		dumperKind = "remote"
+	}
+	dumper := newPTYDumper(sessionID, dumperKind)
 	outputHandler := func(data []byte) {
+		dumper.write(data)
 		outputBuffer.Write(data)
 		m.hub.BroadcastSessionOutput(sessionID, data)
 		m.checkForNotificationTriggers(sessionID, data)
@@ -865,7 +873,9 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	// Create output buffer (1MB max)
 	outputBuffer := NewOutputBuffer(1024 * 1024)
 
+	dumper := newPTYDumper(sessionID, "remote")
 	runner, err := remoteRunnerFactory(project, envVars, func(data []byte) {
+		dumper.write(data)
 		outputBuffer.Write(data)
 		m.hub.BroadcastSessionOutput(sessionID, data)
 		m.checkForNotificationTriggers(sessionID, data)
