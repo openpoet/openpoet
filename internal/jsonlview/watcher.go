@@ -50,7 +50,9 @@ func (w *Watcher) Events() <-chan []*SessionEvent {
 }
 
 func (w *Watcher) run() {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	// Fast local polling — local stat() is cheap and brings end-to-end
+	// latency for "user typed → SV card appears" down from ~500ms to ~150ms.
+	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
 	defer close(w.events)
 

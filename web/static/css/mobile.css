@@ -208,6 +208,7 @@
         flex: 1;
         position: relative;
         min-height: 0; /* Allow flex shrink */
+        max-height: none; /* Desktop height cap doesn't apply on mobile */
     }
 
     .terminal-container {

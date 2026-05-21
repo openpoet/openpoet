@@ -943,7 +943,7 @@ class HookManager {
             const inputType = isMulti ? 'checkbox' : 'radio';
             const options = q.options || [];
 
-            let html = `<div class="ask-user-question" data-question-idx="${qIdx}">`;
+            let html = `<div class="ask-user-question" data-question-idx="${qIdx}" data-question-text="${this.escapeHtml(q.question || '')}">`;
             if (q.header) {
                 html += `<div class="ask-user-header">${this.escapeHtml(q.header)}</div>`;
             }
@@ -1035,7 +1035,10 @@ class HookManager {
         const questions = container.querySelectorAll('.ask-user-question');
 
         questions.forEach((qEl) => {
-            const idx = qEl.dataset.questionIdx;
+            // Claude Code expects answers keyed by the question's TEXT (the literal
+            // `question` field), with values being the chosen option label(s).
+            // Multi-select labels join with ", ".
+            const key = qEl.dataset.questionText || qEl.dataset.questionIdx;
             const checked = qEl.querySelectorAll('input[type="radio"]:checked, input[type="checkbox"]:checked');
             const values = [];
 
@@ -1051,7 +1054,7 @@ class HookManager {
             });
 
             if (values.length > 0) {
-                answers[idx] = values.join(', ');
+                answers[key] = values.join(', ');
             }
         });
 
