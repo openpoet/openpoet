@@ -23,6 +23,7 @@ import (
 	"openpoet/internal/websocket"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1217,35 +1218,95 @@ func (a *API) BrowseRemoteDirectory(w http.ResponseWriter, r *http.Request) {
 
 	fm := files.NewRemoteFileManager(tmpProject, a.DecryptFunc())
 
+	// Detect Windows from a probe call to HomeDir — Windows OpenSSH SFTP returns
+	// paths like "/C:/Users/foo", so the home dir's shape tells us the host type
+	// without needing a separate banner check.
+	home, _ := fm.HomeDir()
+	hostIsWindows := looksLikeSFTPWindowsPath(home)
+
 	// Default to the remote user's home directory when no path is specified
 	if input.Path == "" {
-		home, err := fm.HomeDir()
-		if err != nil {
+		if home == "" {
 			input.Path = "/"
 		} else {
 			input.Path = home
 		}
 	}
 
-	fileList, err := fm.List(input.Path)
+	// Convert client-supplied Windows-native path back to the SFTP-style POSIX
+	// form before talking to SFTP (Windows OpenSSH SFTP returns and accepts
+	// "/C:/..." form, not "C:\..." with backslashes).
+	sftpPath := input.Path
+	if hostIsWindows {
+		sftpPath = windowsPathToSFTP(input.Path)
+	}
+
+	fileList, err := fm.List(sftpPath)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("Cannot browse remote directory: %s", err.Error()))
 		return
 	}
 
+	// Display the path in native form on Windows so the user (and the project
+	// record they save) gets "C:\Users\foo" instead of "/C:/Users/foo".
+	displayCurrent := input.Path
+	if hostIsWindows {
+		displayCurrent = sftpPathToWindows(sftpPath)
+	}
+
 	// Filter to directories only
 	var dirs []files.FileInfo
 	for _, f := range fileList {
-		if f.IsDir {
-			f.Path = filepath.Join(input.Path, f.Name)
-			dirs = append(dirs, f)
+		if !f.IsDir {
+			continue
 		}
+		if hostIsWindows {
+			joined := path.Join(sftpPath, f.Name)
+			f.Path = sftpPathToWindows(joined)
+		} else {
+			f.Path = filepath.Join(input.Path, f.Name)
+		}
+		dirs = append(dirs, f)
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"current": input.Path,
+		"current": displayCurrent,
 		"entries": dirs,
 	})
+}
+
+// looksLikeSFTPWindowsPath reports whether p is in the form Windows OpenSSH
+// SFTP uses — "/C:/Users/foo" — so we can decide whether to treat the host as
+// Windows for path-format purposes.
+func looksLikeSFTPWindowsPath(p string) bool {
+	return len(p) >= 4 && p[0] == '/' && isASCIILetter(p[1]) && p[2] == ':' && (p[3] == '/' || p[3] == '\\')
+}
+
+// windowsPathToSFTP converts a native Windows path ("C:\Users\foo" or
+// "C:/Users/foo") back to the SFTP-style POSIX form ("/C:/Users/foo") that the
+// Windows OpenSSH SFTP server expects.
+func windowsPathToSFTP(p string) string {
+	if p == "" {
+		return p
+	}
+	p = strings.ReplaceAll(p, `\`, "/")
+	if len(p) >= 3 && isASCIILetter(p[0]) && p[1] == ':' && p[2] == '/' {
+		return "/" + p
+	}
+	return p
+}
+
+// sftpPathToWindows is the inverse of windowsPathToSFTP. "/C:/Users/foo" ->
+// "C:\Users\foo".
+func sftpPathToWindows(p string) string {
+	if looksLikeSFTPWindowsPath(p) {
+		p = p[1:]
+	}
+	return strings.ReplaceAll(p, "/", `\`)
+}
+
+func isASCIILetter(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
 }
 
 func (a *API) DeleteProject(w http.ResponseWriter, r *http.Request) {
@@ -1446,19 +1507,14 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		input.EnvVars["OPENPOET_TASK_ID"] = fmt.Sprintf("%d", linkedTask.ID)
 		input.EnvVars["OPENPOET_TASK_TITLE"] = linkedTask.Title
 
-		// Build system prompt so Claude Code starts with full task context
-		description := linkedTask.Description
-		if description == "" {
-			description = "(no description provided)"
-		}
+		// Single-line system prompt: cmd.exe on Windows OpenSSH truncates
+		// quoted args at the first `\r`/`\n`, which corrupts the rest of the
+		// `claude` command line (--mcp-config and friends) and kills the
+		// session before it can start. Keep the prompt one-line and point
+		// Claude at openpoet_get_my_task for the full description.
 		input.EnvVars["OPENPOET_APPEND_SYSTEM_PROMPT"] = fmt.Sprintf(
-			"You have been assigned the following task by OpenPoet:\n\n"+
-				"Title: %s\n\n"+
-				"Description:\n%s\n\n"+
-				"IMPORTANT: Communicate with the user in the same language used in the task title and description above. "+
-				"If the task is written in Portuguese, respond in Portuguese. If in English, respond in English. Match the language naturally.\n\n"+
-				"You can use the openpoet_get_my_task MCP tool to fetch updated task details or the openpoet_request_task_evaluation tool when you believe you have completed significant work.",
-			linkedTask.Title, description,
+			"OpenPoet has assigned you task #%d titled %q. Call the openpoet_get_my_task MCP tool now to read its full description and priority. Communicate with the user in the same language as the task; call openpoet_request_task_evaluation when you believe significant work is complete.",
+			linkedTask.ID, linkedTask.Title,
 		)
 	}
 
@@ -1711,19 +1767,11 @@ func (a *API) ReopenSession(w http.ResponseWriter, r *http.Request) {
 		envVars["OPENPOET_TASK_ID"] = fmt.Sprintf("%d", linkedTask.ID)
 		envVars["OPENPOET_TASK_TITLE"] = linkedTask.Title
 
-		description := linkedTask.Description
-		if description == "" {
-			description = "(no description provided)"
-		}
+		// See CreateSession comment: keep system prompt single-line so
+		// Windows cmd.exe quoting doesn't corrupt the rest of the args.
 		envVars["OPENPOET_APPEND_SYSTEM_PROMPT"] = fmt.Sprintf(
-			"You have been assigned the following task by OpenPoet:\n\n"+
-				"Title: %s\n\n"+
-				"Description:\n%s\n\n"+
-				"IMPORTANT: This is a RESUMED session. You are continuing work from a previous conversation.\n\n"+
-				"IMPORTANT: Communicate with the user in the same language used in the task title and description above. "+
-				"If the task is written in Portuguese, respond in Portuguese. If in English, respond in English. Match the language naturally.\n\n"+
-				"You can use the openpoet_get_my_task MCP tool to fetch updated task details or the openpoet_request_task_evaluation tool when you believe you have completed significant work.",
-			linkedTask.Title, description,
+			"This is a RESUMED OpenPoet session for task #%d titled %q. Call the openpoet_get_my_task MCP tool now to read its current description and priority. Communicate with the user in the same language as the task; call openpoet_request_task_evaluation when you believe significant work is complete.",
+			linkedTask.ID, linkedTask.Title,
 		)
 	}
 
@@ -1755,12 +1803,6 @@ func (a *API) AutoRestoreSession(ctx context.Context, sess *database.Session) er
 		return fmt.Errorf("project not found (may have been deleted): %w", err)
 	}
 
-	// Skip remote/SSH sessions — tunnels can't survive restart
-	if project.Type != "local" {
-		a.db.EndSession(ctx, sessionID, "stopped")
-		return fmt.Errorf("skipping remote session %s (tunnels don't survive restart)", sessionID)
-	}
-
 	// Check backend supports resume
 	backend := session.GetBackend(sess.Backend)
 	if !backend.SupportsResume() {
@@ -1782,19 +1824,11 @@ func (a *API) AutoRestoreSession(ctx context.Context, sess *database.Session) er
 		envVars["OPENPOET_TASK_ID"] = fmt.Sprintf("%d", linkedTask.ID)
 		envVars["OPENPOET_TASK_TITLE"] = linkedTask.Title
 
-		description := linkedTask.Description
-		if description == "" {
-			description = "(no description provided)"
-		}
+		// See CreateSession comment: keep system prompt single-line so
+		// Windows cmd.exe quoting doesn't corrupt the rest of the args.
 		envVars["OPENPOET_APPEND_SYSTEM_PROMPT"] = fmt.Sprintf(
-			"You have been assigned the following task by OpenPoet:\n\n"+
-				"Title: %s\n\n"+
-				"Description:\n%s\n\n"+
-				"IMPORTANT: This is a RESUMED session. You are continuing work from a previous conversation.\n\n"+
-				"IMPORTANT: Communicate with the user in the same language used in the task title and description above. "+
-				"If the task is written in Portuguese, respond in Portuguese. If in English, respond in English. Match the language naturally.\n\n"+
-				"You can use the openpoet_get_my_task MCP tool to fetch updated task details or the openpoet_request_task_evaluation tool when you believe you have completed significant work.",
-			linkedTask.Title, description,
+			"This is an AUTO-RESTORED OpenPoet session for task #%d titled %q. Call the openpoet_get_my_task MCP tool now to read its current description and priority. Communicate with the user in the same language as the task; call openpoet_request_task_evaluation when you believe significant work is complete.",
+			linkedTask.ID, linkedTask.Title,
 		)
 	}
 
