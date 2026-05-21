@@ -368,6 +368,11 @@ class TerminalManager {
             if (msg.type === 'session_output' && msg.data) {
                 this.dismissConnectingOverlay(sessionId);
                 terminal.write(msg.data);
+                // Pipe a copy to SV for live PTY streaming while we wait for the
+                // (slower) JSONL assistant event to materialize.
+                if (this.structuredViewActive.get(sessionId)) {
+                    window.structuredView?.onPtyOutput?.(sessionId, msg.data);
+                }
                 // Sync terminal prompt line to mobile input (debounced)
                 this._scheduleMobileInputSync(sessionId);
                 // Clear pending input tracking for activity bar
@@ -621,6 +626,9 @@ class TerminalManager {
                 const msg = JSON.parse(data);
                 if (msg.type === 'session_output' && msg.data) {
                     td.terminal.write(msg.data);
+                    if (this.structuredViewActive.get(sessionId)) {
+                        window.structuredView?.onPtyOutput?.(sessionId, msg.data);
+                    }
                     // Clear pending input tracking for activity bar
                     if (td._awaitingOutput) {
                         td._awaitingOutput = false;
@@ -1139,6 +1147,11 @@ class TerminalManager {
         if (termData && termData.ws && termData.ws.readyState === WebSocket.OPEN) {
             termData.ws.send(JSON.stringify({ type: 'submit_line', data: text }));
             this._trackInput(sessionId, text + '\r');
+            // Optimistic echo on SV — show the user card immediately instead of
+            // waiting ~500ms+ for Claude Code to write the user line to JSONL.
+            if (text && this.structuredViewActive.get(sessionId) && window.structuredView) {
+                window.structuredView.addOptimisticUserMessage?.(sessionId, text);
+            }
         } else {
             flog('TERM-INPUT', `submitTerminalLine SKIPPED: no open WS`);
         }
@@ -1344,6 +1357,50 @@ class TerminalManager {
         const result = text.replace(/^[\s]*[❯>$%#]\s*/, '');
         flog('TERM-READ', `getSessionLineContent: fallback, cursorLine="${text}" -> "${result}"`);
         return result;
+    }
+
+    /**
+     * Detect current Claude Code mode by scanning the xterm buffer for the
+     * status-bar strings the TUI prints. Returns { key, label, icon }.
+     * Falls back to 'default' when no marker is found.
+     */
+    detectClaudeMode(sessionId) {
+        const termData = this.terminals.get(sessionId);
+        if (!termData?.terminal) return { key: 'default', label: 'default', icon: '⏵' };
+
+        const buf = termData.terminal.buffer.active;
+        // Scan the last 60 rows of the active buffer — the status bar is near the bottom
+        const start = Math.max(0, buf.baseY + buf.cursorY - 60);
+        const end = buf.baseY + buf.cursorY + 2;
+        let combined = '';
+        for (let i = start; i <= end; i++) {
+            const line = buf.getLine(i);
+            if (!line) continue;
+            combined += line.translateToString(true).toLowerCase() + '\n';
+        }
+
+        // Order matters: check stronger signals first
+        if (/plan mode (is )?on|⏸ plan mode/.test(combined)) {
+            return { key: 'plan', label: 'plan mode', icon: '⏸' };
+        }
+        if (/bypass(ing)? permissions|--dangerously-skip/.test(combined)) {
+            return { key: 'bypass', label: 'bypass perms', icon: '⚠' };
+        }
+        if (/auto-accept edits|accept edits on|⏵⏵/.test(combined)) {
+            return { key: 'auto', label: 'auto-accept', icon: '⏵⏵' };
+        }
+        return { key: 'default', label: 'default', icon: '⏵' };
+    }
+
+    /**
+     * Send Shift+Tab to the active PTY. Claude Code TUI uses Shift+Tab
+     * to cycle through edit modes (default → auto-accept → plan → default).
+     * CSI Z is the standard xterm sequence for shift-tab (backtab).
+     */
+    sendShiftTab(sessionId) {
+        const termData = this.terminals.get(sessionId);
+        if (!termData?.ws || termData.ws.readyState !== WebSocket.OPEN) return;
+        termData.ws.send(JSON.stringify({ type: 'input', data: '\x1b[Z' }));
     }
 
     // Focus active terminal (desktop only - mobile terminal is read-only)

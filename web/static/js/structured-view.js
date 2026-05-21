@@ -25,16 +25,32 @@ class StructuredViewManager {
         container.className = 'structured-view-container';
         container.id = `structured-view-${sessionId}`;
 
-        // Token bar
+        // Top bar: mode pill (left) + token counters (right)
         const tokenBar = document.createElement('div');
         tokenBar.className = 'sv-token-bar';
         tokenBar.innerHTML = `
-            <span><span class="sv-token-label">In:</span> <span class="sv-token-value" data-token="input">0</span></span>
-            <span><span class="sv-token-label">Out:</span> <span class="sv-token-value" data-token="output">0</span></span>
-            <span><span class="sv-token-label">Cache Read:</span> <span class="sv-token-value" data-token="cache_read">0</span></span>
-            <span><span class="sv-token-label">Cache Write:</span> <span class="sv-token-value" data-token="cache_create">0</span></span>
+            <button class="sv-mode-pill" data-sessionid="${sessionId}" title="Click to cycle Claude Code modes (Shift+Tab)">
+                <span class="sv-mode-icon">⏵</span>
+                <span class="sv-mode-label">default</span>
+                <span class="sv-mode-hint">shift+tab</span>
+            </button>
+            <div class="sv-token-group">
+                <span><span class="sv-token-label">in</span><span class="sv-token-value" data-token="input">0</span></span>
+                <span><span class="sv-token-label">out</span><span class="sv-token-value" data-token="output">0</span></span>
+                <span><span class="sv-token-label">cache r</span><span class="sv-token-value" data-token="cache_read">0</span></span>
+                <span><span class="sv-token-label">cache w</span><span class="sv-token-value" data-token="cache_create">0</span></span>
+            </div>
         `;
         container.appendChild(tokenBar);
+
+        // Wire mode pill: click cycles via Shift+Tab to the PTY
+        const modePill = tokenBar.querySelector('.sv-mode-pill');
+        modePill?.addEventListener('click', () => {
+            window.terminalManager?.sendShiftTab?.(sessionId);
+            // Schedule a re-read after the TUI repaints
+            setTimeout(() => this._refreshMode(sessionId), 80);
+            setTimeout(() => this._refreshMode(sessionId), 250);
+        });
 
         // Messages area
         const messagesEl = document.createElement('div');
@@ -180,16 +196,24 @@ class StructuredViewManager {
             container,
             messagesEl,
             tokenBarEl: tokenBar,
+            modePillEl: modePill,
             inputArea,
             textarea,
             sendToTerminal,
             events: [],
             uuidTypeMap: new Map(), // uuid → event type, for parent-chain detection
             toolIdMap: new Map(), // tool_id → { tool_name, title, cardEl }
+            // message_id → { cardEl, contentEl, mergedMessage } for streaming dedup
+            messageIdMap: new Map(),
             currentProgressWidget: null, // active blinking progress widget
             totalTokens: { input: 0, output: 0, cache_read: 0, cache_create: 0 },
+            // Track which message_ids have already contributed to totalTokens
+            // (assistant chunks stream multiple usage updates per message_id; only
+            // the final stop_reason chunk has the authoritative usage)
+            tokenAccountedIds: new Set(),
             loaded: false,
             userScrolled: false,
+            modeRefreshTimer: null,
         };
 
         // Track user scroll
@@ -226,6 +250,8 @@ class StructuredViewManager {
                 events = data.events || [];
             }
 
+            // Preserve any pending optimistic cards across loads
+            const optimistics = Array.from(view.messagesEl.querySelectorAll('.sv-optimistic'));
             view.messagesEl.innerHTML = '';
 
             if (events.length === 0) {
@@ -236,6 +262,7 @@ class StructuredViewManager {
                 }
                 this._scrollToBottom(view);
             }
+            for (const el of optimistics) view.messagesEl.appendChild(el);
 
             view.loaded = true;
 
@@ -260,10 +287,189 @@ class StructuredViewManager {
         const empty = view.messagesEl.querySelector('.sv-empty');
         if (empty) empty.remove();
 
+        // If this is the real user event matching a pending optimistic echo,
+        // remove the optimistic card before rendering the authoritative one.
+        if (event.type === 'user' && !event.isSidechain) {
+            this._reconcileOptimisticUser(view, event);
+        }
+
+        // The real assistant event has arrived — drop the PTY streaming preview
+        // so the formatted card takes over. We do this BEFORE rendering so the
+        // preview never sits between user and the new assistant card.
+        if (event.type === 'assistant' && view.streamingPreview) {
+            this._stopStreamingPreview(view);
+        }
+
         this._appendEventToDOM(view, event);
+
+        // Streaming preview must always stay anchored at the bottom — moving it
+        // after each append prevents new (real) events from rendering below it.
+        this._pinStreamingPreviewToBottom(view);
 
         if (!view.userScrolled) {
             this._scrollToBottom(view);
+        }
+    }
+
+    _pinStreamingPreviewToBottom(view) {
+        const sp = view.streamingPreview;
+        if (!sp || !sp.cardEl) return;
+        if (view.messagesEl.lastElementChild !== sp.cardEl) {
+            view.messagesEl.appendChild(sp.cardEl);
+        }
+    }
+
+    /**
+     * Show the user's message in the SV immediately, before the JSONL watcher
+     * delivers the real event. The card is removed when the real event arrives
+     * (matched by trimmed text, FIFO).
+     */
+    addOptimisticUserMessage(sessionId, text) {
+        const view = this.views.get(sessionId);
+        if (!view) return;
+        if (!text || !text.trim()) return;
+
+        // Remove "no events" placeholder if present
+        const empty = view.messagesEl.querySelector('.sv-empty');
+        if (empty) empty.remove();
+
+        const div = document.createElement('div');
+        div.className = 'sv-message sv-message--user sv-optimistic';
+        div.dataset.optimisticText = text.trim();
+
+        const header = document.createElement('div');
+        header.className = 'sv-message-header';
+        header.innerHTML = `
+            <span class="sv-role sv-role--user">User</span>
+            <span class="sv-timestamp">${this._formatTime(new Date())}</span>
+        `;
+        div.appendChild(header);
+
+        const content = document.createElement('div');
+        content.className = 'sv-content';
+        const textEl = document.createElement('div');
+        textEl.className = 'sv-text';
+        textEl.textContent = text;
+        content.appendChild(textEl);
+        div.appendChild(content);
+
+        view.messagesEl.appendChild(div);
+        view.userScrolled = false;
+        this._scrollToBottom(view);
+
+        // Begin PTY streaming preview: until the JSONL assistant event arrives,
+        // we mirror Claude Code's TUI output (ANSI-stripped) into a live preview
+        // card so the user sees text growing instead of staring at a void.
+        this._startStreamingPreview(view);
+    }
+
+    /**
+     * Receive a raw PTY chunk (already written into xterm) and, if a streaming
+     * preview is active for this session, append its visible text.
+     */
+    onPtyOutput(sessionId, ptyChunk) {
+        const view = this.views.get(sessionId);
+        if (!view || !view.streamingPreview) return;
+        view.streamingPreview.rawBuffer += ptyChunk;
+        // Trim to last ~32KB to avoid runaway memory
+        if (view.streamingPreview.rawBuffer.length > 32768) {
+            view.streamingPreview.rawBuffer =
+                view.streamingPreview.rawBuffer.slice(-32768);
+        }
+        // Coalesce DOM updates into ~60fps
+        if (view.streamingPreview.rafPending) return;
+        view.streamingPreview.rafPending = true;
+        requestAnimationFrame(() => {
+            view.streamingPreview.rafPending = false;
+            this._renderStreamingPreview(view);
+        });
+    }
+
+    _startStreamingPreview(view) {
+        if (view.streamingPreview) return;
+
+        const div = document.createElement('div');
+        div.className = 'sv-streaming-preview';
+        div.innerHTML = `
+            <div class="sv-stream-header">
+                <span class="sv-stream-dot"></span>
+                <span class="sv-stream-label">streaming from terminal…</span>
+            </div>
+            <pre class="sv-stream-body"></pre>
+        `;
+        view.messagesEl.appendChild(div);
+
+        view.streamingPreview = {
+            cardEl: div,
+            bodyEl: div.querySelector('.sv-stream-body'),
+            rawBuffer: '',
+            rafPending: false,
+            startedAt: Date.now(),
+            // Auto-stop after 90s of silence so we never leak the preview
+            timeoutHandle: setTimeout(() => this._stopStreamingPreview(view), 90000),
+        };
+
+        if (!view.userScrolled) this._scrollToBottom(view);
+    }
+
+    _stopStreamingPreview(view) {
+        if (!view.streamingPreview) return;
+        clearTimeout(view.streamingPreview.timeoutHandle);
+        view.streamingPreview.cardEl?.remove();
+        view.streamingPreview = null;
+    }
+
+    _renderStreamingPreview(view) {
+        const sp = view.streamingPreview;
+        if (!sp) return;
+
+        // Strip ANSI/CSI sequences and box-drawing chrome. We want a clean
+        // readable text — not a perfect TUI reproduction.
+        const cleaned = sp.rawBuffer
+            .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '')   // OSC (hyperlinks)
+            .replace(/\x1b\[[\?0-9;]*[A-Za-z]/g, '')           // CSI
+            .replace(/\x1b[=>]/g, '')                          // DEC modes
+            .replace(/\x1b[()][AB012]/g, '')                   // SCS
+            .replace(/\r/g, '')                                 // CR
+            .replace(/\x07/g, '')                              // BEL
+            .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');     // other control chars
+
+        // Show only the tail (last ~24 lines) so the preview stays focused on
+        // the assistant's current response and doesn't include old scrollback.
+        const lines = cleaned.split('\n');
+        // Skip leading blank/box lines and prefer the bottom
+        const tail = lines.slice(-40);
+        // Drop pure box-drawing dividers and empty lines clumped at the start
+        let firstReal = 0;
+        while (firstReal < tail.length && /^[\s─━─┄┈│]*$/.test(tail[firstReal])) firstReal++;
+        const visible = tail.slice(firstReal).join('\n').trimEnd();
+
+        sp.bodyEl.textContent = visible || '…';
+        if (!view.userScrolled) this._scrollToBottom(view);
+    }
+
+    /**
+     * If an optimistic user card is pending and this real user event matches,
+     * remove the optimistic card so the real one takes its place.
+     */
+    _reconcileOptimisticUser(view, event) {
+        const blocks = event.message?.content_blocks || [];
+        const realText = blocks
+            .filter(b => b.type === 'text')
+            .map(b => (b.text || '').trim())
+            .join('\n')
+            .trim();
+        if (!realText) return;
+
+        const optimistics = view.messagesEl.querySelectorAll('.sv-optimistic');
+        for (const el of optimistics) {
+            const optText = (el.dataset.optimisticText || '').trim();
+            // Loose match: real msg should start with our optimistic text
+            // (Claude Code occasionally appends "(via …)" suffixes)
+            if (optText && (realText === optText || realText.startsWith(optText) || optText.startsWith(realText))) {
+                el.remove();
+                return;
+            }
         }
     }
 
@@ -325,6 +531,42 @@ class StructuredViewManager {
         if (!view.loaded) {
             this.loadEvents(sessionId);
         }
+
+        // Refresh mode pill from terminal buffer immediately and poll while active
+        this._refreshMode(sessionId);
+        if (!view.modeRefreshTimer) {
+            view.modeRefreshTimer = setInterval(() => {
+                if (view.container.classList.contains('active')) {
+                    this._refreshMode(sessionId);
+                }
+            }, 1500);
+        }
+    }
+
+    /**
+     * Detect Claude Code mode by scanning the xterm buffer for status-bar
+     * indicators ("plan mode on", "accept edits", etc) and update the pill.
+     */
+    _refreshMode(sessionId) {
+        const view = this.views.get(sessionId);
+        if (!view?.modePillEl) return;
+
+        const tm = window.terminalManager;
+        const mode = tm?.detectClaudeMode?.(sessionId) || { key: 'default', label: 'default', icon: '⏵' };
+
+        const pill = view.modePillEl;
+        if (pill.dataset.mode === mode.key) return;
+        pill.dataset.mode = mode.key;
+        pill.querySelector('.sv-mode-icon').textContent = mode.icon;
+        pill.querySelector('.sv-mode-label').textContent = mode.label;
+    }
+
+    _scheduleModeRefresh(view) {
+        if (!view?.modePillEl) return;
+        clearTimeout(view._modeRefreshSoon);
+        view._modeRefreshSoon = setTimeout(() => {
+            this._refreshMode(this.activeSessionId);
+        }, 200);
     }
 
     /**
@@ -376,6 +618,10 @@ class StructuredViewManager {
     dispose(sessionId) {
         const view = this.views.get(sessionId);
         if (view) {
+            if (view.modeRefreshTimer) {
+                clearInterval(view.modeRefreshTimer);
+                view.modeRefreshTimer = null;
+            }
             this.stopWatching(sessionId);
             view.container.remove();
             this.views.delete(sessionId);
@@ -399,24 +645,121 @@ class StructuredViewManager {
             // Non-progress event: finalize any active progress widget
             view.currentProgressWidget = null;
 
-            const el = this._renderEvent(view, event);
-            if (el) {
-                view.messagesEl.appendChild(el);
+            // Streaming: assistant events stream as partial chunks sharing one
+            // message_id. The watcher delivers raw chunks. Merge into an existing
+            // card if we've seen this id before so text/tools grow in-place.
+            const msgID = event.type === 'assistant' && event.message?.message_id
+                ? event.message.message_id
+                : null;
+            if (msgID && view.messageIdMap.has(msgID)) {
+                this._updateAssistantCard(view, msgID, event);
+            } else {
+                const el = this._renderEvent(view, event);
+                if (el) {
+                    view.messagesEl.appendChild(el);
+                    if (msgID && event.type === 'assistant') {
+                        const wrapper = el.classList?.contains('sv-message')
+                            ? el
+                            : el.querySelector?.('.sv-message--assistant');
+                        if (wrapper) {
+                            view.messageIdMap.set(msgID, {
+                                cardEl: wrapper,
+                                contentEl: wrapper.querySelector('.sv-content'),
+                                merged: this._cloneMessage(event.message),
+                            });
+                            this._setStreamingState(wrapper, !event.message?.stop_reason);
+                        }
+                    }
+                }
             }
         }
 
-        // Update token counter
+        // Update token counter — only credit a message_id once (use final chunk usage)
         if (event.message?.usage) {
-            const u = event.message.usage;
-            view.totalTokens.input += u.input_tokens || 0;
-            view.totalTokens.output += u.output_tokens || 0;
-            view.totalTokens.cache_read += u.cache_read_tokens || 0;
-            view.totalTokens.cache_create += u.cache_creation_tokens || 0;
-            this._updateTokenBar(view);
+            const msgID = event.message.message_id;
+            if (!msgID || !view.tokenAccountedIds.has(msgID)) {
+                const u = event.message.usage;
+                view.totalTokens.input += u.input_tokens || 0;
+                view.totalTokens.output += u.output_tokens || 0;
+                view.totalTokens.cache_read += u.cache_read_tokens || 0;
+                view.totalTokens.cache_create += u.cache_creation_tokens || 0;
+                this._updateTokenBar(view);
+                if (msgID && event.message.stop_reason) {
+                    view.tokenAccountedIds.add(msgID);
+                }
+            }
         }
 
         // Update input state hint
         this._updateInputState(view, event);
+
+        // Streaming activity → refresh mode soon (TUI may have repainted)
+        if (event.type === 'assistant') {
+            this._scheduleModeRefresh(view);
+        }
+    }
+
+    _cloneMessage(msg) {
+        if (!msg) return null;
+        return {
+            role: msg.role,
+            model: msg.model,
+            message_id: msg.message_id,
+            stop_reason: msg.stop_reason,
+            usage: msg.usage ? { ...msg.usage } : null,
+            content_blocks: (msg.content_blocks || []).map(b => ({ ...b })),
+        };
+    }
+
+    /**
+     * Merge a partial assistant chunk into the existing card.
+     * Mirrors backend mergeAssistantMessage: keeps one block per type
+     * (text/thinking/tool_use) and updates metadata from the newer chunk.
+     */
+    _updateAssistantCard(view, msgID, event) {
+        const slot = view.messageIdMap.get(msgID);
+        if (!slot) return;
+
+        const newMsg = event.message;
+        if (!newMsg) return;
+
+        // Merge content blocks: unique by type+tool_id
+        const seenKeys = new Map(); // key → index in merged.content_blocks
+        slot.merged.content_blocks.forEach((b, i) => {
+            const key = b.type === 'tool_use' ? `tool_use:${b.tool_id}` : b.type;
+            seenKeys.set(key, i);
+        });
+        for (const b of (newMsg.content_blocks || [])) {
+            const key = b.type === 'tool_use' ? `tool_use:${b.tool_id}` : b.type;
+            if (seenKeys.has(key)) {
+                // Replace with newer version (text might have grown)
+                slot.merged.content_blocks[seenKeys.get(key)] = { ...b };
+            } else {
+                seenKeys.set(key, slot.merged.content_blocks.length);
+                slot.merged.content_blocks.push({ ...b });
+            }
+        }
+
+        // Update metadata
+        if (newMsg.usage) slot.merged.usage = { ...newMsg.usage };
+        if (newMsg.stop_reason) slot.merged.stop_reason = newMsg.stop_reason;
+        if (newMsg.model) slot.merged.model = newMsg.model;
+
+        // Re-render content area (cheap — small messages)
+        this._renderAssistantContent(view, slot.contentEl, slot.merged);
+
+        // Update header tokens & streaming state
+        const u = slot.merged.usage;
+        const tokensEl = slot.cardEl.querySelector('.sv-tokens-inline');
+        if (tokensEl && u) {
+            tokensEl.textContent = `in:${this._formatNum(u.input_tokens)} out:${this._formatNum(u.output_tokens)}`;
+        }
+        this._setStreamingState(slot.cardEl, !slot.merged.stop_reason);
+    }
+
+    _setStreamingState(cardEl, streaming) {
+        if (!cardEl) return;
+        cardEl.classList.toggle('sv-streaming', !!streaming);
     }
 
     _renderEvent(view, event) {
@@ -516,7 +859,7 @@ class StructuredViewManager {
 
         let headerHTML = '<span class="sv-role sv-role--assistant">Assistant</span>';
         if (msg.model) {
-            headerHTML += `<span class="sv-model">${this._escapeHtml(msg.model)}</span>`;
+            headerHTML += `<span class="sv-model">${this._escapeHtml(this._shortModel(msg.model))}</span>`;
         }
         headerHTML += `<span class="sv-timestamp">${this._formatTime(event.timestamp)}</span>`;
         if (msg.usage) {
@@ -528,14 +871,44 @@ class StructuredViewManager {
 
         const content = document.createElement('div');
         content.className = 'sv-content';
-
-        for (const block of (msg.content_blocks || [])) {
-            const blockEl = this._renderContentBlock(view, block);
-            if (blockEl) content.appendChild(blockEl);
-        }
-
+        this._renderAssistantContent(view, content, msg);
         div.appendChild(content);
         return div;
+    }
+
+    /**
+     * Render assistant content blocks into `contentEl`, replacing children.
+     * Reuses existing tool_use/tool_result rendering. Called both on initial
+     * render and on partial-chunk updates (streaming).
+     */
+    _renderAssistantContent(view, contentEl, msg) {
+        // Capture which tool toggles were expanded so streaming re-renders
+        // don't collapse the user's open panes.
+        const expandedKeys = new Set();
+        contentEl.querySelectorAll('[data-tool-key].expanded').forEach(el => {
+            expandedKeys.add(el.getAttribute('data-tool-key'));
+        });
+
+        contentEl.innerHTML = '';
+        for (const block of (msg.content_blocks || [])) {
+            const blockEl = this._renderContentBlock(view, block);
+            if (!blockEl) continue;
+            if (block.type === 'tool_use' && block.tool_id) {
+                blockEl.setAttribute?.('data-tool-key', `tool_use:${block.tool_id}`);
+                if (expandedKeys.has(`tool_use:${block.tool_id}`)) {
+                    blockEl.classList?.add('expanded');
+                }
+            }
+            contentEl.appendChild(blockEl);
+        }
+    }
+
+    _shortModel(model) {
+        if (!model) return '';
+        // claude-opus-4-7-something → opus 4.7
+        const m = model.match(/claude-(opus|sonnet|haiku)-(\d+)-(\d+)/i);
+        if (m) return `${m[1].toLowerCase()} ${m[2]}.${m[3]}`;
+        return model.replace(/^claude-/, '');
     }
 
     _renderContentBlock(view, block) {
@@ -591,19 +964,20 @@ class StructuredViewManager {
 
     _renderToolUseBlock(block) {
         const div = document.createElement('div');
-        div.className = 'sv-tool-use';
+        div.className = 'sv-tool-use sv-tool-compact';
 
         const summary = this._toolInputSummary(block.tool_name, block.tool_input);
+        const icon = this._toolIcon(block.tool_name);
 
         div.innerHTML = `
             <button class="sv-tool-toggle">
-                <span class="sv-tool-icon">&#9881;</span>
+                <span class="sv-tool-icon">${icon}</span>
                 <span class="sv-tool-name">${this._escapeHtml(block.tool_name || 'Tool')}</span>
+                <span class="sv-tool-sep">·</span>
                 <span class="sv-tool-summary">${this._escapeHtml(summary)}</span>
-                <span class="sv-tool-chevron">&#9654;</span>
+                <span class="sv-tool-chevron">▸</span>
             </button>
             <div class="sv-tool-body">
-                <div class="sv-tool-section-label">Input</div>
                 <pre class="sv-tool-input">${this._escapeHtml(this._formatToolInput(block.tool_input))}</pre>
             </div>
         `;
@@ -613,6 +987,27 @@ class StructuredViewManager {
         });
 
         return div;
+    }
+
+    _toolIcon(name) {
+        switch (name) {
+            case 'Bash': return '⌨';
+            case 'Read': return '📄';
+            case 'Write': return '✎';
+            case 'Edit': return '✎';
+            case 'Grep': return '🔍';
+            case 'Glob': return '🔍';
+            case 'WebFetch': return '🌐';
+            case 'WebSearch': return '🌐';
+            case 'Task':
+            case 'Agent': return '🤖';
+            case 'Skill': return '✨';
+            case 'TaskCreate':
+            case 'TaskUpdate':
+            case 'TaskList': return '✓';
+            case 'AskUserQuestion': return '❓';
+            default: return '·';
+        }
     }
 
     _renderDocCardBlock(view, block) {
@@ -712,22 +1107,30 @@ class StructuredViewManager {
 
     _renderToolResultBlock(block) {
         const div = document.createElement('div');
-        div.className = 'sv-tool-result';
+        div.className = 'sv-tool-result sv-tool-compact';
+        if (block.is_error) div.classList.add('sv-tool-result--error');
 
         const content = block.content || '';
         const extractedText = this._extractResultText(content);
         const errorClass = block.is_error ? ' sv-tool-output--error' : '';
+        const icon = block.is_error ? '✕' : '✓';
+
+        // Line count hint for the inline summary
+        const sourceForLines = extractedText || content;
+        const lineCount = sourceForLines ? sourceForLines.split('\n').filter(l => l.length).length : 0;
+        const lineHint = lineCount > 1 ? `${lineCount} lines` : '';
 
         if (extractedText && !block.is_error) {
-            // Render extracted text as markdown
-            const preview = this._plainTextPreview(extractedText, 80);
+            const preview = this._plainTextPreview(extractedText, 90);
 
             div.innerHTML = `
                 <button class="sv-tool-toggle">
-                    <span class="sv-tool-icon">&#9989;</span>
-                    <span class="sv-tool-name">Result</span>
+                    <span class="sv-tool-icon">${icon}</span>
+                    <span class="sv-tool-name">result</span>
+                    <span class="sv-tool-sep">·</span>
                     <span class="sv-tool-summary">${this._escapeHtml(preview)}</span>
-                    <span class="sv-tool-chevron">&#9654;</span>
+                    ${lineHint ? `<span class="sv-tool-meta">${lineHint}</span>` : ''}
+                    <span class="sv-tool-chevron">▸</span>
                 </button>
                 <div class="sv-tool-body">
                     <div class="sv-text markdown-body sv-result-text"></div>
@@ -745,16 +1148,17 @@ class StructuredViewManager {
                 textEl.textContent = extractedText;
             }
         } else {
-            // Try to pretty-print JSON content for readability
             const displayContent = this._formatJsonContent(content);
-            const preview = this._plainTextPreview(content, 80);
+            const preview = this._plainTextPreview(content, 90);
 
             div.innerHTML = `
                 <button class="sv-tool-toggle">
-                    <span class="sv-tool-icon">${block.is_error ? '&#10060;' : '&#9989;'}</span>
-                    <span class="sv-tool-name">Result</span>
+                    <span class="sv-tool-icon">${icon}</span>
+                    <span class="sv-tool-name">result</span>
+                    <span class="sv-tool-sep">·</span>
                     <span class="sv-tool-summary">${this._escapeHtml(preview)}</span>
-                    <span class="sv-tool-chevron">&#9654;</span>
+                    ${lineHint ? `<span class="sv-tool-meta">${lineHint}</span>` : ''}
+                    <span class="sv-tool-chevron">▸</span>
                 </button>
                 <div class="sv-tool-body">
                     <pre class="sv-tool-output${errorClass}">${this._escapeHtml(displayContent)}</pre>
@@ -949,22 +1353,28 @@ class StructuredViewManager {
     }
 
     /**
-     * Generate a clean preview from text, stripping markdown and collapsing whitespace.
+     * Generate a clean preview from text, stripping markdown, ANSI escape
+     * codes, and collapsing whitespace.
      */
     _plainTextPreview(text, maxLen) {
         if (!text) return '';
         const plain = text
-            .replace(/#{1,6}\s+/g, '')     // strip markdown headings
-            .replace(/\*{1,2}([^*]+)\*{1,2}/g, '$1') // strip bold/italic
-            .replace(/`([^`]+)`/g, '$1')   // strip inline code
-            .replace(/\n+/g, ' ')          // collapse newlines
-            .replace(/\s+/g, ' ')          // collapse whitespace
+            // Strip ANSI CSI sequences (e.g. PowerShell coloured output)
+            .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+            // [ESC missing] orphaned codes like "[32;1m" left after PTY mangling
+            .replace(/\[[0-9]+(;[0-9]+)*m/g, '')
+            .replace(/#{1,6}\s+/g, '')                 // markdown headings
+            .replace(/\*{1,2}([^*]+)\*{1,2}/g, '$1')   // bold/italic
+            .replace(/`([^`]+)`/g, '$1')               // inline code
+            .replace(/\n+/g, ' ')                       // collapse newlines
+            .replace(/\s+/g, ' ')                       // collapse whitespace
             .trim();
-        return plain.length > maxLen ? plain.substring(0, maxLen) + '...' : plain;
+        return plain.length > maxLen ? plain.substring(0, maxLen) + '…' : plain;
     }
 
     /**
      * Format JSON content for display, pretty-printing if valid JSON.
+     * Strips ANSI escape sequences so PowerShell/colorized output is readable.
      */
     _formatJsonContent(content) {
         if (!content) return '';
@@ -973,39 +1383,61 @@ class StructuredViewManager {
             const parsed = JSON.parse(trimmed);
             return JSON.stringify(parsed, null, 2);
         } catch (e) {
-            return content;
+            return content
+                .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+                .replace(/\[[0-9]+(;[0-9]+)*m/g, '');
         }
     }
 
     _toolInputSummary(toolName, input) {
         if (!input) return '';
-        if (typeof input === 'string') return input.substring(0, 60);
+        if (typeof input === 'string') return input.substring(0, 90);
 
-        // Common tool shortcuts
+        // Strip workspace prefix so file paths stay readable
+        const shortPath = (p) => {
+            if (!p) return '';
+            return p.replace(/^\/Users\/[^/]+\//, '~/').replace(/^.*\/([^/]+\/[^/]+\/[^/]+)$/, '…/$1');
+        };
+
         switch (toolName) {
             case 'Bash':
-                return input.command || '';
+                return (input.command || '').replace(/\s+/g, ' ').substring(0, 90);
             case 'Read':
-                return input.file_path || '';
+                return shortPath(input.file_path);
             case 'Write':
-                return input.file_path || '';
+                return shortPath(input.file_path);
             case 'Edit':
-                return input.file_path || '';
+                return shortPath(input.file_path);
             case 'Grep':
-                return `${input.pattern || ''} ${input.path || ''}`.trim();
+                return `${input.pattern || ''}${input.path ? ' in ' + shortPath(input.path) : ''}`.trim();
             case 'Glob':
                 return input.pattern || '';
             case 'Skill':
                 return input.skill || '';
             case 'Task':
-                return input.description || '';
-            default:
-                // Try to find a useful short field
+            case 'Agent':
+                return input.description || input.subagent_type || '';
+            case 'TaskCreate':
+            case 'TaskUpdate':
+                return input.subject || input.taskId || '';
+            case 'WebFetch':
+            case 'WebSearch':
+                return input.url || input.query || '';
+            case 'AskUserQuestion': {
+                const q = input.questions?.[0]?.question;
+                return q ? q.substring(0, 90) : '';
+            }
+            default: {
                 const keys = Object.keys(input);
                 if (keys.length === 0) return '';
+                // Prefer string fields with semantic names
+                for (const k of ['name', 'title', 'description', 'subject', 'query', 'url', 'path']) {
+                    if (typeof input[k] === 'string') return input[k].substring(0, 90);
+                }
                 const val = input[keys[0]];
-                if (typeof val === 'string') return val.substring(0, 60);
+                if (typeof val === 'string') return val.substring(0, 90);
                 return '';
+            }
         }
     }
 
