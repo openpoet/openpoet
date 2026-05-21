@@ -31,6 +31,8 @@ type RemoteRunner struct {
 	cancel         context.CancelFunc
 	done           chan struct{}
 	waitErr        error
+	isWindows      bool
+	launcherPath   string // remote path of uploaded launcher, deleted on Stop
 }
 
 func NewRemoteRunner(
@@ -70,7 +72,8 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to connect to SSH server: %w", err)
 	}
 	r.client = client
-	log.Printf("[remote] SSH connection established to %s", addr)
+	r.isWindows = isWindowsServer(client)
+	log.Printf("[remote] SSH connection established to %s (server=%s, windows=%v)", addr, client.ServerVersion(), r.isWindows)
 
 	// Set up reverse tunnel so remote bridge.sh can reach local OpenPoet
 	log.Printf("[remote] Setting up reverse tunnel, envVars before: OPENPOET_HOOK_URL=%s", r.envVars["OPENPOET_HOOK_URL"])
@@ -131,16 +134,35 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to get stderr pipe: %w", err)
 	}
 
-	// Build command with exported environment variables and directory change
-	// Using 'export' so env vars are inherited by claude and its child processes (bridge.sh)
-	// Prepend common binary paths so tools like claude are found in non-interactive SSH sessions
-	cmd := "export PATH=$HOME/.local/bin:$HOME/.nvm/current/bin:/usr/local/bin:$PATH && "
-	for k, v := range r.envVars {
-		cmd += fmt.Sprintf("export %s=%s && ", k, shellQuote(v))
-	}
-	cmd += fmt.Sprintf("cd %s && claude", r.project.Path)
-	for _, arg := range r.cliArgs {
-		cmd += " " + shellQuote(arg)
+	// Build command with exported environment variables and directory change.
+	// On Windows OpenSSH the default shell is cmd.exe, which can't parse the
+	// POSIX `export ... && ...` form, so we upload a .cmd launcher via SFTP
+	// and invoke it instead. That also sidesteps cmd.exe's brutal inline
+	// quoting rules for arguments like the JSON --mcp-config payload.
+	var cmd string
+	if r.isWindows {
+		script := buildWindowsBatchScript(r.envVars, r.project.Path, r.cliArgs)
+		sftpPath, cmdPath, uerr := uploadWindowsLauncher(client, script)
+		if uerr != nil {
+			session.Close()
+			client.Close()
+			return fmt.Errorf("failed to upload Windows launcher: %w", uerr)
+		}
+		r.launcherPath = sftpPath
+		// Quote the path so directories with spaces still work. Within a cmd.exe
+		// command line, double quotes around the executable path are stripped.
+		cmd = fmt.Sprintf(`"%s"`, cmdPath)
+	} else {
+		// Using 'export' so env vars are inherited by claude and its child processes (bridge.sh)
+		// Prepend common binary paths so tools like claude are found in non-interactive SSH sessions
+		cmd = "export PATH=$HOME/.local/bin:$HOME/.nvm/current/bin:/usr/local/bin:$PATH && "
+		for k, v := range r.envVars {
+			cmd += fmt.Sprintf("export %s=%s && ", k, shellQuote(v))
+		}
+		cmd += fmt.Sprintf("cd %s && claude", r.project.Path)
+		for _, arg := range r.cliArgs {
+			cmd += " " + shellQuote(arg)
+		}
 	}
 	log.Printf("[remote] Starting command: %s", cmd)
 
@@ -388,6 +410,10 @@ func (r *RemoteRunner) Stop() error {
 		r.session.Close()
 	}
 
+	if r.launcherPath != "" {
+		removeRemoteFile(r.client, r.launcherPath)
+	}
+
 	if r.client != nil {
 		r.client.Close()
 	}
@@ -459,7 +485,22 @@ func ValidateConnection(project *database.Project, decryptFunc func(string, stri
 	}
 	defer session.Close()
 
-	// Check if path exists
+	if isWindowsServer(client) {
+		// cmd.exe path check. `if exist` is a builtin, so we can call it directly.
+		// `\` at end ensures `if exist` treats the target as a directory.
+		path := normalizeWindowsPath(project.Path)
+		probe := fmt.Sprintf(`if exist "%s\" (echo ok) else (echo missing)`, strings.TrimRight(path, `\/`))
+		output, err := session.CombinedOutput(probe)
+		if err != nil {
+			return fmt.Errorf("failed to validate path on Windows host: %w", err)
+		}
+		if !strings.Contains(string(output), "ok") {
+			return fmt.Errorf("path does not exist or is not accessible: %s", project.Path)
+		}
+		return nil
+	}
+
+	// Check if path exists (POSIX)
 	output, err := session.CombinedOutput(fmt.Sprintf("test -d %s && echo ok", project.Path))
 	if err != nil || string(output) != "ok\n" {
 		return fmt.Errorf("path does not exist or is not accessible: %s", project.Path)

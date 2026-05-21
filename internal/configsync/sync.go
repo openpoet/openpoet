@@ -303,7 +303,11 @@ func (cs *ConfigSyncer) syncToRemote(ctx context.Context, project *database.Proj
 	sftpClient.MkdirAll(skillsDir)
 	sftpClient.MkdirAll(hooksDir)
 
-	// Sync bridge.sh hook script to remote
+	// Sync the bash bridge.sh — claude.exe on Windows ships its own bash and
+	// runs hooks through it (we proved this with stream-json hook responses
+	// like "/usr/bin/bash: line 1: fg: no job control" when the command was
+	// cmd-style %VAR%). So a single bash script works on both POSIX and
+	// Windows hosts.
 	cs.reportProgress(project.ID, "hooks", "running", "Syncing hook scripts to remote...")
 	if err := cs.syncBridgeScriptRemote(client, sftpClient, hooksDir); err != nil {
 		cs.reportProgress(project.ID, "hooks", "error", err.Error())
