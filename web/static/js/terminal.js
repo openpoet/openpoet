@@ -294,6 +294,18 @@ class TerminalManager {
             terminal.writeln('\x1b[32mConnected to session\x1b[0m');
             ws.send(JSON.stringify({ type: 'subscribe', channel: `session:${sessionId}` }));
 
+            // Report our current terminal dimensions immediately so the
+            // server's min-size logic for multi-client sessions can include
+            // us. The initial double-rAF fit usually runs before the WS
+            // finishes opening, so the `terminal.onResize` it fires gets
+            // dropped (`ws.readyState !== OPEN`) and the server never learns
+            // our size unless the layout subsequently shifts. Send whatever
+            // dimensions we have now; later fits will refine the value.
+            ws.send(JSON.stringify({
+                type: 'resize',
+                data: { cols: terminal.cols, rows: terminal.rows }
+            }));
+
             // Update status to running
             this.updateSessionStatus(sessionId, 'running');
 
