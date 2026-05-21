@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -241,9 +242,11 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	backend := r.Header.Get("X-Backend")
 	isCopilot := backend == "copilot" || backend == "acp"
 
-	// Parse the hook event JSON
+	// Parse the hook event JSON. Windows claude.exe pipes hook input using the
+	// host's ANSI codepage; normalize to UTF-8 so JSON strings round-trip cleanly.
+	rawBody, _ := io.ReadAll(r.Body)
 	var hookEvent map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&hookEvent); err != nil {
+	if err := json.Unmarshal(normalizeUTF8Body(rawBody), &hookEvent); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
@@ -668,8 +671,9 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rawBody, _ := io.ReadAll(r.Body)
 	var hookEvent map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&hookEvent); err != nil {
+	if err := json.Unmarshal(normalizeUTF8Body(rawBody), &hookEvent); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
