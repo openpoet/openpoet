@@ -33,8 +33,32 @@ func ResolveJSONLPath(projectPath, sessionID string) string {
 // remoteHomeDir is the remote user's home directory (from SFTP Getwd()).
 // projectPath is the absolute project path on the remote machine.
 // Unlike the local version, this cannot resolve symlinks since the path is remote.
+//
+// For Windows hosts the project path comes back from SFTP as "/C:/Users/foo",
+// but claude.exe encodes the *native* form ("C:\Users\foo"), producing
+// folders like "C--Users-foo" — no leading "-" because the original path
+// doesn't start with a separator. Detect that shape and skip the leading-dash
+// convention that POSIX paths need.
 func ResolveRemoteJSONLPath(projectPath, sessionID, remoteHomeDir string) string {
+	if isSFTPWindowsAbsPath(projectPath) {
+		// Strip the leading "/" so we encode "C:/Users/foo" rather than
+		// "/C:/Users/foo".
+		trimmed := projectPath[1:]
+		encoded := nonAlphanumRe.ReplaceAllString(trimmed, "-")
+		return filepath.Join(remoteHomeDir, ".claude", "projects", encoded, sessionID+".jsonl")
+	}
 	trimmed := strings.TrimPrefix(projectPath, "/")
 	encoded := "-" + nonAlphanumRe.ReplaceAllString(trimmed, "-")
 	return filepath.Join(remoteHomeDir, ".claude", "projects", encoded, sessionID+".jsonl")
+}
+
+func isSFTPWindowsAbsPath(p string) bool {
+	if len(p) < 4 || p[0] != '/' || p[2] != ':' {
+		return false
+	}
+	c := p[1]
+	if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+		return false
+	}
+	return p[3] == '/' || p[3] == '\\'
 }
