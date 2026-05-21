@@ -1241,7 +1241,12 @@ body {
     gap: 8px;
 }
 
-/* Wrapper for multiple terminal containers */
+/* Wrapper for multiple terminal containers.
+ * Width cap (1400px) keeps PTY cols < 200 to avoid Claude Code's 2-col TUI.
+ * Height cap (~1080px) keeps rows close to the remote PTY's init size (48
+ * rows in internal/session/remote.go); without this, tall viewports settle
+ * around 59 rows and the 48→59 SIGWINCH makes the Windows ConPTY Claude
+ * Code TUI duplicate footer/task-list rows in the scrollback. */
 .terminal-containers-wrapper {
     flex: 1;
     position: relative;
@@ -1249,7 +1254,14 @@ body {
     overflow: hidden;
     width: 100%;
     max-width: 1400px;
+    max-height: 1080px;
     align-self: center;
+    /* Push wrapper to the bottom of .terminal-main-area when max-height
+     * leaves residual vertical space, so the Claude Code input bar (drawn
+     * at the bottom of the xterm grid) stays where the user expects —
+     * at the bottom of the viewport. Without this the cap pins the wrapper
+     * to the top and the input floats ~200px above the viewport bottom. */
+    margin-top: auto;
 }
 
 /* Individual terminal containers (one per tab) */
