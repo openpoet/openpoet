@@ -917,7 +917,7 @@ class StructuredViewManager {
                 return this._renderTextBlock(block);
             case 'tool_use':
                 if (block.tool_name === 'AskUserQuestion') {
-                    return this._renderAskUserBlock(block);
+                    return this._renderAskUserBlock(block, view);
                 }
                 if (block.tool_name === 'TodoWrite') {
                     return this._renderTodoWriteBlock(block);
@@ -939,6 +939,10 @@ class StructuredViewManager {
                         }
                     }
                     return null; // suppress generic tool_result for doc cards
+                }
+                if (meta?.tool_name === 'AskUserQuestion' && meta.cardEl) {
+                    this._applyAskUserAnswers(meta, block.content || '');
+                    return null; // suppress generic tool_result for ask-user cards
                 }
                 return this._renderToolResultBlock(block);
             }
@@ -1285,7 +1289,7 @@ class StructuredViewManager {
         return div;
     }
 
-    _renderAskUserBlock(block) {
+    _renderAskUserBlock(block, view) {
         const input = block.tool_input || {};
         const questions = input.questions || [];
         if (questions.length === 0) return this._renderToolUseBlock(block);
@@ -1301,6 +1305,7 @@ class StructuredViewManager {
         for (const q of questions) {
             const qDiv = document.createElement('div');
             qDiv.className = 'sv-ask-question';
+            qDiv.dataset.question = q.question || '';
 
             if (q.question) {
                 const text = document.createElement('div');
@@ -1317,6 +1322,7 @@ class StructuredViewManager {
                 for (const opt of options) {
                     const optEl = document.createElement('div');
                     optEl.className = 'sv-ask-option';
+                    optEl.dataset.label = opt.label || '';
 
                     const label = document.createElement('span');
                     label.className = 'sv-ask-option-label';
@@ -1339,7 +1345,82 @@ class StructuredViewManager {
             div.appendChild(qDiv);
         }
 
+        // Register so the matching tool_result can highlight the chosen options
+        if (view?.toolIdMap && block.tool_id) {
+            view.toolIdMap.set(block.tool_id, {
+                tool_name: 'AskUserQuestion',
+                cardEl: div,
+                questions,
+            });
+        }
+
         return div;
+    }
+
+    /**
+     * Parse the tool_result string from AskUserQuestion and update the card:
+     * highlight the option that matches each answer; if the answer doesn't
+     * match any option label, render it as a free-text answer below.
+     */
+    _applyAskUserAnswers(meta, content) {
+        if (!content || !meta?.cardEl) return;
+
+        // Format: User has answered your questions: "Q1"="A1", "Q2"="A2", ...
+        // Extract Q/A pairs with a regex that handles escaped quotes loosely.
+        const pairs = [];
+        const re = /"([^"]+)"\s*=\s*"((?:[^"\\]|\\.)*)"/g;
+        let m;
+        while ((m = re.exec(content)) !== null) {
+            pairs.push({ q: m[1], a: m[2] });
+        }
+        if (pairs.length === 0) return;
+
+        const qNodes = Array.from(meta.cardEl.querySelectorAll('.sv-ask-question'));
+
+        // Group answers by question (multiSelect: multiple pairs share same Q)
+        const byQ = new Map();
+        for (const { q, a } of pairs) {
+            if (!byQ.has(q)) byQ.set(q, []);
+            byQ.get(q).push(a);
+        }
+
+        for (const [questionText, answers] of byQ.entries()) {
+            const qNode = qNodes.find(n => (n.dataset.question || '') === questionText);
+            if (!qNode) continue;
+
+            const optionEls = Array.from(qNode.querySelectorAll('.sv-ask-option'));
+            const unmatched = [];
+
+            for (const answer of answers) {
+                // Strip the " (Recommended)" suffix the platform appends to the
+                // first option's label when echoing the answer back.
+                const cleaned = answer.replace(/\s*\(Recommended\)\s*$/, '').trim();
+                const matchEl = optionEls.find(el => {
+                    const lbl = (el.dataset.label || '').trim();
+                    return lbl && (lbl === cleaned || lbl === answer.trim());
+                });
+                if (matchEl) {
+                    matchEl.classList.add('sv-ask-option--selected');
+                } else if (answer.trim()) {
+                    unmatched.push(answer.trim());
+                }
+            }
+
+            if (unmatched.length > 0) {
+                // Drop next to the highlighted option, or at the end if none
+                const lastSelected = qNode.querySelector('.sv-ask-option--selected:last-of-type');
+                const answerEl = document.createElement('div');
+                answerEl.className = 'sv-ask-answer-text';
+                answerEl.textContent = unmatched.join('\n');
+                if (lastSelected) {
+                    lastSelected.insertAdjacentElement('afterend', answerEl);
+                } else {
+                    qNode.appendChild(answerEl);
+                }
+            }
+        }
+
+        meta.cardEl.classList.add('sv-ask-user--answered');
     }
 
     _updateInputState(view, event) {
@@ -1368,7 +1449,7 @@ class StructuredViewManager {
                     label = 'responding';
                 }
             } else if (msg.role === 'user') {
-                label = 'waiting for response';
+                label = 'thinking';
             }
         }
 
