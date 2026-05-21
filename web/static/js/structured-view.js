@@ -919,6 +919,9 @@ class StructuredViewManager {
                 if (block.tool_name === 'AskUserQuestion') {
                     return this._renderAskUserBlock(block);
                 }
+                if (block.tool_name === 'TodoWrite') {
+                    return this._renderTodoWriteBlock(block);
+                }
                 if (block.tool_name?.endsWith('openpoet_create_document')) {
                     return this._renderDocCardBlock(view, block);
                 }
@@ -1230,6 +1233,58 @@ class StructuredViewManager {
         }
     }
 
+    _renderTodoWriteBlock(block) {
+        const todos = (block.tool_input && block.tool_input.todos) || [];
+        if (!Array.isArray(todos) || todos.length === 0) {
+            return this._renderToolUseBlock(block);
+        }
+
+        const completed = todos.filter(t => t.status === 'completed').length;
+        const total = todos.length;
+        const allDone = completed === total;
+
+        const div = document.createElement('div');
+        div.className = 'sv-todo-list';
+        if (allDone) div.classList.add('sv-todo-list--done');
+
+        const header = document.createElement('div');
+        header.className = 'sv-todo-header';
+        header.innerHTML = `
+            <span class="sv-todo-header-icon">${allDone ? '&#10003;' : '&#9776;'}</span>
+            <span class="sv-todo-header-title">Task list</span>
+            <span class="sv-todo-header-count">${completed}/${total}</span>
+        `;
+        div.appendChild(header);
+
+        const list = document.createElement('ul');
+        list.className = 'sv-todo-items';
+
+        for (const todo of todos) {
+            const status = todo.status || 'pending';
+            const li = document.createElement('li');
+            li.className = `sv-todo-item sv-todo-${status}`;
+
+            const text = (status === 'in_progress' && todo.activeForm)
+                ? todo.activeForm
+                : (todo.content || '');
+
+            let iconHTML;
+            if (status === 'completed') {
+                iconHTML = '<span class="sv-todo-check sv-todo-check--done">&#10003;</span>';
+            } else if (status === 'in_progress') {
+                iconHTML = '<span class="sv-todo-check sv-todo-check--active"></span>';
+            } else {
+                iconHTML = '<span class="sv-todo-check sv-todo-check--pending"></span>';
+            }
+
+            li.innerHTML = `${iconHTML}<span class="sv-todo-text">${this._escapeHtml(text)}</span>`;
+            list.appendChild(li);
+        }
+
+        div.appendChild(list);
+        return div;
+    }
+
     _renderAskUserBlock(block) {
         const input = block.tool_input || {};
         const questions = input.questions || [];
@@ -1295,26 +1350,60 @@ class StructuredViewManager {
         if (!stateEl) return;
 
         const msg = event.message;
-        if (!msg) {
-            stateEl.textContent = '';
+        let label = null; // null => idle
+
+        if (event.type === 'progress') {
+            label = 'working';
+        } else if (msg) {
+            if (msg.role === 'assistant') {
+                if (msg.stop_reason === 'end_turn') {
+                    label = null;
+                    const textarea = isMobile
+                        ? document.getElementById('mobile-terminal-input')
+                        : view.textarea;
+                    if (textarea) textarea.placeholder = isMobile ? 'Message...' : 'Send a message...';
+                } else if (msg.stop_reason === 'tool_use') {
+                    label = 'using tools';
+                } else {
+                    label = 'responding';
+                }
+            } else if (msg.role === 'user') {
+                label = 'waiting for response';
+            }
+        }
+
+        this._setStatusIndicator(view, stateEl, label);
+    }
+
+    _setStatusIndicator(view, stateEl, label) {
+        if (view._statusIdleTimer) {
+            clearTimeout(view._statusIdleTimer);
+            view._statusIdleTimer = null;
+        }
+
+        if (!label) {
+            stateEl.innerHTML = '';
+            stateEl.classList.remove('sv-state-active');
             return;
         }
 
-        if (msg.role === 'assistant') {
-            if (msg.stop_reason === 'end_turn') {
-                stateEl.textContent = '';
-                const textarea = isMobile
-                    ? document.getElementById('mobile-terminal-input')
-                    : view.textarea;
-                if (textarea) textarea.placeholder = isMobile ? 'Message...' : 'Send a message...';
-            } else if (msg.stop_reason === 'tool_use') {
-                stateEl.textContent = 'Claude is using tools...';
-            } else {
-                stateEl.textContent = 'Claude is responding...';
-            }
-        } else if (msg.role === 'user') {
-            stateEl.textContent = 'Waiting for response...';
+        if (stateEl.dataset.label !== label) {
+            stateEl.dataset.label = label;
+            stateEl.innerHTML = `
+                <span class="sv-state-dots" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                </span>
+                <span class="sv-state-text">Claude is ${this._escapeHtml(label)}</span>
+            `;
         }
+        stateEl.classList.add('sv-state-active');
+
+        // Auto-clear if nothing new arrives for a while (e.g. session crashed)
+        view._statusIdleTimer = setTimeout(() => {
+            stateEl.innerHTML = '';
+            stateEl.classList.remove('sv-state-active');
+            delete stateEl.dataset.label;
+        }, 45000);
     }
 
     // --- Helpers ---
