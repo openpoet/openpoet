@@ -787,6 +787,7 @@
     font-size: 13px;
     text-align: left;
     width: 100%;
+    transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
 }
 
 .sv-ask-option-label {
@@ -797,6 +798,38 @@
     font-size: 12px;
     color: var(--color-text-muted);
     margin-top: 2px;
+}
+
+/* Once the user answered, dim unselected options and highlight the chosen one. */
+.sv-ask-user--answered .sv-ask-option {
+    opacity: 0.5;
+}
+
+.sv-ask-option--selected,
+.sv-ask-user--answered .sv-ask-option--selected {
+    opacity: 1;
+    border-color: var(--color-primary);
+    background: rgba(var(--color-primary-rgb), 0.12);
+    box-shadow: 0 0 0 1px var(--color-primary) inset;
+}
+
+.sv-ask-option--selected .sv-ask-option-label {
+    color: var(--color-primary);
+    font-weight: 600;
+}
+
+/* Free-text answer (e.g. "Other" with notes) shown below the selected option. */
+.sv-ask-answer-text {
+    margin-top: 6px;
+    padding: 8px 12px;
+    border-left: 3px solid var(--color-primary);
+    background: var(--color-bg);
+    border-radius: 0 6px 6px 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--color-text);
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 /* ==================== Document Cards ==================== */
