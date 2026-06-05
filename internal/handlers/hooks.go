@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -521,14 +522,24 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 			for k, v := range toolInput {
 				updatedInput[k] = v
 			}
-			// Convert answers to interface{} map for JSON
+			// Claude Code matches answers to questions by the question TEXT, not by
+			// position. Older (and stale-in-memory) web clients keyed answers by
+			// index ("0","1",…); those keys never match a question, so Claude Code
+			// silently drops the answer — most visibly the free-text "Other" answer,
+			// which has no option label to fall back on. Remap any numeric-index key
+			// to its question text so answers from any client version are honored.
+			questionTexts := extractQuestionTexts(toolInput)
 			answersMap := make(map[string]interface{})
 			for k, v := range resp.Answers {
-				answersMap[k] = v
+				key := k
+				if idx, err := strconv.Atoi(k); err == nil && idx >= 0 && idx < len(questionTexts) && questionTexts[idx] != "" {
+					key = questionTexts[idx]
+				}
+				answersMap[key] = v
 			}
 			updatedInput["answers"] = answersMap
 			decision.UpdatedInput = updatedInput
-			log.Printf("[hooks] AskUserQuestion answered for session %s: %v", sessionID, resp.Answers)
+			log.Printf("[hooks] AskUserQuestion answered for session %s: %v", sessionID, answersMap)
 		} else if resp.Behavior == "allowAlways" {
 			decision.Behavior = "allow"
 			// Pass permission suggestions as updatedPermissions to Claude Code
@@ -616,6 +627,26 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(output)
 	}
+}
+
+// extractQuestionTexts pulls the ordered question texts out of an AskUserQuestion
+// tool_input (shape: {"questions": [{"question": "..."}, ...]}). Used to remap
+// index-keyed answers from older web clients onto the question text that Claude
+// Code matches against. Returns nil when the shape doesn't match.
+func extractQuestionTexts(toolInput map[string]interface{}) []string {
+	questions, ok := toolInput["questions"].([]interface{})
+	if !ok {
+		return nil
+	}
+	texts := make([]string, len(questions))
+	for i, q := range questions {
+		if qm, ok := q.(map[string]interface{}); ok {
+			if qt, ok := qm["question"].(string); ok {
+				texts[i] = qt
+			}
+		}
+	}
+	return texts
 }
 
 // HandlePermissionRespond handles POST /api/hooks/permission/{sessionId}/respond
