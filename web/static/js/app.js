@@ -190,6 +190,11 @@ class OpenPoet {
         });
 
         this.currentView = viewName;
+        if (viewName === 'terminal') {
+            window.terminalManager?.resumeActiveResize?.();
+        } else {
+            window.terminalManager?.releaseAllResize?.();
+        }
 
         // Close sidebar on mobile
         document.getElementById('sidebar')?.classList.remove('open');
@@ -278,6 +283,7 @@ class OpenPoet {
             this.currentView = 'terminal';
         }
         this._updateNavForTerminal();
+        window.terminalManager?.resumeActiveResize?.();
     }
 
     refreshViewData(viewName) {
@@ -810,6 +816,7 @@ class OpenPoet {
                     </div>
                     ${project.backend === 'copilot' ? '<span class="badge badge-copilot">Copilot</span>' : ''}
                     ${project.backend === 'acp' ? '<span class="badge badge-acp">ACP</span>' : ''}
+                    ${project.backend === 'codex' ? '<span class="badge badge-codex">Codex</span>' : ''}
                     <span class="badge badge-${project.type}">${project.type}</span>
                 </div>
                 ${tagChips ? `<div class="card-tags">${tagChips}</div>` : ''}
@@ -3115,8 +3122,12 @@ class OpenPoet {
                 this.api('GET', '/sessions'),
                 this.api('GET', '/sessions/active-details')
             ]);
-            this.sessions = sessions;
             this.activeSessionDetails = activeDetails || [];
+            const activeById = new Map(this.activeSessionDetails.map(s => [s.id, s]));
+            this.sessions = sessions.map(s => {
+                const active = activeById.get(s.id);
+                return active ? { ...s, ...active } : s;
+            });
             this.renderSessions();
             this._restoreScrollTop('sessions-list', this._viewState['sessions']?.scrollTop);
         } catch (error) {
@@ -3217,8 +3228,10 @@ class OpenPoet {
 
         const isCopilot = session.backend === 'copilot';
         const isACP = session.backend === 'acp';
+        const isCodex = session.backend === 'codex';
         const backendBadge = isCopilot ? '<span class="badge badge-copilot" style="margin-left:4px;">Copilot</span>'
-            : isACP ? '<span class="badge badge-acp" style="margin-left:4px;">ACP</span>' : '';
+            : isACP ? '<span class="badge badge-acp" style="margin-left:4px;">ACP</span>'
+            : isCodex ? '<span class="badge badge-codex" style="margin-left:4px;">Codex</span>' : '';
 
         return `
             <div class="session-card" onclick="app.openTerminal('${session.id}')">
@@ -3239,7 +3252,7 @@ class OpenPoet {
                         <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                         <span class="session-elapsed" data-start="${session.start_time}">${elapsed}</span>
                     </span>
-                    ${!isCopilot && !isACP ? `<span class="session-card-stat" title="Tokens used">
+                    ${!isCopilot && !isACP && !isCodex ? `<span class="session-card-stat" title="Tokens used">
                         <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
                         ${tokenLabel}${costLabel ? ` (${costLabel})` : ''}
                     </span>` : ''}
@@ -3307,7 +3320,7 @@ class OpenPoet {
         const tabData = this.openTabs.get(sessionId);
         if (tabData) {
             const tabName = tabData.sessionName;
-            window.terminalManager.connect(sessionId, tabName);
+            window.terminalManager.connect(sessionId, tabName, session);
             tabData.connected = true;
         }
 
@@ -3590,7 +3603,7 @@ class OpenPoet {
                 const session = this.sessions.find(s => s.id === sessionId);
                 if (session) {
                     const tabName = tabData.sessionName;
-                    window.terminalManager.connect(sessionId, tabName);
+                    window.terminalManager.connect(sessionId, tabName, session);
                     tabData.connected = true;
                 }
             }
@@ -4050,7 +4063,7 @@ class OpenPoet {
                 // Connect terminal if not connected
                 const session = this.sessions.find(s => s.id === sessionId);
                 if (session) {
-                    window.terminalManager.connect(sessionId, tabData.sessionName);
+                    window.terminalManager.connect(sessionId, tabData.sessionName, session);
                     tabData.connected = true;
                 }
             }
@@ -4108,6 +4121,14 @@ class OpenPoet {
 
     // ==================== MOBILE TERMINAL INPUT ====================
 
+    resetMobileTerminalInput(input = document.getElementById('mobile-terminal-input')) {
+        if (!input) return;
+        input._lastSyncedValue = '';
+        input.value = '';
+        input.style.height = '44px';
+        input.style.overflow = 'hidden';
+    }
+
     setupMobileTerminalInput() {
         const input = document.getElementById('mobile-terminal-input');
         const sendBtn = document.getElementById('mobile-terminal-send');
@@ -4144,6 +4165,34 @@ class OpenPoet {
                     return;
                 }
                 const tm = window.terminalManager;
+
+                if (tm?.codexSlashPalette?.open && tm.codexSlashPalette.sessionId === sessionId) {
+                    if (newVal !== oldVal) {
+                        if (newVal.length < oldVal.length) {
+                            for (let i = 0; i < oldVal.length - newVal.length; i++) {
+                                tm.codexSlashPalette.consume('\x7f');
+                            }
+                        } else if (newVal.startsWith(oldVal)) {
+                            tm.codexSlashPalette.consume(newVal.substring(oldVal.length));
+                        } else {
+                            for (let i = 0; i < oldVal.length; i++) {
+                                tm.codexSlashPalette.consume('\x7f');
+                            }
+                            tm.codexSlashPalette.consume(newVal);
+                        }
+                    }
+                    this.resetMobileTerminalInput(input);
+                    return;
+                }
+
+                if (oldVal === '' && newVal.startsWith('/') && tm?._handleCodexSlashInput?.(sessionId, '/')) {
+                    const rest = newVal.substring(1);
+                    if (rest) {
+                        tm.codexSlashPalette.consume(rest);
+                    }
+                    this.resetMobileTerminalInput(input);
+                    return;
+                }
 
                 if (newVal === oldVal) {
                     flog('MOBILE-INPUT', 'deferred tick SKIP — no change');
@@ -4195,13 +4244,32 @@ class OpenPoet {
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
+                const tm = window.terminalManager;
+                if (tm?.codexSlashPalette?.open && tm.codexSlashPalette.sessionId === tm.activeSessionId) {
+                    tm.codexSlashPalette.consume('\r');
+                    this.resetMobileTerminalInput(input);
+                    return;
+                }
                 flog('MOBILE-INPUT', `Enter pressed, calling sendMobileTerminalInput. value="${input.value}"`);
                 this.sendMobileTerminalInput();
+            } else if (e.key === 'Escape') {
+                const tm = window.terminalManager;
+                if (tm?.codexSlashPalette?.open && tm.codexSlashPalette.sessionId === tm.activeSessionId) {
+                    e.preventDefault();
+                    tm.codexSlashPalette.consume('\x1b');
+                    this.resetMobileTerminalInput(input);
+                }
             }
         });
 
         // Send button sends Enter to terminal
         sendBtn.addEventListener('click', () => {
+            const tm = window.terminalManager;
+            if (tm?.codexSlashPalette?.open && tm.codexSlashPalette.sessionId === tm.activeSessionId) {
+                tm.codexSlashPalette.consume('\r');
+                this.resetMobileTerminalInput(input);
+                return;
+            }
             flog('MOBILE-INPUT', `Send button clicked. value="${input.value}"`);
             this.sendMobileTerminalInput();
         });
@@ -4423,6 +4491,11 @@ class OpenPoet {
             const sequence = keyMap[key];
             if (sequence && window.terminalManager) {
                 const tm = window.terminalManager;
+                if (tm.codexSlashPalette?.open && tm.codexSlashPalette.sessionId === tm.activeSessionId) {
+                    tm.codexSlashPalette.consume(sequence);
+                    this.resetMobileTerminalInput();
+                    return;
+                }
                 const termData = tm.activeSessionId ? tm.terminals.get(tm.activeSessionId) : null;
                 const savedViewportY = termData?.terminal?.buffer?.active?.viewportY ?? 0;
 
@@ -5437,7 +5510,7 @@ class OpenPoet {
         container.innerHTML = `
             <div class="modal-header">
                 <h3 class="modal-title">${title}</h3>
-                <button class="btn-icon" onclick="app.hideModal()">
+                <button class="btn-icon" onclick="app.hideModal()" title="Close">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="18" y1="6" x2="6" y2="18"></line>
                         <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -5455,9 +5528,95 @@ class OpenPoet {
         document.getElementById('modal-overlay').classList.add('hidden');
     }
 
+    _parseProjectBackendConfig(raw) {
+        if (!raw) return {};
+        if (typeof raw === 'object') return raw;
+        try {
+            const parsed = JSON.parse(raw);
+            return parsed && typeof parsed === 'object' ? parsed : {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    _codexOption(value, current, label) {
+        return `<option value="${value}" ${current === value ? 'selected' : ''}>${label}</option>`;
+    }
+
+    _renderCodexBackendConfig(config = {}, visible = false) {
+        const runtime = config.runtime || 'app-server';
+        const effort = config.reasoning_effort || '';
+        const approvalPolicy = config.approval_policy || 'on-request';
+        const sandboxMode = config.sandbox_mode || 'workspace-write';
+        return `
+            <div id="codex-backend-config" class="backend-config-panel ${visible ? '' : 'hidden'}">
+                <div class="backend-config-header">
+                    <div>
+                        <div class="backend-config-title">Codex Settings</div>
+                        <div class="backend-config-subtitle">OpenPoet mode uses terminal plus app modals; native TUI keeps Codex prompts inside the terminal.</div>
+                    </div>
+                </div>
+                <div class="backend-config-grid">
+                    <div class="form-group">
+                        <label class="form-label">Runtime</label>
+                        <select class="form-select" name="codex_runtime">
+                            ${this._codexOption('app-server', runtime, 'OpenPoet Terminal + Modals')}
+                            ${this._codexOption('tui', runtime, 'Native Codex TUI')}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Codex Binary</label>
+                        <input type="text" class="form-input" name="codex_binary_path" value="${this.escapeHtml(config.binary_path || '')}" placeholder="codex">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">CODEX_HOME</label>
+                        <input type="text" class="form-input" name="codex_home_path" value="${this.escapeHtml(config.home_path || '')}" placeholder="Default Codex home">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Model</label>
+                        <input type="text" class="form-input" name="codex_model" value="${this.escapeHtml(config.model || '')}" placeholder="Codex CLI default">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Reasoning Effort</label>
+                        <select class="form-select" name="codex_reasoning_effort">
+                            ${this._codexOption('', effort, 'Default')}
+                            ${this._codexOption('minimal', effort, 'Minimal')}
+                            ${this._codexOption('low', effort, 'Low')}
+                            ${this._codexOption('medium', effort, 'Medium')}
+                            ${this._codexOption('high', effort, 'High')}
+                            ${this._codexOption('xhigh', effort, 'Extra High')}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Service Tier</label>
+                        <input type="text" class="form-input" name="codex_service_tier" value="${this.escapeHtml(config.service_tier || '')}" placeholder="Default, flex, or fast">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Approval Policy</label>
+                        <select class="form-select" name="codex_approval_policy">
+                            ${this._codexOption('on-request', approvalPolicy, 'On Request')}
+                            ${this._codexOption('untrusted', approvalPolicy, 'Untrusted')}
+                            ${this._codexOption('never', approvalPolicy, 'Never')}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Sandbox Mode</label>
+                        <select class="form-select" name="codex_sandbox_mode">
+                            ${this._codexOption('workspace-write', sandboxMode, 'Workspace Write')}
+                            ${this._codexOption('read-only', sandboxMode, 'Read Only')}
+                            ${this._codexOption('danger-full-access', sandboxMode, 'Danger Full Access')}
+                        </select>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
     showProjectModal(project = null) {
         const isEdit = project && project.id;
         this._browseEditProjectId = project?.id || null;
+        const selectedBackend = project?.backend || 'claude_code';
+        const codexConfig = this._parseProjectBackendConfig(project?.backend_config);
         const content = `
             <form id="project-form">
                 <div class="form-group">
@@ -5473,19 +5632,21 @@ class OpenPoet {
                 </div>
                 <div class="form-group">
                     <label class="form-label">Type</label>
-                    <select class="form-select" name="type" onchange="app.toggleSSHFields(this.value)">
+                    <select class="form-select" name="type" onchange="app.onProjectTypeChange(this.value)">
                         <option value="local" ${project?.type === 'local' ? 'selected' : ''}>Local</option>
                         <option value="remote" ${project?.type === 'remote' ? 'selected' : ''}>Remote (SSH)</option>
                     </select>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Backend</label>
-                    <select class="form-select" name="backend">
-                        <option value="claude_code" ${(project?.backend || 'claude_code') === 'claude_code' ? 'selected' : ''}>Claude Code</option>
-                        <option value="copilot" ${project?.backend === 'copilot' ? 'selected' : ''}>GitHub Copilot CLI</option>
-                        <option value="acp" ${project?.backend === 'acp' ? 'selected' : ''}>Copilot ACP</option>
+                    <select class="form-select" name="backend" onchange="app.onProjectBackendChange()">
+                        <option value="claude_code" ${selectedBackend === 'claude_code' ? 'selected' : ''}>Claude Code</option>
+                        <option value="copilot" ${selectedBackend === 'copilot' ? 'selected' : ''}>GitHub Copilot CLI</option>
+                        <option value="acp" ${selectedBackend === 'acp' ? 'selected' : ''}>Copilot ACP</option>
+                        <option value="codex" ${selectedBackend === 'codex' ? 'selected' : ''}>OpenAI Codex</option>
                     </select>
                 </div>
+                ${this._renderCodexBackendConfig(codexConfig, selectedBackend === 'codex')}
                 <div class="form-group">
                     <label class="form-label">Tags</label>
                     <div id="project-tag-select" class="tag-select-container">
@@ -5582,6 +5743,8 @@ class OpenPoet {
 
         this.showModal(isEdit ? 'Edit Project' : 'New Project', content, actions);
         this._populateProjectToolPolicy(project?.tool_policy || '');
+        this.onProjectTypeChange(project?.type || 'local');
+        this.onProjectBackendChange();
     }
 
     async _populateProjectToolPolicy(policyJson) {
@@ -5675,13 +5838,64 @@ class OpenPoet {
         }
     }
 
+    onProjectTypeChange(type) {
+        this.toggleSSHFields(type);
+        this.updateProjectBackendAvailability();
+    }
+
     toggleSSHFields(type) {
-        document.getElementById('ssh-fields').classList.toggle('hidden', type !== 'remote');
+        document.getElementById('ssh-fields')?.classList.toggle('hidden', type !== 'remote');
+    }
+
+    onProjectBackendChange() {
+        const backend = document.querySelector('#project-form [name="backend"]')?.value || 'claude_code';
+        const codexConfig = document.getElementById('codex-backend-config');
+        if (codexConfig) {
+            codexConfig.classList.toggle('hidden', backend !== 'codex');
+        }
+        this.updateProjectBackendAvailability();
+    }
+
+    updateProjectBackendAvailability() {
+        const form = document.getElementById('project-form');
+        if (!form) return;
+
+        form.querySelector('[name="backend"]')?.querySelector('option[value="codex"]')?.removeAttribute('disabled');
     }
 
     toggleSSHCredentialField(authType) {
         const el = document.getElementById('ssh-credential-group');
         if (el) el.classList.toggle('hidden', authType === 'default_keys');
+    }
+
+    _trimFormValue(formData, key) {
+        return (formData.get(key) || '').trim();
+    }
+
+    _buildProjectBackendConfig(formData) {
+        const backend = formData.get('backend') || 'claude_code';
+        if (backend !== 'codex') {
+            return null;
+        }
+
+        const config = {
+            runtime: this._trimFormValue(formData, 'codex_runtime') || 'app-server',
+            approval_policy: this._trimFormValue(formData, 'codex_approval_policy') || 'on-request',
+            sandbox_mode: this._trimFormValue(formData, 'codex_sandbox_mode') || 'workspace-write'
+        };
+        const optionalFields = [
+            ['binary_path', 'codex_binary_path'],
+            ['home_path', 'codex_home_path'],
+            ['model', 'codex_model'],
+            ['reasoning_effort', 'codex_reasoning_effort'],
+            ['service_tier', 'codex_service_tier']
+        ];
+        for (const [configKey, formKey] of optionalFields) {
+            const value = this._trimFormValue(formData, formKey);
+            if (value) config[configKey] = value;
+        }
+
+        return JSON.stringify(config);
     }
 
     async saveProject(projectId) {
@@ -5705,11 +5919,14 @@ class OpenPoet {
             return;
         }
 
+        const projectType = formData.get('type') || 'local';
+        const backend = formData.get('backend') || 'claude_code';
+
         const data = {
             name,
             path,
-            type: formData.get('type'),
-            backend: formData.get('backend') || 'claude_code',
+            type: projectType,
+            backend,
             ssh_host: formData.get('ssh_host'),
             ssh_port: parseInt(formData.get('ssh_port')) || 22,
             ssh_user: formData.get('ssh_user'),
@@ -5718,6 +5935,10 @@ class OpenPoet {
             tool_policy: formData.get('tool_policy') || '',
             dangerously_skip_permissions: form.querySelector('[name="dangerously_skip_permissions"]')?.checked || false
         };
+        const backendConfig = this._buildProjectBackendConfig(formData);
+        if (backendConfig !== null) {
+            data.backend_config = backendConfig;
+        }
 
         try {
             let savedProject;
@@ -5774,8 +5995,10 @@ class OpenPoet {
             field.style.borderColor = '';
             errorEl.remove();
             field.removeEventListener('input', clearError);
+            field.removeEventListener('change', clearError);
         };
         field.addEventListener('input', clearError);
+        field.addEventListener('change', clearError);
     }
 
     _getTagColors() {
@@ -5956,6 +6179,8 @@ class OpenPoet {
             name: form.querySelector('[name="name"]')?.value || '',
             path: currentPath,
             type: projectType,
+            backend: form.querySelector('[name="backend"]')?.value || 'claude_code',
+            backend_config: this._buildProjectBackendConfig(new FormData(form)) || '',
             tool_policy: form.querySelector('[name="tool_policy"]')?.value || '',
             ssh_host: form.querySelector('[name="ssh_host"]')?.value || '',
             ssh_port: form.querySelector('[name="ssh_port"]')?.value || '22',
@@ -6123,6 +6348,8 @@ class OpenPoet {
             name: saved.name,
             path: saved.path,
             type: saved.type,
+            backend: saved.backend || 'claude_code',
+            backend_config: saved.backend_config || '',
             tool_policy: saved.tool_policy,
             ssh_host: { String: saved.ssh_host },
             ssh_port: { Int64: parseInt(saved.ssh_port) || 22 },

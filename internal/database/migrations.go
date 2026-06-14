@@ -57,6 +57,9 @@ var migrations = []Migration{
 	{Version: 39, Description: "tools: add project_tools table for custom per-project tool definitions", Up: migrateV39},
 	{Version: 40, Description: "tags: add global tags table and migrate project_tags to use tag_id FK", Up: migrateV40},
 	{Version: 41, Description: "agents: add ai_agents table and agent_id column to ai_conversations", Up: migrateV41},
+	{Version: 42, Description: "sessions: add provider_session_id for native backend resume cursors", Up: migrateV42},
+	{Version: 43, Description: "codex: persist app-server structured transcript events", Up: migrateV43},
+	{Version: 44, Description: "codex: add transcript retention cleanup index", Up: migrateV44},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1116,6 +1119,46 @@ func migrateV41(tx *sqlx.Tx) error {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV41 failed: %w\nSQL: %s", err, s)
 		}
+	}
+	return nil
+}
+
+func migrateV42(tx *sqlx.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE sessions ADD COLUMN provider_session_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("migrateV42 failed: %w", err)
+	}
+	return nil
+}
+
+func migrateV43(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS codex_transcript_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			event_id INTEGER NOT NULL,
+			kind TEXT NOT NULL DEFAULT 'status',
+			text TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			command TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			append INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_codex_transcript_session_id ON codex_transcript_events(session_id, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_codex_transcript_event_id ON codex_transcript_events(session_id, event_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV43 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV44(tx *sqlx.Tx) error {
+	_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_status_end_time ON sessions(status, end_time)`)
+	if err != nil {
+		return fmt.Errorf("migrateV44 failed: %w", err)
 	}
 	return nil
 }

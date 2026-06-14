@@ -157,6 +157,12 @@ class HookManager {
         return tabData?.sessionName || sessionId?.substring(0, 8) || 'Session';
     }
 
+    _getAgentName(event = {}) {
+        if (event.backend === 'codex') return 'Codex';
+        if (event.backend === 'copilot' || event.backend === 'acp') return 'Copilot';
+        return 'Claude';
+    }
+
     // Get tool events for a specific session
     _getSessionEvents(sessionId) {
         if (!sessionId) return [];
@@ -454,7 +460,7 @@ class HookManager {
         } else if (dialogType === 'exitPlan') {
             label = 'Plan ready for review';
         } else if (dialogType === 'askUser') {
-            label = 'Question from Claude';
+            label = `Question from ${this._getAgentName(event)}`;
         } else if (dialogType === 'taskLoaded') {
             label = `Task loaded: ${event.task_title || 'Task'}`;
         }
@@ -476,7 +482,7 @@ class HookManager {
         toast.innerHTML = `
             <span class="hook-toast-session-badge">${this.escapeHtml(sessionName)}</span>
             <span class="toast-message">${this.escapeHtml(label)}</span>
-            <button class="toast-close" onclick="event.stopPropagation(); this.parentElement.remove();">
+            <button class="toast-close" onclick="event.stopPropagation(); this.parentElement.remove();" title="Close">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <line x1="18" y1="6" x2="6" y2="18"></line>
                     <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -619,11 +625,11 @@ class HookManager {
         // Build tool details display
         let detailsHtml = '';
         if (toolName === 'Bash' || toolName === 'bash') {
-            const command = toolInput.command || toolInput.cmd || '';
+            const command = toolInput.command || toolInput.cmd || toolInput.action?.command || '';
             detailsHtml = `<div class="hook-detail-label">Command:</div>
                 <pre class="hook-detail-code">${this.escapeHtml(command)}</pre>`;
-        } else if (toolName === 'Edit' || toolName === 'Write' || toolName === 'edit' || toolName === 'write') {
-            const filePath = toolInput.file_path || toolInput.path || '';
+        } else if (toolName === 'Edit' || toolName === 'Write' || toolName === 'edit' || toolName === 'write' || toolName === 'FileChange') {
+            const filePath = toolInput.file_path || toolInput.path || toolInput.grantRoot || toolInput.item?.path || '';
             detailsHtml = `<div class="hook-detail-label">File:</div>
                 <div class="hook-detail-value">${this.escapeHtml(filePath)}</div>`;
             if (toolInput.content) {
@@ -925,6 +931,7 @@ class HookManager {
         const event = data.event || {};
         const toolInput = event.tool_input || {};
         const questions = toolInput.questions || [];
+        const agentName = this._getAgentName(event);
 
         this.pendingPermission = {
             sessionId: data.session_id,
@@ -934,6 +941,8 @@ class HookManager {
 
         // Show session label
         this._updateDialogSessionLabel('hook-ask-user-session-label', data.session_id);
+        const titleEl = document.getElementById('hook-ask-user-title');
+        if (titleEl) titleEl.textContent = `${agentName} has a question`;
 
         const container = document.getElementById('hook-ask-user-questions');
         if (!container) return;
@@ -1462,7 +1471,7 @@ class HookManager {
                 } else if (entry.dialogType === 'exitPlan') {
                     label = 'Plan Review';
                 } else if (entry.dialogType === 'askUser') {
-                    label = 'Question from Claude';
+                    label = `Question from ${this._getAgentName(event)}`;
                 }
 
                 const timeStr = new Date(entry.timestamp).toLocaleTimeString();

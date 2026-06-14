@@ -11,13 +11,16 @@ import (
 type MessageType string
 
 const (
-	MsgTypeSessionOutput MessageType = "session_output"
-	MsgTypeSessionStatus MessageType = "session_status"
-	MsgTypeNotification  MessageType = "notification"
-	MsgTypeStateUpdate   MessageType = "state_update"
-	MsgTypeError         MessageType = "error"
-	MsgTypePing          MessageType = "ping"
-	MsgTypePong          MessageType = "pong"
+	MsgTypeSessionOutput      MessageType = "session_output"
+	MsgTypeSessionStatus      MessageType = "session_status"
+	MsgTypeNotification       MessageType = "notification"
+	MsgTypeStateUpdate        MessageType = "state_update"
+	MsgTypeError              MessageType = "error"
+	MsgTypePing               MessageType = "ping"
+	MsgTypePong               MessageType = "pong"
+	MsgTypeCodexCommandResult MessageType = "codex_command_result"
+	MsgTypeCodexState         MessageType = "codex_state"
+	MsgTypeCodexTranscript    MessageType = "codex_transcript"
 
 	// Sync progress
 	MsgTypeSyncProgress MessageType = "sync_progress"

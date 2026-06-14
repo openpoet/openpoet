@@ -155,10 +155,24 @@ window.networkFeedback = new NetworkFeedback();
 // Skips static assets, manifest, and service worker fetches.
 (function() {
     const _originalFetch = window.fetch;
-    window.fetch = function(input, init) {
+    function shouldTrackFetch(input, init) {
+        if (init && init.skipNetworkFeedback) return false;
         const url = typeof input === 'string' ? input : (input?.url || '');
-        // Skip static assets — these are page loads, not user-initiated operations
-        if (url.includes('/static/') || url.includes('/sw.js') || url.includes('/manifest.json') || url.includes('/favicon')) {
+        const parsed = new URL(url, window.location.href);
+        const path = parsed.pathname;
+        // Skip static assets and passive terminal/session hydration. These can
+        // run frequently while a terminal is open and should not imply the user
+        // is waiting on a foreground network operation.
+        if (path.includes('/static/') || path === '/sw.js' || path === '/manifest.json' || path.includes('/favicon')) return false;
+        if (path === '/api/client-log') return false;
+        if (path.startsWith('/api/hooks/pending/')) return false;
+        if (/^\/api\/sessions\/[^/]+\/(output|plan|documents|events)$/.test(path)) return false;
+        if (/^\/api\/sessions\/[^/]+\/events\/watch$/.test(path)) return false;
+        return true;
+    }
+
+    window.fetch = function(input, init) {
+        if (!shouldTrackFetch(input, init)) {
             return _originalFetch.apply(this, arguments);
         }
         const nf = window.networkFeedback;

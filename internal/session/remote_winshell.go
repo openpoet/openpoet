@@ -17,7 +17,7 @@ func isWindowsServer(client *ssh.Client) bool {
 }
 
 // buildWindowsBatchScript renders a .cmd script that sets the given env vars,
-// changes to the project path, and execs `claude` with the supplied args.
+// changes to the project path, and execs the selected backend with the supplied args.
 // The .cmd file is the only safe way to pass complex args (like JSON for
 // --mcp-config) to a Windows command — cmd.exe inline quoting is too fragile.
 //
@@ -25,10 +25,11 @@ func isWindowsServer(client *ssh.Client) bool {
 // so callers must not pass cliArgs whose values contain `\r` or `\n`. For
 // multi-line content (e.g. a task system prompt), put it elsewhere (env var,
 // file claude reads via MCP, etc.) and keep cliArgs single-line.
-func buildWindowsBatchScript(envVars map[string]string, projectPath string, cliArgs []string) string {
+func buildWindowsBatchScript(envVars map[string]string, projectPath string, command string, cliArgs []string) string {
 	var sb strings.Builder
 	sb.WriteString("@echo off\r\n")
-	// Add common npm-global location to PATH so `claude.cmd` is found.
+	// Add common npm-global location to PATH so CLI shims like `claude.cmd`
+	// and `codex.cmd` are found in non-interactive OpenSSH sessions.
 	sb.WriteString(`set "PATH=%APPDATA%\npm;%LOCALAPPDATA%\Programs\claude;%PATH%"` + "\r\n")
 	for k, v := range envVars {
 		sb.WriteString(fmt.Sprintf("set \"%s=%s\"\r\n", k, batchSetValue(v)))
@@ -44,7 +45,10 @@ func buildWindowsBatchScript(envVars map[string]string, projectPath string, cliA
 		sb.WriteString(fmt.Sprintf("if errorlevel 1 (echo [openpoet] cannot enter project path: %s 1>&2 & exit /b 1)\r\n", cdPath))
 	}
 
-	sb.WriteString("claude")
+	if strings.TrimSpace(command) == "" {
+		command = "claude"
+	}
+	sb.WriteString(cmdQuoteArg(command))
 	for _, a := range cliArgs {
 		sb.WriteByte(' ')
 		sb.WriteString(cmdQuoteArg(a))

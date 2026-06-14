@@ -27,7 +27,9 @@ type Client struct {
 	mu                sync.Mutex
 	channels          map[string]bool
 	inputHandler      func(data []byte)
+	codexCommand      func(ctx context.Context, data json.RawMessage) (interface{}, error)
 	resizeHandler     func(rows, cols uint16)
+	resizeRelease     func()
 	disconnectHandler func()
 }
 
@@ -47,10 +49,22 @@ func (c *Client) SetInputHandler(handler func(data []byte)) {
 	c.inputHandler = handler
 }
 
+func (c *Client) SetCodexCommandHandler(handler func(ctx context.Context, data json.RawMessage) (interface{}, error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.codexCommand = handler
+}
+
 func (c *Client) SetResizeHandler(handler func(rows, cols uint16)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.resizeHandler = handler
+}
+
+func (c *Client) SetResizeReleaseHandler(handler func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resizeRelease = handler
 }
 
 func (c *Client) SetDisconnectHandler(handler func()) {
@@ -88,9 +102,24 @@ func (c *Client) ReadPump(ctx context.Context) {
 	c.conn.SetReadLimit(maxMessageSize)
 
 	for {
-		_, data, err := c.conn.Read(ctx)
+		// Enforce a read deadline so half-open connections (laptop sleep,
+		// network drop, mobile backgrounding) are detected. The server pings
+		// every 30s; healthy clients reply "pong" (or send any message),
+		// which resets this deadline. A client silent for pongWait is
+		// considered dead and evicted, firing the disconnect handler — this
+		// releases its stale terminal size, which would otherwise pin the
+		// shared PTY to the minimum across clients.
+		readCtx, cancel := context.WithTimeout(ctx, pongWait)
+		_, data, err := c.conn.Read(readCtx)
+		timedOut := readCtx.Err() == context.DeadlineExceeded
+		cancel()
 		if err != nil {
-			if websocket.CloseStatus(err) != websocket.StatusNormalClosure {
+			switch {
+			case ctx.Err() != nil:
+				// Parent context canceled (server shutdown) — quiet.
+			case timedOut:
+				log.Printf("WebSocket client %s evicted: no pong within %s (dead connection)", c.ID[:8], pongWait)
+			case websocket.CloseStatus(err) != websocket.StatusNormalClosure:
 				log.Printf("WebSocket read error: %v", err)
 			}
 			return
@@ -126,7 +155,10 @@ func (c *Client) ReadPump(ctx context.Context) {
 			if handler != nil && msg.Data != nil {
 				var input string
 				if err := json.Unmarshal(msg.Data, &input); err == nil {
-					handler([]byte(input))
+					input = sanitizeTerminalClientInput(input)
+					if input != "" {
+						handler([]byte(input))
+					}
 				}
 			}
 		case "complex_edit":
@@ -156,7 +188,9 @@ func (c *Client) ReadPump(ctx context.Context) {
 						time.Sleep(time.Duration(wait) * time.Millisecond)
 					}
 					if len(edit.Text) > 0 {
-						handler([]byte(edit.Text))
+						if text := sanitizeTerminalClientInput(edit.Text); text != "" {
+							handler([]byte(text))
+						}
 					}
 				}
 			}
@@ -168,6 +202,7 @@ func (c *Client) ReadPump(ctx context.Context) {
 			if handler != nil && msg.Data != nil {
 				var input string
 				if err := json.Unmarshal(msg.Data, &input); err == nil {
+					input = sanitizeTerminalClientInput(input)
 					if len(input) > 0 {
 						handler([]byte(input))
 						time.Sleep(150 * time.Millisecond)
@@ -184,10 +219,12 @@ func (c *Client) ReadPump(ctx context.Context) {
 			if handler != nil && msg.Data != nil {
 				var input string
 				if err := json.Unmarshal(msg.Data, &input); err == nil {
+					input = sanitizeTerminalClientInput(input)
 					if len(input) > 0 {
-						for i := 0; i < len(input); i++ {
-							handler([]byte{input[i]})
-							if i < len(input)-1 {
+						runes := []rune(input)
+						for i, r := range runes {
+							handler([]byte(string(r)))
+							if i < len(runes)-1 {
 								time.Sleep(1 * time.Millisecond)
 							}
 						}
@@ -195,6 +232,32 @@ func (c *Client) ReadPump(ctx context.Context) {
 					}
 					handler([]byte("\r"))
 				}
+			}
+		case "codex_command":
+			c.mu.Lock()
+			handler := c.codexCommand
+			c.mu.Unlock()
+			if handler != nil && msg.Data != nil {
+				var req struct {
+					ID string `json:"id"`
+				}
+				_ = json.Unmarshal(msg.Data, &req)
+				go func(requestID string, data json.RawMessage) {
+					result, err := handler(ctx, data)
+					response := map[string]interface{}{
+						"id": requestID,
+						"ok": err == nil,
+					}
+					if err != nil {
+						response["error"] = err.Error()
+					} else {
+						response["result"] = result
+					}
+					select {
+					case c.send <- &Message{Type: MsgTypeCodexCommandResult, Data: response, Timestamp: time.Now()}:
+					case <-ctx.Done():
+					}
+				}(req.ID, msg.Data)
 			}
 		case "resize":
 			c.mu.Lock()
@@ -208,6 +271,13 @@ func (c *Client) ReadPump(ctx context.Context) {
 				if err := json.Unmarshal(msg.Data, &size); err == nil && size.Cols > 0 && size.Rows > 0 {
 					handler(size.Rows, size.Cols)
 				}
+			}
+		case "resize_release":
+			c.mu.Lock()
+			handler := c.resizeRelease
+			c.mu.Unlock()
+			if handler != nil {
+				handler()
 			}
 		}
 	}

@@ -186,6 +186,7 @@ func main() {
 	if err := db.FixStaleStreamingMessages(ctx); err != nil {
 		log.Printf("Warning: failed to fix stale streaming messages: %v", err)
 	}
+	runCodexTranscriptCleanup(ctx, db)
 
 	// Initialize encryptor
 	encryptor, err := security.NewEncryptor(cfg.EncryptKey)
@@ -887,12 +888,17 @@ func main() {
 	// Start binary update checker goroutine
 	go runUpdateChecker(db, appUpdater, hub)
 
+	codexCleanupCtx, stopCodexCleanup := context.WithCancel(context.Background())
+	go runCodexTranscriptCleanupLoop(codexCleanupCtx, db)
+
 	// Create server
 	// WriteTimeout is 600s to support long-polling hook permission requests (up to 590s)
+	// ReadTimeout is 180s so large uploads (e.g. ~1MB voice recordings via the
+	// relay tunnel on slow uplinks) don't get cut mid-stream.
 	server := &http.Server{
 		Addr:         cfg.Address(),
 		Handler:      r,
-		ReadTimeout:  30 * time.Second,
+		ReadTimeout:  180 * time.Second,
 		WriteTimeout: 600 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
@@ -955,6 +961,7 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down...")
+	stopCodexCleanup()
 
 	// Disconnect tunnel
 	api.DisconnectTunnel()
@@ -1275,6 +1282,35 @@ func runUpdateChecker(db *database.DB, u *updater.Updater, hub *websocket.Hub) {
 	defer ticker.Stop()
 	for range ticker.C {
 		checkOnce()
+	}
+}
+
+func runCodexTranscriptCleanupLoop(ctx context.Context, db *database.DB) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runCodexTranscriptCleanup(ctx, db)
+		}
+	}
+}
+
+func runCodexTranscriptCleanup(ctx context.Context, db *database.DB) {
+	stats, err := db.CleanupCodexTranscriptEvents(
+		ctx,
+		database.DefaultCodexTranscriptRetentionDays,
+		database.DefaultCodexTranscriptMaxEvents,
+	)
+	if err != nil {
+		log.Printf("[Codex] transcript cleanup failed: %v", err)
+		return
+	}
+	if stats.ExpiredDeleted > 0 || stats.OverflowDeleted > 0 {
+		log.Printf("[Codex] transcript cleanup removed %d expired and %d overflow event(s)", stats.ExpiredDeleted, stats.OverflowDeleted)
 	}
 }
 
