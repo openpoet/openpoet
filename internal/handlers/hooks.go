@@ -40,6 +40,7 @@ type hookSpecificOutput struct {
 
 type permissionDecision struct {
 	Behavior           string                 `json:"behavior"`
+	OriginalBehavior   string                 `json:"originalBehavior,omitempty"`
 	Message            string                 `json:"message,omitempty"`
 	UpdatedInput       map[string]interface{} `json:"updatedInput,omitempty"`
 	UpdatedPermissions []interface{}          `json:"updatedPermissions,omitempty"`
@@ -159,6 +160,17 @@ func normalizeCopilotEventName(name string) string {
 	}
 }
 
+func hookBackendDisplayName(backend string) string {
+	switch backend {
+	case "codex":
+		return "Codex"
+	case "copilot", "acp":
+		return "Copilot"
+	default:
+		return "Claude"
+	}
+}
+
 // setSessionMode updates the mode and broadcasts if changed. Must NOT hold h.mu.
 func (h *HookHandler) setSessionMode(sessionID, newMode, reason string) {
 	h.mu.Lock()
@@ -242,6 +254,7 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	// Detect backend from header (both "copilot" and "acp" use non-Claude hook format)
 	backend := r.Header.Get("X-Backend")
 	isCopilot := backend == "copilot" || backend == "acp"
+	agentName := hookBackendDisplayName(backend)
 
 	// Parse the hook event JSON. Windows claude.exe pipes hook input using the
 	// host's ANSI codepage; normalize to UTF-8 so JSON strings round-trip cleanly.
@@ -250,6 +263,9 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(normalizeUTF8Body(rawBody), &hookEvent); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
+	}
+	if backend != "" {
+		hookEvent["backend"] = backend
 	}
 
 	// Normalize Copilot event names
@@ -363,7 +379,7 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[hooks] Sending push for AskUserQuestion on session %s", sessionID)
 			go func() {
 				if err := h.notifService.Send(context.Background(), sessionID, "question",
-					"Question from Claude", "Claude needs your input", ""); err != nil {
+					"Question from "+agentName, agentName+" needs your input", ""); err != nil {
 					log.Printf("[hooks] Push failed for AskUserQuestion: %v", err)
 				}
 			}()
@@ -394,7 +410,7 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[hooks] Sending push for ExitPlanMode on session %s", sessionID)
 			go func() {
 				if err := h.notifService.Send(context.Background(), sessionID, "permission",
-					"Plan Ready", "Claude's plan needs your approval", ""); err != nil {
+					"Plan Ready", agentName+"'s plan needs your approval", ""); err != nil {
 					log.Printf("[hooks] Push failed for ExitPlanMode: %v", err)
 				}
 			}()
@@ -440,7 +456,7 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Build decision based on user response
-		decision := permissionDecision{}
+		decision := permissionDecision{OriginalBehavior: resp.Behavior}
 		denyMessage := resp.Message
 
 		if resp.Behavior == "passthrough" {
@@ -707,6 +723,9 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(normalizeUTF8Body(rawBody), &hookEvent); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
+	}
+	if backend := r.Header.Get("X-Backend"); backend != "" {
+		hookEvent["backend"] = backend
 	}
 
 	eventName, _ := hookEvent["hook_event_name"].(string)

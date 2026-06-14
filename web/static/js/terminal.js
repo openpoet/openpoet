@@ -1,5 +1,6 @@
 // Terminal Manager using xterm.js - Multi-Terminal Support
 var flog = window.flog || ((...a) => console.log(...a));
+
 class TerminalManager {
     constructor(containerWrapperId) {
         this.containerWrapperId = containerWrapperId || 'terminal-containers-wrapper';
@@ -7,7 +8,151 @@ class TerminalManager {
         this.activeSessionId = null;
         this.structuredViewActive = new Map(); // sessionId -> boolean
         this._knownInput = new Map(); // sessionId -> string — trusted source of what's in the terminal prompt
+        this._codexCommandSeq = 1;
+        this._codexCommandPending = new Map();
+        this._codexState = new Map();
+        this._codexTranscriptLoaded = new Set();
+        this._codexTranscriptLoading = new Map();
+        this._codexTranscriptRetryTimers = new Map();
+        this.codexSlashPalette = new CodexSlashPalette(this);
         console.log('TerminalManager initialized for multi-terminal support');
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                this.releaseAllResize();
+            } else {
+                this.resumeActiveResize();
+            }
+        });
+        let codexChromeResizeTimer = null;
+        window.addEventListener('resize', () => {
+            clearTimeout(codexChromeResizeTimer);
+            codexChromeResizeTimer = setTimeout(() => this._syncCodexAgentChrome(), 120);
+        });
+    }
+
+    _codexDefaultState(sessionId) {
+        const termData = this.terminals.get(sessionId);
+        return {
+            sessionId,
+            phase: termData?.status === 'connecting' ? 'starting' : 'idle',
+            detail: termData?.status === 'connecting' ? 'Connecting to Codex' : 'Waiting for instructions',
+            model: '',
+            reasoningEffort: '',
+            serviceTier: '',
+            approvalPolicy: '',
+            sandboxMode: '',
+            threadId: '',
+            activeTurn: false,
+            activeProcessCount: 0,
+            activeCommandProcesses: [],
+            lastInputTokens: 0,
+            lastOutputTokens: 0
+        };
+    }
+
+    _syncCodexAgentChrome() {
+        const sessionId = this.activeSessionId;
+        const active = !!sessionId && this.isCodexAppServerSession(sessionId);
+
+        if (!active) {
+            return;
+        }
+
+        this.structuredViewActive.set(sessionId, true);
+        const termData = this.terminals.get(sessionId);
+        if (termData) {
+            termData.container.classList.remove('active');
+            termData.terminal?.blur?.();
+        }
+        window.structuredView?.showCodex?.(sessionId);
+        this._updateStructuredViewButton(true);
+
+        if (!this._codexState.has(sessionId)) {
+            this._codexState.set(sessionId, this._codexDefaultState(sessionId));
+        }
+        this.refreshCodexState(sessionId);
+        this.refreshCodexTranscript(sessionId);
+    }
+
+    _handleCodexState(sessionId, state) {
+        if (!sessionId || !state) return;
+        this._codexState.set(sessionId, { ...this._codexDefaultState(sessionId), ...state });
+        window.structuredView?.updateCodexState?.(sessionId, this._codexState.get(sessionId));
+    }
+
+    async refreshCodexTranscript(sessionId, options = {}) {
+        if (!this.isCodexAppServerSession(sessionId)) return;
+        const force = !!options.force;
+        if (!force && this._codexTranscriptLoaded.has(sessionId)) return;
+        const existing = this._codexTranscriptLoading.get(sessionId);
+        if (existing) return existing;
+        const load = this._loadCodexTranscript(sessionId, force);
+        this._codexTranscriptLoading.set(sessionId, load);
+        try {
+            await load;
+        } finally {
+            if (this._codexTranscriptLoading.get(sessionId) === load) {
+                this._codexTranscriptLoading.delete(sessionId);
+            }
+        }
+    }
+
+    async _loadCodexTranscript(sessionId, force = false) {
+        try {
+            const result = await this.requestCodexCommand(sessionId, 'ui/transcript', {});
+            const events = Array.isArray(result?.events) ? result.events : [];
+            if (events.length > 0) {
+                window.structuredView?.resetCodexTranscript?.(sessionId);
+                events.forEach(event => window.structuredView?.appendCodexTranscriptEvent?.(sessionId, event));
+            } else if (!force) {
+                this._scheduleCodexTranscriptRetry(sessionId, 1200);
+            }
+            this._codexTranscriptLoaded.add(sessionId);
+        } catch (err) {
+            this._codexTranscriptLoaded.delete(sessionId);
+            this._scheduleCodexTranscriptRetry(sessionId, 1200);
+        }
+    }
+
+    _scheduleCodexTranscriptRetry(sessionId, delay) {
+        if (!sessionId || !this.terminals.has(sessionId) || this._codexTranscriptRetryTimers.has(sessionId)) return;
+        const timer = setTimeout(() => {
+            this._codexTranscriptRetryTimers.delete(sessionId);
+            if (!this.terminals.has(sessionId)) return;
+            this.refreshCodexTranscript(sessionId, { force: true });
+        }, delay);
+        this._codexTranscriptRetryTimers.set(sessionId, timer);
+    }
+
+    refreshCodexState(sessionId) {
+        if (!this.isCodexAppServerSession(sessionId)) return;
+        const termData = this.terminals.get(sessionId);
+        if (!termData?.ws || termData.ws.readyState !== WebSocket.OPEN) return;
+        this.requestCodexCommand(sessionId, 'ui/status', {})
+            .then(state => this._handleCodexState(sessionId, state))
+            .catch(() => {});
+    }
+
+    async stopCodexTurn() {
+        const sessionId = this.activeSessionId;
+        if (!sessionId || !this.isCodexAppServerSession(sessionId)) return;
+        try {
+            await this.requestCodexCommand(sessionId, 'turn/stop', {});
+            this.refreshCodexState(sessionId);
+        } catch (err) {
+            window.app?.showToast?.('Codex', err.message || 'Failed to stop turn', 'error');
+        }
+    }
+
+    _escapeHTML(value) {
+        return String(value ?? '').replace(/[&<>"']/g, ch => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        }[ch]));
     }
 
     // Create a new terminal container for a session
@@ -49,7 +194,7 @@ class TerminalManager {
     }
 
     // Connect to a session (create new terminal if doesn't exist)
-    async connect(sessionId, sessionName) {
+    async connect(sessionId, sessionName, sessionMeta = null) {
         console.log('TerminalManager.connect called with:', sessionId, sessionName);
 
         // If already connected to this session, just switch to it
@@ -85,7 +230,10 @@ class TerminalManager {
             cursorBlink: true,
             cursorStyle: 'bar',
             scrollback: 10000,
-            tabStopWidth: 4
+            tabStopWidth: 4,
+            // Lets Mac users Alt+drag to force a native selection even when
+            // Claude Code's mouse tracking is active (selection mode OFF).
+            macOptionClickForcesSelection: true
         });
 
         // Load addons
@@ -115,8 +263,13 @@ class TerminalManager {
             fitAddon,
             status: 'connecting',
             sessionId,
+            backend: sessionMeta?.backend || window.app?.sessions?.find?.(s => s.id === sessionId)?.backend || '',
+            codexRuntime: sessionMeta?.codex_runtime || window.app?.sessions?.find?.(s => s.id === sessionId)?.codex_runtime || '',
             isRemote: window.app?._isRemoteSession?.(sessionId) || false
         });
+        if (this.isCodexAppServerSession(sessionId)) {
+            this._codexState.set(sessionId, this._codexDefaultState(sessionId));
+        }
 
         // Set up WebSocket handlers
         this.setupWebSocket(sessionId, ws, terminal);
@@ -225,7 +378,7 @@ class TerminalManager {
             const lineHeight = 17;
             if (Math.abs(deltaY) >= lineHeight) {
                 const lines = Math.round(deltaY / lineHeight);
-                terminal.scrollLines(lines);
+                this._scrollTerminal(termData, lines);
                 lastTouchY = currentY;
             }
 
@@ -271,7 +424,7 @@ class TerminalManager {
                 const pixelDelta = velocity * 16; // 16ms per frame
                 const lines = Math.round(pixelDelta / lineHeight);
                 if (lines !== 0) {
-                    terminal.scrollLines(lines);
+                    this._scrollTerminal(termData, lines);
                 }
 
                 momentumRAF = requestAnimationFrame(applyMomentum);
@@ -291,7 +444,9 @@ class TerminalManager {
 
         ws.onopen = async () => {
             console.log(`WebSocket connected for session: ${sessionId}`);
-            terminal.writeln('\x1b[32mConnected to session\x1b[0m');
+            if (!this.isCodexAppServerSession(sessionId)) {
+                terminal.writeln('\x1b[32mConnected to session\x1b[0m');
+            }
             ws.send(JSON.stringify({ type: 'subscribe', channel: `session:${sessionId}` }));
 
             // Report our current terminal dimensions immediately so the
@@ -301,39 +456,43 @@ class TerminalManager {
             // dropped (`ws.readyState !== OPEN`) and the server never learns
             // our size unless the layout subsequently shifts. Send whatever
             // dimensions we have now; later fits will refine the value.
-            ws.send(JSON.stringify({
-                type: 'resize',
-                data: { cols: terminal.cols, rows: terminal.rows }
-            }));
+            this._sendResize(termData, terminal.cols, terminal.rows, true);
 
             // Update status to running
             this.updateSessionStatus(sessionId, 'running');
+            this.refreshCodexState(sessionId);
+            if (this.isCodexAppServerSession(sessionId)) {
+                await this.refreshCodexTranscript(sessionId);
+                this.dismissConnectingOverlay(sessionId);
+            }
 
             // Fetch buffered output to restore history
-            try {
-                console.log('Fetching output buffer for session:', sessionId);
-                const response = await fetch(`/api/sessions/${sessionId}/output`);
-                console.log('Buffer fetch response:', response.status, response.ok);
-                if (response.ok) {
-                    const arrayBuffer = await response.arrayBuffer();
-                    console.log('Buffer size:', arrayBuffer.byteLength, 'bytes');
-                    if (arrayBuffer.byteLength > 0) {
-                        const text = new TextDecoder().decode(arrayBuffer);
-                        console.log('Buffer text length:', text.length, 'chars');
-                        // Clear terminal and reset cursor before replaying buffer
-                        terminal.write('\x1b[2J\x1b[H');
-                        terminal.writeln('\x1b[33m--- Session History ---\x1b[0m');
-                        terminal.write(text);
-                        // Ensure we land at the latest output after replaying history
-                        terminal.scrollToBottom();
+            if (!this.isCodexAppServerSession(sessionId)) {
+                try {
+                    console.log('Fetching output buffer for session:', sessionId);
+                    const response = await fetch(`/api/sessions/${sessionId}/output`);
+                    console.log('Buffer fetch response:', response.status, response.ok);
+                    if (response.ok) {
+                        const arrayBuffer = await response.arrayBuffer();
+                        console.log('Buffer size:', arrayBuffer.byteLength, 'bytes');
+                        if (arrayBuffer.byteLength > 0) {
+                            const text = new TextDecoder().decode(arrayBuffer);
+                            console.log('Buffer text length:', text.length, 'chars');
+                            // Clear terminal and reset cursor before replaying buffer
+                            terminal.write('\x1b[2J\x1b[H');
+                            terminal.writeln('\x1b[33m--- Session History ---\x1b[0m');
+                            terminal.write(text);
+                            // Ensure we land at the latest output after replaying history
+                            terminal.scrollToBottom();
+                        } else {
+                            console.log('Buffer is empty');
+                        }
                     } else {
-                        console.log('Buffer is empty');
+                        console.warn('Buffer fetch failed with status:', response.status);
                     }
-                } else {
-                    console.warn('Buffer fetch failed with status:', response.status);
+                } catch (err) {
+                    console.error('Failed to fetch session output buffer:', err);
                 }
-            } catch (err) {
-                console.error('Failed to fetch session output buffer:', err);
             }
 
             // Buffer fetch done (or failed) — dismiss the connecting overlay.
@@ -377,8 +536,18 @@ class TerminalManager {
             }
 
             const msg = JSON.parse(data);
+            // Keepalive: server pings every 30s and evicts clients that don't
+            // pong within 60s. Without this, an idle session client would be
+            // dropped (and its stale terminal size would pin the PTY small).
+            if (msg.type === 'ping') {
+                try { ws.send(JSON.stringify({ type: 'pong' })); } catch (e) {}
+                return;
+            }
             if (msg.type === 'session_output' && msg.data) {
                 this.dismissConnectingOverlay(sessionId);
+                if (this.isCodexAppServerSession(sessionId)) {
+                    return;
+                }
                 terminal.write(msg.data);
                 // Pipe a copy to SV for live PTY streaming while we wait for the
                 // (slower) JSONL assistant event to materialize.
@@ -387,18 +556,20 @@ class TerminalManager {
                 }
                 // Sync terminal prompt line to mobile input (debounced)
                 this._scheduleMobileInputSync(sessionId);
-                // Clear pending input tracking for activity bar
-                const _td = this.terminals.get(sessionId);
-                if (_td && _td._awaitingOutput) {
-                    _td._awaitingOutput = false;
-                    window.networkFeedback?.requestFinished();
-                }
             } else if (msg.type === 'session_status') {
                 if (msg.data.status === 'completed' || msg.data.status === 'error' || msg.data.status === 'stopped') {
                     this.dismissConnectingOverlay(sessionId);
-                    terminal.writeln(`\r\n\x1b[33mSession ${msg.data.status}\x1b[0m`);
+                    if (!this.isCodexAppServerSession(sessionId)) {
+                        terminal.writeln(`\r\n\x1b[33mSession ${msg.data.status}\x1b[0m`);
+                    }
                     this.updateSessionStatus(sessionId, msg.data.status);
                 }
+            } else if (msg.type === 'codex_command_result') {
+                this._handleCodexCommandResult(msg.data);
+            } else if (msg.type === 'codex_state') {
+                this._handleCodexState(sessionId, msg.data);
+            } else if (msg.type === 'codex_transcript') {
+                window.structuredView?.appendCodexTranscriptEvent?.(sessionId, msg.data);
             } else if (msg.type && msg.type.startsWith('hook_')) {
                 // Route hook messages to HookManager
                 if (window.hookManager) {
@@ -437,24 +608,20 @@ class TerminalManager {
             terminal.onData((data) => {
                 // Block input when structured view is active — let SV textarea handle it
                 if (this.structuredViewActive.get(sessionId)) return;
+                if (this._handleCodexSlashInput(sessionId, data)) return;
+                data = this._sanitizeTerminalClientInput(data);
+                if (!data) return;
                 if (ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'input', data: data }));
                     this._trackInput(sessionId, data);
                     this.clearScrollLock(termData);
-                    // Track pending output for activity bar
-                    if (!termData._awaitingOutput) {
-                        termData._awaitingOutput = true;
-                        window.networkFeedback?.requestStarted();
-                    }
                 }
             });
         }
 
         // Handle resize
         terminal.onResize(({ cols, rows }) => {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'resize', data: { cols, rows } }));
-            }
+            this._sendResize(termData, cols, rows);
         });
 
         // Desktop scroll system — mirrors the mobile approach.
@@ -542,6 +709,16 @@ class TerminalManager {
                     return false;
                 }
 
+                // Ctrl+Home / Ctrl+End jump the app's own viewport (Claude Code
+                // scroll-to-top/bottom). The full alt-buffer redraw that follows
+                // is sometimes not repainted by the DOM renderer until the next
+                // scroll, leaving the screen blank — force a repaint. (Let xterm
+                // still send the key by returning true.)
+                if (domEvent.type === 'keydown' && domEvent.ctrlKey &&
+                    (domEvent.key === 'Home' || domEvent.key === 'End')) {
+                    this._refreshSoon(termData);
+                }
+
                 return true;
             });
 
@@ -617,13 +794,20 @@ class TerminalManager {
             const ws = new WebSocket(`${protocol}//${window.location.host}/ws/session/${sessionId}`);
 
             ws.onopen = async () => {
-                console.log(`Reconnected WebSocket for session: ${sessionId}`);
-                td.ws = ws;
-                td._reconnectAttempt = 0;
-                td.terminal.writeln('\r\n\x1b[32mReconnected\x1b[0m');
-                ws.send(JSON.stringify({ type: 'subscribe', channel: `session:${sessionId}` }));
-                this.updateSessionStatus(sessionId, 'running');
-            };
+	                console.log(`Reconnected WebSocket for session: ${sessionId}`);
+	                td.ws = ws;
+	                td._reconnectAttempt = 0;
+	                if (!this.isCodexAppServerSession(sessionId)) {
+	                    td.terminal.writeln('\r\n\x1b[32mReconnected\x1b[0m');
+	                }
+	                ws.send(JSON.stringify({ type: 'subscribe', channel: `session:${sessionId}` }));
+	                this._sendResize(td, td.terminal.cols, td.terminal.rows, true);
+	                this.updateSessionStatus(sessionId, 'running');
+	                this.refreshCodexState(sessionId);
+	                if (this.isCodexAppServerSession(sessionId)) {
+	                    await this.refreshCodexTranscript(sessionId);
+	                }
+	            };
 
             ws.onmessage = async (event) => {
                 let data = event.data;
@@ -636,21 +820,31 @@ class TerminalManager {
                     } catch (e) {}
                 }
                 const msg = JSON.parse(data);
+                if (msg.type === 'ping') {
+                    try { ws.send(JSON.stringify({ type: 'pong' })); } catch (e) {}
+                    return;
+                }
                 if (msg.type === 'session_output' && msg.data) {
+                    if (this.isCodexAppServerSession(sessionId)) {
+                        return;
+                    }
                     td.terminal.write(msg.data);
                     if (this.structuredViewActive.get(sessionId)) {
                         window.structuredView?.onPtyOutput?.(sessionId, msg.data);
                     }
-                    // Clear pending input tracking for activity bar
-                    if (td._awaitingOutput) {
-                        td._awaitingOutput = false;
-                        window.networkFeedback?.requestFinished();
-                    }
                 } else if (msg.type === 'session_status') {
                     if (msg.data.status === 'completed' || msg.data.status === 'error' || msg.data.status === 'stopped') {
-                        td.terminal.writeln(`\r\n\x1b[33mSession ${msg.data.status}\x1b[0m`);
+                        if (!this.isCodexAppServerSession(sessionId)) {
+                            td.terminal.writeln(`\r\n\x1b[33mSession ${msg.data.status}\x1b[0m`);
+                        }
                         this.updateSessionStatus(sessionId, msg.data.status);
                     }
+                } else if (msg.type === 'codex_command_result') {
+                    this._handleCodexCommandResult(msg.data);
+                } else if (msg.type === 'codex_state') {
+                    this._handleCodexState(sessionId, msg.data);
+                } else if (msg.type === 'codex_transcript') {
+                    window.structuredView?.appendCodexTranscriptEvent?.(sessionId, msg.data);
                 } else if (msg.type && msg.type.startsWith('hook_')) {
                     if (window.hookManager) {
                         window.hookManager.handleMessage(msg);
@@ -678,22 +872,19 @@ class TerminalManager {
                 td.terminal.onData((data) => {
                     // Block input when structured view is active
                     if (this.structuredViewActive.get(sessionId)) return;
+                    if (this._handleCodexSlashInput(sessionId, data)) return;
+                    data = this._sanitizeTerminalClientInput(data);
+                    if (!data) return;
                     if (ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({ type: 'input', data: data }));
                         this._trackInput(sessionId, data);
                         this.clearScrollLock(td);
-                        if (!td._awaitingOutput) {
-                            td._awaitingOutput = true;
-                            window.networkFeedback?.requestStarted();
-                        }
                     }
                 });
             }
 
             td.terminal.onResize(({ cols, rows }) => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'resize', data: { cols, rows } }));
-                }
+                this._sendResize(td, cols, rows);
             });
         }, delay);
     }
@@ -709,6 +900,20 @@ class TerminalManager {
         const termData = this.terminals.get(sessionId);
         if (termData) {
             termData.status = status;
+            if (this.isCodexAppServerSession(sessionId)) {
+                const current = this._codexState.get(sessionId) || this._codexDefaultState(sessionId);
+                if (status === 'disconnected' || status === 'error' || status === 'stopped' || status === 'completed') {
+                    this._codexState.set(sessionId, {
+                        ...current,
+                        phase: status === 'error' ? 'error' : status,
+                        detail: status === 'disconnected' ? 'Connection lost' : `Session ${status}`,
+                        activeTurn: false,
+                        activeProcessCount: 0,
+                        activeCommandProcesses: []
+                    });
+                    window.structuredView?.updateCodexState?.(sessionId, this._codexState.get(sessionId));
+                }
+            }
 
             // Dispatch custom event for UI to update
             window.dispatchEvent(new CustomEvent('session-status-changed', {
@@ -742,10 +947,18 @@ class TerminalManager {
         }
 
         this.activeSessionId = sessionId;
+        const isCodexAppServer = this.isCodexAppServerSession(sessionId);
+        if (isCodexAppServer) {
+            this.structuredViewActive.set(sessionId, true);
+        }
 
         // Check if structured view is active for this session
         if (this.structuredViewActive.get(sessionId) && window.structuredView) {
-            window.structuredView.show(sessionId);
+            if (isCodexAppServer) {
+                window.structuredView.showCodex?.(sessionId);
+            } else {
+                window.structuredView.show(sessionId);
+            }
             this._updateStructuredViewButton(true);
         } else {
             // Show terminal
@@ -765,6 +978,7 @@ class TerminalManager {
                 });
             });
         }
+        this._syncCodexAgentChrome();
 
         // Notify hook manager to refresh panel/badge for the new session
         if (window.hookManager) {
@@ -776,6 +990,17 @@ class TerminalManager {
     toggleStructuredView() {
         const sessionId = this.activeSessionId;
         if (!sessionId || !window.structuredView) return;
+
+        if (this.isCodexAppServerSession(sessionId)) {
+            this.structuredViewActive.set(sessionId, true);
+            const termData = this.terminals.get(sessionId);
+            termData?.container?.classList.remove('active');
+            termData?.terminal?.blur?.();
+            window.structuredView.showCodex?.(sessionId);
+            this._updateStructuredViewButton(true);
+            this._syncCodexAgentChrome();
+            return;
+        }
 
         const isActive = this.structuredViewActive.get(sessionId) || false;
         const isMobile = window.innerWidth <= 768;
@@ -938,6 +1163,13 @@ class TerminalManager {
             window.structuredView.dispose(sessionId);
         }
         this.structuredViewActive.delete(sessionId);
+        this._codexTranscriptLoaded.delete(sessionId);
+        this._codexTranscriptLoading.delete(sessionId);
+        const transcriptRetryTimer = this._codexTranscriptRetryTimers.get(sessionId);
+        if (transcriptRetryTimer) {
+            clearTimeout(transcriptRetryTimer);
+        }
+        this._codexTranscriptRetryTimers.delete(sessionId);
 
         // Remove from map
         this.terminals.delete(sessionId);
@@ -980,6 +1212,109 @@ class TerminalManager {
     // Get active session ID
     getActiveSessionId() {
         return this.activeSessionId;
+    }
+
+    // Scroll a terminal by `lines` (>0 = toward newest, <0 = toward oldest).
+    //
+    // When the app (Claude Code 2.1.x) has mouse tracking active, it owns the
+    // viewport and there is no xterm scrollback to move — so we forward the
+    // scroll intent as SGR mouse-wheel events (btn 64 = up, 65 = down) to the
+    // PTY and let the app scroll its own transcript. Desktop wheel is forwarded
+    // natively by xterm.js, but touch is not, so this is what makes mobile
+    // scrolling work again. Otherwise (plain shell / normal buffer) we scroll
+    // xterm's scrollback directly.
+    _scrollTerminal(termData, lines) {
+        if (!termData?.terminal || !lines) return;
+        const t = termData.terminal;
+        const mouseOn = t.modes && t.modes.mouseTrackingMode && t.modes.mouseTrackingMode !== 'none';
+        if (mouseOn) {
+            const btn = lines > 0 ? 65 : 64; // 65 = wheel down, 64 = wheel up
+            const count = Math.min(Math.abs(lines), 5);
+            const col = Math.max(1, Math.min(t.cols, Math.ceil(t.cols / 2)));
+            const row = Math.max(1, Math.min(t.rows, Math.ceil(t.rows / 2)));
+            let seq = '';
+            for (let i = 0; i < count; i++) seq += `\x1b[<${btn};${col};${row}M`;
+            if (termData.ws && termData.ws.readyState === WebSocket.OPEN) {
+                termData.ws.send(JSON.stringify({ type: 'input', data: seq }));
+            }
+        } else {
+            t.scrollLines(lines);
+        }
+    }
+
+    // Jump to the top/bottom of a terminal. When the app owns the viewport
+    // (mouse tracking on, e.g. Claude Code 2.1.x), there is no xterm scrollback
+    // to jump within — so send the app's own scroll shortcut: Ctrl+End jumps to
+    // the bottom (`ESC[1;5F`), Ctrl+Home to the top (`ESC[1;5H`). These are the
+    // exact sequences xterm.js emits for those keys. Otherwise (plain shell /
+    // normal buffer) scroll xterm's scrollback directly.
+    _jumpScroll(termData, toBottom) {
+        if (!termData?.terminal) return;
+        const t = termData.terminal;
+        const mouseOn = t.modes && t.modes.mouseTrackingMode && t.modes.mouseTrackingMode !== 'none';
+        if (mouseOn) {
+            const seq = toBottom ? '\x1b[1;5F' : '\x1b[1;5H'; // Ctrl+End / Ctrl+Home
+            if (termData.ws && termData.ws.readyState === WebSocket.OPEN) {
+                termData.ws.send(JSON.stringify({ type: 'input', data: seq }));
+            }
+            this._refreshSoon(termData);
+        } else if (toBottom) {
+            t.scrollToBottom();
+        } else {
+            t.scrollToTop();
+        }
+    }
+
+    // Force the DOM renderer to repaint a few times over the next ~350ms. After
+    // the app (Claude Code) redraws the alt buffer in response to a jump/scroll,
+    // the renderer occasionally leaves the screen blank until the next scroll;
+    // these refreshes catch the redraw (local fast, remote SSH slower).
+    _refreshSoon(termData) {
+        const t = termData?.terminal;
+        if (!t) return;
+        const refresh = () => { try { t.refresh(0, t.rows - 1); } catch (e) {} };
+        for (const d of [50, 150, 350]) setTimeout(refresh, d);
+    }
+
+    _sendResize(termData, cols, rows, force = false) {
+        if (!termData?.ws || termData.ws.readyState !== WebSocket.OPEN) return;
+        if (!this._shouldOwnResize(termData)) {
+            this._releaseResize(termData);
+            return;
+        }
+        if (termData._resizeReleased) force = true;
+        cols = Math.max(1, Math.floor(cols || 0));
+        rows = Math.max(1, Math.floor(rows || 0));
+        const key = `${cols}x${rows}`;
+        if (!force && termData._lastResizeSent === key) return;
+        termData._lastResizeSent = key;
+        termData._resizeReleased = false;
+        termData.ws.send(JSON.stringify({ type: 'resize', data: { cols, rows } }));
+    }
+
+    _shouldOwnResize(termData) {
+        if (!termData) return false;
+        if (document.hidden) return false;
+        if (window.app?.currentView && window.app.currentView !== 'terminal') return false;
+        return this.activeSessionId === termData.sessionId && termData.container?.classList.contains('active');
+    }
+
+    _releaseResize(termData) {
+        if (!termData?.ws || termData.ws.readyState !== WebSocket.OPEN) return;
+        if (termData._resizeReleased) return;
+        termData._resizeReleased = true;
+        termData.ws.send(JSON.stringify({ type: 'resize_release' }));
+    }
+
+    releaseAllResize() {
+        this.terminals.forEach((termData) => this._releaseResize(termData));
+    }
+
+    resumeActiveResize() {
+        const termData = this.activeSessionId ? this.terminals.get(this.activeSessionId) : null;
+        if (termData?.terminal) {
+            this._sendResize(termData, termData.terminal.cols, termData.terminal.rows, true);
+        }
     }
 
     // Write to active terminal
@@ -1105,6 +1440,50 @@ class TerminalManager {
         }
     }
 
+    isCodexAppServerSession(sessionId) {
+        const termData = this.terminals.get(sessionId);
+        if (!termData || termData.backend !== 'codex') return false;
+        const runtime = String(termData.codexRuntime || '').trim().toLowerCase().replace(/_/g, '-');
+        return runtime === 'app-server' || runtime === 'appserver';
+    }
+
+    _handleCodexSlashInput(sessionId, data) {
+        if (!this.codexSlashPalette) return false;
+        return this.codexSlashPalette.handleData(sessionId, data);
+    }
+
+    requestCodexCommand(sessionId, action, params = {}) {
+        const termData = this.terminals.get(sessionId);
+        if (!termData?.ws || termData.ws.readyState !== WebSocket.OPEN) {
+            return Promise.reject(new Error('Session WebSocket is not connected'));
+        }
+        const id = `codex-${Date.now()}-${this._codexCommandSeq++}`;
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                this._codexCommandPending.delete(id);
+                reject(new Error('Codex command timed out'));
+            }, 25000);
+            this._codexCommandPending.set(id, { resolve, reject, timer });
+            termData.ws.send(JSON.stringify({
+                type: 'codex_command',
+                data: { id, action, params }
+            }));
+        });
+    }
+
+    _handleCodexCommandResult(data) {
+        if (!data?.id) return;
+        const pending = this._codexCommandPending.get(data.id);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this._codexCommandPending.delete(data.id);
+        if (data.ok) {
+            pending.resolve(data.result);
+        } else {
+            pending.reject(new Error(data.error || 'Codex command failed'));
+        }
+    }
+
     // Send input to active terminal.
     // Blocks input if a session transition is in progress (pendingSessionOpen)
     // to prevent stray input from reaching the wrong session.
@@ -1127,6 +1506,7 @@ class TerminalManager {
     sendComplexEdit(sessionId, backspaces, text) {
         const termData = this.terminals.get(sessionId);
         const wsOpen = termData?.ws?.readyState === WebSocket.OPEN;
+        text = this._sanitizeTerminalClientInput(text);
         flog('TERM-INPUT', `sendComplexEdit: sessionId=${sessionId}, backspaces=${backspaces}, text="${text}", wsOpen=${wsOpen}`);
         if (termData && termData.ws && wsOpen) {
             termData.ws.send(JSON.stringify({ type: 'complex_edit', data: { backspaces, text } }));
@@ -1154,6 +1534,7 @@ class TerminalManager {
 
     // Submit text to terminal: server bulk-writes text, sleeps, then writes \r.
     submitTerminalLine(sessionId, text) {
+        text = this._sanitizeTerminalClientInput(text);
         flog('TERM-INPUT', `submitTerminalLine: sessionId=${sessionId}, text="${text}" (len=${text.length})`);
         const termData = this.terminals.get(sessionId);
         if (termData && termData.ws && termData.ws.readyState === WebSocket.OPEN) {
@@ -1161,7 +1542,7 @@ class TerminalManager {
             this._trackInput(sessionId, text + '\r');
             // Optimistic echo on SV — show the user card immediately instead of
             // waiting ~500ms+ for Claude Code to write the user line to JSONL.
-            if (text && this.structuredViewActive.get(sessionId) && window.structuredView) {
+            if (text && !this.isCodexAppServerSession(sessionId) && this.structuredViewActive.get(sessionId) && window.structuredView) {
                 window.structuredView.addOptimisticUserMessage?.(sessionId, text);
             }
         } else {
@@ -1173,6 +1554,7 @@ class TerminalManager {
     // to avoid readline paste detection, then sends \r. Use for programmatic text
     // that wasn't user-typed (e.g. auto-generated image prompts).
     typeAndSubmitLine(sessionId, text) {
+        text = this._sanitizeTerminalClientInput(text);
         flog('TERM-INPUT', `typeAndSubmitLine: sessionId=${sessionId}, text="${text}" (len=${text.length})`);
         const termData = this.terminals.get(sessionId);
         if (termData && termData.ws && termData.ws.readyState === WebSocket.OPEN) {
@@ -1192,6 +1574,8 @@ class TerminalManager {
     sendInputToSession(sessionId, data) {
         const termData = this.terminals.get(sessionId);
         const wsOpen = termData?.ws?.readyState === WebSocket.OPEN;
+        data = this._sanitizeTerminalClientInput(data);
+        if (!data) return;
         // Log control chars as escape notation
         const displayData = data.replace(/[\x00-\x1f]/g, c => `\\x${c.charCodeAt(0).toString(16).padStart(2,'0')}`);
         flog('TERM-INPUT', `sendInputToSession: sessionId=${sessionId}, data="${displayData}" (len=${data.length}), wsOpen=${wsOpen}`);
@@ -1199,12 +1583,19 @@ class TerminalManager {
             termData.ws.send(JSON.stringify({ type: 'input', data: data }));
             // Update _knownInput tracker
             this._trackInput(sessionId, data);
-            // Track pending output for activity bar
-            if (!termData._awaitingOutput) {
-                termData._awaitingOutput = true;
-                window.networkFeedback?.requestStarted();
-            }
         }
+    }
+
+    _sanitizeTerminalClientInput(data) {
+        if (!data) return data;
+        return String(data)
+            .replace(/\x1b\[[0-9;?<>]*[Rc]/g, '')
+            .replace(/\x1b\[[<][0-9;?<>]*u/g, '')
+            .replace(/\x1b\]1[01];[^\x07\x1b\r\n]*(?:\x07|\x1b\\)/g, '')
+            .replace(/\[O(?=(?:\[[0-9;?<>]*[Rcu]|\]1[01];))/g, '')
+            .replace(/\[[0-9;?<>]*[Rc]/g, '')
+            .replace(/\[[<][0-9;?<>]*u/g, '')
+            .replace(/\]1[01];[^\r\n\\\x07]*(?:\\|\x07)/g, '');
     }
 
     // Update _knownInput based on what was sent to the terminal
@@ -1227,6 +1618,19 @@ class TerminalManager {
                     } else if (next === 'O') {
                         // SS3: skip ESC O <char>
                         i += 2;
+                    } else if (next === ']' || next === 'P' || next === '^' || next === '_') {
+                        // OSC/DCS/PM/APC terminal responses (for example color
+                        // queries like ESC ] 10 ; rgb:... ST) are input bytes
+                        // from xterm to the PTY, not user prompt text.
+                        i += 2;
+                        while (i < data.length) {
+                            if (data[i] === '\x07') break; // BEL terminator
+                            if (data[i] === '\x1b' && data[i + 1] === '\\') {
+                                i += 1; // ST terminator; loop increment skips it
+                                break;
+                            }
+                            i++;
+                        }
                     } else {
                         // Two-char escape: ESC <char>
                         i += 1;
@@ -1288,7 +1692,7 @@ class TerminalManager {
                 flog('MOBILE-SYNC', `_scheduleMobileInputSync: updating mobile input from _knownInput: old="${mobileInput.value}" (len=${mobileInput.value.length}) -> new="${knownValue}" (len=${knownValue.length})`);
                 mobileInput.value = knownValue;
                 mobileInput._lastSyncedValue = knownValue;
-                if (!lineContent || lineContent.indexOf('\n') === -1) {
+                if (knownValue.indexOf('\n') === -1) {
                     mobileInput.style.height = '44px';
                     mobileInput.style.overflow = 'hidden';
                 }
@@ -1418,6 +1822,13 @@ class TerminalManager {
     // Focus active terminal (desktop only - mobile terminal is read-only)
     focus() {
         if (this.activeSessionId && window.innerWidth > 768) {
+            if (this.structuredViewActive.get(this.activeSessionId)) {
+                const view = window.structuredView?.views?.get(this.activeSessionId);
+                if (view?.textarea) {
+                    view.textarea.focus();
+                    return;
+                }
+            }
             const termData = this.terminals.get(this.activeSessionId);
             if (termData && termData.terminal) {
                 termData.terminal.focus();
@@ -1462,6 +1873,483 @@ class TerminalManager {
         });
         this.terminals.clear();
         this.activeSessionId = null;
+    }
+}
+
+class CodexSlashPalette {
+    constructor(manager) {
+        this.manager = manager;
+        this.open = false;
+        this.sessionId = null;
+        this.mode = 'root';
+        this.query = '';
+        this.items = [];
+        this.selected = 0;
+        this.loading = false;
+        this.error = '';
+        this.selectedModel = null;
+        this.selectedEffort = '';
+        this.searchTimer = null;
+        this.rootCommands = [
+            { id: 'status', label: '/status', description: 'Show Codex session, thread, model, and permission status' },
+            { id: 'resume', label: '/resume', description: 'Resume a Codex thread from this project' },
+            { id: 'model', label: '/model', description: 'Choose model, reasoning effort, and service tier' },
+            { id: 'permissions', label: '/permissions', description: 'Choose the permission preset for future turns' },
+            { id: 'compact', label: '/compact', description: 'Compact the current Codex thread' },
+            { id: 'new', label: '/new', description: 'Start a fresh Codex thread in this OpenPoet session' },
+            { id: 'stop', label: '/stop', description: 'Interrupt the active Codex turn' },
+            { id: 'init', label: '/init', description: 'Unavailable: Codex app-server does not expose this TUI command yet', disabled: true }
+        ];
+    }
+
+    handleData(sessionId, data) {
+        if (this.open) {
+            if (this.sessionId !== sessionId) {
+                this.close();
+                return false;
+            }
+            this.consume(data);
+            return true;
+        }
+
+        if (data !== '/' || !this.manager.isCodexAppServerSession(sessionId)) return false;
+        const knownInput = this.manager._knownInput.get(sessionId) || '';
+        if (knownInput.length > 0) return false;
+
+        this.openRoot(sessionId);
+        return true;
+    }
+
+    openRoot(sessionId) {
+        this.open = true;
+        this.sessionId = sessionId;
+        this.mode = 'root';
+        this.query = '';
+        this.items = [...this.rootCommands];
+        this.selected = 0;
+        this.loading = false;
+        this.error = '';
+        this.selectedModel = null;
+        this.selectedEffort = '';
+        this.render();
+    }
+
+    consume(data) {
+        if (data === '\x1b' || data === '\x03') {
+            this.close();
+            return;
+        }
+        if (data === '\r' || data === '\n' || data === '\t') {
+            this.activateSelected();
+            return;
+        }
+        if (data === '\x1b[A') {
+            this.move(-1);
+            return;
+        }
+        if (data === '\x1b[B') {
+            this.move(1);
+            return;
+        }
+        if (data === '\x7f' || data === '\b') {
+            if (this.query.length > 0) {
+                this.query = this.query.slice(0, -1);
+                this.refreshItems();
+            } else {
+                this.close();
+            }
+            return;
+        }
+        if (/^[\x20-\x7e]+$/.test(data)) {
+            this.query += data.replace(/^\//, '');
+            this.refreshItems();
+        }
+    }
+
+    move(delta) {
+        if (!this.items.length) return;
+        this.selected = (this.selected + delta + this.items.length) % this.items.length;
+        this.render();
+    }
+
+    refreshItems() {
+        if (this.mode === 'root') {
+            const q = this.query.toLowerCase();
+            this.items = this.rootCommands.filter(item =>
+                item.label.toLowerCase().includes(q) || item.description.toLowerCase().includes(q)
+            );
+            this.selected = 0;
+            this.render();
+            return;
+        }
+
+        if (this.mode === 'resume') {
+            clearTimeout(this.searchTimer);
+            this.searchTimer = setTimeout(() => this.loadResumeThreads(), 180);
+            this.render();
+            return;
+        }
+
+        const q = this.query.toLowerCase();
+        const source = this.sourceItems || [];
+        this.items = source.filter(item =>
+            item.label.toLowerCase().includes(q) || (item.description || '').toLowerCase().includes(q)
+        );
+        this.selected = 0;
+        this.render();
+    }
+
+    async activateSelected() {
+        if (this.loading || !this.items.length) return;
+        const item = this.items[this.selected];
+        if (!item || item.disabled) return;
+
+        try {
+            if (this.mode === 'root') {
+                await this.openCommand(item.id);
+            } else if (this.mode === 'model') {
+                await this.chooseModel(item);
+            } else if (this.mode === 'model-effort') {
+                this.selectedEffort = item.value || '';
+                if (this.selectedModel?.serviceTiers?.length) {
+                    this.openServiceTierStep();
+                } else {
+                    await this.applyModel('');
+                }
+            } else if (this.mode === 'model-tier') {
+                await this.applyModel(item.value || '');
+            } else if (this.mode === 'permissions') {
+                if (item.kind === 'profile') {
+                    await this.applyPermissionProfile(item.id);
+                } else {
+                    await this.applyPermissions(item.id);
+                }
+            } else if (this.mode === 'resume') {
+                await this.applyResume(item.id);
+            } else if (this.mode === 'confirm') {
+                await this.applyConfirmation(item);
+            }
+        } catch (err) {
+            this.error = err?.message || String(err);
+            this.loading = false;
+            this.render();
+        }
+    }
+
+    async openCommand(commandId) {
+        this.query = '';
+        this.error = '';
+        if (commandId === 'model') {
+            await this.loadModels();
+        } else if (commandId === 'permissions') {
+            await this.loadPermissions();
+        } else if (commandId === 'resume') {
+            await this.loadResumeThreads();
+        } else if (commandId === 'status') {
+            await this.runStatus();
+        } else if (commandId === 'compact') {
+            this.openConfirmation('Compact Thread', 'Start Codex compaction for the current thread', 'thread/compact', 'Compaction requested');
+        } else if (commandId === 'new') {
+            this.openConfirmation('New Thread', 'Start a fresh Codex thread and clear the terminal view', 'thread/new', 'New Codex thread started');
+        } else if (commandId === 'stop') {
+            await this.runStop();
+        }
+    }
+
+    async runStatus() {
+        this.loading = true;
+        this.render();
+        await this.manager.requestCodexCommand(this.sessionId, 'status/read', {});
+        this.finish('Status written to terminal');
+    }
+
+    async runStop() {
+        this.loading = true;
+        this.render();
+        await this.manager.requestCodexCommand(this.sessionId, 'turn/stop', {});
+        this.finish('Stop requested');
+    }
+
+    openConfirmation(title, description, action, successMessage) {
+        this.mode = 'confirm';
+        this.title = title;
+        this.query = '';
+        this.confirmAction = action;
+        this.confirmSuccessMessage = successMessage;
+        this.sourceItems = [
+            { id: 'confirm', label: 'Confirm', description, value: true },
+            { id: 'cancel', label: 'Cancel', description: 'Return to the terminal without changing the session', value: false }
+        ];
+        this.items = [...this.sourceItems];
+        this.selected = 0;
+        this.render();
+    }
+
+    async applyConfirmation(item) {
+        if (!item.value) {
+            this.finish('Cancelled');
+            return;
+        }
+        this.loading = true;
+        this.render();
+        await this.manager.requestCodexCommand(this.sessionId, this.confirmAction, {});
+        this.finish(this.confirmSuccessMessage || 'Done');
+    }
+
+    async loadModels() {
+        this.mode = 'model';
+        this.title = 'Choose Model';
+        this.loading = true;
+        this.items = [];
+        this.render();
+        const result = await this.manager.requestCodexCommand(this.sessionId, 'model/list', { limit: 100 });
+        const models = Array.isArray(result?.data) ? result.data : [];
+        this.sourceItems = [
+            { id: 'default', label: 'Default', description: 'Use the configured Codex default model', model: null },
+            ...models.map(model => ({
+                id: model.model || model.id,
+                label: model.displayName || model.model || model.id,
+                description: model.description || model.model || model.id,
+                meta: model.model || model.id,
+                model
+            }))
+        ];
+        this.items = [...this.sourceItems];
+        this.loading = false;
+        this.selected = 0;
+        this.render();
+    }
+
+    async chooseModel(item) {
+        if (!item.model) {
+            await this.manager.requestCodexCommand(this.sessionId, 'model/set', { model: 'default' });
+            this.finish('Model reset to default');
+            return;
+        }
+        this.selectedModel = item.model;
+        const efforts = Array.isArray(item.model.supportedReasoningEfforts) ? item.model.supportedReasoningEfforts : [];
+        if (efforts.length) {
+            this.mode = 'model-effort';
+            this.title = 'Choose Reasoning Effort';
+            this.query = '';
+            this.sourceItems = [
+                {
+                    id: 'default',
+                    label: item.model.defaultReasoningEffort ? `Default (${item.model.defaultReasoningEffort})` : 'Default',
+                    description: 'Use the model default reasoning effort',
+                    value: ''
+                },
+                ...efforts.map(effort => ({
+                    id: effort.reasoningEffort,
+                    label: effort.reasoningEffort,
+                    description: effort.description || '',
+                    value: effort.reasoningEffort
+                }))
+            ];
+            this.items = [...this.sourceItems];
+            this.selected = 0;
+            this.render();
+        } else if (item.model.serviceTiers?.length) {
+            this.selectedEffort = '';
+            this.openServiceTierStep();
+        } else {
+            this.selectedEffort = '';
+            await this.applyModel('');
+        }
+    }
+
+    openServiceTierStep() {
+        this.mode = 'model-tier';
+        this.title = 'Choose Service Tier';
+        this.query = '';
+        const tiers = Array.isArray(this.selectedModel?.serviceTiers) ? this.selectedModel.serviceTiers : [];
+        this.sourceItems = [
+            {
+                id: 'default',
+                label: this.selectedModel?.defaultServiceTier ? `Default (${this.selectedModel.defaultServiceTier})` : 'Default',
+                description: 'Use the model default service tier',
+                value: ''
+            },
+            ...tiers.map(tier => ({
+                id: tier.id,
+                label: tier.name || tier.id,
+                description: tier.description || '',
+                value: tier.id
+            }))
+        ];
+        this.items = [...this.sourceItems];
+        this.selected = 0;
+        this.render();
+    }
+
+    async applyModel(serviceTier) {
+        const model = this.selectedModel?.model || this.selectedModel?.id;
+        if (!model) return;
+        await this.manager.requestCodexCommand(this.sessionId, 'model/set', {
+            model,
+            reasoningEffort: this.selectedEffort || '',
+            serviceTier: serviceTier || ''
+        });
+        this.finish(`Model set to ${model}`);
+    }
+
+    async loadPermissions() {
+        this.mode = 'permissions';
+        this.title = 'Choose Permissions';
+        this.loading = true;
+        this.items = [];
+        this.render();
+        const result = await this.manager.requestCodexCommand(this.sessionId, 'permissions/list', {});
+        const presets = Array.isArray(result?.presets) ? result.presets : [];
+        const currentMeta = result?.current ? `${result.current.approvalPolicy} / ${result.current.sandboxMode}` : '';
+        const profiles = Array.isArray(result?.profiles?.data) ? result.profiles.data : [];
+        this.sourceItems = presets.map(preset => ({
+            id: preset.id,
+            kind: 'preset',
+            label: preset.label || preset.id,
+            description: preset.description || '',
+            meta: currentMeta
+        }));
+        if (profiles.length) {
+            this.sourceItems.push(...profiles.map(profile => ({
+                id: profile.id,
+                kind: 'profile',
+                label: profile.id,
+                description: profile.description || 'Custom profile listed by Codex',
+                meta: result?.profileApplySupported ? 'profile' : 'profile / list-only',
+                disabled: !result?.profileApplySupported
+            })));
+        }
+        this.items = [...this.sourceItems];
+        this.loading = false;
+        this.selected = 0;
+        this.render();
+    }
+
+    async applyPermissions(preset) {
+        await this.manager.requestCodexCommand(this.sessionId, 'permissions/set', { preset });
+        this.finish(`Permissions set: ${preset}`);
+    }
+
+    async applyPermissionProfile(profile) {
+        await this.manager.requestCodexCommand(this.sessionId, 'permissions/set', { profile });
+        this.finish(`Permission profile set: ${profile}`);
+    }
+
+    async loadResumeThreads() {
+        this.mode = 'resume';
+        this.title = 'Resume Thread';
+        this.loading = true;
+        this.error = '';
+        this.render();
+        const result = await this.manager.requestCodexCommand(this.sessionId, 'resume/list', {
+            searchTerm: this.query,
+            limit: 20
+        });
+        const threads = Array.isArray(result?.data) ? result.data : [];
+        this.items = threads.map(thread => ({
+            id: thread.id,
+            label: thread.name || thread.preview || thread.id,
+            description: thread.preview || thread.cwd || '',
+            meta: this.formatThreadMeta(thread)
+        }));
+        this.sourceItems = [...this.items];
+        this.loading = false;
+        this.selected = 0;
+        this.render();
+    }
+
+    async applyResume(threadId) {
+        await this.manager.requestCodexCommand(this.sessionId, 'resume/apply', { threadId });
+        this.finish(`Resumed ${threadId.slice(0, 10)}`);
+    }
+
+    finish(message) {
+        this.close();
+        window.app?.showToast?.('Codex', message, 'success');
+        this.manager.focus();
+    }
+
+    close() {
+        clearTimeout(this.searchTimer);
+        this.open = false;
+        this.sessionId = null;
+        this.query = '';
+        this.items = [];
+        this.sourceItems = [];
+        this.error = '';
+        const el = document.getElementById('codex-slash-palette');
+        if (el) el.remove();
+        this.manager.focus();
+    }
+
+    render() {
+        const wrapper = document.getElementById(this.manager.containerWrapperId);
+        if (!wrapper || !this.open) return;
+        let el = document.getElementById('codex-slash-palette');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'codex-slash-palette';
+            el.className = 'codex-slash-palette';
+            wrapper.appendChild(el);
+        }
+
+        const title = this.title || 'Codex Commands';
+        const queryText = this.mode === 'root' ? `/${this.query}` : this.query;
+        const rows = this.items.map((item, idx) => `
+            <button type="button" class="codex-slash-item ${idx === this.selected ? 'active' : ''} ${item.disabled ? 'disabled' : ''}" data-index="${idx}" ${item.disabled ? 'disabled' : ''}>
+                <span class="codex-slash-item-main">
+                    <span class="codex-slash-label">${this.escape(item.label)}</span>
+                    <span class="codex-slash-desc">${this.escape(item.description || '')}</span>
+                </span>
+                ${item.meta ? `<span class="codex-slash-meta">${this.escape(item.meta)}</span>` : ''}
+            </button>
+        `).join('');
+
+        el.innerHTML = `
+            <div class="codex-slash-header">
+                <span>${this.escape(title)}</span>
+                <kbd>Esc</kbd>
+            </div>
+            <div class="codex-slash-query">${this.escape(queryText || '/')}</div>
+            <div class="codex-slash-list">
+                ${this.loading ? '<div class="codex-slash-empty">Loading...</div>' : ''}
+                ${!this.loading && this.error ? `<div class="codex-slash-error">${this.escape(this.error)}</div>` : ''}
+                ${!this.loading && !this.error && rows ? rows : ''}
+                ${!this.loading && !this.error && !rows ? '<div class="codex-slash-empty">No matches</div>' : ''}
+            </div>
+            <div class="codex-slash-footer">Type to filter, Enter to select</div>
+        `;
+
+        el.querySelectorAll('.codex-slash-item').forEach(btn => {
+            btn.addEventListener('mouseenter', () => {
+                this.selected = Number(btn.dataset.index) || 0;
+                this.render();
+            });
+            btn.addEventListener('click', () => {
+                this.selected = Number(btn.dataset.index) || 0;
+                this.activateSelected();
+            });
+        });
+    }
+
+    formatThreadMeta(thread) {
+        const parts = [];
+        if (thread.status) parts.push(thread.status);
+        if (thread.updatedAt) {
+            parts.push(new Date(thread.updatedAt * 1000).toLocaleDateString());
+        }
+        return parts.join(' / ');
+    }
+
+    escape(value) {
+        return String(value ?? '').replace(/[&<>"']/g, ch => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        }[ch]));
     }
 }
 
@@ -1520,7 +2408,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (termData && termData.terminal) {
                     // Cancel any ongoing momentum
                     if (termData._cancelMomentum) termData._cancelMomentum();
-                    termData.terminal.scrollToTop();
+                    tm._jumpScroll(termData, false);
                 }
             }
         });
@@ -1544,7 +2432,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (termData._cancelMomentum) termData._cancelMomentum();
                     tm.syncViewport(termData);
                     tm.clearScrollLock(termData);
-                    termData.terminal.scrollToBottom();
+                    tm._jumpScroll(termData, true);
                 }
             }
         });

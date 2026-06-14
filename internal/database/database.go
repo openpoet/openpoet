@@ -16,6 +16,16 @@ type DB struct {
 	*sqlx.DB
 }
 
+const (
+	DefaultCodexTranscriptRetentionDays = 14
+	DefaultCodexTranscriptMaxEvents     = 10000
+)
+
+type CodexTranscriptCleanupStats struct {
+	ExpiredDeleted  int64
+	OverflowDeleted int64
+}
+
 func New(path string) (*DB, error) {
 	db, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)")
 	if err != nil {
@@ -240,6 +250,11 @@ func (d *DB) UpdateSessionSkipPermissions(ctx context.Context, id string, skipPe
 	return err
 }
 
+func (d *DB) UpdateSessionProviderSessionID(ctx context.Context, id string, providerSessionID string) error {
+	_, err := d.ExecContext(ctx, "UPDATE sessions SET provider_session_id=? WHERE id=?", providerSessionID, id)
+	return err
+}
+
 func (d *DB) GetSession(ctx context.Context, id string) (*Session, error) {
 	var s Session
 	err := d.GetContext(ctx, &s, "SELECT * FROM sessions WHERE id = ?", id)
@@ -308,6 +323,90 @@ func (d *DB) GetSessionPlan(ctx context.Context, id string) (string, *time.Time,
 func (d *DB) DeleteSession(ctx context.Context, id string) error {
 	_, err := d.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
 	return err
+}
+
+func (d *DB) InsertCodexTranscriptEvent(ctx context.Context, event *CodexTranscriptEvent) error {
+	if event == nil || event.SessionID == "" || event.EventID <= 0 {
+		return nil
+	}
+	if event.Kind == "" {
+		event.Kind = "status"
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now()
+	}
+	_, err := d.ExecContext(ctx, `
+		INSERT INTO codex_transcript_events
+			(session_id, event_id, kind, text, title, command, status, append, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.SessionID,
+		event.EventID,
+		event.Kind,
+		event.Text,
+		event.Title,
+		event.Command,
+		event.Status,
+		event.Append,
+		event.CreatedAt,
+	)
+	return err
+}
+
+func (d *DB) ListCodexTranscriptEvents(ctx context.Context, sessionID string, limit int) ([]CodexTranscriptEvent, error) {
+	if limit <= 0 {
+		limit = 4000
+	}
+	var events []CodexTranscriptEvent
+	err := d.SelectContext(ctx, &events, `
+		SELECT * FROM (
+			SELECT * FROM codex_transcript_events
+			WHERE session_id = ?
+			ORDER BY id DESC
+			LIMIT ?
+	) ORDER BY id ASC`, sessionID, limit)
+	return events, err
+}
+
+func (d *DB) CleanupCodexTranscriptEvents(ctx context.Context, retentionDays, maxEventsPerSession int) (CodexTranscriptCleanupStats, error) {
+	if retentionDays <= 0 {
+		retentionDays = DefaultCodexTranscriptRetentionDays
+	}
+	if maxEventsPerSession <= 0 {
+		maxEventsPerSession = DefaultCodexTranscriptMaxEvents
+	}
+
+	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	expiredResult, err := d.ExecContext(ctx, `
+		DELETE FROM codex_transcript_events
+		WHERE session_id IN (
+			SELECT id FROM sessions
+			WHERE status IN ('stopped', 'completed', 'error')
+			  AND COALESCE(end_time, start_time) < ?
+		)`, cutoff)
+	if err != nil {
+		return CodexTranscriptCleanupStats{}, err
+	}
+	expiredDeleted, _ := expiredResult.RowsAffected()
+
+	overflowResult, err := d.ExecContext(ctx, `
+		DELETE FROM codex_transcript_events
+		WHERE id IN (
+			SELECT id FROM (
+				SELECT id,
+				       ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id DESC) AS rn
+				FROM codex_transcript_events
+			)
+			WHERE rn > ?
+		)`, maxEventsPerSession)
+	if err != nil {
+		return CodexTranscriptCleanupStats{}, err
+	}
+	overflowDeleted, _ := overflowResult.RowsAffected()
+
+	return CodexTranscriptCleanupStats{
+		ExpiredDeleted:  expiredDeleted,
+		OverflowDeleted: overflowDeleted,
+	}, nil
 }
 
 // Skill operations

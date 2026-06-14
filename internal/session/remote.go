@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"openpoet/internal/database"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ type RemoteRunner struct {
 	outputHandler func([]byte)
 	decryptFunc   func(string, string) (string, error)
 	cliArgs       []string
+	backend       BackendStrategy
 
 	mu             sync.Mutex
 	client         *ssh.Client
@@ -48,6 +50,7 @@ func NewRemoteRunner(
 		outputHandler: outputHandler,
 		decryptFunc:   decryptFunc,
 		cliArgs:       cliArgs,
+		backend:       GetBackend(project.Backend),
 		done:          make(chan struct{}),
 	}, nil
 }
@@ -140,8 +143,9 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 	// and invoke it instead. That also sidesteps cmd.exe's brutal inline
 	// quoting rules for arguments like the JSON --mcp-config payload.
 	var cmd string
+	backendCommand := r.backendCommand()
 	if r.isWindows {
-		script := buildWindowsBatchScript(r.envVars, r.project.Path, r.cliArgs)
+		script := buildWindowsBatchScript(r.envVars, r.project.Path, backendCommand, r.cliArgs)
 		sftpPath, cmdPath, uerr := uploadWindowsLauncher(client, script)
 		if uerr != nil {
 			session.Close()
@@ -153,13 +157,13 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 		// command line, double quotes around the executable path are stripped.
 		cmd = fmt.Sprintf(`"%s"`, cmdPath)
 	} else {
-		// Using 'export' so env vars are inherited by claude and its child processes (bridge.sh)
+		// Using 'export' so env vars are inherited by the backend and its child processes.
 		// Prepend common binary paths so tools like claude are found in non-interactive SSH sessions
 		cmd = "export PATH=$HOME/.local/bin:$HOME/.nvm/current/bin:/usr/local/bin:$PATH && "
 		for k, v := range r.envVars {
 			cmd += fmt.Sprintf("export %s=%s && ", k, shellQuote(v))
 		}
-		cmd += fmt.Sprintf("cd %s && claude", r.project.Path)
+		cmd += fmt.Sprintf("cd %s && %s", shellQuote(r.project.Path), shellCommandWord(backendCommand))
 		for _, arg := range r.cliArgs {
 			cmd += " " + shellQuote(arg)
 		}
@@ -187,6 +191,18 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+func (r *RemoteRunner) backendCommand() string {
+	if override := strings.TrimSpace(r.envVars["OPENPOET_BACKEND_BINARY"]); override != "" {
+		return override
+	}
+	if r.backend != nil {
+		if binary := strings.TrimSpace(r.backend.BinaryName()); binary != "" {
+			return binary
+		}
+	}
+	return "claude"
 }
 
 func (r *RemoteRunner) buildSSHConfig() (*ssh.ClientConfig, error) {
@@ -314,6 +330,11 @@ func (r *RemoteRunner) setupReverseTunnel(client *ssh.Client) {
 // doesn't work on remote machines because the openpoet binary isn't installed
 // there and the API URL points to localhost.
 func (r *RemoteRunner) rewriteMCPConfigForRemote() {
+	if r.backend != nil && r.backend.Type() == BackendCodex {
+		r.injectCodexOpenPoetMCPForRemote()
+		return
+	}
+
 	if r.tunnelListener == nil {
 		log.Printf("[remote] MCP rewrite: no tunnel, skipping")
 		return
@@ -372,6 +393,50 @@ func (r *RemoteRunner) rewriteMCPConfigForRemote() {
 		log.Printf("[remote] MCP rewrite: openpoet -> HTTP %s", mcpURL)
 		return
 	}
+}
+
+func (r *RemoteRunner) injectCodexOpenPoetMCPForRemote() {
+	raw := r.envVars["OPENPOET_MCP_CONFIG_JSON"]
+	delete(r.envVars, "OPENPOET_MCP_CONFIG_JSON")
+	providerSessionID := r.envVars["OPENPOET_PROVIDER_SESSION_ID"]
+	delete(r.envVars, "OPENPOET_PROVIDER_SESSION_ID")
+
+	if r.tunnelListener == nil {
+		log.Printf("[remote] Codex MCP inject: no tunnel, skipping")
+		return
+	}
+	if strings.TrimSpace(raw) == "" {
+		return
+	}
+
+	var config struct {
+		MCPServers map[string]map[string]interface{} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(raw), &config); err != nil || len(config.MCPServers) == 0 {
+		log.Printf("[remote] Codex MCP inject: failed to parse config: %v", err)
+		return
+	}
+	if _, ok := config.MCPServers["openpoet"]; !ok {
+		return
+	}
+
+	mcpURL := fmt.Sprintf("http://%s/mcp", r.tunnelListener.Addr().String())
+	if sessionID := strings.TrimSpace(r.envVars["OPENPOET_SESSION_ID"]); sessionID != "" {
+		mcpURL += "?session_id=" + sessionID
+	}
+	r.insertCodexConfigOverride("mcp_servers.openpoet.url", mcpURL, providerSessionID)
+	log.Printf("[remote] Codex MCP inject: openpoet -> HTTP %s", mcpURL)
+}
+
+func (r *RemoteRunner) insertCodexConfigOverride(key, value, providerSessionID string) {
+	override := []string{"-c", key + "=" + codexTomlQuotedValue(value)}
+	insertAt := len(r.cliArgs)
+	if providerSessionID != "" && len(r.cliArgs) > 0 && r.cliArgs[len(r.cliArgs)-1] == providerSessionID {
+		insertAt = len(r.cliArgs) - 1
+	}
+	r.cliArgs = append(r.cliArgs, "", "")
+	copy(r.cliArgs[insertAt+2:], r.cliArgs[insertAt:])
+	copy(r.cliArgs[insertAt:], override)
 }
 
 func (r *RemoteRunner) readOutput(reader io.Reader) {
@@ -459,6 +524,91 @@ func (r *RemoteRunner) Done() <-chan struct{} {
 	return r.done
 }
 
+func (r *RemoteRunner) DiscoverCodexProviderSessionID(workDir string, since time.Time) (string, error) {
+	r.mu.Lock()
+	client := r.client
+	codexHome := strings.TrimSpace(r.envVars["CODEX_HOME"])
+	r.mu.Unlock()
+	if client == nil {
+		return "", fmt.Errorf("remote SSH client is not connected")
+	}
+	return discoverCodexProviderSessionIDOverSSH(client, codexHome, workDir, since)
+}
+
+func discoverRemoteCodexProviderSessionID(project *database.Project, decryptFunc func(string, string) (string, error), codexHome, workDir string, since time.Time) (string, error) {
+	runner := &RemoteRunner{
+		project:     project,
+		decryptFunc: decryptFunc,
+	}
+	config, err := runner.buildSSHConfig()
+	if err != nil {
+		return "", err
+	}
+	addr := fmt.Sprintf("%s:%d", project.SSHHost.String, project.SSHPort.Int64)
+	client, err := ssh.Dial("tcp", addr, config)
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
+	return discoverCodexProviderSessionIDOverSSH(client, codexHome, workDir, since)
+}
+
+func discoverCodexProviderSessionIDOverSSH(client *ssh.Client, codexHome, workDir string, since time.Time) (string, error) {
+	session, err := client.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer session.Close()
+
+	cmd := ""
+	if strings.TrimSpace(codexHome) != "" {
+		cmd += "CODEX_HOME=" + shellQuote(codexHome) + " "
+	}
+	cmd += "python3 -c " + shellQuote(remoteCodexProviderSessionIDScript) + " " + shellQuote(workDir) + " " + shellQuote(strconv.FormatInt(since.Unix(), 10))
+	output, err := session.CombinedOutput(cmd)
+	if err != nil {
+		return "", fmt.Errorf("remote Codex session discovery failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+const remoteCodexProviderSessionIDScript = `
+import json, os, pathlib, sys
+
+work = os.path.realpath(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1] else ""
+since = float(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else 0
+home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+root = pathlib.Path(home).expanduser() / "sessions"
+best = None
+
+if root.is_dir():
+    for path in root.rglob("*.jsonl"):
+        try:
+            stat = path.stat()
+            if since and stat.st_mtime < since:
+                continue
+            with path.open("r", encoding="utf-8", errors="ignore") as fh:
+                raw = json.loads(fh.readline())
+            if raw.get("type") != "session_meta":
+                continue
+            payload = raw.get("payload") or {}
+            sid = str(payload.get("id") or "").strip()
+            cwd = str(payload.get("cwd") or "").strip()
+            if not sid:
+                continue
+            if work and os.path.realpath(cwd) != work:
+                continue
+            origin = str(payload.get("originator") or "").lower()
+            item = (1 if origin == "openpoet" else 0, stat.st_mtime, sid)
+            if best is None or item[:2] > best[:2]:
+                best = item
+        except Exception:
+            pass
+
+if best:
+    print(best[2])
+`
+
 // ValidateConnection tests SSH connection without starting a session
 func ValidateConnection(project *database.Project, decryptFunc func(string, string) (string, error)) error {
 	runner := &RemoteRunner{
@@ -513,6 +663,17 @@ func ValidateConnection(project *database.Project, decryptFunc func(string, stri
 // Internal single quotes are escaped using the '\” idiom.
 func shellQuote(s string) string {
 	return "'" + strings.Replace(s, "'", `'\''`, -1) + "'"
+}
+
+func shellCommandWord(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "claude"
+	}
+	if strings.ContainsAny(command, "/\\ \t'\"$`;&|()<>") {
+		return shellQuote(command)
+	}
+	return command
 }
 
 // Register factory on init

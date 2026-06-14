@@ -842,6 +842,20 @@ func validateProjectPath(path, projectType string) string {
 	return ""
 }
 
+func validateProjectBackend(projectType, backend string) string {
+	if backend == "" {
+		backend = string(session.BackendClaudeCode)
+	}
+
+	switch backend {
+	case string(session.BackendClaudeCode), string(session.BackendCopilot), string(session.BackendACP), string(session.BackendCodex):
+	default:
+		return fmt.Sprintf("Unsupported project backend: %s", backend)
+	}
+
+	return ""
+}
+
 // ============ Projects ============
 
 func (a *API) ListProjects(w http.ResponseWriter, r *http.Request) {
@@ -898,6 +912,10 @@ func (a *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	backend := input.Backend
 	if backend == "" {
 		backend = "claude_code"
+	}
+	if errMsg := validateProjectBackend(input.Type, backend); errMsg != "" {
+		respondError(w, http.StatusBadRequest, errMsg)
+		return
 	}
 	backendConfig := input.BackendConfig
 	if backendConfig == "" {
@@ -995,6 +1013,10 @@ func (a *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	if input.Backend != "" {
 		project.Backend = input.Backend
 	}
+	if errMsg := validateProjectBackend(project.Type, project.Backend); errMsg != "" {
+		respondError(w, http.StatusBadRequest, errMsg)
+		return
+	}
 	if input.BackendConfig != "" {
 		project.BackendConfig = input.BackendConfig
 	}
@@ -1067,6 +1089,10 @@ func (a *API) DuplicateProject(w http.ResponseWriter, r *http.Request) {
 	// Apply overrides
 	if overrides.Type != "" {
 		clone.Type = overrides.Type
+	}
+	if errMsg := validateProjectBackend(clone.Type, clone.Backend); errMsg != "" {
+		respondError(w, http.StatusBadRequest, errMsg)
+		return
 	}
 	if overrides.Path != "" {
 		overrides.Path = strings.TrimSpace(overrides.Path)
@@ -1399,6 +1425,7 @@ type ActiveSessionDetail struct {
 	TotalCost            float64       `json:"total_cost"`
 	HasPendingPermission bool          `json:"has_pending_permission"`
 	ExecutionMode        string        `json:"execution_mode"`
+	CodexRuntime         string        `json:"codex_runtime,omitempty"`
 	ACPUsage             *ACPUsageInfo `json:"acp_usage,omitempty"`
 }
 
@@ -1434,6 +1461,15 @@ func (a *API) GetActiveSessionDetails(w http.ResponseWriter, r *http.Request) {
 			d.ProjectType = p.Type
 			if p.SSHHost.Valid {
 				d.ProjectSSHHost = p.SSHHost.String
+			}
+			if s.Backend == string(session.BackendCodex) {
+				d.CodexRuntime = "app-server"
+				var cfg struct {
+					Runtime string `json:"runtime"`
+				}
+				if err := json.Unmarshal([]byte(p.BackendConfig), &cfg); err == nil && strings.TrimSpace(cfg.Runtime) != "" {
+					d.CodexRuntime = strings.TrimSpace(cfg.Runtime)
+				}
 			}
 		}
 

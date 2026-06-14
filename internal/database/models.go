@@ -20,7 +20,7 @@ type Project struct {
 	ToolPolicy                 string         `db:"tool_policy" json:"tool_policy,omitempty"`   // JSON ToolPolicy
 	SkillPolicy                string         `db:"skill_policy" json:"skill_policy,omitempty"` // '' = inherit global, 'custom' = per-project
 	DangerouslySkipPermissions bool           `db:"dangerously_skip_permissions" json:"dangerously_skip_permissions"`
-	Backend                    string         `db:"backend" json:"backend"`               // 'claude_code', 'copilot', or 'acp'
+	Backend                    string         `db:"backend" json:"backend"`               // 'claude_code', 'copilot', 'acp', or 'codex'
 	BackendConfig              string         `db:"backend_config" json:"backend_config"` // JSON blob for backend-specific settings
 	ConfigSyncedAt             sql.NullTime   `db:"config_synced_at" json:"config_synced_at,omitempty"`
 	CreatedAt                  time.Time      `db:"created_at" json:"created_at"`
@@ -58,19 +58,33 @@ type ProjectTag struct {
 }
 
 type Session struct {
-	ID              string        `db:"id" json:"id"`
-	ProjectID       int64         `db:"project_id" json:"project_id"`
-	Status          string        `db:"status" json:"status"` // 'starting', 'running', 'stopped', 'error', 'completed'
-	PID             sql.NullInt64 `db:"pid" json:"pid,omitempty"`
-	Name            string        `db:"name" json:"name"`
-	TaskID          sql.NullInt64 `db:"task_id" json:"task_id,omitempty"`
-	StartTime       time.Time     `db:"start_time" json:"start_time"`
-	EndTime         sql.NullTime  `db:"end_time" json:"end_time,omitempty"`
-	LastActivityAt  sql.NullTime  `db:"last_activity_at" json:"last_activity_at,omitempty"`
-	PlanContent     string        `db:"plan_content" json:"plan_content"`
-	PlanUpdatedAt   sql.NullTime  `db:"plan_updated_at" json:"plan_updated_at,omitempty"`
-	Backend         string        `db:"backend" json:"backend"` // 'claude_code', 'copilot', or 'acp'
-	SkipPermissions bool          `db:"skip_permissions" json:"skip_permissions"`
+	ID                string        `db:"id" json:"id"`
+	ProjectID         int64         `db:"project_id" json:"project_id"`
+	Status            string        `db:"status" json:"status"` // 'starting', 'running', 'stopped', 'error', 'completed'
+	PID               sql.NullInt64 `db:"pid" json:"pid,omitempty"`
+	Name              string        `db:"name" json:"name"`
+	TaskID            sql.NullInt64 `db:"task_id" json:"task_id,omitempty"`
+	StartTime         time.Time     `db:"start_time" json:"start_time"`
+	EndTime           sql.NullTime  `db:"end_time" json:"end_time,omitempty"`
+	LastActivityAt    sql.NullTime  `db:"last_activity_at" json:"last_activity_at,omitempty"`
+	PlanContent       string        `db:"plan_content" json:"plan_content"`
+	PlanUpdatedAt     sql.NullTime  `db:"plan_updated_at" json:"plan_updated_at,omitempty"`
+	Backend           string        `db:"backend" json:"backend"` // 'claude_code', 'copilot', 'acp', or 'codex'
+	ProviderSessionID string        `db:"provider_session_id" json:"provider_session_id,omitempty"`
+	SkipPermissions   bool          `db:"skip_permissions" json:"skip_permissions"`
+}
+
+type CodexTranscriptEvent struct {
+	ID        int64     `db:"id" json:"-"`
+	SessionID string    `db:"session_id" json:"session_id"`
+	EventID   int       `db:"event_id" json:"id"`
+	Kind      string    `db:"kind" json:"kind"`
+	Text      string    `db:"text" json:"text,omitempty"`
+	Title     string    `db:"title" json:"title,omitempty"`
+	Command   string    `db:"command" json:"command,omitempty"`
+	Status    string    `db:"status" json:"status,omitempty"`
+	Append    bool      `db:"append" json:"append,omitempty"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
 }
 
 type Skill struct {

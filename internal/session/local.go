@@ -67,7 +67,11 @@ func (r *LocalRunner) Start(ctx context.Context) error {
 			return fmt.Errorf("OPENPOET_BIN not set for self-exec backend")
 		}
 	} else {
-		binaryPath, err = exec.LookPath(binaryName)
+		if override := strings.TrimSpace(r.envVars["OPENPOET_BACKEND_BINARY"]); override != "" {
+			binaryPath = override
+		} else {
+			binaryPath, err = exec.LookPath(binaryName)
+		}
 		if err != nil {
 			// Try finding the binary as a sibling of the openpoet binary
 			if binPath, ok := r.envVars["OPENPOET_BIN"]; ok && binPath != "" {
