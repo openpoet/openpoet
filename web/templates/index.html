@@ -366,9 +366,9 @@
                         </div>
                         <div id="session-tools-panel-list" class="session-tools-panel-list"></div>
                     </div>
-                    <div id="terminal-containers-wrapper" class="terminal-containers-wrapper">
-                        <!-- Multiple terminal containers will be created here dynamically -->
-                    </div>
+	                    <div id="terminal-containers-wrapper" class="terminal-containers-wrapper">
+	                        <!-- Multiple terminal containers will be created here dynamically -->
+	                    </div>
                     <!-- Session Document Notifications (floating over terminal) -->
                     <div id="session-doc-cards" class="session-doc-cards"></div>
                     <!-- Mobile scroll navigation buttons -->
@@ -763,7 +763,7 @@
     <!-- Voice Recording Indicator -->
     <div id="voice-indicator" class="voice-indicator hidden">
         <div class="voice-indicator-pulse"></div>
-        <span>Recording...</span>
+        <span id="voice-status-label">Recording…</span>
         <span id="voice-timer" class="voice-timer">0:00</span>
         <button id="voice-cancel" class="btn btn-sm voice-cancel-btn" title="Cancel recording">Cancel</button>
         <button id="voice-stop-btn" class="btn btn-sm voice-stop-btn" title="Stop recording">
@@ -771,6 +771,8 @@
             Stop
         </button>
         <button id="voice-send" class="btn btn-sm btn-danger" title="Stop and submit">Send</button>
+        <button id="voice-retry" class="btn btn-sm voice-retry-btn hidden" title="Retry upload">Retry</button>
+        <button id="voice-discard" class="btn btn-sm voice-cancel-btn hidden" title="Discard recording">Discard</button>
     </div>
 
     <!-- Image Paste Modal -->
@@ -952,7 +954,7 @@
                         <line x1="12" y1="17" x2="12.01" y2="17"></line>
                     </svg>
                 </div>
-                <h3>Claude has a question</h3>
+                <h3 id="hook-ask-user-title">Claude has a question</h3>
                 <button id="hook-ask-user-dismiss" class="hook-permission-close" title="Minimize">&times;</button>
             </div>
             <div class="hook-ask-user-body">

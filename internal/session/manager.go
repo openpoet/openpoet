@@ -28,6 +28,14 @@ type Runner interface {
 	Done() <-chan struct{} // closed when the process exits
 }
 
+type CodexCommandHandler interface {
+	HandleCodexCommand(ctx context.Context, data json.RawMessage) (interface{}, error)
+}
+
+type CodexProviderSessionIDDiscoverer interface {
+	DiscoverCodexProviderSessionID(workDir string, since time.Time) (string, error)
+}
+
 type TermSize struct {
 	Rows uint16
 	Cols uint16
@@ -42,6 +50,7 @@ type Manager struct {
 	mu           sync.RWMutex
 	sessions     map[string]*runningSession
 	clientSizes  map[string]map[string]TermSize // sessionID -> clientID -> size
+	ptySizes     map[string]TermSize            // sessionID -> last size applied to PTY
 	shuttingDown bool                           // true during graceful shutdown for restart
 
 	// Callbacks for AI session evaluation
@@ -135,6 +144,7 @@ func NewManager(db *database.DB, hub *websocket.Hub, serverAddr string) *Manager
 		execPath:    execPath,
 		sessions:    make(map[string]*runningSession),
 		clientSizes: make(map[string]map[string]TermSize),
+		ptySizes:    make(map[string]TermSize),
 	}
 }
 
@@ -183,10 +193,10 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	cfg.MCPConfigJSON = m.buildMCPConfigJSON(ctx, project, sessionID)
 
 	// Let the backend build its CLI args and env vars
-	cliArgs := backend.BuildCLIArgs(cfg)
 	for k, v := range backend.BuildEnvVars(cfg) {
 		envVars[k] = v
 	}
+	cliArgs := backend.BuildCLIArgs(cfg)
 
 	// Create runner based on project type
 	var runner Runner
@@ -194,12 +204,17 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 
 	if project.Type == "local" {
 		dumper := newPTYDumper(sessionID, "local")
-		runner, err = NewLocalRunner(project.Path, envVars, func(data []byte) {
+		outputHandler := func(data []byte) {
 			dumper.write(data)
 			outputBuffer.Write(data)
 			m.hub.BroadcastSessionOutput(sessionID, data)
 			m.checkForNotificationTriggers(sessionID, data)
-		}, cliArgs, backend)
+		}
+		if useCodexAppServer(project.Backend, project.BackendConfig) {
+			runner, err = NewCodexRunner(project.Path, envVars, outputHandler, cfg, m.db, m.hub)
+		} else {
+			runner, err = NewLocalRunner(project.Path, envVars, outputHandler, cliArgs, backend)
+		}
 	} else {
 		return nil, fmt.Errorf("remote sessions not yet implemented")
 	}
@@ -230,6 +245,9 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 		m.mu.Unlock()
 		m.db.EndSession(ctx, sessionID, "error")
 		return nil, fmt.Errorf("failed to start runner: %w", err)
+	}
+	if project.Type == "local" && backend.Type() == BackendCodex && !useCodexAppServer(project.Backend, project.BackendConfig) {
+		go m.captureCodexProviderSessionID(sessionID, project.Path, envVars, session.StartTime)
 	}
 
 	// Update session status and PID
@@ -273,6 +291,13 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	if err := m.db.ReopenSession(ctx, sessionID); err != nil {
 		return fmt.Errorf("failed to reopen session in DB: %w", err)
 	}
+	reopenComplete := false
+	defer func() {
+		if !reopenComplete {
+			m.db.EndSession(ctx, sessionID, "error")
+			m.hub.BroadcastSessionStatus(sessionID, "error")
+		}
+	}()
 
 	// Clean up copilot session errors before resume.
 	// Copilot replays events.jsonl on --resume, including session.error entries
@@ -291,11 +316,12 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 
 	// Build backend-agnostic session config
 	cfg := &SessionConfig{
-		SessionID:     sessionID,
-		ServerAddr:    m.serverAddr,
-		ExecPath:      m.execPath,
-		IsReopen:      true,
-		BackendConfig: project.BackendConfig,
+		SessionID:         sessionID,
+		ProviderSessionID: session.ProviderSessionID,
+		ServerAddr:        m.serverAddr,
+		ExecPath:          m.execPath,
+		IsReopen:          true,
+		BackendConfig:     project.BackendConfig,
 	}
 
 	// Extract special env vars set by API handler
@@ -313,10 +339,30 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	cfg.MCPConfigJSON = m.buildMCPConfigJSON(ctx, project, sessionID)
 
 	// Let the backend build its CLI args and env vars
-	cliArgs := backend.BuildCLIArgs(cfg)
 	for k, v := range backend.BuildEnvVars(cfg) {
 		envVars[k] = v
 	}
+	if project.Type == "local" && backend.Type() == BackendCodex && !useCodexAppServer(project.Backend, project.BackendConfig) && !m.codexProviderSessionIDUsable(envVars, cfg.ProviderSessionID) {
+		if providerID := m.resolveCodexProviderSessionID(ctx, sessionID, project.Path, envVars, session.StartTime.Add(-2*time.Minute)); providerID != "" {
+			cfg.ProviderSessionID = providerID
+			session.ProviderSessionID = providerID
+		}
+	}
+	if project.Type != "local" && backend.Type() == BackendCodex && !useCodexAppServer(project.Backend, project.BackendConfig) && strings.TrimSpace(cfg.ProviderSessionID) == "" {
+		if providerID := m.resolveRemoteCodexProviderSessionID(ctx, sessionID, project, decryptFunc, session.StartTime.Add(-2*time.Minute)); providerID != "" {
+			cfg.ProviderSessionID = providerID
+			session.ProviderSessionID = providerID
+		}
+	}
+	if backend.Type() == BackendCodex && !useCodexAppServer(project.Backend, project.BackendConfig) {
+		if strings.TrimSpace(cfg.ProviderSessionID) == "" {
+			return fmt.Errorf("cannot reopen Codex session %s: provider session id not found", sessionID)
+		}
+		if project.Type == "local" && !m.codexProviderSessionIDUsable(envVars, cfg.ProviderSessionID) {
+			return fmt.Errorf("cannot reopen Codex session %s: provider session id %s was not found in CODEX_HOME", sessionID, cfg.ProviderSessionID)
+		}
+	}
+	cliArgs := backend.BuildCLIArgs(cfg)
 
 	// Create runner based on project type
 	var runner Runner
@@ -335,12 +381,28 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	}
 
 	if project.Type == "local" {
-		runner, err = NewLocalRunner(project.Path, envVars, outputHandler, cliArgs, backend)
-	} else {
-		if remoteRunnerFactory == nil {
-			return fmt.Errorf("remote runner factory not set")
+		if useCodexAppServer(project.Backend, project.BackendConfig) {
+			runner, err = NewCodexRunner(project.Path, envVars, outputHandler, cfg, m.db, m.hub)
+		} else {
+			runner, err = NewLocalRunner(project.Path, envVars, outputHandler, cliArgs, backend)
 		}
-		runner, err = remoteRunnerFactory(project, envVars, outputHandler, decryptFunc, cliArgs)
+	} else {
+		if backend.Type() == BackendCodex && useCodexAppServer(project.Backend, project.BackendConfig) {
+			runner, err = NewRemoteCodexRunner(project, envVars, outputHandler, cfg, m.db, m.hub, decryptFunc)
+		} else {
+			if remoteRunnerFactory == nil {
+				return fmt.Errorf("remote runner factory not set")
+			}
+			if backend.Type() == BackendCodex {
+				if cfg.MCPConfigJSON != "" {
+					envVars["OPENPOET_MCP_CONFIG_JSON"] = cfg.MCPConfigJSON
+				}
+				if cfg.ProviderSessionID != "" {
+					envVars["OPENPOET_PROVIDER_SESSION_ID"] = cfg.ProviderSessionID
+				}
+			}
+			runner, err = remoteRunnerFactory(project, envVars, outputHandler, decryptFunc, cliArgs)
+		}
 	}
 
 	if err != nil {
@@ -370,6 +432,14 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 		m.db.EndSession(ctx, sessionID, "error")
 		return fmt.Errorf("failed to start runner: %w", err)
 	}
+	if project.Type == "local" && backend.Type() == BackendCodex && !useCodexAppServer(project.Backend, project.BackendConfig) {
+		go m.captureCodexProviderSessionID(sessionID, project.Path, envVars, session.StartTime)
+	}
+	if project.Type != "local" && backend.Type() == BackendCodex && !useCodexAppServer(project.Backend, project.BackendConfig) {
+		if discoverer, ok := runner.(CodexProviderSessionIDDiscoverer); ok {
+			go m.captureCodexProviderSessionIDFromDiscoverer(sessionID, project.Path, session.StartTime, discoverer)
+		}
+	}
 
 	// Update session status and PID
 	session.Status = "running"
@@ -387,7 +457,116 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 		go m.OnSessionStart(sessionID)
 	}
 
+	reopenComplete = true
 	return nil
+}
+
+func useCodexAppServer(backend, rawConfig string) bool {
+	if BackendType(backend) != BackendCodex {
+		return false
+	}
+	return parseCodexConfig(rawConfig).Runtime == "app-server"
+}
+
+func (m *Manager) captureCodexProviderSessionID(sessionID, workDir string, envVars map[string]string, since time.Time) {
+	deadline := time.Now().Add(12 * time.Second)
+	for {
+		if providerID := m.resolveCodexProviderSessionID(context.Background(), sessionID, workDir, envVars, since.Add(-2*time.Second)); providerID != "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Printf("[Codex] provider session id was not discovered for OpenPoet session %s", sessionID)
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+func (m *Manager) resolveCodexProviderSessionID(ctx context.Context, sessionID, workDir string, envVars map[string]string, since time.Time) string {
+	codexHome := codexHomeFromEnv(envVars)
+	providerID, err := discoverCodexProviderSessionID(codexHome, workDir, since)
+	if err != nil {
+		log.Printf("[Codex] failed to discover provider session id for OpenPoet session %s: %v", sessionID, err)
+		return ""
+	}
+	if providerID == "" {
+		return ""
+	}
+	if err := m.db.UpdateSessionProviderSessionID(ctx, sessionID, providerID); err != nil {
+		log.Printf("[Codex] failed to persist provider session id %s for OpenPoet session %s: %v", providerID, sessionID, err)
+		return ""
+	}
+	log.Printf("[Codex] persisted provider session id %s for OpenPoet session %s", providerID, sessionID)
+	return providerID
+}
+
+func (m *Manager) captureCodexProviderSessionIDFromDiscoverer(sessionID, workDir string, since time.Time, discoverer CodexProviderSessionIDDiscoverer) {
+	deadline := time.Now().Add(12 * time.Second)
+	for {
+		if providerID := m.resolveCodexProviderSessionIDFromDiscoverer(context.Background(), sessionID, workDir, since.Add(-2*time.Second), discoverer); providerID != "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Printf("[Codex] provider session id was not discovered for remote OpenPoet session %s", sessionID)
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+func (m *Manager) resolveCodexProviderSessionIDFromDiscoverer(ctx context.Context, sessionID, workDir string, since time.Time, discoverer CodexProviderSessionIDDiscoverer) string {
+	providerID, err := discoverer.DiscoverCodexProviderSessionID(workDir, since)
+	if err != nil {
+		log.Printf("[Codex] failed to discover remote provider session id for OpenPoet session %s: %v", sessionID, err)
+		return ""
+	}
+	if providerID == "" {
+		return ""
+	}
+	if err := m.db.UpdateSessionProviderSessionID(ctx, sessionID, providerID); err != nil {
+		log.Printf("[Codex] failed to persist provider session id %s for OpenPoet session %s: %v", providerID, sessionID, err)
+		return ""
+	}
+	log.Printf("[Codex] persisted remote provider session id %s for OpenPoet session %s", providerID, sessionID)
+	return providerID
+}
+
+func (m *Manager) resolveRemoteCodexProviderSessionID(ctx context.Context, sessionID string, project *database.Project, decryptFunc func(string, string) (string, error), since time.Time) string {
+	codexHome := strings.TrimSpace(parseCodexConfig(project.BackendConfig).HomePath)
+	providerID, err := discoverRemoteCodexProviderSessionID(project, decryptFunc, codexHome, project.Path, since)
+	if err != nil {
+		log.Printf("[Codex] failed to discover remote provider session id for OpenPoet session %s: %v", sessionID, err)
+		return ""
+	}
+	if providerID == "" {
+		return ""
+	}
+	if err := m.db.UpdateSessionProviderSessionID(ctx, sessionID, providerID); err != nil {
+		log.Printf("[Codex] failed to persist remote provider session id %s for OpenPoet session %s: %v", providerID, sessionID, err)
+		return ""
+	}
+	log.Printf("[Codex] persisted remote provider session id %s for OpenPoet session %s", providerID, sessionID)
+	return providerID
+}
+
+func (m *Manager) codexProviderSessionIDUsable(envVars map[string]string, providerID string) bool {
+	providerID = strings.TrimSpace(providerID)
+	if providerID == "" {
+		return false
+	}
+	return codexProviderSessionIDExists(codexHomeFromEnv(envVars), providerID)
+}
+
+func codexHomeFromEnv(envVars map[string]string) string {
+	if envVars != nil {
+		if home := strings.TrimSpace(envVars["CODEX_HOME"]); home != "" {
+			return expandCodexHome(home)
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".codex")
+	}
+	return ""
 }
 
 func (m *Manager) StopSession(ctx context.Context, sessionID string) error {
@@ -446,6 +625,22 @@ func (m *Manager) WriteToSession(sessionID string, data []byte) error {
 	return err
 }
 
+func (m *Manager) HandleCodexCommand(ctx context.Context, sessionID string, data json.RawMessage) (interface{}, error) {
+	m.mu.RLock()
+	rs, ok := m.sessions[sessionID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	handler, ok := rs.runner.(CodexCommandHandler)
+	if !ok {
+		return nil, fmt.Errorf("session does not support Codex commands")
+	}
+	return handler.HandleCodexCommand(ctx, data)
+}
+
 func (m *Manager) ResizeSession(sessionID string, rows, cols uint16) error {
 	m.mu.RLock()
 	rs, ok := m.sessions[sessionID]
@@ -474,10 +669,17 @@ func (m *Manager) RegisterClientSize(sessionID, clientID string, rows, cols uint
 	m.clientSizes[sessionID][clientID] = TermSize{Rows: rows, Cols: cols}
 
 	minRows, minCols := m.computeMinSize(sessionID)
+	clientCount := len(m.clientSizes[sessionID])
+	nextSize := TermSize{Rows: minRows, Cols: minCols}
+	if prevSize, ok := m.ptySizes[sessionID]; ok && prevSize == nextSize {
+		m.mu.Unlock()
+		return nil
+	}
+	m.ptySizes[sessionID] = nextSize
 	m.mu.Unlock()
 
 	log.Printf("Session %s: client %s reported %dx%d, PTY min is %dx%d (%d clients)",
-		sessionID[:8], clientID[:8], cols, rows, minCols, minRows, len(m.clientSizes[sessionID]))
+		sessionID[:8], clientID[:8], cols, rows, minCols, minRows, clientCount)
 
 	return rs.runner.Resize(minRows, minCols)
 }
@@ -497,17 +699,25 @@ func (m *Manager) UnregisterClientSize(sessionID, clientID string) {
 
 	if len(clients) == 0 {
 		delete(m.clientSizes, sessionID)
+		delete(m.ptySizes, sessionID)
 		m.mu.Unlock()
 		return
 	}
 
 	rs, sessionOk := m.sessions[sessionID]
 	minRows, minCols := m.computeMinSize(sessionID)
+	clientCount := len(clients)
+	nextSize := TermSize{Rows: minRows, Cols: minCols}
+	if prevSize, ok := m.ptySizes[sessionID]; ok && prevSize == nextSize {
+		m.mu.Unlock()
+		return
+	}
+	m.ptySizes[sessionID] = nextSize
 	m.mu.Unlock()
 
 	if sessionOk {
 		log.Printf("Session %s: client %s disconnected, PTY resized to %dx%d (%d clients remain)",
-			sessionID[:8], clientID[:8], minCols, minRows, len(clients))
+			sessionID[:8], clientID[:8], minCols, minRows, clientCount)
 		rs.runner.Resize(minRows, minCols)
 	}
 }
@@ -821,11 +1031,10 @@ func SetRemoteRunnerFactory(factory RemoteRunnerFactory) {
 }
 
 func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Project, envVars map[string]string, decryptFunc func(string, string) (string, error)) (*database.Session, error) {
-	if remoteRunnerFactory == nil {
+	backend := GetBackend(project.Backend)
+	if remoteRunnerFactory == nil && !(backend.Type() == BackendCodex && useCodexAppServer(project.Backend, project.BackendConfig)) {
 		return nil, fmt.Errorf("remote runner factory not set")
 	}
-
-	backend := GetBackend(project.Backend)
 	sessionID := uuid.New().String()
 	session := &database.Session{
 		ID:        sessionID,
@@ -874,12 +1083,23 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	outputBuffer := NewOutputBuffer(1024 * 1024)
 
 	dumper := newPTYDumper(sessionID, "remote")
-	runner, err := remoteRunnerFactory(project, envVars, func(data []byte) {
+	outputHandler := func(data []byte) {
 		dumper.write(data)
 		outputBuffer.Write(data)
 		m.hub.BroadcastSessionOutput(sessionID, data)
 		m.checkForNotificationTriggers(sessionID, data)
-	}, decryptFunc, cliArgs)
+	}
+
+	var runner Runner
+	var err error
+	if backend.Type() == BackendCodex && useCodexAppServer(project.Backend, project.BackendConfig) {
+		runner, err = NewRemoteCodexRunner(project, envVars, outputHandler, cfg, m.db, m.hub, decryptFunc)
+	} else {
+		if backend.Type() == BackendCodex && cfg.MCPConfigJSON != "" {
+			envVars["OPENPOET_MCP_CONFIG_JSON"] = cfg.MCPConfigJSON
+		}
+		runner, err = remoteRunnerFactory(project, envVars, outputHandler, decryptFunc, cliArgs)
+	}
 
 	if err != nil {
 		m.db.EndSession(ctx, sessionID, "error")
@@ -911,6 +1131,11 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	session.Status = "running"
 	m.db.UpdateSessionStatus(ctx, sessionID, "running")
 	m.hub.BroadcastSessionStatus(sessionID, "running")
+	if backend.Type() == BackendCodex && !useCodexAppServer(project.Backend, project.BackendConfig) {
+		if discoverer, ok := runner.(CodexProviderSessionIDDiscoverer); ok {
+			go m.captureCodexProviderSessionIDFromDiscoverer(sessionID, project.Path, session.StartTime, discoverer)
+		}
+	}
 
 	go m.monitorSession(sessionID, rs)
 

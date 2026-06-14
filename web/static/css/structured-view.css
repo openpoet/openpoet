@@ -42,6 +42,42 @@
     gap: 4px;
 }
 
+.sv-session-model {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    padding: 3px 0;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+}
+
+.sv-session-model[hidden] {
+    display: none;
+}
+
+.sv-session-meta-label {
+    color: var(--color-text-muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+.sv-session-meta-value {
+    max-width: min(34vw, 340px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-weight: 500;
+    color: var(--color-text);
+}
+
+.sv-session-meta-separator {
+    width: 1px;
+    height: 12px;
+    background: var(--color-border);
+    margin: 0 2px;
+}
+
 .sv-token-label {
     color: var(--color-text-muted);
     font-size: 10px;
@@ -1067,9 +1103,19 @@
 
     .sv-token-bar {
         padding: 4px 10px;
-        gap: 10px;
+        gap: 8px 10px;
         font-size: 11px;
         flex-wrap: wrap;
+    }
+
+    .sv-session-model {
+        order: 3;
+        width: 100%;
+        gap: 5px;
+    }
+
+    .sv-session-meta-value {
+        max-width: 42vw;
     }
 
     .sv-message {

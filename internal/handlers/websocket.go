@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -29,6 +30,11 @@ func NewWebSocketHandler(hub *websocket.Hub, api *API, webpush *notifications.We
 func (h *WebSocketHandler) HandleSessionWS(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
 
+	if !h.api.sessionMgr.IsSessionRunning(sessionID) {
+		respondError(w, http.StatusConflict, "Session is not running")
+		return
+	}
+
 	client, err := websocket.UpgradeAndServe(h.hub, w, r)
 	if err != nil {
 		log.Printf("WebSocket upgrade failed: %v", err)
@@ -46,11 +52,21 @@ func (h *WebSocketHandler) HandleSessionWS(w http.ResponseWriter, r *http.Reques
 		}
 	})
 
+	client.SetCodexCommandHandler(func(ctx context.Context, data json.RawMessage) (interface{}, error) {
+		return h.api.sessionMgr.HandleCodexCommand(ctx, sessionID, data)
+	})
+
 	// Set up resize handler - tracks per-client size and uses minimum
 	client.SetResizeHandler(func(rows, cols uint16) {
 		if err := h.api.sessionMgr.RegisterClientSize(sessionID, client.ID, rows, cols); err != nil {
 			log.Printf("Failed to register client size: %v", err)
 		}
+	})
+
+	// Hidden/background browser windows should not keep pinning the shared PTY
+	// size. They can register their current size again when visible.
+	client.SetResizeReleaseHandler(func() {
+		h.api.sessionMgr.UnregisterClientSize(sessionID, client.ID)
 	})
 
 	// Clean up client size tracking on disconnect

@@ -2,13 +2,17 @@ package configsync
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"openpoet/internal/database"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -143,6 +147,9 @@ func (cs *ConfigSyncer) SyncToProject(ctx context.Context, project *database.Pro
 	if project.Type == "local" {
 		return cs.syncToLocal(ctx, project)
 	}
+	if project.Backend == "codex" {
+		return cs.syncToRemoteCodex(ctx, project)
+	}
 	return cs.syncToRemote(ctx, project)
 }
 
@@ -154,6 +161,9 @@ func (cs *ConfigSyncer) syncToLocal(ctx context.Context, project *database.Proje
 	// ACP projects use .acp/ directory
 	if project.Backend == "acp" {
 		return cs.syncToLocalACP(ctx, project)
+	}
+	if project.Backend == "codex" {
+		return cs.syncToLocalCodex(ctx, project)
 	}
 
 	projectPath := project.Path
@@ -358,6 +368,65 @@ func (cs *ConfigSyncer) syncToRemote(ctx context.Context, project *database.Proj
 	// Sync CLAUDE.md ↔ memory doc (keep newest)
 	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing CLAUDE.md...")
 	cs.syncMemoryDocRemote(ctx, sftpClient, project, filepath.Join(project.Path, "CLAUDE.md"))
+
+	return nil
+}
+
+func (cs *ConfigSyncer) syncToRemoteCodex(ctx context.Context, project *database.Project) error {
+	config, err := cs.buildSSHConfig(project)
+	if err != nil {
+		return err
+	}
+
+	addr := fmt.Sprintf("%s:%d", project.SSHHost.String, project.SSHPort.Int64)
+	client, err := ssh.Dial("tcp", addr, config)
+	if err != nil {
+		return fmt.Errorf("SSH connection failed: %w", err)
+	}
+	defer client.Close()
+
+	sftpClient, err := sftp.NewClient(client)
+	if err != nil {
+		return fmt.Errorf("SFTP connection failed: %w", err)
+	}
+	defer sftpClient.Close()
+
+	agentsSkillsDir := filepath.Join(project.Path, ".agents", "skills")
+	codexDir := filepath.Join(project.Path, ".codex")
+	if err := sftpClient.MkdirAll(agentsSkillsDir); err != nil {
+		return fmt.Errorf("failed to create remote .agents/skills directory: %w", err)
+	}
+	if err := sftpClient.MkdirAll(codexDir); err != nil {
+		return fmt.Errorf("failed to create remote .codex directory: %w", err)
+	}
+
+	cs.reportProgress(project.ID, "skills", "running", "Syncing Codex skills to remote .agents/skills...")
+	cs.importSkillsFromRemote(ctx, sftpClient, agentsSkillsDir, project)
+	if err := cs.syncSkillsToRemote(ctx, sftpClient, agentsSkillsDir, project); err != nil {
+		cs.reportProgress(project.ID, "skills", "error", err.Error())
+		return fmt.Errorf("failed to sync remote Codex skills: %w", err)
+	}
+	cs.reportProgress(project.ID, "skills", "done", "Codex skills synced to remote .agents/skills")
+
+	cs.importMCPsFromRemote(ctx, sftpClient, project.Path, project)
+	cs.reportProgress(project.ID, "mcps", "running", "Writing remote .codex/config.toml...")
+	if err := cs.writeCodexConfigRemote(ctx, sftpClient, filepath.Join(codexDir, "config.toml"), project); err != nil {
+		cs.reportProgress(project.ID, "mcps", "error", err.Error())
+		return err
+	}
+	cs.reportProgress(project.ID, "mcps", "done", "Remote Codex MCP config written")
+
+	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing remote AGENTS.md...")
+	source, err := cs.syncCodexMemoryDocRemote(ctx, sftpClient, project)
+	if err != nil {
+		cs.reportProgress(project.ID, "memory_doc", "error", err.Error())
+		return err
+	}
+	if source != "" {
+		cs.reportProgress(project.ID, "memory_doc", "done", "Remote AGENTS.md and CLAUDE.md synced from "+source)
+	} else {
+		cs.reportProgress(project.ID, "memory_doc", "done", "No remote AGENTS.md or CLAUDE.md found")
+	}
 
 	return nil
 }
@@ -1291,6 +1360,395 @@ func (cs *ConfigSyncer) syncToLocalACP(ctx context.Context, project *database.Pr
 	cs.syncMemoryDocLocal(ctx, project, mdPath)
 
 	return nil
+}
+
+// syncToLocalCodex syncs configuration for OpenAI Codex projects.
+// Codex uses AGENTS.md for durable repo instructions, .agents/skills for
+// repo-scoped skills, and .codex/config.toml for project-scoped settings.
+func (cs *ConfigSyncer) syncToLocalCodex(ctx context.Context, project *database.Project) error {
+	projectPath := project.Path
+	agentsSkillsDir := filepath.Join(projectPath, ".agents", "skills")
+	codexDir := filepath.Join(projectPath, ".codex")
+
+	if err := os.MkdirAll(agentsSkillsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create .agents/skills directory: %w", err)
+	}
+	if err := os.MkdirAll(codexDir, 0755); err != nil {
+		return fmt.Errorf("failed to create .codex directory: %w", err)
+	}
+
+	cs.reportProgress(project.ID, "skills", "running", "Syncing skills to .agents/skills...")
+	cs.importSkillsFromDisk(ctx, agentsSkillsDir, project)
+	if err := cs.syncSkillsToLocal(ctx, agentsSkillsDir, project); err != nil {
+		cs.reportProgress(project.ID, "skills", "error", err.Error())
+		return fmt.Errorf("failed to sync Codex skills: %w", err)
+	}
+	cs.reportProgress(project.ID, "skills", "done", "Skills synced to .agents/skills")
+
+	cs.importMCPsFromDisk(ctx, projectPath, project)
+	cs.reportProgress(project.ID, "mcps", "running", "Writing .codex/config.toml...")
+	if err := cs.writeCodexConfigLocal(ctx, filepath.Join(codexDir, "config.toml"), project); err != nil {
+		cs.reportProgress(project.ID, "mcps", "error", err.Error())
+		return err
+	}
+	cs.reportProgress(project.ID, "mcps", "done", "Codex MCP config written")
+
+	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing AGENTS.md...")
+	source, err := cs.syncCodexMemoryDocLocal(ctx, project)
+	if err != nil {
+		cs.reportProgress(project.ID, "memory_doc", "error", err.Error())
+		return err
+	}
+	if source != "" {
+		cs.reportProgress(project.ID, "memory_doc", "done", "AGENTS.md and CLAUDE.md synced from "+source)
+	} else {
+		cs.reportProgress(project.ID, "memory_doc", "done", "No AGENTS.md or CLAUDE.md found")
+	}
+
+	return nil
+}
+
+type codexMemorySource struct {
+	Name      string
+	Path      string
+	Content   string
+	UpdatedAt time.Time
+	IsDB      bool
+}
+
+func (cs *ConfigSyncer) syncCodexMemoryDocLocal(ctx context.Context, project *database.Project) (string, error) {
+	agentsPath := filepath.Join(project.Path, "AGENTS.md")
+	claudePath := filepath.Join(project.Path, "CLAUDE.md")
+
+	sources := make([]codexMemorySource, 0, 3)
+	if source, err := readCodexMemoryFile("AGENTS.md", agentsPath); err == nil {
+		sources = append(sources, source)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	if source, err := readCodexMemoryFile("CLAUDE.md", claudePath); err == nil {
+		sources = append(sources, source)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	dbDoc, dbErr := cs.db.GetMemoryDoc(ctx, project.ID)
+	if dbErr == nil {
+		sources = append(sources, codexMemorySource{
+			Name:      "memory doc",
+			Content:   dbDoc.Content,
+			UpdatedAt: dbDoc.UpdatedAt,
+			IsDB:      true,
+		})
+	} else if !errors.Is(dbErr, sql.ErrNoRows) {
+		return "", fmt.Errorf("failed to load memory doc: %w", dbErr)
+	}
+
+	winner, ok := newestCodexMemorySource(sources)
+	if !ok {
+		return "", nil
+	}
+
+	for _, path := range []string{agentsPath, claudePath} {
+		if err := writeCodexMemoryFileIfChanged(path, winner.Content); err != nil {
+			return "", err
+		}
+	}
+
+	if dbErr != nil || dbDoc.Content != winner.Content {
+		if _, err := cs.db.UpsertMemoryDoc(ctx, project.ID, winner.Content, "sync", "Synced from "+winner.Name); err != nil {
+			return "", err
+		}
+	}
+
+	log.Printf("[configsync] project %d: synced Codex memory from %s", project.ID, winner.Name)
+	return winner.Name, nil
+}
+
+func (cs *ConfigSyncer) syncCodexMemoryDocRemote(ctx context.Context, sftpClient *sftp.Client, project *database.Project) (string, error) {
+	agentsPath := filepath.Join(project.Path, "AGENTS.md")
+	claudePath := filepath.Join(project.Path, "CLAUDE.md")
+
+	sources := make([]codexMemorySource, 0, 3)
+	if source, err := readCodexMemoryFileRemote(sftpClient, "AGENTS.md", agentsPath); err == nil {
+		sources = append(sources, source)
+	} else if !isRemoteNotExist(err) {
+		return "", err
+	}
+	if source, err := readCodexMemoryFileRemote(sftpClient, "CLAUDE.md", claudePath); err == nil {
+		sources = append(sources, source)
+	} else if !isRemoteNotExist(err) {
+		return "", err
+	}
+	dbDoc, dbErr := cs.db.GetMemoryDoc(ctx, project.ID)
+	if dbErr == nil {
+		sources = append(sources, codexMemorySource{
+			Name:      "memory doc",
+			Content:   dbDoc.Content,
+			UpdatedAt: dbDoc.UpdatedAt,
+			IsDB:      true,
+		})
+	} else if !errors.Is(dbErr, sql.ErrNoRows) {
+		return "", fmt.Errorf("failed to load memory doc: %w", dbErr)
+	}
+
+	winner, ok := newestCodexMemorySource(sources)
+	if !ok {
+		return "", nil
+	}
+
+	for _, path := range []string{agentsPath, claudePath} {
+		if err := writeCodexMemoryFileRemoteIfChanged(sftpClient, path, winner.Content); err != nil {
+			return "", err
+		}
+	}
+
+	if dbErr != nil || dbDoc.Content != winner.Content {
+		if _, err := cs.db.UpsertMemoryDoc(ctx, project.ID, winner.Content, "sync", "Synced from "+winner.Name); err != nil {
+			return "", err
+		}
+	}
+
+	log.Printf("[configsync] project %d: synced remote Codex memory from %s", project.ID, winner.Name)
+	return winner.Name, nil
+}
+
+func readCodexMemoryFile(name, path string) (codexMemorySource, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return codexMemorySource{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return codexMemorySource{}, err
+	}
+	return codexMemorySource{
+		Name:      name,
+		Path:      path,
+		Content:   string(data),
+		UpdatedAt: info.ModTime(),
+	}, nil
+}
+
+func newestCodexMemorySource(sources []codexMemorySource) (codexMemorySource, bool) {
+	var winner codexMemorySource
+	found := false
+	for _, source := range sources {
+		if !found || source.UpdatedAt.After(winner.UpdatedAt) ||
+			(source.UpdatedAt.Equal(winner.UpdatedAt) && codexMemorySourcePriority(source) > codexMemorySourcePriority(winner)) {
+			winner = source
+			found = true
+		}
+	}
+	return winner, found
+}
+
+func codexMemorySourcePriority(source codexMemorySource) int {
+	switch source.Name {
+	case "AGENTS.md":
+		return 3
+	case "CLAUDE.md":
+		return 2
+	default:
+		return 1
+	}
+}
+
+func writeCodexMemoryFileIfChanged(path, content string) error {
+	if data, err := os.ReadFile(path); err == nil && string(data) == content {
+		return nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return os.WriteFile(path, []byte(content), 0644)
+}
+
+func readCodexMemoryFileRemote(sftpClient *sftp.Client, name, path string) (codexMemorySource, error) {
+	info, err := sftpClient.Stat(path)
+	if err != nil {
+		return codexMemorySource{}, err
+	}
+	f, err := sftpClient.Open(path)
+	if err != nil {
+		return codexMemorySource{}, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return codexMemorySource{}, err
+	}
+	return codexMemorySource{
+		Name:      name,
+		Path:      path,
+		Content:   string(data),
+		UpdatedAt: info.ModTime(),
+	}, nil
+}
+
+func writeCodexMemoryFileRemoteIfChanged(sftpClient *sftp.Client, path, content string) error {
+	if f, err := sftpClient.Open(path); err == nil {
+		data, readErr := io.ReadAll(f)
+		closeErr := f.Close()
+		if readErr != nil {
+			return readErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if string(data) == content {
+			return nil
+		}
+	} else if !isRemoteNotExist(err) {
+		return err
+	}
+
+	f, err := sftpClient.Create(path)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write([]byte(content)); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func isRemoteNotExist(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such file") || strings.Contains(msg, "file does not exist") || strings.Contains(msg, "not found")
+}
+
+type codexMCPConfigEntry struct {
+	Name    string
+	Command string
+	Args    []string
+	Env     map[string]string
+}
+
+func (cs *ConfigSyncer) writeCodexConfigLocal(ctx context.Context, configPath string, project *database.Project) error {
+	content, err := cs.buildCodexConfigTOML(ctx, project)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(configPath, []byte(content), 0644)
+}
+
+func (cs *ConfigSyncer) writeCodexConfigRemote(ctx context.Context, sftpClient *sftp.Client, configPath string, project *database.Project) error {
+	content, err := cs.buildCodexConfigTOML(ctx, project)
+	if err != nil {
+		return err
+	}
+	f, err := sftpClient.Create(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to create remote config.toml: %w", err)
+	}
+	if _, err := f.Write([]byte(content)); err != nil {
+		f.Close()
+		return fmt.Errorf("failed to write remote config.toml: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("failed to close remote config.toml: %w", err)
+	}
+	return nil
+}
+
+func (cs *ConfigSyncer) buildCodexConfigTOML(ctx context.Context, project *database.Project) (string, error) {
+	entries := make(map[string]codexMCPConfigEntry)
+
+	servers, err := cs.db.ListEnabledMCPServers(ctx)
+	if err != nil {
+		log.Printf("Warning: failed to list global MCP servers for Codex config: %v", err)
+	}
+	for _, server := range servers {
+		entries[server.Name] = codexMCPConfigFromParts(server.Name, server.Command, server.Args, server.Env)
+	}
+
+	projectServers, err := cs.db.ListEnabledProjectMCPServers(ctx, project.ID)
+	if err != nil {
+		log.Printf("Warning: failed to list project MCP servers for Codex config: %v", err)
+	}
+	for _, server := range projectServers {
+		entries[server.Name] = codexMCPConfigFromParts(server.Name, server.Command, server.Args, server.Env)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# OpenPoet-managed Codex project configuration.\n")
+	sb.WriteString("# The OpenPoet MCP server is injected at session start because it needs\n")
+	sb.WriteString("# the current OpenPoet session id.\n\n")
+
+	names := make([]string, 0, len(entries))
+	for name := range entries {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		entry := entries[name]
+		sb.WriteString("[mcp_servers." + codexTomlKey(entry.Name) + "]\n")
+		sb.WriteString("command = " + codexTomlString(entry.Command) + "\n")
+		if len(entry.Args) > 0 {
+			sb.WriteString("args = " + codexTomlStringArray(entry.Args) + "\n")
+		}
+		if len(entry.Env) > 0 {
+			sb.WriteString("\n[mcp_servers." + codexTomlKey(entry.Name) + ".env]\n")
+			envNames := make([]string, 0, len(entry.Env))
+			for k := range entry.Env {
+				envNames = append(envNames, k)
+			}
+			sort.Strings(envNames)
+			for _, k := range envNames {
+				sb.WriteString(codexTomlKey(k) + " = " + codexTomlString(entry.Env[k]) + "\n")
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String(), nil
+}
+
+func codexMCPConfigFromParts(name, command, argsJSON, envJSON string) codexMCPConfigEntry {
+	var args []string
+	var env map[string]string
+	_ = json.Unmarshal([]byte(argsJSON), &args)
+	_ = json.Unmarshal([]byte(envJSON), &env)
+	if env == nil {
+		env = make(map[string]string)
+	}
+	return codexMCPConfigEntry{
+		Name:    name,
+		Command: command,
+		Args:    args,
+		Env:     env,
+	}
+}
+
+func codexTomlString(v string) string {
+	return strconv.Quote(v)
+}
+
+func codexTomlStringArray(values []string) string {
+	quoted := make([]string, 0, len(values))
+	for _, v := range values {
+		quoted = append(quoted, codexTomlString(v))
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
+
+func codexTomlKey(v string) string {
+	if v == "" {
+		return `""`
+	}
+	for _, r := range v {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			continue
+		}
+		return strconv.Quote(v)
+	}
+	return v
 }
 
 // syncSkillsToACPInstructions concatenates all enabled skills into .acp/instructions.md

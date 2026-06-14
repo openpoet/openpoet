@@ -34,6 +34,13 @@ class StructuredViewManager {
                 <span class="sv-mode-label">default</span>
                 <span class="sv-mode-hint">shift+tab</span>
             </button>
+            <div class="sv-session-model" hidden title="Current Codex model and reasoning effort">
+                <span class="sv-session-meta-label">model</span>
+                <span class="sv-session-meta-value" data-codex-model>default</span>
+                <span class="sv-session-meta-separator"></span>
+                <span class="sv-session-meta-label">reasoning</span>
+                <span class="sv-session-meta-value" data-codex-reasoning>default</span>
+            </div>
             <div class="sv-token-group">
                 <span><span class="sv-token-label">in</span><span class="sv-token-value" data-token="input">0</span></span>
                 <span><span class="sv-token-label">out</span><span class="sv-token-value" data-token="output">0</span></span>
@@ -45,6 +52,7 @@ class StructuredViewManager {
 
         // Wire mode pill: click cycles via Shift+Tab to the PTY
         const modePill = tokenBar.querySelector('.sv-mode-pill');
+        const modelInfoEl = tokenBar.querySelector('.sv-session-model');
         modePill?.addEventListener('click', () => {
             window.terminalManager?.sendShiftTab?.(sessionId);
             // Schedule a re-read after the TUI repaints
@@ -144,6 +152,9 @@ class StructuredViewManager {
 
             // Enter submits (Shift+Enter for newline)
             textarea.addEventListener('keydown', (e) => {
+                if (this._handleCodexSlashTextareaKey(sessionId, textarea, e)) {
+                    return;
+                }
                 if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
                     flog('SV-INPUT', `Enter pressed in SV textarea. value="${textarea.value}"`);
@@ -154,6 +165,9 @@ class StructuredViewManager {
             // Send button
             sendBtn.addEventListener('click', () => {
                 flog('SV-INPUT', `Send button clicked in SV. value="${textarea.value}"`);
+                if (this._openCodexSlashIfCommandPrefix(sessionId, textarea)) {
+                    return;
+                }
                 sendToTerminal();
             });
 
@@ -197,6 +211,7 @@ class StructuredViewManager {
             messagesEl,
             tokenBarEl: tokenBar,
             modePillEl: modePill,
+            modelInfoEl,
             inputArea,
             textarea,
             sendToTerminal,
@@ -212,6 +227,9 @@ class StructuredViewManager {
             // the final stop_reason chunk has the authoritative usage)
             tokenAccountedIds: new Set(),
             loaded: false,
+            codexMode: false,
+            codexState: null,
+            codexTranscript: { order: [], items: new Map() },
             userScrolled: false,
             modeRefreshTimer: null,
         };
@@ -224,6 +242,54 @@ class StructuredViewManager {
 
         this.views.set(sessionId, viewData);
         return viewData;
+    }
+
+    _handleCodexSlashTextareaKey(sessionId, textarea, event) {
+        const tm = window.terminalManager;
+        const palette = tm?.codexSlashPalette;
+        if (!tm?.isCodexAppServerSession?.(sessionId) || !palette) return false;
+
+        const data = this._codexSlashKeyData(event);
+        if (palette.open) {
+            if (!data) return false;
+            event.preventDefault();
+            palette.handleData(sessionId, data);
+            return true;
+        }
+
+        if (event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey && (textarea.value || '').length === 0) {
+            event.preventDefault();
+            palette.handleData(sessionId, '/');
+            return true;
+        }
+
+        return false;
+    }
+
+    _openCodexSlashIfCommandPrefix(sessionId, textarea) {
+        const text = (textarea?.value || '').trim();
+        if (text !== '/') return false;
+        const tm = window.terminalManager;
+        const palette = tm?.codexSlashPalette;
+        if (!tm?.isCodexAppServerSession?.(sessionId) || !palette) return false;
+        palette.handleData(sessionId, '/');
+        textarea.value = '';
+        textarea.style.height = 'auto';
+        return true;
+    }
+
+    _codexSlashKeyData(event) {
+        if (event.key === 'Escape') return '\x1b';
+        if (event.ctrlKey && event.key.toLowerCase() === 'c') return '\x03';
+        if (event.key === 'Enter') return '\r';
+        if (event.key === 'Tab') return '\t';
+        if (event.key === 'Backspace') return '\x7f';
+        if (event.key === 'ArrowUp') return '\x1b[A';
+        if (event.key === 'ArrowDown') return '\x1b[B';
+        if (event.key && event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
+            return event.key;
+        }
+        return '';
     }
 
     /**
@@ -525,6 +591,7 @@ class StructuredViewManager {
         const view = this.views.get(sessionId) || this.createView(sessionId);
         if (!view) return;
 
+        this._configureCodexView(view, false);
         view.container.classList.add('active');
         this.activeSessionId = sessionId;
 
@@ -544,12 +611,289 @@ class StructuredViewManager {
     }
 
     /**
+     * Show Codex app-server transcript in the existing Structured View shell.
+     * Codex does not expose Claude JSONL events, so it feeds normalized events
+     * through appendCodexTranscriptEvent instead of loadEvents().
+     */
+    showCodex(sessionId) {
+        const view = this.views.get(sessionId) || this.createView(sessionId);
+        if (!view) return;
+
+        this._configureCodexView(view, true);
+        view.container.classList.add('active');
+        this.activeSessionId = sessionId;
+        view.loaded = true;
+
+        if (!view.codexTranscript.order.length && !view.messagesEl.children.length) {
+            view.messagesEl.innerHTML = '<div class="sv-empty">Waiting for Codex activity</div>';
+        }
+
+        if (view.textarea) {
+            requestAnimationFrame(() => view.textarea.focus());
+        }
+    }
+
+    _configureCodexView(view, enabled) {
+        view.codexMode = !!enabled;
+        const pill = view.modePillEl;
+        if (!pill) return;
+
+        if (enabled) {
+            pill.dataset.mode = 'codex';
+            pill.title = 'Codex app-server';
+            pill.querySelector('.sv-mode-icon').textContent = '>';
+            pill.querySelector('.sv-mode-label').textContent = 'codex';
+            pill.querySelector('.sv-mode-hint').textContent = 'app-server';
+            if (view.modelInfoEl?.hidden) {
+                this._updateCodexModelInfo(view, view.codexState);
+            }
+        } else {
+            pill.title = 'Click to cycle Claude Code modes (Shift+Tab)';
+            pill.querySelector('.sv-mode-icon').textContent = '⏵';
+            pill.querySelector('.sv-mode-label').textContent = 'default';
+            pill.querySelector('.sv-mode-hint').textContent = 'shift+tab';
+            delete pill.dataset.mode;
+            if (view.modelInfoEl) view.modelInfoEl.hidden = true;
+        }
+    }
+
+    updateCodexState(sessionId, state) {
+        const view = this.views.get(sessionId) || this.createView(sessionId);
+        if (!view || !state) return;
+        view.codexState = state;
+        this._configureCodexView(view, true);
+
+        if (state.model && view.modePillEl) {
+            view.modePillEl.title = [state.model, state.approvalPolicy, state.sandboxMode]
+                .filter(Boolean)
+                .join(' / ');
+        }
+        this._updateCodexModelInfo(view, state);
+
+        view.totalTokens.input = Number(state.lastInputTokens || 0);
+        view.totalTokens.output = Number(state.lastOutputTokens || 0);
+        this._updateTokenBar(view);
+
+        const phase = state.phase || '';
+        const label = ({
+            thinking: 'thinking',
+            working: 'working',
+            responding: 'responding',
+            running_command: 'using tools',
+            editing: 'using tools',
+            starting: 'starting',
+        })[phase] || null;
+
+        const stateEl = window.innerWidth <= 768
+            ? document.getElementById('mobile-input-state')
+            : view.inputArea?.querySelector('.sv-input-state');
+        if (stateEl) {
+            this._setStatusIndicator(view, stateEl, label);
+        }
+    }
+
+    _updateCodexModelInfo(view, state) {
+        const modelInfoEl = view?.modelInfoEl;
+        if (!modelInfoEl) return;
+
+        modelInfoEl.hidden = !view.codexMode;
+        if (!view.codexMode) return;
+
+        const model = this._codexModelLabel(state?.model);
+        const reasoning = this._codexReasoningLabel(state?.reasoningEffort);
+        const modelEl = modelInfoEl.querySelector('[data-codex-model]');
+        const reasoningEl = modelInfoEl.querySelector('[data-codex-reasoning]');
+
+        if (modelEl) modelEl.textContent = model;
+        if (reasoningEl) reasoningEl.textContent = reasoning;
+
+        const details = [
+            `Model: ${model}`,
+            `Reasoning: ${reasoning}`,
+            state?.serviceTier ? `Service tier: ${state.serviceTier}` : '',
+            state?.approvalPolicy ? `Approval: ${state.approvalPolicy}` : '',
+            state?.sandboxMode ? `Sandbox: ${state.sandboxMode}` : '',
+        ].filter(Boolean);
+        modelInfoEl.title = details.join(' / ');
+    }
+
+    _codexModelLabel(model) {
+        return String(model || '').trim() || 'default';
+    }
+
+    _codexReasoningLabel(effort) {
+        const value = String(effort || '').trim().toLowerCase();
+        if (!value) return 'default';
+        return ({
+            minimal: 'minimal',
+            low: 'low',
+            medium: 'medium',
+            high: 'high',
+            xhigh: 'extra high',
+            'x-high': 'extra high',
+            'extra-high': 'extra high',
+            extra_high: 'extra high',
+            'extra high': 'extra high',
+        })[value] || value.replace(/[_-]+/g, ' ');
+    }
+
+    resetCodexTranscript(sessionId) {
+        const view = this.views.get(sessionId) || this.createView(sessionId);
+        if (!view) return;
+
+        this._configureCodexView(view, true);
+        view.loaded = true;
+        view.events = [];
+        view.uuidTypeMap.clear();
+        view.toolIdMap.clear();
+        view.messageIdMap.clear();
+        view.tokenAccountedIds.clear();
+        view.totalTokens = { input: 0, output: 0, cache_read: 0, cache_create: 0 };
+        view.codexTranscript = { order: [], items: new Map() };
+        view.currentProgressWidget = null;
+        view.messagesEl.innerHTML = '<div class="sv-empty">Waiting for Codex activity</div>';
+        this._updateTokenBar(view);
+    }
+
+    appendCodexTranscriptEvent(sessionId, event) {
+        const view = this.views.get(sessionId) || this.createView(sessionId);
+        if (!view || !event || !event.id) return;
+
+        this._configureCodexView(view, true);
+        view.loaded = true;
+
+        const item = this._upsertCodexTranscriptItem(view, event);
+        const normalized = this._codexTranscriptItemToEvent(item);
+        if (!normalized) return;
+
+        this.appendEvent(sessionId, normalized);
+    }
+
+    _upsertCodexTranscriptItem(view, event) {
+        let item = view.codexTranscript.items.get(event.id);
+        if (!item) {
+            item = {
+                id: event.id,
+                kind: event.kind || 'status',
+                text: '',
+                title: event.title || '',
+                command: event.command || '',
+                status: event.status || '',
+                createdAt: event.created_at || event.createdAt || new Date().toISOString(),
+            };
+            view.codexTranscript.items.set(event.id, item);
+            view.codexTranscript.order.push(event.id);
+        }
+
+        if (event.kind) item.kind = event.kind;
+        if (event.title) item.title = event.title;
+        if (event.command) item.command = event.command;
+        if (event.status) item.status = event.status;
+        if (event.created_at || event.createdAt) item.createdAt = event.created_at || event.createdAt;
+        if (event.append) item.text += event.text || '';
+        else if (typeof event.text === 'string') item.text = event.text;
+
+        return item;
+    }
+
+    _codexTranscriptItemToEvent(item) {
+        const timestamp = item.createdAt || new Date().toISOString();
+        const uuid = `codex-${item.id}`;
+        const messageId = `codex-msg-${item.id}`;
+        // Codex transcript rows are durable log entries, not live Claude JSONL
+        // stream chunks. Treat them as complete so historical assistant cards do
+        // not keep the Structured View streaming caret blinking indefinitely.
+        const stopReason = 'end_turn';
+        const text = item.text || item.title || '';
+
+        if (item.kind === 'user') {
+            return {
+                type: 'user',
+                uuid,
+                timestamp,
+                message: {
+                    role: 'user',
+                    content_blocks: [{ type: 'text', text }],
+                },
+            };
+        }
+
+        if (item.kind === 'command' || item.kind === 'file') {
+            const isFile = item.kind === 'file';
+            const toolId = `codex-tool-${item.id}`;
+            const toolName = isFile ? 'Edit' : 'Bash';
+            const blocks = [{
+                type: 'tool_use',
+                tool_id: toolId,
+                tool_name: toolName,
+                tool_input: isFile
+                    ? { file_path: item.command || item.title || 'file change', status: item.status || undefined }
+                    : { command: item.command || text },
+            }];
+
+            if (item.text) {
+                blocks.push({
+                    type: 'tool_result',
+                    tool_id: toolId,
+                    content: item.text,
+                    is_error: item.status === 'failed',
+                });
+            }
+
+            return {
+                type: 'assistant',
+                uuid,
+                timestamp,
+                message: {
+                    role: 'assistant',
+                    model: 'codex',
+                    message_id: messageId,
+                    stop_reason: stopReason,
+                    content_blocks: blocks,
+                },
+            };
+        }
+
+        const blockType = item.kind === 'reasoning' ? 'thinking' : 'text';
+        const prefix = this._codexKindPrefix(item.kind, item.title);
+        return {
+            type: 'assistant',
+            uuid,
+            timestamp,
+            message: {
+                role: 'assistant',
+                model: 'codex',
+                message_id: messageId,
+                stop_reason: stopReason,
+                content_blocks: [{
+                    type: blockType,
+                    text: blockType === 'thinking' ? text : `${prefix}${text}`.trim(),
+                }],
+            },
+        };
+    }
+
+    _codexKindPrefix(kind, title) {
+        if (!kind || kind === 'assistant') return '';
+        if (kind === 'reasoning') return '';
+        const label = title || ({
+            plan: 'Plan',
+            status: 'Status',
+            warning: 'Warning',
+            error: 'Error',
+            tokens: 'Tokens',
+        }[kind] || '');
+        return label ? `${label}: ` : '';
+    }
+
+    /**
      * Detect Claude Code mode by scanning the xterm buffer for status-bar
      * indicators ("plan mode on", "accept edits", etc) and update the pill.
      */
     _refreshMode(sessionId) {
         const view = this.views.get(sessionId);
         if (!view?.modePillEl) return;
+        if (view.codexMode) return;
 
         const tm = window.terminalManager;
         const mode = tm?.detectClaudeMode?.(sessionId) || { key: 'default', label: 'default', icon: '⏵' };
@@ -1474,7 +1818,7 @@ class StructuredViewManager {
                 <span class="sv-state-dots" aria-hidden="true">
                     <span></span><span></span><span></span>
                 </span>
-                <span class="sv-state-text">Claude is ${this._escapeHtml(label)}</span>
+                <span class="sv-state-text">${view.codexMode ? 'Codex' : 'Claude'} is ${this._escapeHtml(label)}</span>
             `;
         }
         stateEl.classList.add('sv-state-active');

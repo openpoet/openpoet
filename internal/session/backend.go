@@ -7,15 +7,17 @@ const (
 	BackendClaudeCode BackendType = "claude_code"
 	BackendCopilot    BackendType = "copilot"
 	BackendACP        BackendType = "acp"
+	BackendCodex      BackendType = "codex"
 )
 
 // SessionConfig holds parameters needed to build CLI args and env vars for a session.
 type SessionConfig struct {
-	SessionID     string
-	ServerAddr    string // OpenPoet server address (e.g., "localhost:8080")
-	MCPConfigJSON string // JSON for --mcp-config flag
-	ExecPath      string // Resolved path to the openpoet binary
-	IsReopen      bool   // true when resuming a previous session
+	SessionID         string
+	ProviderSessionID string // Native backend thread/session ID, when known
+	ServerAddr        string // OpenPoet server address (e.g., "localhost:8080")
+	MCPConfigJSON     string // JSON for --mcp-config flag
+	ExecPath          string // Resolved path to the openpoet binary
+	IsReopen          bool   // true when resuming a previous session
 
 	// Env var passthrough from API handler
 	AppendSystemPrompt         string // task context prompt
@@ -71,6 +73,8 @@ func GetBackend(backendType string) BackendStrategy {
 		return &CopilotBackend{}
 	case BackendACP:
 		return &ACPBackend{}
+	case BackendCodex:
+		return &CodexBackend{}
 	default:
 		return &ClaudeCodeBackend{}
 	}
