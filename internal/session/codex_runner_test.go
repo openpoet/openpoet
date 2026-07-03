@@ -188,6 +188,30 @@ func TestCodexTypingWhileTurnActiveStartsOwnInputLine(t *testing.T) {
 	}
 }
 
+func TestCodexTurnStartedDoesNotEmitWorkingMessage(t *testing.T) {
+	var out strings.Builder
+	r := &CodexRunner{
+		outputHandler: func(b []byte) { out.Write(b) },
+	}
+
+	r.handleNotification("turn/started", json.RawMessage(`{"turn":{"id":"turn-1"}}`))
+
+	if r.activeTurnID != "turn-1" {
+		t.Fatalf("activeTurnID = %q, want turn-1", r.activeTurnID)
+	}
+	if r.agentPhase != "thinking" || r.agentDetail != "Starting turn" {
+		t.Fatalf("phase/detail = %q/%q, want thinking/Starting turn", r.agentPhase, r.agentDetail)
+	}
+	if strings.Contains(out.String(), "Codex is working") {
+		t.Fatalf("terminal output included working message: %q", out.String())
+	}
+	for _, event := range r.transcript {
+		if event.Title == "Turn started" || strings.Contains(event.Text, "Codex is working") {
+			t.Fatalf("transcript included working message: %#v", r.transcript)
+		}
+	}
+}
+
 func TestCodexInputPreservesUTF8Characters(t *testing.T) {
 	var out strings.Builder
 	r := &CodexRunner{

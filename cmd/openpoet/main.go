@@ -341,6 +341,9 @@ func main() {
 	hookHandler.OnEvaluateSession = func(sessionID string, trigger string, outputSnapshot []byte) bool {
 		return aiHandler.EvaluateSession(context.Background(), sessionID, trigger, outputSnapshot)
 	}
+	sessionMgr.OnUserPromptSubmitted = func(sessionID string) {
+		hookHandler.ScheduleSessionEvaluation(sessionID)
+	}
 
 	// Wire task/suggestion guard callbacks for debounced evaluation
 	hookHandler.HasLinkedTask = func(sessionID string) bool {

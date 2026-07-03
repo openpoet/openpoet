@@ -215,6 +215,60 @@ func TestGetTaskSessionSummary(t *testing.T) {
 	}
 }
 
+func TestTaskSessionSummaryPrefersMostRecentlyLinkedSession(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	proj := &Project{Name: "test-project", Path: "/tmp/test", Type: "local"}
+	if err := db.CreateProject(ctx, proj); err != nil {
+		t.Fatal(err)
+	}
+
+	task := &ProjectTask{ProjectID: proj.ID, Title: "Task A", Status: "in_progress", Priority: "medium"}
+	if err := db.CreateTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	olderSession := &Session{ID: "sess-older", ProjectID: proj.ID, Status: "stopped", Name: "Older Session", StartTime: time.Now().Add(-2 * time.Hour)}
+	newerSession := &Session{ID: "sess-newer", ProjectID: proj.ID, Status: "stopped", Name: "Newer Session", StartTime: time.Now().Add(-1 * time.Hour)}
+	if err := db.CreateSession(ctx, olderSession); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateSession(ctx, newerSession); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.LinkSessionToTask(ctx, newerSession.ID, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	if err := db.LinkSessionToTask(ctx, olderSession.ID, task.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := db.GetTaskSessionSummary(ctx, proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary) != 1 {
+		t.Fatalf("expected 1 task summary, got %d", len(summary))
+	}
+	if summary[0].LatestStoppedSession != olderSession.ID {
+		t.Fatalf("latest_stopped_session = %q, want %q", summary[0].LatestStoppedSession, olderSession.ID)
+	}
+
+	sessions, err := db.GetSessionsForTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(sessions))
+	}
+	if sessions[0].ID != olderSession.ID {
+		t.Fatalf("first task session = %q, want %q", sessions[0].ID, olderSession.ID)
+	}
+}
+
 func TestGetSessionsForTask_NoSessions(t *testing.T) {
 	db := setupTestDB(t)
 	ctx := context.Background()

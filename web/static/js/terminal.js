@@ -103,8 +103,7 @@ class TerminalManager {
             const result = await this.requestCodexCommand(sessionId, 'ui/transcript', {});
             const events = Array.isArray(result?.events) ? result.events : [];
             if (events.length > 0) {
-                window.structuredView?.resetCodexTranscript?.(sessionId);
-                events.forEach(event => window.structuredView?.appendCodexTranscriptEvent?.(sessionId, event));
+                this.applyCodexTranscriptSnapshot(sessionId, result);
             } else if (!force) {
                 this._scheduleCodexTranscriptRetry(sessionId, 1200);
             }
@@ -113,6 +112,15 @@ class TerminalManager {
             this._codexTranscriptLoaded.delete(sessionId);
             this._scheduleCodexTranscriptRetry(sessionId, 1200);
         }
+    }
+
+    applyCodexTranscriptSnapshot(sessionId, transcript) {
+        const events = Array.isArray(transcript?.events) ? transcript.events : null;
+        if (!events) return false;
+        window.structuredView?.resetCodexTranscript?.(sessionId);
+        events.forEach(event => window.structuredView?.appendCodexTranscriptEvent?.(sessionId, event));
+        this._codexTranscriptLoaded.add(sessionId);
+        return true;
     }
 
     _scheduleCodexTranscriptRetry(sessionId, delay) {
@@ -1890,6 +1898,7 @@ class CodexSlashPalette {
         this.selectedModel = null;
         this.selectedEffort = '';
         this.searchTimer = null;
+        this.boundKeydown = (event) => this.handleKeydown(event);
         this.rootCommands = [
             { id: 'status', label: '/status', description: 'Show Codex session, thread, model, and permission status' },
             { id: 'resume', label: '/resume', description: 'Resume a Codex thread from this project' },
@@ -1932,6 +1941,7 @@ class CodexSlashPalette {
         this.selectedModel = null;
         this.selectedEffort = '';
         this.render();
+        document.addEventListener('keydown', this.boundKeydown, true);
     }
 
     consume(data) {
@@ -1966,10 +1976,52 @@ class CodexSlashPalette {
         }
     }
 
+    handleKeydown(event) {
+        if (!this.open) return;
+
+        const data = this.keyData(event);
+        if (!data) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        this.consume(data);
+    }
+
+    keyData(event) {
+        if (event.key === 'Escape') return '\x1b';
+        if (event.ctrlKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === 'c') return '\x03';
+        if (event.metaKey || event.altKey || event.ctrlKey) return '';
+        if (event.key === 'Enter') return '\r';
+        if (event.key === 'Tab') return '\t';
+        if (event.key === 'Backspace') return '\x7f';
+        if (event.key === 'ArrowUp') return '\x1b[A';
+        if (event.key === 'ArrowDown') return '\x1b[B';
+        if (event.key && event.key.length === 1) return event.key;
+        return '';
+    }
+
     move(delta) {
         if (!this.items.length) return;
         this.selected = (this.selected + delta + this.items.length) % this.items.length;
         this.render();
+        this.scrollSelectedIntoView();
+    }
+
+    setSelected(index) {
+        const next = Number(index);
+        if (!Number.isFinite(next) || next < 0 || next >= this.items.length || next === this.selected) return;
+        this.selected = next;
+        const el = document.getElementById('codex-slash-palette');
+        if (!el) return;
+        el.querySelectorAll('.codex-slash-item').forEach((btn, idx) => {
+            btn.classList.toggle('active', idx === this.selected);
+        });
+    }
+
+    scrollSelectedIntoView() {
+        const el = document.getElementById('codex-slash-palette');
+        const active = el?.querySelector?.('.codex-slash-item.active');
+        active?.scrollIntoView?.({ block: 'nearest' });
     }
 
     refreshItems() {
@@ -2257,10 +2309,16 @@ class CodexSlashPalette {
         this.loading = false;
         this.selected = 0;
         this.render();
+        this.scrollSelectedIntoView();
     }
 
     async applyResume(threadId) {
-        await this.manager.requestCodexCommand(this.sessionId, 'resume/apply', { threadId });
+        const sessionId = this.sessionId;
+        const result = await this.manager.requestCodexCommand(sessionId, 'resume/apply', { threadId });
+        this.manager._codexTranscriptLoaded.delete(sessionId);
+        if (!this.manager.applyCodexTranscriptSnapshot(sessionId, result?.transcript)) {
+            await this.manager.refreshCodexTranscript(sessionId, { force: true });
+        }
         this.finish(`Resumed ${threadId.slice(0, 10)}`);
     }
 
@@ -2280,6 +2338,7 @@ class CodexSlashPalette {
         this.error = '';
         const el = document.getElementById('codex-slash-palette');
         if (el) el.remove();
+        document.removeEventListener('keydown', this.boundKeydown, true);
         this.manager.focus();
     }
 
@@ -2323,8 +2382,12 @@ class CodexSlashPalette {
 
         el.querySelectorAll('.codex-slash-item').forEach(btn => {
             btn.addEventListener('mouseenter', () => {
+                this.setSelected(btn.dataset.index);
+            });
+            btn.addEventListener('pointerdown', (event) => {
+                event.preventDefault();
                 this.selected = Number(btn.dataset.index) || 0;
-                this.render();
+                this.activateSelected();
             });
             btn.addEventListener('click', () => {
                 this.selected = Number(btn.dataset.index) || 0;
@@ -2335,7 +2398,8 @@ class CodexSlashPalette {
 
     formatThreadMeta(thread) {
         const parts = [];
-        if (thread.status) parts.push(thread.status);
+        const status = typeof thread.status === 'string' ? thread.status : thread.status?.type;
+        if (status) parts.push(status);
         if (thread.updatedAt) {
             parts.push(new Date(thread.updatedAt * 1000).toLocaleDateString());
         }

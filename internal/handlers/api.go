@@ -848,7 +848,7 @@ func validateProjectBackend(projectType, backend string) string {
 	}
 
 	switch backend {
-	case string(session.BackendClaudeCode), string(session.BackendCopilot), string(session.BackendACP), string(session.BackendCodex):
+	case string(session.BackendClaudeCode), string(session.BackendCopilot), string(session.BackendACP), string(session.BackendCodex), string(session.BackendOpenCode):
 	default:
 		return fmt.Sprintf("Unsupported project backend: %s", backend)
 	}

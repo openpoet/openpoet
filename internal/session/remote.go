@@ -334,6 +334,10 @@ func (r *RemoteRunner) rewriteMCPConfigForRemote() {
 		r.injectCodexOpenPoetMCPForRemote()
 		return
 	}
+	if r.backend != nil && r.backend.Type() == BackendOpenCode {
+		r.injectOpenCodeOpenPoetMCPForRemote()
+		return
+	}
 
 	if r.tunnelListener == nil {
 		log.Printf("[remote] MCP rewrite: no tunnel, skipping")
@@ -426,6 +430,49 @@ func (r *RemoteRunner) injectCodexOpenPoetMCPForRemote() {
 	}
 	r.insertCodexConfigOverride("mcp_servers.openpoet.url", mcpURL, providerSessionID)
 	log.Printf("[remote] Codex MCP inject: openpoet -> HTTP %s", mcpURL)
+}
+
+func (r *RemoteRunner) injectOpenCodeOpenPoetMCPForRemote() {
+	if r.tunnelListener == nil {
+		log.Printf("[remote] OpenCode MCP inject: no tunnel, skipping")
+		return
+	}
+
+	raw := r.envVars["OPENCODE_CONFIG_CONTENT"]
+	if strings.TrimSpace(raw) == "" {
+		return
+	}
+
+	var config map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &config); err != nil {
+		log.Printf("[remote] OpenCode MCP inject: failed to parse config: %v", err)
+		return
+	}
+	mcp, ok := config["mcp"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	if _, ok := mcp["openpoet"]; !ok {
+		return
+	}
+
+	mcpURL := fmt.Sprintf("http://%s/mcp", r.tunnelListener.Addr().String())
+	if sessionID := strings.TrimSpace(r.envVars["OPENPOET_SESSION_ID"]); sessionID != "" {
+		mcpURL += "?session_id=" + sessionID
+	}
+	mcp["openpoet"] = map[string]interface{}{
+		"type":    "remote",
+		"url":     mcpURL,
+		"enabled": true,
+	}
+
+	data, err := json.Marshal(config)
+	if err != nil {
+		log.Printf("[remote] OpenCode MCP inject: failed to marshal config: %v", err)
+		return
+	}
+	r.envVars["OPENCODE_CONFIG_CONTENT"] = string(data)
+	log.Printf("[remote] OpenCode MCP inject: openpoet -> HTTP %s", mcpURL)
 }
 
 func (r *RemoteRunner) insertCodexConfigOverride(key, value, providerSessionID string) {
@@ -535,6 +582,17 @@ func (r *RemoteRunner) DiscoverCodexProviderSessionID(workDir string, since time
 	return discoverCodexProviderSessionIDOverSSH(client, codexHome, workDir, since)
 }
 
+func (r *RemoteRunner) DiscoverOpenCodeProviderSessionID(workDir string, since time.Time) (string, error) {
+	r.mu.Lock()
+	client := r.client
+	binaryPath := strings.TrimSpace(r.envVars["OPENPOET_BACKEND_BINARY"])
+	r.mu.Unlock()
+	if client == nil {
+		return "", fmt.Errorf("remote SSH client is not connected")
+	}
+	return discoverOpenCodeProviderSessionIDOverSSH(client, binaryPath, workDir, since)
+}
+
 func discoverRemoteCodexProviderSessionID(project *database.Project, decryptFunc func(string, string) (string, error), codexHome, workDir string, since time.Time) (string, error) {
 	runner := &RemoteRunner{
 		project:     project,
@@ -551,6 +609,43 @@ func discoverRemoteCodexProviderSessionID(project *database.Project, decryptFunc
 	}
 	defer client.Close()
 	return discoverCodexProviderSessionIDOverSSH(client, codexHome, workDir, since)
+}
+
+func discoverRemoteOpenCodeProviderSessionID(project *database.Project, decryptFunc func(string, string) (string, error), workDir string, since time.Time) (string, error) {
+	runner := &RemoteRunner{
+		project:     project,
+		decryptFunc: decryptFunc,
+	}
+	config, err := runner.buildSSHConfig()
+	if err != nil {
+		return "", err
+	}
+	addr := fmt.Sprintf("%s:%d", project.SSHHost.String, project.SSHPort.Int64)
+	client, err := ssh.Dial("tcp", addr, config)
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
+	return discoverOpenCodeProviderSessionIDOverSSH(client, parseOpenCodeConfig(project.BackendConfig).BinaryPath, workDir, since)
+}
+
+func discoverOpenCodeProviderSessionIDOverSSH(client *ssh.Client, binaryPath, workDir string, since time.Time) (string, error) {
+	session, err := client.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer session.Close()
+
+	command := strings.TrimSpace(binaryPath)
+	if command == "" {
+		command = "opencode"
+	}
+	cmd := "cd " + shellQuote(workDir) + " && " + shellCommandWord(command) + " session list --format json --max-count 25"
+	output, err := session.CombinedOutput(cmd)
+	if err != nil {
+		return "", fmt.Errorf("remote OpenCode session discovery failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return selectOpenCodeProviderSessionID(output, workDir, since), nil
 }
 
 func discoverCodexProviderSessionIDOverSSH(client *ssh.Client, codexHome, workDir string, since time.Time) (string, error) {

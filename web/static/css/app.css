@@ -643,6 +643,11 @@ body {
     color: var(--color-primary);
 }
 
+.badge-opencode {
+    background-color: rgba(var(--color-success-rgb), 0.2);
+    color: var(--color-success);
+}
+
 .badge-claude_code {
     background-color: rgba(var(--color-primary-rgb), 0.2);
     color: var(--color-primary);

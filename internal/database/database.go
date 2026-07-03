@@ -352,6 +352,14 @@ func (d *DB) InsertCodexTranscriptEvent(ctx context.Context, event *CodexTranscr
 	return err
 }
 
+func (d *DB) ClearCodexTranscriptEvents(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	_, err := d.ExecContext(ctx, "DELETE FROM codex_transcript_events WHERE session_id = ?", sessionID)
+	return err
+}
+
 func (d *DB) ListCodexTranscriptEvents(ctx context.Context, sessionID string, limit int) ([]CodexTranscriptEvent, error) {
 	if limit <= 0 {
 		limit = 4000
@@ -1688,7 +1696,7 @@ func (d *DB) GetAllTasksSummary(ctx context.Context) (map[string]int, error) {
 
 // LinkSessionToTask sets the task_id on a session.
 func (d *DB) LinkSessionToTask(ctx context.Context, sessionID string, taskID int64) error {
-	_, err := d.ExecContext(ctx, "UPDATE sessions SET task_id = ? WHERE id = ?", taskID, sessionID)
+	_, err := d.ExecContext(ctx, "UPDATE sessions SET task_id = ?, last_activity_at = ? WHERE id = ?", taskID, time.Now(), sessionID)
 	return err
 }
 
@@ -1727,7 +1735,7 @@ func (d *DB) GetTaskForSession(ctx context.Context, sessionID string) (*ProjectT
 func (d *DB) GetSessionsForTask(ctx context.Context, taskID int64) ([]Session, error) {
 	var sessions []Session
 	err := d.SelectContext(ctx, &sessions,
-		`SELECT * FROM sessions WHERE task_id = ? ORDER BY start_time DESC`, taskID)
+		`SELECT * FROM sessions WHERE task_id = ? ORDER BY COALESCE(last_activity_at, end_time, start_time) DESC`, taskID)
 	return sessions, err
 }
 
@@ -1753,8 +1761,8 @@ func (d *DB) GetTaskSessionSummary(ctx context.Context, projectID int64) ([]stru
 		       COUNT(*) as session_count,
 		       COUNT(CASE WHEN s.status IN ('running', 'starting') THEN 1 END) as active_count,
 		       COUNT(CASE WHEN s.status IN ('stopped', 'completed') THEN 1 END) as stopped_count,
-		       COALESCE((SELECT s2.id FROM sessions s2 WHERE s2.task_id = s.task_id ORDER BY s2.start_time DESC LIMIT 1), '') as latest_session,
-		       COALESCE((SELECT s2.id FROM sessions s2 WHERE s2.task_id = s.task_id AND s2.status IN ('stopped', 'completed') ORDER BY s2.start_time DESC LIMIT 1), '') as latest_stopped_session
+		       COALESCE((SELECT s2.id FROM sessions s2 WHERE s2.task_id = s.task_id AND s2.status IN ('running', 'starting') ORDER BY COALESCE(s2.last_activity_at, s2.end_time, s2.start_time) DESC LIMIT 1), '') as latest_session,
+		       COALESCE((SELECT s2.id FROM sessions s2 WHERE s2.task_id = s.task_id AND s2.status IN ('stopped', 'completed') ORDER BY COALESCE(s2.last_activity_at, s2.end_time, s2.start_time) DESC LIMIT 1), '') as latest_stopped_session
 		FROM sessions s
 		INNER JOIN project_tasks t ON t.id = s.task_id
 		WHERE t.project_id = ? AND s.task_id IS NOT NULL
@@ -1803,8 +1811,8 @@ func (d *DB) GetAllTaskSessionSummary(ctx context.Context) ([]struct {
 		       COUNT(*) as session_count,
 		       COUNT(CASE WHEN s.status IN ('running', 'starting') THEN 1 END) as active_count,
 		       COUNT(CASE WHEN s.status IN ('stopped', 'completed') THEN 1 END) as stopped_count,
-		       COALESCE((SELECT s2.id FROM sessions s2 WHERE s2.task_id = s.task_id ORDER BY s2.start_time DESC LIMIT 1), '') as latest_session,
-		       COALESCE((SELECT s2.id FROM sessions s2 WHERE s2.task_id = s.task_id AND s2.status IN ('stopped', 'completed') ORDER BY s2.start_time DESC LIMIT 1), '') as latest_stopped_session
+		       COALESCE((SELECT s2.id FROM sessions s2 WHERE s2.task_id = s.task_id AND s2.status IN ('running', 'starting') ORDER BY COALESCE(s2.last_activity_at, s2.end_time, s2.start_time) DESC LIMIT 1), '') as latest_session,
+		       COALESCE((SELECT s2.id FROM sessions s2 WHERE s2.task_id = s.task_id AND s2.status IN ('stopped', 'completed') ORDER BY COALESCE(s2.last_activity_at, s2.end_time, s2.start_time) DESC LIMIT 1), '') as latest_stopped_session
 		FROM sessions s
 		WHERE s.task_id IS NOT NULL
 		GROUP BY s.task_id`)
