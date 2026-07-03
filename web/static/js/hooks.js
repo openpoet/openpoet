@@ -159,6 +159,7 @@ class HookManager {
 
     _getAgentName(event = {}) {
         if (event.backend === 'codex') return 'Codex';
+        if (event.backend === 'opencode') return 'OpenCode';
         if (event.backend === 'copilot' || event.backend === 'acp') return 'Copilot';
         return 'Claude';
     }

@@ -36,6 +36,10 @@ type CodexProviderSessionIDDiscoverer interface {
 	DiscoverCodexProviderSessionID(workDir string, since time.Time) (string, error)
 }
 
+type OpenCodeProviderSessionIDDiscoverer interface {
+	DiscoverOpenCodeProviderSessionID(workDir string, since time.Time) (string, error)
+}
+
 type TermSize struct {
 	Rows uint16
 	Cols uint16
@@ -54,9 +58,10 @@ type Manager struct {
 	shuttingDown bool                           // true during graceful shutdown for restart
 
 	// Callbacks for AI session evaluation
-	OnSessionStart func(sessionID string)
-	OnSessionEnd   func(sessionID string, output []byte)
-	OnSessionFlush func(sessionID string) // Always called on session end (even user-stopped) for OTEL flush
+	OnSessionStart        func(sessionID string)
+	OnSessionEnd          func(sessionID string, output []byte)
+	OnUserPromptSubmitted func(sessionID string)
+	OnSessionFlush        func(sessionID string) // Always called on session end (even user-stopped) for OTEL flush
 }
 
 // OutputBuffer is a ring buffer for storing recent terminal output
@@ -249,6 +254,9 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	if project.Type == "local" && backend.Type() == BackendCodex && !useCodexAppServer(project.Backend, project.BackendConfig) {
 		go m.captureCodexProviderSessionID(sessionID, project.Path, envVars, session.StartTime)
 	}
+	if project.Type == "local" && backend.Type() == BackendOpenCode {
+		go m.captureOpenCodeProviderSessionID(sessionID, project.Path, envVars, session.StartTime)
+	}
 
 	// Update session status and PID
 	session.Status = "running"
@@ -348,8 +356,20 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 			session.ProviderSessionID = providerID
 		}
 	}
+	if project.Type == "local" && backend.Type() == BackendOpenCode && strings.TrimSpace(cfg.ProviderSessionID) == "" {
+		if providerID := m.resolveOpenCodeProviderSessionID(ctx, sessionID, project.Path, envVars, session.StartTime.Add(-2*time.Minute)); providerID != "" {
+			cfg.ProviderSessionID = providerID
+			session.ProviderSessionID = providerID
+		}
+	}
 	if project.Type != "local" && backend.Type() == BackendCodex && !useCodexAppServer(project.Backend, project.BackendConfig) && strings.TrimSpace(cfg.ProviderSessionID) == "" {
 		if providerID := m.resolveRemoteCodexProviderSessionID(ctx, sessionID, project, decryptFunc, session.StartTime.Add(-2*time.Minute)); providerID != "" {
+			cfg.ProviderSessionID = providerID
+			session.ProviderSessionID = providerID
+		}
+	}
+	if project.Type != "local" && backend.Type() == BackendOpenCode && strings.TrimSpace(cfg.ProviderSessionID) == "" {
+		if providerID := m.resolveRemoteOpenCodeProviderSessionID(ctx, sessionID, project, decryptFunc, session.StartTime.Add(-2*time.Minute)); providerID != "" {
 			cfg.ProviderSessionID = providerID
 			session.ProviderSessionID = providerID
 		}
@@ -361,6 +381,9 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 		if project.Type == "local" && !m.codexProviderSessionIDUsable(envVars, cfg.ProviderSessionID) {
 			return fmt.Errorf("cannot reopen Codex session %s: provider session id %s was not found in CODEX_HOME", sessionID, cfg.ProviderSessionID)
 		}
+	}
+	if backend.Type() == BackendOpenCode && strings.TrimSpace(cfg.ProviderSessionID) == "" {
+		return fmt.Errorf("cannot reopen OpenCode session %s: provider session id not found", sessionID)
 	}
 	cliArgs := backend.BuildCLIArgs(cfg)
 
@@ -435,9 +458,17 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	if project.Type == "local" && backend.Type() == BackendCodex && !useCodexAppServer(project.Backend, project.BackendConfig) {
 		go m.captureCodexProviderSessionID(sessionID, project.Path, envVars, session.StartTime)
 	}
+	if project.Type == "local" && backend.Type() == BackendOpenCode {
+		go m.captureOpenCodeProviderSessionID(sessionID, project.Path, envVars, session.StartTime)
+	}
 	if project.Type != "local" && backend.Type() == BackendCodex && !useCodexAppServer(project.Backend, project.BackendConfig) {
 		if discoverer, ok := runner.(CodexProviderSessionIDDiscoverer); ok {
 			go m.captureCodexProviderSessionIDFromDiscoverer(sessionID, project.Path, session.StartTime, discoverer)
+		}
+	}
+	if project.Type != "local" && backend.Type() == BackendOpenCode {
+		if discoverer, ok := runner.(OpenCodeProviderSessionIDDiscoverer); ok {
+			go m.captureOpenCodeProviderSessionIDFromDiscoverer(sessionID, project.Path, session.StartTime, discoverer)
 		}
 	}
 
@@ -549,6 +580,94 @@ func (m *Manager) resolveRemoteCodexProviderSessionID(ctx context.Context, sessi
 	return providerID
 }
 
+func (m *Manager) PersistProviderSessionID(ctx context.Context, sessionID, providerID, backend string) {
+	providerID = strings.TrimSpace(providerID)
+	if providerID == "" {
+		return
+	}
+	if err := m.db.UpdateSessionProviderSessionID(ctx, sessionID, providerID); err != nil {
+		log.Printf("[%s] failed to persist provider session id %s for OpenPoet session %s: %v", backend, providerID, sessionID, err)
+		return
+	}
+	log.Printf("[%s] persisted provider session id %s for OpenPoet session %s", backend, providerID, sessionID)
+}
+
+func (m *Manager) captureOpenCodeProviderSessionID(sessionID, workDir string, envVars map[string]string, since time.Time) {
+	deadline := time.Now().Add(12 * time.Second)
+	for {
+		if providerID := m.resolveOpenCodeProviderSessionID(context.Background(), sessionID, workDir, envVars, since.Add(-2*time.Second)); providerID != "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Printf("[OpenCode] provider session id was not discovered for OpenPoet session %s", sessionID)
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+func (m *Manager) resolveOpenCodeProviderSessionID(ctx context.Context, sessionID, workDir string, envVars map[string]string, since time.Time) string {
+	providerID, err := discoverOpenCodeProviderSessionID(ctx, openCodeBinaryFromEnv(envVars), workDir, since)
+	if err != nil {
+		log.Printf("[OpenCode] failed to discover provider session id for OpenPoet session %s: %v", sessionID, err)
+		return ""
+	}
+	if providerID == "" {
+		return ""
+	}
+	m.PersistProviderSessionID(ctx, sessionID, providerID, "OpenCode")
+	return providerID
+}
+
+func (m *Manager) captureOpenCodeProviderSessionIDFromDiscoverer(sessionID, workDir string, since time.Time, discoverer OpenCodeProviderSessionIDDiscoverer) {
+	deadline := time.Now().Add(12 * time.Second)
+	for {
+		if providerID := m.resolveOpenCodeProviderSessionIDFromDiscoverer(context.Background(), sessionID, workDir, since.Add(-2*time.Second), discoverer); providerID != "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Printf("[OpenCode] provider session id was not discovered for remote OpenPoet session %s", sessionID)
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+func (m *Manager) resolveOpenCodeProviderSessionIDFromDiscoverer(ctx context.Context, sessionID, workDir string, since time.Time, discoverer OpenCodeProviderSessionIDDiscoverer) string {
+	providerID, err := discoverer.DiscoverOpenCodeProviderSessionID(workDir, since)
+	if err != nil {
+		log.Printf("[OpenCode] failed to discover remote provider session id for OpenPoet session %s: %v", sessionID, err)
+		return ""
+	}
+	if providerID == "" {
+		return ""
+	}
+	m.PersistProviderSessionID(ctx, sessionID, providerID, "OpenCode")
+	return providerID
+}
+
+func (m *Manager) resolveRemoteOpenCodeProviderSessionID(ctx context.Context, sessionID string, project *database.Project, decryptFunc func(string, string) (string, error), since time.Time) string {
+	providerID, err := discoverRemoteOpenCodeProviderSessionID(project, decryptFunc, project.Path, since)
+	if err != nil {
+		log.Printf("[OpenCode] failed to discover remote provider session id for OpenPoet session %s: %v", sessionID, err)
+		return ""
+	}
+	if providerID == "" {
+		return ""
+	}
+	m.PersistProviderSessionID(ctx, sessionID, providerID, "OpenCode")
+	return providerID
+}
+
+func openCodeBinaryFromEnv(envVars map[string]string) string {
+	if envVars != nil {
+		if bin := strings.TrimSpace(envVars["OPENPOET_BACKEND_BINARY"]); bin != "" {
+			return expandCodexHome(bin)
+		}
+	}
+	return "opencode"
+}
+
 func (m *Manager) codexProviderSessionIDUsable(envVars map[string]string, providerID string) bool {
 	providerID = strings.TrimSpace(providerID)
 	if providerID == "" {
@@ -622,6 +741,9 @@ func (m *Manager) WriteToSession(sessionID string, data []byte) error {
 	}
 
 	_, err := rs.runner.Write(data)
+	if err == nil && m.isCodexTerminalSubmit(rs, data) {
+		m.notifyUserPromptSubmitted(sessionID)
+	}
 	return err
 }
 
@@ -638,7 +760,32 @@ func (m *Manager) HandleCodexCommand(ctx context.Context, sessionID string, data
 	if !ok {
 		return nil, fmt.Errorf("session does not support Codex commands")
 	}
-	return handler.HandleCodexCommand(ctx, data)
+	result, err := handler.HandleCodexCommand(ctx, data)
+	if err == nil && codexCommandAction(data) == "input/send" {
+		m.notifyUserPromptSubmitted(sessionID)
+	}
+	return result, err
+}
+
+func (m *Manager) isCodexTerminalSubmit(rs *runningSession, data []byte) bool {
+	if rs == nil || rs.session == nil || rs.session.Backend != string(BackendCodex) {
+		return false
+	}
+	return bytes.ContainsAny(data, "\r\n")
+}
+
+func (m *Manager) notifyUserPromptSubmitted(sessionID string) {
+	if m.OnUserPromptSubmitted != nil {
+		m.OnUserPromptSubmitted(sessionID)
+	}
+}
+
+func codexCommandAction(data json.RawMessage) string {
+	var req struct {
+		Action string `json:"action"`
+	}
+	_ = json.Unmarshal(data, &req)
+	return strings.TrimSpace(req.Action)
 }
 
 func (m *Manager) ResizeSession(sessionID string, rows, cols uint16) error {
@@ -1134,6 +1281,11 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	if backend.Type() == BackendCodex && !useCodexAppServer(project.Backend, project.BackendConfig) {
 		if discoverer, ok := runner.(CodexProviderSessionIDDiscoverer); ok {
 			go m.captureCodexProviderSessionIDFromDiscoverer(sessionID, project.Path, session.StartTime, discoverer)
+		}
+	}
+	if backend.Type() == BackendOpenCode {
+		if discoverer, ok := runner.(OpenCodeProviderSessionIDDiscoverer); ok {
+			go m.captureOpenCodeProviderSessionIDFromDiscoverer(sessionID, project.Path, session.StartTime, discoverer)
 		}
 	}
 

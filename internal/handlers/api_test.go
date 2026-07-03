@@ -14,6 +14,15 @@ func TestValidateProjectBackendAcceptsLocalCodex(t *testing.T) {
 	}
 }
 
+func TestValidateProjectBackendAcceptsOpenCode(t *testing.T) {
+	if got := validateProjectBackend("local", "opencode"); got != "" {
+		t.Fatalf("expected OpenCode backend to be accepted, got %q", got)
+	}
+	if got := validateProjectBackend("remote", "opencode"); got != "" {
+		t.Fatalf("expected remote OpenCode backend to be accepted, got %q", got)
+	}
+}
+
 func TestValidateProjectBackendRejectsUnknownBackend(t *testing.T) {
 	if got := validateProjectBackend("local", "unknown"); got == "" {
 		t.Fatal("expected unknown backend to be rejected")

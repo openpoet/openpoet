@@ -369,13 +369,15 @@ func (r *CodexRunner) codexCommandResumeApply(ctx context.Context, raw json.RawM
 		resumedThreadID = threadID
 	}
 	r.switchCodexThread(resumedThreadID)
+	r.replaceCodexTranscriptFromThreadResponse(rawResult)
 	msg := fmt.Sprintf("Resumed Codex thread: %s", resumedThreadID)
 	r.addCodexCommandFeedback("Resume", msg)
 	r.write([]byte(msg + "\r\n"))
 	r.writePrompt()
 	return map[string]interface{}{
-		"threadId": resumedThreadID,
-		"thread":   result,
+		"threadId":   resumedThreadID,
+		"thread":     result,
+		"transcript": r.codexTranscriptSnapshot(),
 	}, nil
 }
 

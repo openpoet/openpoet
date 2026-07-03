@@ -817,6 +817,7 @@ class OpenPoet {
                     ${project.backend === 'copilot' ? '<span class="badge badge-copilot">Copilot</span>' : ''}
                     ${project.backend === 'acp' ? '<span class="badge badge-acp">ACP</span>' : ''}
                     ${project.backend === 'codex' ? '<span class="badge badge-codex">Codex</span>' : ''}
+                    ${project.backend === 'opencode' ? '<span class="badge badge-opencode">OpenCode</span>' : ''}
                     <span class="badge badge-${project.type}">${project.type}</span>
                 </div>
                 ${tagChips ? `<div class="card-tags">${tagChips}</div>` : ''}
@@ -3229,9 +3230,11 @@ class OpenPoet {
         const isCopilot = session.backend === 'copilot';
         const isACP = session.backend === 'acp';
         const isCodex = session.backend === 'codex';
+        const isOpenCode = session.backend === 'opencode';
         const backendBadge = isCopilot ? '<span class="badge badge-copilot" style="margin-left:4px;">Copilot</span>'
             : isACP ? '<span class="badge badge-acp" style="margin-left:4px;">ACP</span>'
-            : isCodex ? '<span class="badge badge-codex" style="margin-left:4px;">Codex</span>' : '';
+            : isCodex ? '<span class="badge badge-codex" style="margin-left:4px;">Codex</span>'
+            : isOpenCode ? '<span class="badge badge-opencode" style="margin-left:4px;">OpenCode</span>' : '';
 
         return `
             <div class="session-card" onclick="app.openTerminal('${session.id}')">
@@ -5612,11 +5615,61 @@ class OpenPoet {
         `;
     }
 
+    _renderOpenCodeBackendConfig(config = {}, visible = false) {
+        const enableMCP = config.enable_mcp !== false;
+        const permissionMode = config.permission_mode || '';
+        return `
+            <div id="opencode-backend-config" class="backend-config-panel ${visible ? '' : 'hidden'}">
+                <div class="backend-config-header">
+                    <div>
+                        <div class="backend-config-title">OpenCode Settings</div>
+                        <div class="backend-config-subtitle">OpenPoet syncs AGENTS.md, .opencode/skills, and opencode.json for this backend.</div>
+                    </div>
+                </div>
+                <div class="backend-config-grid">
+                    <div class="form-group">
+                        <label class="form-label">OpenCode Binary</label>
+                        <input type="text" class="form-input" name="opencode_binary_path" value="${this.escapeHtml(config.binary_path || '')}" placeholder="opencode">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Model</label>
+                        <input type="text" class="form-input" name="opencode_model" value="${this.escapeHtml(config.model || '')}" placeholder="OpenCode default">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Default Agent</label>
+                        <input type="text" class="form-input" name="opencode_agent" value="${this.escapeHtml(config.agent || '')}" placeholder="build or plan">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Permission Mode</label>
+                        <select class="form-select" name="opencode_permission_mode">
+                            ${this._codexOption('', permissionMode, 'OpenCode Default')}
+                            ${this._codexOption('ask', permissionMode, 'Ask')}
+                            ${this._codexOption('allow', permissionMode, 'Allow')}
+                            ${this._codexOption('deny', permissionMode, 'Deny')}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-checkbox">
+                            <input type="checkbox" name="opencode_enable_mcp" ${enableMCP ? 'checked' : ''}>
+                            <span>Sync MCP servers to opencode.json</span>
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-checkbox">
+                            <input type="checkbox" name="opencode_auto_approve" ${config.auto_approve ? 'checked' : ''}>
+                            <span>Start OpenCode with --auto</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
     showProjectModal(project = null) {
         const isEdit = project && project.id;
         this._browseEditProjectId = project?.id || null;
         const selectedBackend = project?.backend || 'claude_code';
-        const codexConfig = this._parseProjectBackendConfig(project?.backend_config);
+        const backendConfig = this._parseProjectBackendConfig(project?.backend_config);
         const content = `
             <form id="project-form">
                 <div class="form-group">
@@ -5644,9 +5697,11 @@ class OpenPoet {
                         <option value="copilot" ${selectedBackend === 'copilot' ? 'selected' : ''}>GitHub Copilot CLI</option>
                         <option value="acp" ${selectedBackend === 'acp' ? 'selected' : ''}>Copilot ACP</option>
                         <option value="codex" ${selectedBackend === 'codex' ? 'selected' : ''}>OpenAI Codex</option>
+                        <option value="opencode" ${selectedBackend === 'opencode' ? 'selected' : ''}>OpenCode</option>
                     </select>
                 </div>
-                ${this._renderCodexBackendConfig(codexConfig, selectedBackend === 'codex')}
+                ${this._renderCodexBackendConfig(backendConfig, selectedBackend === 'codex')}
+                ${this._renderOpenCodeBackendConfig(backendConfig, selectedBackend === 'opencode')}
                 <div class="form-group">
                     <label class="form-label">Tags</label>
                     <div id="project-tag-select" class="tag-select-container">
@@ -5853,6 +5908,10 @@ class OpenPoet {
         if (codexConfig) {
             codexConfig.classList.toggle('hidden', backend !== 'codex');
         }
+        const openCodeConfig = document.getElementById('opencode-backend-config');
+        if (openCodeConfig) {
+            openCodeConfig.classList.toggle('hidden', backend !== 'opencode');
+        }
         this.updateProjectBackendAvailability();
     }
 
@@ -5861,6 +5920,7 @@ class OpenPoet {
         if (!form) return;
 
         form.querySelector('[name="backend"]')?.querySelector('option[value="codex"]')?.removeAttribute('disabled');
+        form.querySelector('[name="backend"]')?.querySelector('option[value="opencode"]')?.removeAttribute('disabled');
     }
 
     toggleSSHCredentialField(authType) {
@@ -5874,28 +5934,45 @@ class OpenPoet {
 
     _buildProjectBackendConfig(formData) {
         const backend = formData.get('backend') || 'claude_code';
-        if (backend !== 'codex') {
-            return null;
+        if (backend === 'codex') {
+            const config = {
+                runtime: this._trimFormValue(formData, 'codex_runtime') || 'app-server',
+                approval_policy: this._trimFormValue(formData, 'codex_approval_policy') || 'on-request',
+                sandbox_mode: this._trimFormValue(formData, 'codex_sandbox_mode') || 'workspace-write'
+            };
+            const optionalFields = [
+                ['binary_path', 'codex_binary_path'],
+                ['home_path', 'codex_home_path'],
+                ['model', 'codex_model'],
+                ['reasoning_effort', 'codex_reasoning_effort'],
+                ['service_tier', 'codex_service_tier']
+            ];
+            for (const [configKey, formKey] of optionalFields) {
+                const value = this._trimFormValue(formData, formKey);
+                if (value) config[configKey] = value;
+            }
+            return JSON.stringify(config);
         }
 
-        const config = {
-            runtime: this._trimFormValue(formData, 'codex_runtime') || 'app-server',
-            approval_policy: this._trimFormValue(formData, 'codex_approval_policy') || 'on-request',
-            sandbox_mode: this._trimFormValue(formData, 'codex_sandbox_mode') || 'workspace-write'
-        };
-        const optionalFields = [
-            ['binary_path', 'codex_binary_path'],
-            ['home_path', 'codex_home_path'],
-            ['model', 'codex_model'],
-            ['reasoning_effort', 'codex_reasoning_effort'],
-            ['service_tier', 'codex_service_tier']
-        ];
-        for (const [configKey, formKey] of optionalFields) {
-            const value = this._trimFormValue(formData, formKey);
-            if (value) config[configKey] = value;
+        if (backend === 'opencode') {
+            const config = {
+                enable_mcp: formData.get('opencode_enable_mcp') === 'on',
+                auto_approve: formData.get('opencode_auto_approve') === 'on'
+            };
+            const optionalFields = [
+                ['binary_path', 'opencode_binary_path'],
+                ['model', 'opencode_model'],
+                ['agent', 'opencode_agent'],
+                ['permission_mode', 'opencode_permission_mode']
+            ];
+            for (const [configKey, formKey] of optionalFields) {
+                const value = this._trimFormValue(formData, formKey);
+                if (value) config[configKey] = value;
+            }
+            return JSON.stringify(config);
         }
 
-        return JSON.stringify(config);
+        return null;
     }
 
     async saveProject(projectId) {

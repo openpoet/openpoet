@@ -154,7 +154,7 @@ func (h *StructuredViewHandler) resolveJSONLSource(r *http.Request, sessionID st
 		return nil, "not_found"
 	}
 
-	if sess.Backend == "copilot" || sess.Backend == "codex" {
+	if sess.Backend == "copilot" || sess.Backend == "codex" || sess.Backend == "opencode" {
 		return nil, "unsupported_backend"
 	}
 

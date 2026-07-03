@@ -1,0 +1,11 @@
+# OpenPoet-managed Codex project configuration.
+# The OpenPoet MCP server is injected at session start because it needs
+# the current OpenPoet session id.
+
+[mcp_servers.playwright]
+command = "npx"
+args = ["@playwright/mcp@latest", "--headless", "--browser", "chromium", "--isolated", "--no-sandbox"]
+
+[mcp_servers.playwright.env]
+PLAYWRIGHT_CHROMIUM_SANDBOX = "false"
+

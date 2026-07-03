@@ -150,6 +150,9 @@ func (cs *ConfigSyncer) SyncToProject(ctx context.Context, project *database.Pro
 	if project.Backend == "codex" {
 		return cs.syncToRemoteCodex(ctx, project)
 	}
+	if project.Backend == "opencode" {
+		return cs.syncToRemoteOpenCode(ctx, project)
+	}
 	return cs.syncToRemote(ctx, project)
 }
 
@@ -164,6 +167,9 @@ func (cs *ConfigSyncer) syncToLocal(ctx context.Context, project *database.Proje
 	}
 	if project.Backend == "codex" {
 		return cs.syncToLocalCodex(ctx, project)
+	}
+	if project.Backend == "opencode" {
+		return cs.syncToLocalOpenCode(ctx, project)
 	}
 
 	projectPath := project.Path
@@ -415,6 +421,73 @@ func (cs *ConfigSyncer) syncToRemoteCodex(ctx context.Context, project *database
 		return err
 	}
 	cs.reportProgress(project.ID, "mcps", "done", "Remote Codex MCP config written")
+
+	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing remote AGENTS.md...")
+	source, err := cs.syncCodexMemoryDocRemote(ctx, sftpClient, project)
+	if err != nil {
+		cs.reportProgress(project.ID, "memory_doc", "error", err.Error())
+		return err
+	}
+	if source != "" {
+		cs.reportProgress(project.ID, "memory_doc", "done", "Remote AGENTS.md and CLAUDE.md synced from "+source)
+	} else {
+		cs.reportProgress(project.ID, "memory_doc", "done", "No remote AGENTS.md or CLAUDE.md found")
+	}
+
+	return nil
+}
+
+func (cs *ConfigSyncer) syncToRemoteOpenCode(ctx context.Context, project *database.Project) error {
+	config, err := cs.buildSSHConfig(project)
+	if err != nil {
+		return err
+	}
+
+	addr := fmt.Sprintf("%s:%d", project.SSHHost.String, project.SSHPort.Int64)
+	client, err := ssh.Dial("tcp", addr, config)
+	if err != nil {
+		return fmt.Errorf("SSH connection failed: %w", err)
+	}
+	defer client.Close()
+
+	sftpClient, err := sftp.NewClient(client)
+	if err != nil {
+		return fmt.Errorf("SFTP connection failed: %w", err)
+	}
+	defer sftpClient.Close()
+
+	openCodeDir := filepath.Join(project.Path, ".opencode")
+	openCodeSkillsDir := filepath.Join(openCodeDir, "skills")
+	openCodePluginsDir := filepath.Join(openCodeDir, "plugins")
+	if err := sftpClient.MkdirAll(openCodeSkillsDir); err != nil {
+		return fmt.Errorf("failed to create remote .opencode/skills directory: %w", err)
+	}
+	if err := sftpClient.MkdirAll(openCodePluginsDir); err != nil {
+		return fmt.Errorf("failed to create remote .opencode/plugins directory: %w", err)
+	}
+
+	cs.reportProgress(project.ID, "hooks", "running", "Syncing remote OpenCode plugin...")
+	if err := cs.syncOpenCodePluginRemote(sftpClient, openCodePluginsDir); err != nil {
+		cs.reportProgress(project.ID, "hooks", "error", err.Error())
+		return fmt.Errorf("failed to sync remote OpenCode plugin: %w", err)
+	}
+	cs.reportProgress(project.ID, "hooks", "done", "Remote OpenCode plugin synced")
+
+	cs.reportProgress(project.ID, "skills", "running", "Syncing OpenCode skills to remote .opencode/skills...")
+	cs.importSkillsFromRemote(ctx, sftpClient, openCodeSkillsDir, project)
+	if err := cs.syncSkillsToRemote(ctx, sftpClient, openCodeSkillsDir, project); err != nil {
+		cs.reportProgress(project.ID, "skills", "error", err.Error())
+		return fmt.Errorf("failed to sync remote OpenCode skills: %w", err)
+	}
+	cs.reportProgress(project.ID, "skills", "done", "OpenCode skills synced to remote .opencode/skills")
+
+	cs.importMCPsFromRemote(ctx, sftpClient, project.Path, project)
+	cs.reportProgress(project.ID, "mcps", "running", "Writing remote opencode.json...")
+	if err := cs.writeOpenCodeConfigRemote(ctx, sftpClient, filepath.Join(project.Path, "opencode.json"), project); err != nil {
+		cs.reportProgress(project.ID, "mcps", "error", err.Error())
+		return err
+	}
+	cs.reportProgress(project.ID, "mcps", "done", "Remote OpenCode config written")
 
 	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing remote AGENTS.md...")
 	source, err := cs.syncCodexMemoryDocRemote(ctx, sftpClient, project)
@@ -1408,6 +1481,59 @@ func (cs *ConfigSyncer) syncToLocalCodex(ctx context.Context, project *database.
 	return nil
 }
 
+// syncToLocalOpenCode syncs configuration for OpenCode projects.
+// OpenCode uses AGENTS.md for repo instructions, .opencode/skills for
+// repo-scoped skills, and opencode.json for project-scoped settings.
+func (cs *ConfigSyncer) syncToLocalOpenCode(ctx context.Context, project *database.Project) error {
+	projectPath := project.Path
+	openCodeSkillsDir := filepath.Join(projectPath, ".opencode", "skills")
+	openCodePluginsDir := filepath.Join(projectPath, ".opencode", "plugins")
+
+	if err := os.MkdirAll(openCodeSkillsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create .opencode/skills directory: %w", err)
+	}
+	if err := os.MkdirAll(openCodePluginsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create .opencode/plugins directory: %w", err)
+	}
+
+	cs.reportProgress(project.ID, "hooks", "running", "Syncing OpenCode plugin...")
+	if err := cs.syncOpenCodePluginLocal(openCodePluginsDir); err != nil {
+		cs.reportProgress(project.ID, "hooks", "error", err.Error())
+		return fmt.Errorf("failed to sync OpenCode plugin: %w", err)
+	}
+	cs.reportProgress(project.ID, "hooks", "done", "OpenCode plugin synced")
+
+	cs.reportProgress(project.ID, "skills", "running", "Syncing skills to .opencode/skills...")
+	cs.importSkillsFromDisk(ctx, openCodeSkillsDir, project)
+	if err := cs.syncSkillsToLocal(ctx, openCodeSkillsDir, project); err != nil {
+		cs.reportProgress(project.ID, "skills", "error", err.Error())
+		return fmt.Errorf("failed to sync OpenCode skills: %w", err)
+	}
+	cs.reportProgress(project.ID, "skills", "done", "Skills synced to .opencode/skills")
+
+	cs.importMCPsFromDisk(ctx, projectPath, project)
+	cs.reportProgress(project.ID, "mcps", "running", "Writing opencode.json...")
+	if err := cs.writeOpenCodeConfigLocal(ctx, filepath.Join(projectPath, "opencode.json"), project); err != nil {
+		cs.reportProgress(project.ID, "mcps", "error", err.Error())
+		return err
+	}
+	cs.reportProgress(project.ID, "mcps", "done", "OpenCode config written")
+
+	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing AGENTS.md...")
+	source, err := cs.syncCodexMemoryDocLocal(ctx, project)
+	if err != nil {
+		cs.reportProgress(project.ID, "memory_doc", "error", err.Error())
+		return err
+	}
+	if source != "" {
+		cs.reportProgress(project.ID, "memory_doc", "done", "AGENTS.md and CLAUDE.md synced from "+source)
+	} else {
+		cs.reportProgress(project.ID, "memory_doc", "done", "No AGENTS.md or CLAUDE.md found")
+	}
+
+	return nil
+}
+
 type codexMemorySource struct {
 	Name      string
 	Path      string
@@ -1656,6 +1782,366 @@ func (cs *ConfigSyncer) writeCodexConfigRemote(ctx context.Context, sftpClient *
 	}
 	return nil
 }
+
+type openCodeSyncConfig struct {
+	Model          string `json:"model"`
+	Agent          string `json:"agent"`
+	EnableMCP      bool   `json:"enable_mcp"`
+	PermissionMode string `json:"permission_mode"`
+}
+
+func parseOpenCodeSyncConfig(raw string) openCodeSyncConfig {
+	cfg := openCodeSyncConfig{EnableMCP: true}
+	if strings.TrimSpace(raw) != "" {
+		_ = json.Unmarshal([]byte(raw), &cfg)
+	}
+	switch strings.TrimSpace(strings.ToLower(cfg.PermissionMode)) {
+	case "allow", "ask", "deny":
+		cfg.PermissionMode = strings.TrimSpace(strings.ToLower(cfg.PermissionMode))
+	default:
+		cfg.PermissionMode = ""
+	}
+	cfg.Model = strings.TrimSpace(cfg.Model)
+	cfg.Agent = strings.TrimSpace(cfg.Agent)
+	return cfg
+}
+
+func (cs *ConfigSyncer) writeOpenCodeConfigLocal(ctx context.Context, configPath string, project *database.Project) error {
+	existing := make(map[string]interface{})
+	if data, err := os.ReadFile(configPath); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+		if err := json.Unmarshal(data, &existing); err != nil {
+			return fmt.Errorf("failed to parse existing opencode.json: %w", err)
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	if err := cs.mergeOpenCodeConfig(ctx, existing, project); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(configPath, data, 0644)
+}
+
+func (cs *ConfigSyncer) writeOpenCodeConfigRemote(ctx context.Context, sftpClient *sftp.Client, configPath string, project *database.Project) error {
+	existing := make(map[string]interface{})
+	if f, err := sftpClient.Open(configPath); err == nil {
+		data, readErr := io.ReadAll(f)
+		closeErr := f.Close()
+		if readErr != nil {
+			return readErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if len(strings.TrimSpace(string(data))) > 0 {
+			if err := json.Unmarshal(data, &existing); err != nil {
+				return fmt.Errorf("failed to parse existing remote opencode.json: %w", err)
+			}
+		}
+	} else if !isRemoteNotExist(err) {
+		return err
+	}
+
+	if err := cs.mergeOpenCodeConfig(ctx, existing, project); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+
+	f, err := sftpClient.Create(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to create remote opencode.json: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return fmt.Errorf("failed to write remote opencode.json: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("failed to close remote opencode.json: %w", err)
+	}
+	return nil
+}
+
+func (cs *ConfigSyncer) mergeOpenCodeConfig(ctx context.Context, config map[string]interface{}, project *database.Project) error {
+	oc := parseOpenCodeSyncConfig(project.BackendConfig)
+	if _, ok := config["$schema"]; !ok {
+		config["$schema"] = "https://opencode.ai/config.json"
+	}
+	if oc.Model != "" {
+		config["model"] = oc.Model
+	}
+	if oc.Agent != "" {
+		config["default_agent"] = oc.Agent
+	}
+	if oc.PermissionMode != "" {
+		config["permission"] = oc.PermissionMode
+	}
+	if oc.EnableMCP {
+		mcpConfig, err := cs.buildOpenCodeMCPConfig(ctx, project)
+		if err != nil {
+			return err
+		}
+		if len(mcpConfig) > 0 {
+			config["mcp"] = mcpConfig
+		}
+	}
+	return nil
+}
+
+func (cs *ConfigSyncer) buildOpenCodeMCPConfig(ctx context.Context, project *database.Project) (map[string]interface{}, error) {
+	entries := make(map[string]codexMCPConfigEntry)
+
+	servers, err := cs.db.ListEnabledMCPServers(ctx)
+	if err != nil {
+		log.Printf("Warning: failed to list global MCP servers for OpenCode config: %v", err)
+	} else {
+		for _, server := range servers {
+			entries[server.Name] = codexMCPConfigFromParts(server.Name, server.Command, server.Args, server.Env)
+		}
+	}
+
+	projectServers, err := cs.db.ListEnabledProjectMCPServers(ctx, project.ID)
+	if err != nil {
+		log.Printf("Warning: failed to list project MCP servers for OpenCode config: %v", err)
+	} else {
+		for _, server := range projectServers {
+			entries[server.Name] = codexMCPConfigFromParts(server.Name, server.Command, server.Args, server.Env)
+		}
+	}
+
+	names := make([]string, 0, len(entries))
+	for name := range entries {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	config := make(map[string]interface{}, len(names))
+	for _, name := range names {
+		entry := entries[name]
+		command := append([]string{entry.Command}, entry.Args...)
+		server := map[string]interface{}{
+			"type":    "local",
+			"command": command,
+			"enabled": true,
+		}
+		if len(entry.Env) > 0 {
+			server["environment"] = entry.Env
+		}
+		config[entry.Name] = server
+	}
+	return config, nil
+}
+
+func (cs *ConfigSyncer) syncOpenCodePluginLocal(pluginsDir string) error {
+	return os.WriteFile(filepath.Join(pluginsDir, "openpoet.js"), []byte(openCodePluginJS), 0644)
+}
+
+func (cs *ConfigSyncer) syncOpenCodePluginRemote(sftpClient *sftp.Client, pluginsDir string) error {
+	path := filepath.Join(pluginsDir, "openpoet.js")
+	if f, err := sftpClient.Open(path); err == nil {
+		data, readErr := io.ReadAll(f)
+		closeErr := f.Close()
+		if readErr != nil {
+			return readErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if string(data) == openCodePluginJS {
+			return nil
+		}
+	} else if !isRemoteNotExist(err) {
+		return err
+	}
+
+	f, err := sftpClient.Create(path)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write([]byte(openCodePluginJS)); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+const openCodePluginJS = `import { tool } from "@opencode-ai/plugin"
+
+function apiBase() {
+  return process.env.OPENPOET_HOOK_URL || process.env.OPENPOET_API_URL || ""
+}
+
+function openpoetSessionID() {
+  return process.env.OPENPOET_SESSION_ID || ""
+}
+
+function post(path, body) {
+  const base = apiBase()
+  const sessionID = openpoetSessionID()
+  if (!base || !sessionID) return Promise.resolve(null)
+  return fetch(base.replace(/\/$/, "") + path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Session-ID": sessionID,
+      "X-Backend": "opencode",
+    },
+    body: JSON.stringify(body || {}),
+  })
+}
+
+function findSessionID(value, depth = 0) {
+  if (!value || depth > 5) return ""
+  if (typeof value !== "object") return ""
+  for (const key of ["id", "sessionID", "sessionId", "session_id"]) {
+    if (typeof value[key] === "string" && value[key]) return value[key]
+  }
+  for (const key of ["session", "properties", "payload", "data"]) {
+    const nested = findSessionID(value[key], depth + 1)
+    if (nested) return nested
+  }
+  return ""
+}
+
+function normalizeQuestions(args) {
+  if (Array.isArray(args.questions)) return args.questions
+  if (typeof args.questions === "string") {
+    try {
+      const parsed = JSON.parse(args.questions)
+      if (Array.isArray(parsed)) return parsed
+    } catch (_) {}
+    return [{ question: args.questions }]
+  }
+  if (typeof args.question === "string") return [{ question: args.question }]
+  return [{ question: "Please provide the requested input." }]
+}
+
+function planFromTodos(todos) {
+  if (!Array.isArray(todos) || todos.length === 0) return ""
+  const lines = ["## OpenCode Todo Plan", ""]
+  for (const todo of todos) {
+    if (!todo || typeof todo !== "object") continue
+    const content = todo.content || todo.text || todo.title || todo.name
+    if (!content) continue
+    const status = todo.status ? " [" + todo.status + "]" : ""
+    lines.push("-" + status + " " + content)
+  }
+  return lines.length > 2 ? lines.join("\n") : ""
+}
+
+function findTodos(value, depth = 0) {
+  if (!value || depth > 5) return null
+  if (Array.isArray(value)) {
+    if (value.some((item) => item && typeof item === "object" && (item.content || item.text || item.title))) return value
+    for (const item of value) {
+      const nested = findTodos(item, depth + 1)
+      if (nested) return nested
+    }
+    return null
+  }
+  if (typeof value === "object") {
+    for (const key of ["todos", "todo", "items", "data", "payload"]) {
+      const nested = findTodos(value[key], depth + 1)
+      if (nested) return nested
+    }
+  }
+  return null
+}
+
+function findPlanText(value, depth = 0) {
+  if (!value || depth > 5) return ""
+  if (typeof value === "string") {
+    const lower = value.toLowerCase()
+    if (lower.includes("## plan") || lower.includes("implementation plan") || lower.includes("opencode todo plan")) return value
+    return ""
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const nested = findPlanText(item, depth + 1)
+      if (nested) return nested
+    }
+    return ""
+  }
+  if (typeof value === "object") {
+    for (const key of ["plan", "markdown", "text", "content", "message", "parts", "data", "payload"]) {
+      const nested = findPlanText(value[key], depth + 1)
+      if (nested) return nested
+    }
+  }
+  return ""
+}
+
+async function sendPlan(plan) {
+  if (!plan || !plan.trim()) return
+  await post("/api/hooks/event", {
+    hook_event_name: "opencode_plan_updated",
+    plan,
+  })
+}
+
+export const OpenPoetPlugin = async () => {
+  return {
+    event: async ({ event }) => {
+      try {
+        if (!event || !event.type) return
+        if (event.type === "session.created") {
+          const providerSessionID = findSessionID(event)
+          if (providerSessionID) {
+            await post("/api/hooks/event", {
+              hook_event_name: "opencode_session_info",
+              provider_session_id: providerSessionID,
+            })
+          }
+          return
+        }
+        if (event.type === "todo.updated") {
+          await sendPlan(planFromTodos(findTodos(event)))
+          return
+        }
+        if (event.type === "message.updated" || event.type === "message.part.updated") {
+          await sendPlan(findPlanText(event))
+        }
+      } catch (err) {
+        console.error("[openpoet] plugin event error", err)
+      }
+    },
+    tool: {
+      AskUserQuestion: tool({
+        description: "Ask the OpenPoet user one or more questions and wait for their answers.",
+        args: {
+          questions: tool.schema.any(),
+          question: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const questions = normalizeQuestions(args || {})
+          const response = await post("/api/hooks/permission", {
+            hook_event_name: "PermissionRequest",
+            tool_name: "AskUserQuestion",
+            tool_input: { questions },
+          })
+          if (!response) return "OpenPoet is not connected; ask the user in the terminal."
+          if (response.status === 204) return "The user dismissed the question."
+          const data = await response.json()
+          const decision = data && data.hookSpecificOutput && data.hookSpecificOutput.decision
+          if (!decision || decision.behavior === "deny") {
+            throw new Error((decision && decision.message) || "The user denied the question.")
+          }
+          const answers = (decision.updatedInput && decision.updatedInput.answers) || {}
+          return JSON.stringify(answers)
+        },
+      }),
+    },
+  }
+}
+`
 
 func (cs *ConfigSyncer) buildCodexConfigTOML(ctx context.Context, project *database.Project) (string, error) {
 	entries := make(map[string]codexMCPConfigEntry)

@@ -2,8 +2,10 @@ package configsync
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,5 +145,99 @@ func TestSyncCodexMemoryDocLocalUsesNewerDBMemoryDoc(t *testing.T) {
 	}
 	if doc.Content != "new db" {
 		t.Fatalf("memory doc = %q, want new db", doc.Content)
+	}
+}
+
+func TestSyncToLocalOpenCodeWritesNativeConfig(t *testing.T) {
+	cs, project := setupConfigSyncTest(t)
+	project.Backend = "opencode"
+	project.BackendConfig = `{"model":"anthropic/claude-sonnet-4-5","agent":"plan","permission_mode":"ask","enable_mcp":true}`
+
+	if err := os.WriteFile(filepath.Join(project.Path, "opencode.json"), []byte(`{"autoupdate":false}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project.Path, "AGENTS.md"), []byte("agent instructions"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cs.db.CreateMCPServer(context.Background(), &database.MCPServer{
+		Name:    "global",
+		Command: "node",
+		Args:    `["server.js"]`,
+		Env:     `{"TOKEN":"global"}`,
+		Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.db.CreateProjectMCPServer(context.Background(), &database.ProjectMCPServer{
+		ProjectID: project.ID,
+		Name:      "project",
+		Command:   "bun",
+		Args:      `["x","mcp"]`,
+		Env:       `{}`,
+		Enabled:   true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cs.SyncToProject(context.Background(), project); err != nil {
+		t.Fatal(err)
+	}
+
+	if info, err := os.Stat(filepath.Join(project.Path, ".opencode", "skills")); err != nil {
+		t.Fatal(err)
+	} else if !info.IsDir() {
+		t.Fatal(".opencode/skills is not a directory")
+	}
+	pluginPath := filepath.Join(project.Path, ".opencode", "plugins", "openpoet.js")
+	pluginData, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(pluginData), "AskUserQuestion") || !strings.Contains(string(pluginData), "opencode_plan_updated") {
+		t.Fatalf("OpenCode plugin missing expected hooks/tools:\n%s", string(pluginData))
+	}
+	assertFileContent(t, filepath.Join(project.Path, "CLAUDE.md"), "agent instructions")
+
+	var config map[string]interface{}
+	data, err := os.ReadFile(filepath.Join(project.Path, "opencode.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	if config["$schema"] != "https://opencode.ai/config.json" {
+		t.Fatalf("$schema = %q", config["$schema"])
+	}
+	if config["autoupdate"] != false {
+		t.Fatalf("autoupdate = %v, want false", config["autoupdate"])
+	}
+	if config["model"] != "anthropic/claude-sonnet-4-5" {
+		t.Fatalf("model = %q", config["model"])
+	}
+	if config["default_agent"] != "plan" {
+		t.Fatalf("default_agent = %q", config["default_agent"])
+	}
+	if config["permission"] != "ask" {
+		t.Fatalf("permission = %q", config["permission"])
+	}
+
+	mcp, ok := config["mcp"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("mcp config missing or wrong type: %#v", config["mcp"])
+	}
+	projectMCP := mcp["project"].(map[string]interface{})
+	if projectMCP["type"] != "local" {
+		t.Fatalf("project MCP type = %q", projectMCP["type"])
+	}
+	command := projectMCP["command"].([]interface{})
+	if len(command) != 3 || command[0] != "bun" || command[1] != "x" || command[2] != "mcp" {
+		t.Fatalf("project MCP command = %#v", command)
+	}
+	globalMCP := mcp["global"].(map[string]interface{})
+	env := globalMCP["environment"].(map[string]interface{})
+	if env["TOKEN"] != "global" {
+		t.Fatalf("global MCP env TOKEN = %q", env["TOKEN"])
 	}
 }
