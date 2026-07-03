@@ -104,6 +104,60 @@ type codexTranscriptEvent struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type codexThreadResumeResponse struct {
+	Thread *codexThreadResumeThread `json:"thread"`
+}
+
+type codexThreadResumeThread struct {
+	Turns []codexThreadResumeTurn `json:"turns"`
+}
+
+type codexThreadResumeTurn struct {
+	ID        string                  `json:"id"`
+	StartedAt *int64                  `json:"startedAt"`
+	Status    string                  `json:"status"`
+	Error     *codexThreadResumeError `json:"error"`
+	Items     []codexThreadResumeItem `json:"items"`
+}
+
+type codexThreadResumeError struct {
+	Message string `json:"message"`
+}
+
+type codexThreadResumeItem struct {
+	ID               string                  `json:"id"`
+	Type             string                  `json:"type"`
+	Text             string                  `json:"text"`
+	Phase            string                  `json:"phase"`
+	Content          json.RawMessage         `json:"content"`
+	Summary          []string                `json:"summary"`
+	Command          string                  `json:"command"`
+	AggregatedOutput *string                 `json:"aggregatedOutput"`
+	Status           string                  `json:"status"`
+	Changes          []codexThreadFileChange `json:"changes"`
+	Error            *codexThreadResumeError `json:"error"`
+	Server           string                  `json:"server"`
+	Tool             string                  `json:"tool"`
+	Namespace        string                  `json:"namespace"`
+	Result           interface{}             `json:"result"`
+	Arguments        interface{}             `json:"arguments"`
+	Query            string                  `json:"query"`
+	Path             string                  `json:"path"`
+	Review           string                  `json:"review"`
+}
+
+type codexThreadUserInput struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+	URL  string `json:"url"`
+	Path string `json:"path"`
+	Name string `json:"name"`
+}
+
+type codexThreadFileChange struct {
+	Path string `json:"path"`
+}
+
 type codexRPCResponse struct {
 	Result json.RawMessage
 	Error  *codexRPCError
@@ -1192,6 +1246,7 @@ func (r *CodexRunner) handleSlashResume(args string) {
 		resumedThreadID = threadID
 	}
 	r.switchCodexThread(resumedThreadID)
+	r.replaceCodexTranscriptFromThreadResponse(result)
 	r.write([]byte(fmt.Sprintf("Resumed Codex thread: %s\r\n", resumedThreadID)))
 	r.writePrompt()
 }
@@ -1793,8 +1848,6 @@ func (r *CodexRunner) handleNotification(method string, params json.RawMessage) 
 			r.lastCommandOutChunk = false
 			r.mu.Unlock()
 			r.resetCodexTranscriptStream()
-			r.addCodexTranscriptBlock("status", "Codex is working...", "Turn started", "", "running")
-			r.write([]byte("\x1b[90mCodex is working...\x1b[0m\r\n"))
 			r.setCodexPhase("thinking", "Starting turn")
 		}
 	case "turn/completed", "turn/failed":
@@ -2187,6 +2240,238 @@ func (r *CodexRunner) codexTranscriptSnapshot() map[string]interface{} {
 	events := make([]codexTranscriptEvent, len(r.transcript))
 	copy(events, r.transcript)
 	return map[string]interface{}{"events": events}
+}
+
+func (r *CodexRunner) replaceCodexTranscriptFromThreadResponse(raw json.RawMessage) bool {
+	var response codexThreadResumeResponse
+	if len(raw) == 0 || json.Unmarshal(raw, &response) != nil {
+		return false
+	}
+	if response.Thread == nil {
+		return false
+	}
+
+	events := codexTranscriptEventsFromThreadTurns(response.Thread.Turns)
+	r.replaceCodexTranscript(events)
+	return true
+}
+
+func codexTranscriptEventsFromThreadTurns(turns []codexThreadResumeTurn) []codexTranscriptEvent {
+	var events []codexTranscriptEvent
+	for _, turn := range turns {
+		createdAt := time.Now()
+		if turn.StartedAt != nil && *turn.StartedAt > 0 {
+			createdAt = time.Unix(*turn.StartedAt, 0)
+		}
+		for _, item := range turn.Items {
+			event, ok := codexTranscriptEventFromThreadItem(item, createdAt)
+			if ok {
+				events = append(events, event)
+			}
+		}
+		if strings.EqualFold(turn.Status, "failed") && turn.Error != nil && strings.TrimSpace(turn.Error.Message) != "" {
+			events = append(events, codexTranscriptEvent{
+				Kind:      "error",
+				Text:      turn.Error.Message,
+				Title:     "Codex turn failed",
+				Status:    "failed",
+				CreatedAt: createdAt,
+			})
+		}
+	}
+	return events
+}
+
+func codexTranscriptEventFromThreadItem(item codexThreadResumeItem, createdAt time.Time) (codexTranscriptEvent, bool) {
+	event := codexTranscriptEvent{CreatedAt: createdAt}
+	switch item.Type {
+	case "userMessage":
+		text := strings.TrimSpace(codexThreadUserInputText(item.Content))
+		if text == "" {
+			return event, false
+		}
+		event.Kind = "user"
+		event.Text = text
+	case "agentMessage":
+		text := strings.TrimSpace(item.Text)
+		if text == "" {
+			return event, false
+		}
+		event.Kind = "assistant"
+		event.Text = text
+	case "plan":
+		event.Kind = "plan"
+		event.Text = item.Text
+	case "reasoning":
+		text := strings.TrimSpace(strings.Join(item.Summary, "\n\n"))
+		if text == "" {
+			text = strings.TrimSpace(strings.Join(codexThreadContentStrings(item.Content), "\n\n"))
+		}
+		if text == "" {
+			return event, false
+		}
+		event.Kind = "reasoning"
+		event.Text = text
+	case "commandExecution":
+		event.Kind = "command"
+		event.Title = "Command"
+		event.Command = item.Command
+		event.Status = item.Status
+		if item.AggregatedOutput != nil {
+			event.Text = *item.AggregatedOutput
+		}
+	case "fileChange":
+		event.Kind = "file"
+		event.Title = "File change"
+		event.Text = strings.Join(codexThreadChangedPaths(item.Changes), "\n")
+		event.Status = item.Status
+	case "mcpToolCall":
+		event.Kind = "command"
+		event.Title = "MCP tool"
+		event.Command = strings.Trim(strings.Join([]string{item.Server, item.Tool}, " "), " ")
+		event.Text = codexThreadToolText(item.Result, item.Error)
+		event.Status = item.Status
+	case "dynamicToolCall":
+		event.Kind = "command"
+		event.Title = "Tool"
+		event.Command = strings.Trim(strings.Join([]string{item.Namespace, item.Tool}, " "), " ")
+		event.Text = codexThreadToolText(item.Result, item.Error)
+		event.Status = item.Status
+	case "webSearch":
+		event.Kind = "command"
+		event.Title = "Web search"
+		event.Command = item.Query
+	case "imageView":
+		event.Kind = "file"
+		event.Title = "Image"
+		event.Text = item.Path
+	case "imageGeneration":
+		event.Kind = "file"
+		event.Title = "Image generation"
+		event.Text = codexThreadToolText(item.Result, item.Error)
+		event.Status = item.Status
+	case "enteredReviewMode", "exitedReviewMode":
+		event.Kind = "status"
+		event.Title = "Review"
+		event.Text = item.Review
+	case "contextCompaction":
+		event.Kind = "status"
+		event.Title = "Codex"
+		event.Text = "Context compacted."
+		event.Status = "complete"
+	default:
+		return event, false
+	}
+	if event.Kind == "" {
+		return event, false
+	}
+	return event, true
+}
+
+func codexThreadContentStrings(raw json.RawMessage) []string {
+	var stringsContent []string
+	if len(raw) > 0 && json.Unmarshal(raw, &stringsContent) == nil {
+		return stringsContent
+	}
+	var inputContent []codexThreadUserInput
+	if len(raw) > 0 && json.Unmarshal(raw, &inputContent) == nil {
+		parts := make([]string, 0, len(inputContent))
+		for _, entry := range inputContent {
+			if entry.Text != "" {
+				parts = append(parts, entry.Text)
+			}
+		}
+		return parts
+	}
+	return nil
+}
+
+func codexThreadUserInputText(raw json.RawMessage) string {
+	var content []codexThreadUserInput
+	if len(raw) == 0 || json.Unmarshal(raw, &content) != nil {
+		return ""
+	}
+	parts := make([]string, 0, len(content))
+	for _, item := range content {
+		switch item.Type {
+		case "text":
+			if item.Text != "" {
+				parts = append(parts, item.Text)
+			}
+		case "image":
+			parts = append(parts, "[image] "+item.URL)
+		case "localImage":
+			parts = append(parts, "[image] "+item.Path)
+		case "skill", "mention":
+			label := item.Name
+			if label == "" {
+				label = item.Path
+			}
+			if label != "" {
+				parts = append(parts, "@"+label)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func codexThreadChangedPaths(changes []codexThreadFileChange) []string {
+	paths := make([]string, 0, len(changes))
+	for _, change := range changes {
+		if change.Path != "" {
+			paths = append(paths, change.Path)
+		}
+	}
+	return paths
+}
+
+func codexThreadToolText(result interface{}, itemErr *codexThreadResumeError) string {
+	if itemErr != nil && itemErr.Message != "" {
+		return itemErr.Message
+	}
+	switch v := result.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	default:
+		data, err := json.Marshal(v)
+		if err != nil {
+			return ""
+		}
+		return string(data)
+	}
+}
+
+func (r *CodexRunner) replaceCodexTranscript(events []codexTranscriptEvent) {
+	for i := range events {
+		events[i].ID = i + 1
+		if events[i].CreatedAt.IsZero() {
+			events[i].CreatedAt = time.Now()
+		}
+	}
+
+	r.mu.Lock()
+	r.transcript = r.transcript[:0]
+	r.transcriptSeq = len(events)
+	r.transcriptStreamID = 0
+	r.transcriptStreamKey = ""
+	for _, event := range events {
+		r.appendCodexTranscriptLocked(event)
+	}
+	r.mu.Unlock()
+
+	if r.db == nil || r.cfg == nil || r.cfg.SessionID == "" {
+		return
+	}
+	ctx := context.Background()
+	if err := r.db.ClearCodexTranscriptEvents(ctx, r.cfg.SessionID); err != nil {
+		log.Printf("[Codex] failed to clear transcript events for session %s: %v", r.cfg.SessionID, err)
+		return
+	}
+	for _, event := range events {
+		r.persistCodexTranscriptEvent(event)
+	}
 }
 
 func (r *CodexRunner) addCodexTranscriptBlock(kind, text, title, command, status string) {

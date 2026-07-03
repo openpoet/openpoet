@@ -164,6 +164,8 @@ func hookBackendDisplayName(backend string) string {
 	switch backend {
 	case "codex":
 		return "Codex"
+	case "opencode":
+		return "OpenCode"
 	case "copilot", "acp":
 		return "Copilot"
 	default:
@@ -789,6 +791,18 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	case "Stop":
 		h.cancelIdleTimer(sessionID)
 		h.setSessionMode(sessionID, "idle", "event=Stop")
+	case "opencode_session_info":
+		if h.sessionMgr != nil {
+			if providerID, ok := hookEvent["provider_session_id"].(string); ok && strings.TrimSpace(providerID) != "" {
+				h.sessionMgr.PersistProviderSessionID(context.Background(), sessionID, providerID, "OpenCode")
+			}
+		}
+	case "opencode_plan_updated":
+		if h.OnPlanUpdated != nil {
+			if plan, ok := hookEvent["plan"].(string); ok && strings.TrimSpace(plan) != "" {
+				go h.OnPlanUpdated(sessionID, strings.TrimSpace(plan))
+			}
+		}
 	case "Notification":
 		if msg, ok := hookEvent["message"].(string); ok {
 			if strings.Contains(msg, "waiting for your input") || strings.Contains(msg, "awaiting") {
@@ -1030,6 +1044,12 @@ func (h *HookHandler) ClearSession(sessionID string) {
 		pending.cancel()
 		delete(h.pending, sessionID)
 	}
+}
+
+// ScheduleSessionEvaluation mirrors Claude Code's UserPromptSubmit hook for
+// backends whose prompts enter OpenPoet directly, such as Codex.
+func (h *HookHandler) ScheduleSessionEvaluation(sessionID string) {
+	h.scheduleDebouncedEval(sessionID)
 }
 
 // evalRetryDelay is how long to wait before retrying evaluation when the first
