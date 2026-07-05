@@ -591,6 +591,7 @@ func main() {
 		r.Get("/projects/{id}/files", fileHandler.ListProjectFiles)
 		r.Get("/projects/{id}/files/view/*", fileHandler.ViewProjectFile)
 		r.Post("/projects/{id}/files/write", fileHandler.WriteProjectFile)
+		r.Get("/projects/{id}/files/preview/*", fileHandler.PreviewProjectFile)
 		r.Get("/projects/{id}/files/raw/*", fileHandler.DownloadProjectFile)
 		r.Post("/projects/{id}/files/raw", fileHandler.UploadProjectFile)
 
@@ -632,6 +633,7 @@ func main() {
 		// Session files
 		r.Get("/sessions/{id}/files", fileHandler.ListFiles)
 		r.Get("/sessions/{id}/files/view/*", fileHandler.ViewFile)
+		r.Get("/sessions/{id}/files/preview/*", fileHandler.PreviewFile)
 		r.Get("/sessions/{id}/files/*", fileHandler.DownloadFile)
 		r.Post("/sessions/{id}/files", fileHandler.UploadFiles)
 		r.Post("/sessions/{id}/files/paste", fileHandler.PasteImage)
@@ -874,6 +876,9 @@ func main() {
 
 	// Serve index.html with version injection for all SPA routes
 	r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
+		if fileHandler.ServePreviewReferrerAsset(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/html")
 		w.Header().Set("Cache-Control", "no-store")
 		data, err := fs.ReadFile(webFS, "templates/index.html")
