@@ -28,6 +28,7 @@ class FileViewer {
     ]);
 
     static MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown']);
+    static HTML_EXTENSIONS = new Set(['.html', '.htm']);
 
     static IMAGE_EXTENSIONS = new Set([
         '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg',
@@ -47,6 +48,8 @@ class FileViewer {
         this.codeBodyEl = document.getElementById('file-viewer-code-body');
         this.imageContainerEl = document.getElementById('file-viewer-image');
         this.imageEl = document.getElementById('file-viewer-image-el');
+        this.htmlContainerEl = document.getElementById('file-viewer-html');
+        this.htmlFrameEl = document.getElementById('file-viewer-html-frame');
 
         this.currentPath = '';
         this.imageZoom = 1;
@@ -256,6 +259,23 @@ class FileViewer {
         return false;
     }
 
+    static isHtml(filename) {
+        if (!filename) return false;
+        const lower = filename.toLowerCase();
+        const lastDotIdx = lower.lastIndexOf('.');
+        if (lastDotIdx >= 0) {
+            return FileViewer.HTML_EXTENSIONS.has(lower.substring(lastDotIdx));
+        }
+        return false;
+    }
+
+    static encodePath(path) {
+        return String(path || '')
+            .split('/')
+            .map(part => encodeURIComponent(part))
+            .join('/');
+    }
+
     async show(filePath) {
         this.currentPath = filePath;
         const sessionId = app.currentSession;
@@ -272,8 +292,14 @@ class FileViewer {
 
         // Images: use the download endpoint directly as img src
         if (FileViewer.isImage(filename)) {
-            const url = `/api/sessions/${sessionId}/files/${filePath}`;
+            const url = `/api/sessions/${sessionId}/files/${FileViewer.encodePath(filePath)}`;
             this.renderImage(url);
+            return;
+        }
+
+        if (FileViewer.isHtml(filename)) {
+            const url = `/api/sessions/${sessionId}/files/preview/${FileViewer.encodePath(filePath)}`;
+            this.renderHtml(url);
             return;
         }
 
@@ -330,8 +356,14 @@ class FileViewer {
         this.sizeEl.textContent = '';
 
         if (FileViewer.isImage(filename)) {
-            const url = `/api/projects/${projectId}/files/raw/${filePath}`;
+            const url = `/api/projects/${projectId}/files/raw/${FileViewer.encodePath(filePath)}`;
             this.renderImage(url);
+            return;
+        }
+
+        if (FileViewer.isHtml(filename)) {
+            const url = `/api/projects/${projectId}/files/preview/${FileViewer.encodePath(filePath)}`;
+            this.renderHtml(url);
             return;
         }
 
@@ -380,6 +412,16 @@ class FileViewer {
         };
         this.imageEl.src = url;
         this.showState('image');
+    }
+
+    renderHtml(url) {
+        if (!this.htmlFrameEl) {
+            this.showError('HTML preview is not available.');
+            return;
+        }
+        this.htmlFrameEl.src = url;
+        this.sizeEl.textContent = 'HTML preview';
+        this.showState('html');
     }
 
     renderMarkdown(content, rawBaseUrl) {
@@ -447,6 +489,7 @@ class FileViewer {
         this.markdownEl.classList.add('hidden');
         this.codeEl.classList.add('hidden');
         this.imageContainerEl.classList.add('hidden');
+        this.htmlContainerEl?.classList.add('hidden');
 
         switch (state) {
             case 'loading':
@@ -463,6 +506,9 @@ class FileViewer {
                 break;
             case 'image':
                 this.imageContainerEl.classList.remove('hidden');
+                break;
+            case 'html':
+                this.htmlContainerEl?.classList.remove('hidden');
                 break;
         }
     }
@@ -565,6 +611,9 @@ ${clone.innerHTML}
         this.imageEl.src = '';
         this.imageEl.onload = null;
         this.imageEl.onerror = null;
+        if (this.htmlFrameEl) {
+            this.htmlFrameEl.src = 'about:blank';
+        }
         this.resetImageZoom();
         this.currentPath = '';
         this._currentProjectId = null;

@@ -5,10 +5,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"openpoet/internal/database"
 	"openpoet/internal/files"
 
 	"github.com/go-chi/chi/v5"
@@ -17,6 +21,13 @@ import (
 type FileHandler struct {
 	api *API
 }
+
+var (
+	htmlRootURLAttrRE = regexp.MustCompile(`(?i)\b(href|src|action|poster|data)\s*=\s*(['"])(/[^'"]*)['"]`)
+	htmlSrcsetAttrRE  = regexp.MustCompile(`(?i)\bsrcset\s*=\s*(['"])([^'"]*)['"]`)
+	cssRootURLRE      = regexp.MustCompile(`(?i)url\(\s*(['"]?)(/[^'")]*)['"]?\s*\)`)
+	cssRootImportRE   = regexp.MustCompile(`(?i)@import\s+(['"])(/[^'"]*)['"]`)
+)
 
 func NewFileHandler(api *API) *FileHandler {
 	return &FileHandler{api: api}
@@ -73,37 +84,96 @@ func (h *FileHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if project.Type == "local" {
-		fm := files.NewLocalFileManager(project.Path)
-		reader, fileInfo, err := fm.ReadStream(filePath)
-		if err != nil {
-			respondError(w, http.StatusNotFound, err.Error())
-			return
-		}
-		defer reader.Close()
+	h.streamProjectFile(w, project, filePath, true, "")
+}
 
-		w.Header().Set("Content-Type", fm.GetMimeType(filePath))
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileInfo.Name))
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", fileInfo.Size))
+// PreviewFile streams a session file inline so HTML previews can load relative
+// CSS, JS, images, and other artifacts through the same URL prefix.
+func (h *FileHandler) PreviewFile(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+	filePath := chi.URLParam(r, "*")
 
-		io.Copy(w, reader)
-	} else {
-		fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
-		file, fileInfo, sshClient, sftpClient, err := fm.ReadStream(filePath)
-		if err != nil {
-			respondError(w, http.StatusNotFound, err.Error())
-			return
-		}
-		defer file.Close()
-		defer sftpClient.Close()
-		defer sshClient.Close()
-
-		w.Header().Set("Content-Type", fm.GetMimeType(filePath))
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileInfo.Name))
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", fileInfo.Size))
-
-		io.Copy(w, file)
+	sess, err := h.api.db.GetSession(r.Context(), sessionID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Session not found")
+		return
 	}
+
+	project, err := h.api.db.GetProject(r.Context(), sess.ProjectID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	previewRoot := "/api/sessions/" + url.PathEscape(sessionID) + "/files/preview"
+	h.streamProjectFile(w, project, filePath, false, previewRoot)
+}
+
+// ServePreviewReferrerAsset serves root-relative artifacts requested by an HTML
+// preview iframe. Browsers resolve URLs like "/assets/app.css" against the app
+// origin, so use the preview document Referer to map that root path back to the
+// project/session being previewed.
+func (h *FileHandler) ServePreviewReferrerAsset(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if r.URL.Path == "/" || strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/static/") {
+		return false
+	}
+
+	ref := r.Referer()
+	if ref == "" {
+		return false
+	}
+	refURL, err := url.Parse(ref)
+	if err != nil {
+		return false
+	}
+	if refURL.Host != "" && refURL.Host != r.Host {
+		return false
+	}
+
+	project, ok := h.projectFromPreviewReferer(r, refURL.Path)
+	if !ok {
+		return false
+	}
+
+	filePath := strings.TrimPrefix(r.URL.Path, "/")
+	if filePath == "" {
+		return false
+	}
+	h.streamProjectFile(w, project, filePath, false, "")
+	return true
+}
+
+func (h *FileHandler) projectFromPreviewReferer(r *http.Request, refPath string) (*database.Project, bool) {
+	if rest, ok := strings.CutPrefix(refPath, "/api/projects/"); ok {
+		idPart, _, ok := strings.Cut(rest, "/files/preview/")
+		if !ok {
+			return nil, false
+		}
+		projectID, err := strconv.ParseInt(idPart, 10, 64)
+		if err != nil {
+			return nil, false
+		}
+		project, err := h.api.db.GetProject(r.Context(), projectID)
+		return project, err == nil
+	}
+
+	if rest, ok := strings.CutPrefix(refPath, "/api/sessions/"); ok {
+		sessionID, _, ok := strings.Cut(rest, "/files/preview/")
+		if !ok || sessionID == "" {
+			return nil, false
+		}
+		sess, err := h.api.db.GetSession(r.Context(), sessionID)
+		if err != nil {
+			return nil, false
+		}
+		project, err := h.api.db.GetProject(r.Context(), sess.ProjectID)
+		return project, err == nil
+	}
+
+	return nil, false
 }
 
 func (h *FileHandler) UploadFiles(w http.ResponseWriter, r *http.Request) {
@@ -554,6 +624,29 @@ func (h *FileHandler) DownloadProjectFile(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	h.streamProjectFile(w, project, filePath, false, "")
+}
+
+// PreviewProjectFile streams project files inline for embedded browser previews.
+func (h *FileHandler) PreviewProjectFile(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(chi.URLParam(r, "id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return
+	}
+	filePath := chi.URLParam(r, "*")
+
+	project, err := h.api.db.GetProject(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Project not found")
+		return
+	}
+
+	previewRoot := fmt.Sprintf("/api/projects/%d/files/preview", id)
+	h.streamProjectFile(w, project, filePath, false, previewRoot)
+}
+
+func (h *FileHandler) streamProjectFile(w http.ResponseWriter, project *database.Project, filePath string, attachment bool, previewRoot string) {
 	if project.Type == "local" {
 		fm := files.NewLocalFileManager(project.Path)
 		reader, fileInfo, err := fm.ReadStream(filePath)
@@ -563,7 +656,14 @@ func (h *FileHandler) DownloadProjectFile(w http.ResponseWriter, r *http.Request
 		}
 		defer reader.Close()
 
-		w.Header().Set("Content-Type", fm.GetMimeType(filePath))
+		contentType := fm.GetMimeType(filePath)
+		w.Header().Set("Content-Type", contentType)
+		if attachment {
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileInfo.Name))
+		}
+		if h.serveRewrittenPreviewFile(w, reader, filePath, contentType, previewRoot) {
+			return
+		}
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", fileInfo.Size))
 		io.Copy(w, reader)
 	} else {
@@ -577,10 +677,117 @@ func (h *FileHandler) DownloadProjectFile(w http.ResponseWriter, r *http.Request
 		defer sftpClient.Close()
 		defer sshClient.Close()
 
-		w.Header().Set("Content-Type", fm.GetMimeType(filePath))
+		contentType := fm.GetMimeType(filePath)
+		w.Header().Set("Content-Type", contentType)
+		if attachment {
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileInfo.Name))
+		}
+		if h.serveRewrittenPreviewFile(w, file, filePath, contentType, previewRoot) {
+			return
+		}
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", fileInfo.Size))
 		io.Copy(w, file)
 	}
+}
+
+func (h *FileHandler) serveRewrittenPreviewFile(w http.ResponseWriter, reader io.Reader, filePath, contentType, previewRoot string) bool {
+	if previewRoot == "" || !isPreviewRewriteType(filePath, contentType) {
+		return false
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to read file")
+		return true
+	}
+	data = rewritePreviewAssetRoots(data, filePath, contentType, previewRoot)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	w.Write(data)
+	return true
+}
+
+func isPreviewRewriteType(filePath, contentType string) bool {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	return ext == ".html" || ext == ".htm" || ext == ".css" ||
+		strings.HasPrefix(contentType, "text/html") || strings.HasPrefix(contentType, "text/css")
+}
+
+func rewritePreviewAssetRoots(data []byte, filePath, contentType, previewRoot string) []byte {
+	text := string(data)
+	ext := strings.ToLower(filepath.Ext(filePath))
+	if ext == ".html" || ext == ".htm" || strings.HasPrefix(contentType, "text/html") {
+		text = rewriteHTMLRootURLs(text, previewRoot)
+	}
+	if ext == ".css" || strings.HasPrefix(contentType, "text/css") ||
+		ext == ".html" || ext == ".htm" || strings.HasPrefix(contentType, "text/html") {
+		text = rewriteCSSRootURLs(text, previewRoot)
+	}
+	return []byte(text)
+}
+
+func rewriteHTMLRootURLs(text, previewRoot string) string {
+	text = htmlRootURLAttrRE.ReplaceAllStringFunc(text, func(match string) string {
+		parts := htmlRootURLAttrRE.FindStringSubmatch(match)
+		if len(parts) != 4 {
+			return match
+		}
+		return parts[1] + "=" + parts[2] + rewritePreviewRootURL(parts[3], previewRoot) + parts[2]
+	})
+	text = htmlSrcsetAttrRE.ReplaceAllStringFunc(text, func(match string) string {
+		parts := htmlSrcsetAttrRE.FindStringSubmatch(match)
+		if len(parts) != 3 {
+			return match
+		}
+		return "srcset=" + parts[1] + rewritePreviewSrcset(parts[2], previewRoot) + parts[1]
+	})
+	return text
+}
+
+func rewriteCSSRootURLs(text, previewRoot string) string {
+	text = cssRootURLRE.ReplaceAllStringFunc(text, func(match string) string {
+		parts := cssRootURLRE.FindStringSubmatch(match)
+		if len(parts) != 3 {
+			return match
+		}
+		quote := parts[1]
+		if quote == "" {
+			quote = `"`
+		}
+		return "url(" + quote + rewritePreviewRootURL(parts[2], previewRoot) + quote + ")"
+	})
+	text = cssRootImportRE.ReplaceAllStringFunc(text, func(match string) string {
+		parts := cssRootImportRE.FindStringSubmatch(match)
+		if len(parts) != 3 {
+			return match
+		}
+		return "@import " + parts[1] + rewritePreviewRootURL(parts[2], previewRoot) + parts[1]
+	})
+	return text
+}
+
+func rewritePreviewSrcset(value, previewRoot string) string {
+	candidates := strings.Split(value, ",")
+	for i, candidate := range candidates {
+		leadingLen := len(candidate) - len(strings.TrimLeft(candidate, " \t\r\n"))
+		leading := candidate[:leadingLen]
+		rest := candidate[leadingLen:]
+		if rest == "" {
+			continue
+		}
+		fields := strings.Fields(rest)
+		if len(fields) == 0 {
+			continue
+		}
+		fields[0] = rewritePreviewRootURL(fields[0], previewRoot)
+		candidates[i] = leading + strings.Join(fields, " ")
+	}
+	return strings.Join(candidates, ",")
+}
+
+func rewritePreviewRootURL(value, previewRoot string) string {
+	if !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") {
+		return value
+	}
+	return previewRoot + value
 }
 
 // UploadProjectFile writes raw bytes to a file in a project (no session required).
