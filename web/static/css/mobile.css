@@ -1053,6 +1053,10 @@
         padding: 16px;
         font-size: 14px;
     }
+    .file-viewer-html {
+        height: calc(100vh - 57px);
+        min-height: 0;
+    }
 
     /* AI Chat - fullscreen on mobile */
     .ai-chat-panel {
