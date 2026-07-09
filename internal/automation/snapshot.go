@@ -17,14 +17,16 @@ type SnapshotStore interface {
 }
 
 type snapshotResponse struct {
-	APIVersion    string                  `json:"api_version"`
-	Cursor        string                  `json:"cursor"`
-	GeneratedAt   time.Time               `json:"generated_at"`
-	Projects      []database.Project      `json:"projects"`
-	Tasks         []database.ProjectTask  `json:"tasks"`
-	TaskSummary   map[string]int          `json:"task_summary"`
-	Sessions      []database.Session      `json:"sessions"`
-	Notifications []database.Notification `json:"notifications"`
+	APIVersion     string                  `json:"api_version"`
+	Cursor         string                  `json:"cursor"`
+	GeneratedAt    time.Time               `json:"generated_at"`
+	Projects       []database.Project      `json:"projects"`
+	Tasks          []database.ProjectTask  `json:"tasks"`
+	TaskSummary    map[string]int          `json:"task_summary"`
+	Sessions       []database.Session      `json:"sessions"`
+	Notifications  []database.Notification `json:"notifications"`
+	ActiveWorkRuns []database.WorkRun      `json:"active_work_runs"`
+	Plans          []database.Plan         `json:"plans"`
 }
 
 func (a *commandAPI) getSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -47,9 +49,14 @@ func (a *commandAPI) getSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "snapshot_failed", "the consistent automation snapshot could not be loaded", true)
 		return
 	}
+	generatedAt := a.now().UTC()
+	for index := range snapshot.ActiveWorkRuns {
+		snapshot.ActiveWorkRuns[index].Hydrate(generatedAt)
+	}
 	writeJSON(w, http.StatusOK, snapshotResponse{
-		APIVersion: APIVersion, Cursor: strconv.FormatInt(snapshot.Cursor, 10), GeneratedAt: a.now().UTC(),
+		APIVersion: APIVersion, Cursor: strconv.FormatInt(snapshot.Cursor, 10), GeneratedAt: generatedAt,
 		Projects: snapshot.Projects, Tasks: snapshot.Tasks, TaskSummary: snapshot.TaskSummary,
 		Sessions: snapshot.Sessions, Notifications: snapshot.Notifications,
+		ActiveWorkRuns: snapshot.ActiveWorkRuns, Plans: snapshot.Plans,
 	})
 }

@@ -67,6 +67,7 @@ var migrations = []Migration{
 	{Version: 49, Description: "automation: add idempotency command ledger", Up: migrateV49},
 	{Version: 50, Description: "automation: add transactional event outbox and consumer cursors", Up: migrateV50},
 	{Version: 51, Description: "reports: add structured session turns and deterministic daily materializations", Up: migrateV51},
+	{Version: 52, Description: "automation: add first-class work runs and durable plans", Up: migrateV52},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1379,6 +1380,101 @@ func migrateV51(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV51 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV52(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS plans (
+			id TEXT PRIMARY KEY CHECK(length(id) = 36),
+			external_ref TEXT NOT NULL UNIQUE,
+			kind TEXT NOT NULL CHECK(kind IN ('daily', 'weekly')),
+			title TEXT NOT NULL,
+			period_start TEXT NOT NULL,
+			period_end TEXT NOT NULL,
+			timezone TEXT NOT NULL,
+			version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+			created_by_actor TEXT NOT NULL,
+			updated_by_actor TEXT NOT NULL,
+			correlation_id TEXT NOT NULL DEFAULT '',
+			idempotency_key TEXT,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			CHECK(period_start <= period_end)
+		)`,
+		`CREATE TABLE IF NOT EXISTS plan_items (
+			id TEXT PRIMARY KEY CHECK(length(id) = 36),
+			plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+			external_ref TEXT NOT NULL UNIQUE,
+			title TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL CHECK(status IN ('planned', 'active', 'completed', 'cancelled')),
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			project_task_id INTEGER REFERENCES project_tasks(id) ON DELETE SET NULL,
+			version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+			updated_by_actor TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS work_runs (
+			id TEXT PRIMARY KEY CHECK(length(id) = 36),
+			title TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL,
+			status TEXT NOT NULL CHECK(status IN ('running', 'paused', 'completed', 'cancelled', 'indeterminate')),
+			expected_minutes INTEGER NOT NULL CHECK(expected_minutes BETWEEN 1 AND 525600),
+			accumulated_active_seconds INTEGER NOT NULL DEFAULT 0 CHECK(accumulated_active_seconds >= 0),
+			started_at TIMESTAMP NOT NULL,
+			active_started_at TIMESTAMP,
+			paused_at TIMESTAMP,
+			completed_at TIMESTAMP,
+			cancelled_at TIMESTAMP,
+			project_task_id INTEGER REFERENCES project_tasks(id) ON DELETE SET NULL,
+			session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+			plan_item_ref TEXT REFERENCES plan_items(external_ref) ON DELETE SET NULL,
+			execution_target_type TEXT NOT NULL DEFAULT '',
+			execution_target_id TEXT NOT NULL DEFAULT '',
+			version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+			created_by_actor TEXT NOT NULL,
+			updated_by_actor TEXT NOT NULL,
+			correlation_id TEXT NOT NULL DEFAULT '',
+			idempotency_key TEXT,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			CHECK((status = 'running' AND active_started_at IS NOT NULL) OR (status != 'running' AND active_started_at IS NULL)),
+			CHECK(status != 'paused' OR paused_at IS NOT NULL),
+			CHECK(status != 'completed' OR completed_at IS NOT NULL),
+			CHECK(status != 'cancelled' OR cancelled_at IS NOT NULL),
+			CHECK((execution_target_type = '' AND execution_target_id = '') OR (execution_target_type != '' AND execution_target_id != ''))
+		)`,
+		`CREATE TABLE IF NOT EXISTS work_run_audit (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			work_run_id TEXT NOT NULL REFERENCES work_runs(id) ON DELETE CASCADE,
+			action TEXT NOT NULL CHECK(action IN ('start', 'pause', 'resume', 'complete', 'cancel')),
+			from_status TEXT NOT NULL DEFAULT '',
+			to_status TEXT NOT NULL,
+			actor TEXT NOT NULL,
+			correlation_id TEXT NOT NULL DEFAULT '',
+			idempotency_key TEXT,
+			version INTEGER NOT NULL CHECK(version > 0),
+			details_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(details_json) AND json_type(details_json) = 'object'),
+			occurred_at TIMESTAMP NOT NULL
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_work_runs_start_idempotency ON work_runs(created_by_actor, idempotency_key) WHERE idempotency_key IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_work_run_audit_idempotency ON work_run_audit(work_run_id, idempotency_key) WHERE idempotency_key IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_work_runs_status_started ON work_runs(status, started_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_work_runs_project_task ON work_runs(project_task_id, started_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_work_runs_session ON work_runs(session_id, started_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_work_runs_plan_item ON work_runs(plan_item_ref, started_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_work_run_audit_run ON work_run_audit(work_run_id, id DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_plans_period ON plans(kind, period_start, period_end)`,
+		`CREATE INDEX IF NOT EXISTS idx_plan_items_plan_order ON plan_items(plan_id, sort_order, created_at)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV52 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil
