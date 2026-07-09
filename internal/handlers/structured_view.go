@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"openpoet/internal/database"
@@ -48,7 +49,7 @@ func NewStructuredViewHandler(db *database.DB, hub *websocket.Hub, decryptFunc f
 func (h *StructuredViewHandler) GetSessionEvents(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
 
-	source, reason := h.resolveJSONLSource(r, sessionID)
+	source, reason := h.resolveJSONLSource(r.Context(), sessionID)
 	if reason != "" {
 		respondJSON(w, http.StatusOK, map[string]any{
 			"events": []any{},
@@ -90,7 +91,7 @@ func (h *StructuredViewHandler) StartWatching(w http.ResponseWriter, r *http.Req
 	}
 	h.mu.Unlock()
 
-	source, reason := h.resolveJSONLSource(r, sessionID)
+	source, reason := h.resolveJSONLSource(r.Context(), sessionID)
 	if reason != "" {
 		respondJSON(w, http.StatusOK, map[string]any{
 			"status": "unavailable",
@@ -143,13 +144,13 @@ func (h *StructuredViewHandler) stopWatcher(sessionID string) {
 
 // resolveJSONLSource resolves where the JSONL file lives for a session.
 // Returns (source, "") on success, or (nil, reason) on failure.
-func (h *StructuredViewHandler) resolveJSONLSource(r *http.Request, sessionID string) (*jsonlSource, string) {
-	sess, err := h.db.GetSession(r.Context(), sessionID)
+func (h *StructuredViewHandler) resolveJSONLSource(ctx context.Context, sessionID string) (*jsonlSource, string) {
+	sess, err := h.db.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, "not_found"
 	}
 
-	project, err := h.db.GetProject(r.Context(), sess.ProjectID)
+	project, err := h.db.GetProject(ctx, sess.ProjectID)
 	if err != nil {
 		return nil, "not_found"
 	}
