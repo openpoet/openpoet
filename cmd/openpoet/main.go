@@ -464,7 +464,10 @@ func main() {
 
 	// Server-to-server automation API. Authentication is mandatory even for
 	// localhost and the handler rejects browser origins and non-loopback peers.
-	r.Mount("/api/automation/v1", automation.NewHandler(db))
+	r.Mount("/api/automation/v1", automation.NewHandler(db, automation.Dependencies{
+		Capabilities: api.CapabilityRegistry(),
+		Snapshot:     db,
+	}))
 
 	// API routes
 	// DEBUG: Client error reporting endpoint
