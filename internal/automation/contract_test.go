@@ -348,7 +348,7 @@ func TestCapabilitiesAndSnapshotContracts(t *testing.T) {
 	if err := json.Unmarshal(snapshot.Body.Bytes(), &state); err != nil {
 		t.Fatal(err)
 	}
-	if state.APIVersion != APIVersion || !state.GeneratedAt.Equal(time.Date(2026, 7, 9, 15, 0, 0, 0, time.UTC)) {
+	if state.APIVersion != APIVersion || state.Cursor != "0" || !state.GeneratedAt.Equal(time.Date(2026, 7, 9, 15, 0, 0, 0, time.UTC)) {
 		t.Fatalf("snapshot metadata=%+v", state)
 	}
 	if len(state.Projects) != 1 || len(state.Tasks) != 1 || len(state.Sessions) != 1 || len(state.Notifications) != 1 {
@@ -387,7 +387,7 @@ func TestVersionedAutomationSchemasMatchRegistry(t *testing.T) {
 	if openAPI.OpenAPI != "3.1.0" {
 		t.Fatalf("OpenAPI version=%q", openAPI.OpenAPI)
 	}
-	for _, path := range []string{"/health", "/capabilities", "/commands", "/snapshot"} {
+	for _, path := range []string{"/health", "/capabilities", "/commands", "/events", "/events/ack", "/snapshot"} {
 		if _, ok := openAPI.Paths[path]; !ok {
 			t.Fatalf("OpenAPI path %s missing", path)
 		}

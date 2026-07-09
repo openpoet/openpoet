@@ -11,6 +11,7 @@ import (
 type commandAPI struct {
 	capabilities *application.CapabilityRegistry
 	snapshot     SnapshotStore
+	events       EventStore
 	now          func() time.Time
 }
 
