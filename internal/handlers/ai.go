@@ -2887,6 +2887,239 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 
 		return sb.String(), nil
 
+	case "dashboard":
+		return h.executeChatDashboard(ctx, conversationID)
+
+	case "batch":
+		callsRaw, ok := input["calls"].([]interface{})
+		if !ok {
+			return "", fmt.Errorf("calls is required")
+		}
+		if len(callsRaw) > 10 {
+			return "", fmt.Errorf("batch limited to 10 calls, got %d", len(callsRaw))
+		}
+		results := make([]map[string]interface{}, 0, len(callsRaw))
+		for _, raw := range callsRaw {
+			call, ok := raw.(map[string]interface{})
+			if !ok {
+				results = append(results, map[string]interface{}{"error": "invalid call"})
+				continue
+			}
+			toolName, _ := call["tool"].(string)
+			if toolName == "" {
+				results = append(results, map[string]interface{}{"error": "tool is required"})
+				continue
+			}
+			if toolName == "batch" || toolName == "openpoet_batch" {
+				results = append(results, map[string]interface{}{"tool": toolName, "error": "cannot nest batch calls"})
+				continue
+			}
+			args, _ := call["args"].(map[string]interface{})
+			if args == nil {
+				args = map[string]interface{}{}
+			}
+			result, err := h.executeTool(ctx, strings.TrimPrefix(toolName, "openpoet_"), args, conversationID, messageID, collector, proactiveType)
+			item := map[string]interface{}{"tool": toolName}
+			if err != nil {
+				item["error"] = err.Error()
+			} else {
+				item["result"] = result
+			}
+			results = append(results, item)
+		}
+		out, _ := json.MarshalIndent(results, "", "  ")
+		return string(out), nil
+
+	case "start_session":
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		var taskID *int64
+		if raw, ok := input["task_id"]; ok && fmt.Sprintf("%v", raw) != "" {
+			id, err := parseIDParam(input, "task_id")
+			if err != nil {
+				return "", err
+			}
+			taskID = &id
+		}
+		sess, err := h.api.startManagedSession(ctx, startSessionInput{
+			ProjectID:                  projectID,
+			TaskID:                     taskID,
+			DangerouslySkipPermissions: boolInput(input, "dangerously_skip_permissions"),
+		})
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Session started: %s (project: %d, status: %s, name: %s)", sess.ID, sess.ProjectID, sess.Status, sess.Name), nil
+
+	case "stop_session":
+		sessionID, _ := input["session_id"].(string)
+		if sessionID == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		if _, err := h.getAllowedSession(ctx, conversationID, sessionID); err != nil {
+			return "", err
+		}
+		if err := h.api.stopManagedSession(ctx, sessionID); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Session %s stopped.", sessionID), nil
+
+	case "list_sessions":
+		sessions, err := h.api.db.ListSessions(ctx)
+		if err != nil {
+			return "", err
+		}
+		statusFilter, _ := input["status"].(string)
+		projectFilter := int64(0)
+		if _, ok := input["project_id"]; ok {
+			projectFilter, _ = parseIDParam(input, "project_id")
+		}
+		allowed := h.getAgentAllowedProjectIDs(ctx, conversationID)
+		var sb strings.Builder
+		for _, s := range sessions {
+			if allowed != nil && !allowed[s.ProjectID] {
+				continue
+			}
+			if statusFilter != "" && s.Status != statusFilter {
+				continue
+			}
+			if projectFilter > 0 && s.ProjectID != projectFilter {
+				continue
+			}
+			task := "none"
+			if s.TaskID.Valid {
+				task = fmt.Sprintf("%d", s.TaskID.Int64)
+			}
+			sb.WriteString(fmt.Sprintf("- %s | %s | project: %d | status: %s | task: %s\n", s.ID, s.Name, s.ProjectID, s.Status, task))
+		}
+		if sb.Len() == 0 {
+			return "No sessions matching filter.", nil
+		}
+		return sb.String(), nil
+
+	case "get_session":
+		sessionID, _ := input["session_id"].(string)
+		if sessionID == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		sess, err := h.getAllowedSession(ctx, conversationID, sessionID)
+		if err != nil {
+			return "", err
+		}
+		return h.formatSessionForTool(ctx, sess), nil
+
+	case "read_session_history":
+		sessionID, _ := input["session_id"].(string)
+		if sessionID == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		if _, err := h.getAllowedSession(ctx, conversationID, sessionID); err != nil {
+			return "", err
+		}
+		result, err := h.api.readSessionHistory(ctx, sessionID, sessionHistoryRequest{
+			Mode:          stringInput(input, "mode"),
+			Query:         stringInput(input, "query"),
+			Regex:         boolInput(input, "regex"),
+			CaseSensitive: boolInput(input, "case_sensitive"),
+			Lines:         intInput(input, "lines", 80),
+			Offset:        intInput(input, "offset", 1),
+			Limit:         intInput(input, "limit", 0),
+			ContextLines:  intInput(input, "context", 2),
+			MaxChars:      intInput(input, "max_chars", 12000),
+		})
+		if err != nil {
+			return "", err
+		}
+		truncated := ""
+		if result.Truncated {
+			truncated = " | truncated"
+		}
+		return fmt.Sprintf("Session history: %s | source: %s | mode: %s | lines: %d/%d | offset: %d%s\n\n%s",
+			result.SessionID, result.Source, result.Mode, result.ReturnedLines, result.TotalLines, result.Offset, truncated, result.Content), nil
+
+	case "send_to_session":
+		sessionID, _ := input["session_id"].(string)
+		text, _ := input["text"].(string)
+		if text == "" {
+			text, _ = input["prompt"].(string)
+		}
+		if sessionID == "" || text == "" {
+			return "", fmt.Errorf("session_id and text are required")
+		}
+		if _, err := h.getAllowedSession(ctx, conversationID, sessionID); err != nil {
+			return "", err
+		}
+		if err := h.api.sessionMgr.WriteToSession(sessionID, []byte(text+"\n")); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Sent to session %s: %s", sessionID, truncateForTool(text, 100)), nil
+
+	case "link_session_task":
+		sessionID, _ := input["session_id"].(string)
+		if sessionID == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		sess, err := h.getAllowedSession(ctx, conversationID, sessionID)
+		if err != nil {
+			return "", err
+		}
+		task, err := h.linkSessionTaskForTool(ctx, sess, input)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Session %s linked to task #%d: %s", sessionID, task.ID, task.Title), nil
+
+	case "unlink_session_task":
+		sessionID, _ := input["session_id"].(string)
+		if sessionID == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		sess, err := h.getAllowedSession(ctx, conversationID, sessionID)
+		if err != nil {
+			return "", err
+		}
+		task, err := h.api.db.GetTaskForSession(ctx, sessionID)
+		if err != nil || task == nil {
+			return "", fmt.Errorf("session has no linked task")
+		}
+		if _, err := h.api.db.UnlinkSessionFromTask(ctx, sessionID); err != nil {
+			return "", err
+		}
+		newName := sess.Name
+		if strings.HasPrefix(newName, "Task: ") {
+			newName = "Session " + sessionID[:8]
+		}
+		h.api.db.ExecContext(ctx, "UPDATE sessions SET name = ? WHERE id = ?", newName, sessionID)
+		h.api.hub.BroadcastStateUpdate("session", map[string]interface{}{"action": "renamed", "session_id": sessionID, "name": newName})
+		h.api.recordTaskHistory(ctx, task.ID, task.ProjectID, "session_unlinked", map[string]interface{}{"session_id": sessionID, "session_name": sess.Name}, "user", sessionID)
+		return fmt.Sprintf("Session %s unlinked from task #%d.", sessionID, task.ID), nil
+
+	case "stop_session_and_update_task":
+		sessionID, _ := input["session_id"].(string)
+		if sessionID == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		if _, err := h.getAllowedSession(ctx, conversationID, sessionID); err != nil {
+			return "", err
+		}
+		task, err := h.api.db.GetTaskForSession(ctx, sessionID)
+		if err != nil || task == nil {
+			return "", fmt.Errorf("session has no linked task")
+		}
+		if err := h.api.stopManagedSession(ctx, sessionID); err != nil {
+			return "", err
+		}
+		changed, err := h.updateTaskFromSessionTool(ctx, task, input, sessionID)
+		if err != nil {
+			return "", fmt.Errorf("session stopped, but failed to update linked task: %w", err)
+		}
+		if !changed {
+			return fmt.Sprintf("Session %s stopped. Linked task #%d was not changed.", sessionID, task.ID), nil
+		}
+		return fmt.Sprintf("Session %s stopped and linked task #%d updated.", sessionID, task.ID), nil
+
 	case "create_document":
 		title, _ := input["title"].(string)
 		content, _ := input["content"].(string)
@@ -4829,6 +5062,227 @@ func parseIDParam(input map[string]interface{}, key string) (int64, error) {
 		return int64(id), nil
 	}
 	return 0, fmt.Errorf("invalid %s type", key)
+}
+
+func stringInput(input map[string]interface{}, key string) string {
+	v, _ := input[key].(string)
+	return v
+}
+
+func boolInput(input map[string]interface{}, key string) bool {
+	switch v := input[key].(type) {
+	case bool:
+		return v
+	case string:
+		return parseBoolQuery(v)
+	}
+	return false
+}
+
+func intInput(input map[string]interface{}, key string, fallback int) int {
+	v, ok := input[key]
+	if !ok {
+		return fallback
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case string:
+		return parseIntQuery(n, fallback)
+	}
+	return fallback
+}
+
+func truncateForTool(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+func (h *AIHandler) getAllowedSession(ctx context.Context, conversationID int64, sessionID string) (*database.Session, error) {
+	sess, err := h.api.db.GetSession(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session not found")
+	}
+	if allowed := h.getAgentAllowedProjectIDs(ctx, conversationID); allowed != nil && !allowed[sess.ProjectID] {
+		return nil, fmt.Errorf("this agent does not have access to project %d", sess.ProjectID)
+	}
+	return sess, nil
+}
+
+func (h *AIHandler) formatSessionForTool(ctx context.Context, sess *database.Session) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Session: %s\nName: %s\nProject ID: %d\nStatus: %s\nBackend: %s\n", sess.ID, sess.Name, sess.ProjectID, sess.Status, sess.Backend))
+	if task, err := h.api.db.GetTaskForSession(ctx, sess.ID); err == nil && task != nil {
+		sb.WriteString(fmt.Sprintf("Linked Task: #%d %s (%s, %s)\n", task.ID, task.Title, task.Status, task.Priority))
+	} else {
+		sb.WriteString("Linked Task: none\n")
+	}
+	return sb.String()
+}
+
+func (h *AIHandler) linkSessionTaskForTool(ctx context.Context, sess *database.Session, input map[string]interface{}) (*database.ProjectTask, error) {
+	if existingTask, _ := h.api.db.GetTaskForSession(ctx, sess.ID); existingTask != nil {
+		if _, err := h.api.db.UnlinkSessionFromTask(ctx, sess.ID); err != nil {
+			return nil, fmt.Errorf("failed to unlink existing task")
+		}
+		h.api.recordTaskHistory(ctx, existingTask.ID, existingTask.ProjectID, "session_unlinked", map[string]interface{}{
+			"session_id": sess.ID, "session_name": sess.Name,
+		}, "user", sess.ID)
+	}
+
+	var task *database.ProjectTask
+	if raw, ok := input["task_id"]; ok && fmt.Sprintf("%v", raw) != "" {
+		taskID, err := parseIDParam(input, "task_id")
+		if err != nil {
+			return nil, err
+		}
+		found, err := h.api.db.GetTask(ctx, taskID)
+		if err != nil {
+			return nil, fmt.Errorf("task not found")
+		}
+		if found.ProjectID != sess.ProjectID {
+			return nil, fmt.Errorf("task belongs to a different project")
+		}
+		task = found
+	} else {
+		title, _ := input["title"].(string)
+		if strings.TrimSpace(title) == "" {
+			return nil, fmt.Errorf("task_id or title is required")
+		}
+		priority := stringInput(input, "priority")
+		if priority == "" {
+			priority = "medium"
+		}
+		task = &database.ProjectTask{
+			ProjectID:   sess.ProjectID,
+			Title:       strings.TrimSpace(title),
+			Description: stringInput(input, "description"),
+			Status:      "in_progress",
+			Priority:    priority,
+		}
+		if err := h.api.db.CreateTask(ctx, task); err != nil {
+			return nil, err
+		}
+		h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "created", "project_id": sess.ProjectID, "task": task})
+	}
+
+	newName := "Task: " + task.Title
+	if err := h.api.db.LinkSessionToTask(ctx, sess.ID, task.ID); err != nil {
+		return nil, err
+	}
+	h.api.db.ExecContext(ctx, "UPDATE sessions SET name = ? WHERE id = ?", newName, sess.ID)
+	h.api.hub.BroadcastStateUpdate("session", map[string]interface{}{"action": "renamed", "session_id": sess.ID, "name": newName})
+	h.api.recordTaskHistory(ctx, task.ID, task.ProjectID, "session_linked", map[string]interface{}{"session_id": sess.ID, "session_name": newName}, "user", sess.ID)
+	h.api.recordTaskHistory(ctx, task.ID, task.ProjectID, "task_assigned", map[string]interface{}{"session_id": sess.ID, "session_name": newName}, "system", sess.ID)
+
+	if task.Status == "todo" {
+		oldStatus := task.Status
+		if err := h.api.db.UpdateTaskStatus(ctx, task.ID, "in_progress"); err == nil {
+			task.Status = "in_progress"
+			h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": task.ProjectID, "task": task})
+			h.api.recordTaskHistory(ctx, task.ID, task.ProjectID, "status_change", map[string]interface{}{"old": oldStatus, "new": "in_progress", "reason": "auto_on_link"}, "system", sess.ID)
+		}
+	}
+
+	return task, nil
+}
+
+func (h *AIHandler) updateTaskFromSessionTool(ctx context.Context, task *database.ProjectTask, input map[string]interface{}, sessionID string) (bool, error) {
+	oldStatus, oldPriority, oldTitle, oldDescription := task.Status, task.Priority, task.Title, task.Description
+	changed := false
+	if v, ok := input["title"].(string); ok && strings.TrimSpace(v) != "" {
+		task.Title = strings.TrimSpace(v)
+		changed = true
+	}
+	if v, ok := input["description"].(string); ok {
+		task.Description = v
+		changed = true
+	}
+	if v, ok := input["status"].(string); ok && v != "" {
+		valid := map[string]bool{"todo": true, "in_progress": true, "awaiting_approval": true, "done": true}
+		if !valid[v] {
+			return false, fmt.Errorf("invalid status")
+		}
+		task.Status = v
+		changed = true
+	}
+	if v, ok := input["priority"].(string); ok && v != "" {
+		valid := map[string]bool{"low": true, "medium": true, "high": true, "urgent": true}
+		if !valid[v] {
+			return false, fmt.Errorf("invalid priority")
+		}
+		task.Priority = v
+		changed = true
+	}
+	if v, ok := input["due_date"].(string); ok {
+		if v == "" {
+			task.DueDate = sql.NullTime{}
+		} else {
+			t, err := parseFlexibleTime(v)
+			if err != nil {
+				return false, fmt.Errorf("invalid due_date")
+			}
+			task.DueDate = sql.NullTime{Time: t, Valid: true}
+			task.DueNotified = false
+		}
+		changed = true
+	}
+	if !changed {
+		return false, nil
+	}
+	if err := h.api.db.UpdateTask(ctx, task); err != nil {
+		return false, err
+	}
+	h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": task.ProjectID, "task": task})
+	if task.Status != oldStatus {
+		h.api.recordTaskHistory(ctx, task.ID, task.ProjectID, "status_change", map[string]interface{}{"old": oldStatus, "new": task.Status}, "user", sessionID)
+	}
+	if task.Priority != oldPriority {
+		h.api.recordTaskHistory(ctx, task.ID, task.ProjectID, "priority_change", map[string]interface{}{"old": oldPriority, "new": task.Priority}, "user", sessionID)
+	}
+	if task.Title != oldTitle {
+		h.api.recordTaskHistory(ctx, task.ID, task.ProjectID, "title_updated", map[string]interface{}{"old": oldTitle, "new": task.Title}, "user", sessionID)
+	}
+	if task.Description != oldDescription {
+		h.api.recordTaskHistory(ctx, task.ID, task.ProjectID, "description_updated", map[string]interface{}{}, "user", sessionID)
+	}
+	return true, nil
+}
+
+func (h *AIHandler) executeChatDashboard(ctx context.Context, conversationID int64) (string, error) {
+	projects, err := h.api.db.ListProjects(ctx)
+	if err != nil {
+		return "", err
+	}
+	if allowed := h.getAgentAllowedProjectIDs(ctx, conversationID); allowed != nil {
+		filtered := make([]database.Project, 0, len(projects))
+		for _, p := range projects {
+			if allowed[p.ID] {
+				filtered = append(filtered, p)
+			}
+		}
+		projects = filtered
+	}
+	sessions, _ := h.api.db.ListSessions(ctx)
+	activeByProject := map[int64]int{}
+	for _, s := range sessions {
+		if s.Status == "running" || s.Status == "starting" {
+			activeByProject[s.ProjectID]++
+		}
+	}
+	var sb strings.Builder
+	sb.WriteString("OpenPoet dashboard:\n")
+	for _, p := range projects {
+		summary, _ := h.api.db.GetTaskSummaryByProject(ctx, p.ID)
+		sb.WriteString(fmt.Sprintf("- [%d] %s | sessions active: %d | tasks todo:%d in_progress:%d awaiting:%d done:%d\n",
+			p.ID, p.Name, activeByProject[p.ID], summary["todo"], summary["in_progress"], summary["awaiting_approval"], summary["done"]))
+	}
+	if len(projects) == 0 {
+		sb.WriteString("No projects available.\n")
+	}
+	return sb.String(), nil
 }
 
 // EvaluateSession uses AI to evaluate a session and proactively suggest task actions.

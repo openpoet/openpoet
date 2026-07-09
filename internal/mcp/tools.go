@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"path"
 	"strings"
 
@@ -818,9 +819,49 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return formatSessionsList(body, params)
 
+	case "openpoet_get_session":
+		sid, _ := params["session_id"].(string)
+		if sid == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		body, err := client.Get(fmt.Sprintf("/api/sessions/%s", sid))
+		if err != nil {
+			return "", err
+		}
+		return formatSessionDetail(client, body)
+
+	case "openpoet_read_session_history":
+		sid, _ := params["session_id"].(string)
+		if sid == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		q := url.Values{}
+		for _, key := range []string{"mode", "lines", "offset", "limit", "query", "context", "max_chars"} {
+			if v, ok := params[key]; ok && fmt.Sprintf("%v", v) != "" {
+				q.Set(key, fmt.Sprintf("%v", v))
+			}
+		}
+		for _, key := range []string{"regex", "case_sensitive"} {
+			if v, ok := params[key]; ok {
+				q.Set(key, fmt.Sprintf("%v", v))
+			}
+		}
+		endpoint := fmt.Sprintf("/api/sessions/%s/history", sid)
+		if encoded := q.Encode(); encoded != "" {
+			endpoint += "?" + encoded
+		}
+		body, err := client.Get(endpoint)
+		if err != nil {
+			return "", err
+		}
+		return formatSessionHistory(body)
+
 	case "openpoet_send_to_session":
 		sid, _ := params["session_id"].(string)
 		text, _ := params["text"].(string)
+		if text == "" {
+			text, _ = params["prompt"].(string)
+		}
 		if sid == "" || text == "" {
 			return "", fmt.Errorf("session_id and text are required")
 		}
@@ -829,7 +870,88 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Sent to session %s: %s", sid[:8], truncate(text, 100)), nil
+		return fmt.Sprintf("Sent to session %s: %s", shortID(sid), truncate(text, 100)), nil
+
+	case "openpoet_link_session_task":
+		sid, _ := params["session_id"].(string)
+		if sid == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		payloadMap := map[string]interface{}{}
+		if taskID, ok := getTaskID(params); ok {
+			payloadMap["task_id"] = taskID
+		} else {
+			title, _ := params["title"].(string)
+			if title == "" {
+				return "", fmt.Errorf("task_id or title is required")
+			}
+			taskData := map[string]interface{}{
+				"title":       title,
+				"description": "",
+				"priority":    "medium",
+			}
+			if desc, ok := params["description"].(string); ok {
+				taskData["description"] = desc
+			}
+			if priority, ok := params["priority"].(string); ok && priority != "" {
+				taskData["priority"] = priority
+			}
+			payloadMap["task_data"] = taskData
+		}
+		payload, _ := json.Marshal(payloadMap)
+		body, err := client.Post(fmt.Sprintf("/api/sessions/%s/link-task", sid), string(payload))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Session task linked: %s", string(body)), nil
+
+	case "openpoet_unlink_session_task":
+		sid, _ := params["session_id"].(string)
+		if sid == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		body, err := client.Post(fmt.Sprintf("/api/sessions/%s/unlink-task", sid), "{}")
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Session task unlinked: %s", string(body)), nil
+
+	case "openpoet_stop_session_and_update_task":
+		sid, _ := params["session_id"].(string)
+		if sid == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		taskBody, err := client.Get(fmt.Sprintf("/api/sessions/%s/task", sid))
+		if err != nil {
+			return "", fmt.Errorf("session has no linked task: %w", err)
+		}
+		var task struct {
+			ID        int64  `json:"id"`
+			ProjectID int64  `json:"project_id"`
+			Title     string `json:"title"`
+		}
+		if err := json.Unmarshal(taskBody, &task); err != nil {
+			return "", fmt.Errorf("failed to parse linked task: %w", err)
+		}
+		if _, err := client.Delete(fmt.Sprintf("/api/sessions/%s", sid)); err != nil {
+			return "", err
+		}
+		update := map[string]interface{}{}
+		for _, key := range []string{"status", "title", "description", "priority", "due_date"} {
+			if v, ok := params[key]; ok {
+				update[key] = v
+			}
+		}
+		if len(update) > 0 {
+			payload, _ := json.Marshal(update)
+			if _, err := client.Put(fmt.Sprintf("/api/projects/%d/tasks/%d", task.ProjectID, task.ID), string(payload)); err != nil {
+				return "", fmt.Errorf("session stopped, but failed to update linked task: %w", err)
+			}
+		}
+		if status, _ := update["status"].(string); status != "" {
+			return fmt.Sprintf("Session %s stopped and linked task #%d (%s) updated to %s", shortID(sid), task.ID, task.Title, status), nil
+		}
+		return fmt.Sprintf("Session %s stopped and linked task #%d (%s) updated", shortID(sid), task.ID, task.Title), nil
 
 	case "openpoet_create_document":
 		title, _ := params["title"].(string)
@@ -1072,6 +1194,10 @@ func formatSessionsList(body []byte, params map[string]interface{}) (string, err
 		ProjectID int64  `json:"project_id"`
 		Status    string `json:"status"`
 		Name      string `json:"name"`
+		TaskID    *struct {
+			Int64 int64 `json:"Int64"`
+			Valid bool  `json:"Valid"`
+		} `json:"task_id"`
 	}
 	if err := json.Unmarshal(body, &sessions); err != nil {
 		return string(body), nil
@@ -1081,6 +1207,8 @@ func formatSessionsList(body []byte, params map[string]interface{}) (string, err
 	filterProjectID := int64(0)
 	if v, ok := params["project_id"].(float64); ok {
 		filterProjectID = int64(v)
+	} else if v, ok := params["project_id"].(string); ok && v != "" {
+		fmt.Sscanf(v, "%d", &filterProjectID)
 	}
 
 	if len(sessions) == 0 {
@@ -1099,12 +1227,88 @@ func formatSessionsList(body []byte, params map[string]interface{}) (string, err
 		if name == "" {
 			name = s.ID[:8]
 		}
-		result += fmt.Sprintf("- [%s] %s (project: %d, status: %s)\n", s.ID[:8], name, s.ProjectID, s.Status)
+		task := "none"
+		if s.TaskID != nil && s.TaskID.Valid {
+			task = fmt.Sprintf("%d", s.TaskID.Int64)
+		}
+		result += fmt.Sprintf("- %s | %s | project: %d | status: %s | task: %s\n", s.ID, name, s.ProjectID, s.Status, task)
 	}
 	if result == "" {
 		return "No sessions matching filter.", nil
 	}
 	return result, nil
+}
+
+func formatSessionDetail(client *APIClient, body []byte) (string, error) {
+	var sess struct {
+		ID        string `json:"id"`
+		ProjectID int64  `json:"project_id"`
+		Status    string `json:"status"`
+		Name      string `json:"name"`
+		TaskID    *struct {
+			Int64 int64 `json:"Int64"`
+			Valid bool  `json:"Valid"`
+		} `json:"task_id"`
+		Backend string `json:"backend"`
+	}
+	if err := json.Unmarshal(body, &sess); err != nil {
+		return string(body), nil
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Session: %s\n", sess.ID))
+	sb.WriteString(fmt.Sprintf("Name: %s\nProject ID: %d\nStatus: %s\nBackend: %s\n", sess.Name, sess.ProjectID, sess.Status, sess.Backend))
+	if taskBody, err := client.Get(fmt.Sprintf("/api/sessions/%s/task", sess.ID)); err == nil {
+		var task struct {
+			ID       int64  `json:"id"`
+			Title    string `json:"title"`
+			Status   string `json:"status"`
+			Priority string `json:"priority"`
+		}
+		if json.Unmarshal(taskBody, &task) == nil {
+			sb.WriteString(fmt.Sprintf("Linked Task: #%d %s (%s, %s)\n", task.ID, task.Title, task.Status, task.Priority))
+		}
+	} else {
+		sb.WriteString("Linked Task: none\n")
+	}
+	return sb.String(), nil
+}
+
+func formatSessionHistory(body []byte) (string, error) {
+	var result struct {
+		SessionID     string `json:"session_id"`
+		Source        string `json:"source"`
+		Mode          string `json:"mode"`
+		TotalLines    int    `json:"total_lines"`
+		ReturnedLines int    `json:"returned_lines"`
+		Offset        int    `json:"offset"`
+		Truncated     bool   `json:"truncated"`
+		Content       string `json:"content"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return string(body), nil
+	}
+	truncated := ""
+	if result.Truncated {
+		truncated = " | truncated"
+	}
+	return fmt.Sprintf(
+		"Session history: %s | source: %s | mode: %s | lines: %d/%d | offset: %d%s\n\n%s",
+		result.SessionID,
+		result.Source,
+		result.Mode,
+		result.ReturnedLines,
+		result.TotalLines,
+		result.Offset,
+		truncated,
+		result.Content,
+	), nil
+}
+
+func shortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }
 
 // getID extracts an integer ID from the params map.

@@ -761,7 +761,7 @@ func AllToolDefs() []ToolDef {
 				Type:       "object",
 				Properties: map[string]ToolPropertySchema{},
 			},
-			Context: ToolContextSession,
+			Context: ToolContextBoth,
 		},
 		{
 			Name:        "batch",
@@ -784,21 +784,21 @@ func AllToolDefs() []ToolDef {
 				},
 				Required: []string{"calls"},
 			},
-			Context: ToolContextSession,
+			Context: ToolContextBoth,
 		},
 		{
 			Name:        "start_session",
-			Description: "Start a Claude Code session for a project. Returns session ID.",
+			Description: "Start an OpenPoet coding session for a project. Optionally link it to an existing task. Returns the session ID.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
-					"project_id": {Type: "string", Description: "Project ID (number)"},
-					"task_id":    {Type: "string", Description: "Optional task ID to link"},
-					"name":       {Type: "string", Description: "Optional session name"},
+					"project_id":                   {Type: "string", Description: "Project ID (number)"},
+					"task_id":                      {Type: "string", Description: "Optional existing task ID to link to the new session"},
+					"dangerously_skip_permissions": {Type: "boolean", Description: "Request skip-permissions mode. Only takes effect if the project allows it."},
 				},
 				Required: []string{"project_id"},
 			},
-			Context: ToolContextSession,
+			Context: ToolContextBoth,
 		},
 		{
 			Name:        "stop_session",
@@ -810,7 +810,7 @@ func AllToolDefs() []ToolDef {
 				},
 				Required: []string{"session_id"},
 			},
-			Context: ToolContextSession,
+			Context: ToolContextBoth,
 		},
 		{
 			Name:        "list_sessions",
@@ -822,20 +822,98 @@ func AllToolDefs() []ToolDef {
 					"project_id": {Type: "string", Description: "Filter by project"},
 				},
 			},
-			Context: ToolContextSession,
+			Context: ToolContextBoth,
 		},
 		{
-			Name:        "send_to_session",
-			Description: "Send text input to a running Claude Code session terminal.",
+			Name:        "get_session",
+			Description: "Get details for a session, including project, status, name, and linked task if any.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
 					"session_id": {Type: "string", Description: "Session ID"},
-					"text":       {Type: "string", Description: "Text to send (Enter appended automatically)"},
+				},
+				Required: []string{"session_id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "read_session_history",
+			Description: "Read a compact slice of a session's terminal/message history without loading the full transcript. Supports tail, head, window, and search modes.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"session_id":     {Type: "string", Description: "Session ID"},
+					"mode":           {Type: "string", Description: "Read mode: tail, head, window, or search. Defaults to tail. Providing query automatically uses search."},
+					"lines":          {Type: "string", Description: "Number of lines for head/tail, or max matches for search. Default: 80."},
+					"offset":         {Type: "string", Description: "1-based starting line for window mode."},
+					"limit":          {Type: "string", Description: "Number of lines for window mode, or max matches for search."},
+					"query":          {Type: "string", Description: "Plain text or regex query for search mode."},
+					"regex":          {Type: "boolean", Description: "Treat query as a regular expression."},
+					"case_sensitive": {Type: "boolean", Description: "Use case-sensitive search. Default false."},
+					"context":        {Type: "string", Description: "Context lines before/after each search match. Default: 2."},
+					"max_chars":      {Type: "string", Description: "Maximum returned characters. Default: 12000, hard cap: 50000."},
+				},
+				Required: []string{"session_id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "send_to_session",
+			Description: "Send a prompt or text input to a running OpenPoet session terminal. Enter is appended automatically.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"session_id": {Type: "string", Description: "Session ID"},
+					"text":       {Type: "string", Description: "Text or prompt to send (Enter appended automatically)"},
 				},
 				Required: []string{"session_id", "text"},
 			},
-			Context: ToolContextSession,
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "link_session_task",
+			Description: "Link a session to an existing task, or create a new task and link it to the session.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"session_id":  {Type: "string", Description: "Session ID"},
+					"task_id":     {Type: "string", Description: "Existing task ID to link"},
+					"title":       {Type: "string", Description: "Title for a new task when task_id is omitted"},
+					"description": {Type: "string", Description: "Description for a new task"},
+					"priority":    {Type: "string", Description: "Priority for a new task: low, medium, high, urgent"},
+				},
+				Required: []string{"session_id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "unlink_session_task",
+			Description: "Remove the task link from a session without deleting the task.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"session_id": {Type: "string", Description: "Session ID"},
+				},
+				Required: []string{"session_id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "stop_session_and_update_task",
+			Description: "Stop a session and update its linked task in one operation. Use this when finishing or pausing work from an active session.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"session_id":  {Type: "string", Description: "Session ID to stop"},
+					"status":      {Type: "string", Description: "Optional new task status: todo, in_progress, awaiting_approval, done"},
+					"title":       {Type: "string", Description: "Optional new task title"},
+					"description": {Type: "string", Description: "Optional new task description"},
+					"priority":    {Type: "string", Description: "Optional new task priority: low, medium, high, urgent"},
+					"due_date":    {Type: "string", Description: "Optional new due date, or empty string to clear"},
+				},
+				Required: []string{"session_id"},
+			},
+			Context: ToolContextBoth,
 		},
 	}
 }

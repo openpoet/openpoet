@@ -173,6 +173,7 @@ func TestGoSDKBuildMCPServerWithExecutor(t *testing.T) {
 
 func TestGoSDKModeRoutingByConversationID(t *testing.T) {
 	p := NewGoSDKProvider("http://localhost:8080")
+	p.SetToolExecutor(&mockToolExecutor{})
 
 	// Verify no sessions exist initially
 	if len(p.sessions) != 0 {
