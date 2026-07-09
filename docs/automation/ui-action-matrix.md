@@ -19,8 +19,8 @@ o wiring aguarda #697.
 | Estado | Quantidade | Significado |
 | --- | ---: | --- |
 | `implemented` | 12 | Application Service e capability de tasks já existem |
-| `application_service_ready` | 62 | Service novo pronto; ainda sem registry/HTTP automation |
-| `gap` | 42 | Ainda precisa de Application Service/capability |
+| `application_service_ready` | 68 | Service novo pronto; ainda sem registry/HTTP automation |
+| `gap` | 36 | Ainda precisa de Application Service/capability |
 | `internal_only` | 2 | Ingestão de hooks, não ação autônoma de usuário |
 
 ## Matriz por domínio
@@ -47,8 +47,8 @@ o wiring aguarda #697.
 | tasks | 10 | 10 | 0 | 0 | 0 | R2, R3 |
 | token_usage | 1 | 0 | 0 | 1 | 0 | R3 |
 | tools | 6 | 0 | 5 | 1 | 0 | R4 |
-| tunnel | 5 | 0 | 0 | 5 | 0 | R4 |
-| update | 1 | 0 | 0 | 1 | 0 | R4 |
+| tunnel | 5 | 0 | 5 | 0 | 0 | R4 |
+| update | 1 | 0 | 1 | 0 | 0 | R4 |
 | voice | 1 | 0 | 1 | 0 | 0 | R1 |
 
 ## Segurança
@@ -93,6 +93,11 @@ o wiring aguarda #697.
   explícita para commit.
 - `VoiceTranscriptionService`: transcrição com áudio, filename e language tag
   bounded antes do provider atual.
+- `TunnelMutationService`: enable/disable, confirmação one-time de pairing,
+  revoke e delete permanente; resultados e eventos não carregam credenciais,
+  tokens ou chaves de dispositivo.
+- `UpdateMutationService`: apply com bloqueio de instalação gerenciada/sessões
+  ativas e autorização separada para `force`.
 
 Operações que manipulam segredo, comando, policy de tools, assignment de
 provider ou sincronização externa exigem `R4Boundary` explícito com aprovação,
@@ -106,8 +111,8 @@ os demais ainda aguardam wiring.
 
 ## Gaps priorizados
 
-1. R4: tunnel/update, execução de custom tools e operações de projeto que
-   carregam credenciais/unsafe permissions.
+1. R4: execução de custom tools e operações auxiliares de projeto que carregam
+   credenciais/unsafe permissions.
 2. Documents/proposals, notifications push/preferences e AI conversations.
 3. Sugestão de dados de task em sessão e operações auxiliares.
 
