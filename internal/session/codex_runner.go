@@ -402,6 +402,23 @@ func (r *CodexRunner) Write(data []byte) (int, error) {
 		var typed []byte
 		var typedRune rune
 
+		if b == 0x1b {
+			next, bareEscape := consumeCodexTerminalEscape(data, i)
+			i = next
+			if bareEscape {
+				r.terminalMu.Lock()
+				r.mu.Lock()
+				r.inputBuffer = nil
+				r.inputLineVisible = false
+				r.emit([]byte("^ESC\r\n"))
+				r.emitPromptLocked(false)
+				r.mu.Unlock()
+				r.terminalMu.Unlock()
+				go r.interruptTurn()
+			}
+			continue
+		}
+
 		if b < utf8.RuneSelf {
 			i++
 			typedRune = rune(b)
@@ -474,6 +491,46 @@ func (r *CodexRunner) Write(data []byte) (int, error) {
 		}
 	}
 	return len(data), nil
+}
+
+func consumeCodexTerminalEscape(data []byte, start int) (int, bool) {
+	if start < 0 || start >= len(data) || data[start] != 0x1b {
+		return start + 1, false
+	}
+	if start+1 >= len(data) {
+		return start + 1, true
+	}
+
+	switch data[start+1] {
+	case '[':
+		i := start + 2
+		for i < len(data) {
+			if data[i] >= 0x40 && data[i] <= 0x7e {
+				return i + 1, false
+			}
+			i++
+		}
+		return len(data), false
+	case 'O':
+		if start+2 < len(data) {
+			return start + 3, false
+		}
+		return len(data), false
+	case ']':
+		i := start + 2
+		for i < len(data) {
+			if data[i] == 0x07 {
+				return i + 1, false
+			}
+			if data[i] == 0x1b && i+1 < len(data) && data[i+1] == '\\' {
+				return i + 2, false
+			}
+			i++
+		}
+		return len(data), false
+	default:
+		return start + 1, true
+	}
 }
 
 func (r *CodexRunner) Resize(rows, cols uint16) error { return nil }
