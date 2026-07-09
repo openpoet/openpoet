@@ -11,6 +11,18 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
+	"path"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"openpoet/internal/application"
 	"openpoet/internal/configsync"
 	"openpoet/internal/database"
 	"openpoet/internal/files"
@@ -22,16 +34,6 @@ import (
 	"openpoet/internal/tunnel"
 	"openpoet/internal/updater"
 	"openpoet/internal/websocket"
-	"os"
-	"os/exec"
-	"path"
-	"path/filepath"
-	"regexp"
-	"sort"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -129,6 +131,8 @@ type API struct {
 	hookHandler  *HookHandler
 	aiHandler    *AIHandler
 	otelHandler  *OTELHandler
+	taskService  *application.ProjectTaskService
+	capabilities *application.CapabilityRegistry
 
 	// ReinitAIProvider is called when legacy AI settings change (kept for backward compat).
 	ReinitAIProvider func()
@@ -385,79 +389,65 @@ func (a *API) ApproveTaskProposal(w http.ResponseWriter, r *http.Request) {
 	for i, action := range pending.Actions {
 		switch action.Action {
 		case "create":
-			task := &database.ProjectTask{
-				ProjectID:   action.ProjectID,
-				Title:       action.Title,
-				Description: action.Description,
-				Status:      action.Status,
-				Priority:    action.Priority,
-				SortOrder:   action.SortOrder,
-			}
-			if task.Status == "" {
-				task.Status = "todo"
-			}
-			if task.Priority == "" {
-				task.Priority = "medium"
-			}
-			if action.DueDate != "" {
-				t, err := parseFlexibleTime(action.DueDate)
-				if err == nil {
-					task.DueDate = sql.NullTime{Time: t, Valid: true}
-				}
-			}
+			var parentID *int64
 			// Resolve parent: parent_ref (batch reference) takes priority over parent_id
 			if action.ParentRef > 0 {
 				if realID, ok := createdTaskIDs[action.ParentRef]; ok {
-					task.ParentID = sql.NullInt64{Int64: realID, Valid: true}
+					parentID = &realID
 				}
 			} else if action.ParentID > 0 {
-				task.ParentID = sql.NullInt64{Int64: action.ParentID, Valid: true}
+				parentID = &action.ParentID
 			}
-			if err := a.db.CreateTask(r.Context(), task); err != nil {
+			dueDate := action.DueDate
+			if dueDate != "" {
+				if _, err := parseFlexibleTime(dueDate); err != nil {
+					dueDate = ""
+				}
+			}
+			task, err := a.taskService.Create(r.Context(), application.CreateProjectTaskCommand{
+				ProjectID: action.ProjectID, Title: action.Title, Description: action.Description,
+				Status: action.Status, Priority: action.Priority, DueDate: dueDate,
+				ParentID: parentID, SortOrder: action.SortOrder, Actor: application.UserActor(),
+			})
+			if err != nil {
 				log.Printf("[TaskProposal] Failed to create task '%s': %v", action.Title, err)
 				continue
 			}
 			createdTaskIDs[i+1] = task.ID // Store with 1-based index
-			a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "created", "project_id": action.ProjectID, "task": task})
 			created++
 
 		case "update":
-			task, err := a.db.GetTask(r.Context(), action.TaskID)
-			if err != nil {
-				log.Printf("[TaskProposal] Task %d not found for update: %v", action.TaskID, err)
-				continue
+			command := application.UpdateProjectTaskCommand{
+				ProjectID: action.ProjectID, TaskID: action.TaskID, Actor: application.UserActor(),
 			}
 			if action.Title != "" {
-				task.Title = action.Title
+				command.Title = &action.Title
 			}
 			if action.Description != "" {
-				task.Description = action.Description
+				command.Description = &action.Description
 			}
 			if action.Status != "" {
-				task.Status = action.Status
+				command.Status = &action.Status
 			}
 			if action.Priority != "" {
-				task.Priority = action.Priority
+				command.Priority = &action.Priority
 			}
 			if action.DueDate != "" {
-				t, err := parseFlexibleTime(action.DueDate)
-				if err == nil {
-					task.DueDate = sql.NullTime{Time: t, Valid: true}
+				if _, err := parseFlexibleTime(action.DueDate); err == nil {
+					command.DueDate = &action.DueDate
 				}
 			}
-			if err := a.db.UpdateTask(r.Context(), task); err != nil {
+			if _, err := a.taskService.Update(r.Context(), command); err != nil {
 				log.Printf("[TaskProposal] Failed to update task %d: %v", action.TaskID, err)
 				continue
 			}
-			a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": action.ProjectID, "task": task})
 			updated++
 
 		case "delete":
-			if err := a.db.DeleteTask(r.Context(), action.TaskID); err != nil {
+			if err := a.taskService.Delete(r.Context(), action.ProjectID, action.TaskID); err != nil {
 				log.Printf("[TaskProposal] Failed to delete task %d: %v", action.TaskID, err)
 				continue
 			}
-			a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "deleted", "project_id": action.ProjectID, "id": action.TaskID})
 			deleted++
 		}
 	}
@@ -807,7 +797,7 @@ func NewAPI(
 	notifService *notifications.Service,
 	hookHandler *HookHandler,
 ) *API {
-	return &API{
+	api := &API{
 		db:           db,
 		hub:          hub,
 		sessionMgr:   sessionMgr,
@@ -816,6 +806,19 @@ func NewAPI(
 		notifService: notifService,
 		hookHandler:  hookHandler,
 	}
+	api.taskService = application.NewProjectTaskService(db, api)
+	api.capabilities, _ = application.NewProjectTaskCapabilityRegistry(api.taskService)
+	return api
+}
+
+// ProjectTaskService exposes the shared application service to future
+// Automation, MCP and AI adapters without exposing handler internals.
+func (a *API) ProjectTaskService() *application.ProjectTaskService {
+	return a.taskService
+}
+
+func (a *API) CapabilityRegistry() *application.CapabilityRegistry {
+	return a.capabilities
 }
 
 // SetUpdater configures the binary auto-updater for the API.
@@ -1674,22 +1677,14 @@ func (a *API) startManagedSession(ctx context.Context, input startSessionInput) 
 
 	// Auto-generate session name
 	if linkedTask != nil {
-		// Task-linked session: use task title
-		autoName := "Task: " + linkedTask.Title
-		a.db.ExecContext(ctx, "UPDATE sessions SET name = ? WHERE id = ?", autoName, sess.ID)
-		sess.Name = autoName
-
-		a.db.LinkSessionToTask(ctx, sess.ID, linkedTask.ID)
-
-		// Auto-set task status to in_progress if it's currently todo
-		if linkedTask.Status == "todo" {
-			a.db.UpdateTaskStatus(ctx, linkedTask.ID, "in_progress")
-			linkedTask.Status = "in_progress"
-			a.hub.BroadcastStateUpdate("task", map[string]interface{}{
-				"action":     "updated",
-				"project_id": linkedTask.ProjectID,
-				"task":       linkedTask,
-			})
+		result, linkErr := a.taskService.LinkSession(ctx, application.LinkSessionTaskCommand{
+			SessionID: sess.ID, TaskID: &linkedTask.ID, Actor: application.UserActor(),
+		})
+		if linkErr != nil {
+			log.Printf("[Session] Failed to link task %d to session %s: %v", linkedTask.ID, sess.ID, linkErr)
+		} else {
+			linkedTask = result.Task
+			sess.Name = result.SessionName
 		}
 
 		if input.AutoStartTaskPrompt {
@@ -3261,6 +3256,59 @@ func (a *API) GetTempDocument(w http.ResponseWriter, r *http.Request) {
 
 // ============ Project Tasks ============
 
+func (a *API) PublishTaskChange(change application.TaskChange) {
+	payload := map[string]interface{}{"action": change.Action}
+	if change.ProjectID > 0 {
+		payload["project_id"] = change.ProjectID
+	}
+	if change.Task != nil {
+		payload["task"] = change.Task
+	}
+	if change.TaskID > 0 {
+		payload["id"] = change.TaskID
+	}
+	a.hub.BroadcastStateUpdate("task", payload)
+}
+
+func (a *API) PublishTaskHistory(history *database.TaskHistory) {
+	if history == nil {
+		return
+	}
+	a.hub.BroadcastStateUpdate("task_history", map[string]interface{}{
+		"action":     "created",
+		"task_id":    history.TaskID,
+		"project_id": history.ProjectID,
+		"entry":      history,
+	})
+}
+
+func (a *API) PublishSessionRename(rename application.SessionRename) {
+	a.hub.BroadcastStateUpdate("session", map[string]interface{}{
+		"action":     "renamed",
+		"session_id": rename.SessionID,
+		"name":       rename.Name,
+	})
+}
+
+func (a *API) RequestTaskVerification(task *database.ProjectTask) {
+	if task != nil && a.aiHandler != nil {
+		go a.aiHandler.GenerateVerificationDoc(context.Background(), task)
+	}
+}
+
+func respondApplicationError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	switch {
+	case application.ErrorIsKind(err, application.ErrorValidation):
+		status = http.StatusBadRequest
+	case application.ErrorIsKind(err, application.ErrorNotFound):
+		status = http.StatusNotFound
+	case application.ErrorIsKind(err, application.ErrorConflict):
+		status = http.StatusConflict
+	}
+	respondError(w, status, err.Error())
+}
+
 func (a *API) ListAllTasks(w http.ResponseWriter, r *http.Request) {
 	f := database.TaskFilter{}
 
@@ -3289,39 +3337,15 @@ func (a *API) ListAllTasks(w http.ResponseWriter, r *http.Request) {
 		f.Search = s
 	}
 
-	// Preserve the original status filter, then clear it for the DB query
-	// so umbrella tasks are fetched regardless of their stored status.
-	statusFilter := f.Status
-	if statusFilter != "" {
-		f.Status = ""
-	}
-
-	tasks, err := a.db.ListAllTasks(r.Context(), f)
+	result, err := a.taskService.ListAll(r.Context(), f)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if tasks == nil {
-		tasks = []database.ProjectTask{}
-	}
-	database.ApplyUmbrellaStatus(tasks)
-
-	// Re-apply status filter after umbrella status computation
-	if statusFilter != "" {
-		filtered := tasks[:0]
-		for _, t := range tasks {
-			if t.Status == statusFilter {
-				filtered = append(filtered, t)
-			}
-		}
-		tasks = filtered
-	}
-
-	summary, _ := a.db.GetAllTasksSummary(r.Context())
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"tasks":   tasks,
-		"summary": summary,
+		"tasks":   result.Tasks,
+		"summary": result.Summary,
 	})
 }
 
@@ -3332,15 +3356,11 @@ func (a *API) ListProjectTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tasks, err := a.db.ListTasksByProject(r.Context(), projectID)
+	tasks, err := a.taskService.ListByProject(r.Context(), projectID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if tasks == nil {
-		tasks = []database.ProjectTask{}
-	}
-	database.ApplyUmbrellaStatus(tasks)
 	respondJSON(w, http.StatusOK, tasks)
 }
 
@@ -3381,12 +3401,6 @@ func (a *API) CreateProjectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify project exists
-	if _, err := a.db.GetProject(r.Context(), projectID); err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
-		return
-	}
-
 	var input struct {
 		Title       string `json:"title"`
 		Description string `json:"description"`
@@ -3401,62 +3415,15 @@ func (a *API) CreateProjectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.TrimSpace(input.Title) == "" {
-		respondError(w, http.StatusBadRequest, "Title is required")
+	task, err := a.taskService.Create(r.Context(), application.CreateProjectTaskCommand{
+		ProjectID: projectID, Title: input.Title, Description: input.Description,
+		Status: input.Status, Priority: input.Priority, DueDate: input.DueDate,
+		ParentID: input.ParentID, SortOrder: input.SortOrder, Actor: application.UserActor(),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	// Validate status
-	if input.Status == "" {
-		input.Status = "todo"
-	}
-	validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "awaiting_approval": true}
-	if !validStatuses[input.Status] {
-		respondError(w, http.StatusBadRequest, "Invalid status. Must be: todo, in_progress, awaiting_approval, done")
-		return
-	}
-
-	// Validate priority
-	if input.Priority == "" {
-		input.Priority = "medium"
-	}
-	validPriorities := map[string]bool{"low": true, "medium": true, "high": true, "urgent": true}
-	if !validPriorities[input.Priority] {
-		respondError(w, http.StatusBadRequest, "Invalid priority. Must be: low, medium, high, urgent")
-		return
-	}
-
-	task := &database.ProjectTask{
-		ProjectID:   projectID,
-		Title:       strings.TrimSpace(input.Title),
-		Description: input.Description,
-		Status:      input.Status,
-		Priority:    input.Priority,
-		SortOrder:   input.SortOrder,
-	}
-
-	if input.ParentID != nil {
-		task.ParentID = sql.NullInt64{Int64: *input.ParentID, Valid: true}
-	}
-
-	if input.DueDate != "" {
-		t, err := parseFlexibleTime(input.DueDate)
-		if err != nil {
-			respondError(w, http.StatusBadRequest, "Invalid due_date format")
-			return
-		}
-		task.DueDate = sql.NullTime{Time: t, Valid: true}
-	}
-
-	if err := a.db.CreateTask(r.Context(), task); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "created", "project_id": projectID, "task": task})
-	a.recordTaskHistory(r.Context(), task.ID, projectID, "task_created", map[string]interface{}{
-		"title": task.Title, "status": task.Status, "priority": task.Priority,
-	}, "user", "")
 	respondJSON(w, http.StatusCreated, task)
 }
 
@@ -3473,22 +3440,10 @@ func (a *API) GetProjectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := a.db.GetTask(r.Context(), taskID)
-	if err != nil || task.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Task not found")
+	task, err := a.taskService.Get(r.Context(), projectID, taskID)
+	if err != nil {
+		respondApplicationError(w, err)
 		return
-	}
-
-	// Compute umbrella status dynamically from children
-	allTasks, err := a.db.ListTasksByProject(r.Context(), projectID)
-	if err == nil {
-		database.ApplyUmbrellaStatus(allTasks)
-		for _, t := range allTasks {
-			if t.ID == taskID {
-				task.Status = t.Status
-				break
-			}
-		}
 	}
 
 	respondJSON(w, http.StatusOK, task)
@@ -3507,18 +3462,6 @@ func (a *API) UpdateProjectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := a.db.GetTask(r.Context(), taskID)
-	if err != nil || task.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Task not found")
-		return
-	}
-
-	// Capture old values for history tracking
-	oldStatus := task.Status
-	oldPriority := task.Priority
-	oldTitle := task.Title
-	oldDescription := task.Description
-
 	var input struct {
 		Title       *string `json:"title"`
 		Description *string `json:"description"`
@@ -3533,77 +3476,14 @@ func (a *API) UpdateProjectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if input.Title != nil {
-		if strings.TrimSpace(*input.Title) == "" {
-			respondError(w, http.StatusBadRequest, "Title cannot be empty")
-			return
-		}
-		task.Title = strings.TrimSpace(*input.Title)
-	}
-	if input.Description != nil {
-		task.Description = *input.Description
-	}
-	if input.Status != nil {
-		validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "awaiting_approval": true}
-		if !validStatuses[*input.Status] {
-			respondError(w, http.StatusBadRequest, "Invalid status")
-			return
-		}
-		task.Status = *input.Status
-	}
-	if input.Priority != nil {
-		validPriorities := map[string]bool{"low": true, "medium": true, "high": true, "urgent": true}
-		if !validPriorities[*input.Priority] {
-			respondError(w, http.StatusBadRequest, "Invalid priority")
-			return
-		}
-		task.Priority = *input.Priority
-	}
-	if input.DueDate != nil {
-		if *input.DueDate == "" {
-			task.DueDate = sql.NullTime{}
-		} else {
-			t, err := parseFlexibleTime(*input.DueDate)
-			if err != nil {
-				respondError(w, http.StatusBadRequest, "Invalid due_date format")
-				return
-			}
-			task.DueDate = sql.NullTime{Time: t, Valid: true}
-			task.DueNotified = false // Reset notification on date change
-		}
-	}
-	if input.ParentID != nil {
-		task.ParentID = sql.NullInt64{Int64: *input.ParentID, Valid: *input.ParentID > 0}
-	}
-	if input.SortOrder != nil {
-		task.SortOrder = *input.SortOrder
-	}
-
-	if err := a.db.UpdateTask(r.Context(), task); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	task, err := a.taskService.Update(r.Context(), application.UpdateProjectTaskCommand{
+		ProjectID: projectID, TaskID: taskID, Title: input.Title, Description: input.Description,
+		Status: input.Status, Priority: input.Priority, DueDate: input.DueDate,
+		ParentID: input.ParentID, SortOrder: input.SortOrder, Actor: application.UserActor(),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
-	}
-
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
-
-	// Record history for each changed field
-	if task.Status != oldStatus {
-		a.recordTaskHistory(r.Context(), taskID, projectID, "status_change", map[string]interface{}{
-			"old": oldStatus, "new": task.Status,
-		}, "user", "")
-	}
-	if task.Priority != oldPriority {
-		a.recordTaskHistory(r.Context(), taskID, projectID, "priority_change", map[string]interface{}{
-			"old": oldPriority, "new": task.Priority,
-		}, "user", "")
-	}
-	if task.Title != oldTitle {
-		a.recordTaskHistory(r.Context(), taskID, projectID, "title_updated", map[string]interface{}{
-			"old": oldTitle, "new": task.Title,
-		}, "user", "")
-	}
-	if task.Description != oldDescription {
-		a.recordTaskHistory(r.Context(), taskID, projectID, "description_updated", map[string]interface{}{}, "user", "")
 	}
 
 	respondJSON(w, http.StatusOK, task)
@@ -3622,13 +3502,6 @@ func (a *API) UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := a.db.GetTask(r.Context(), taskID)
-	if err != nil || task.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Task not found")
-		return
-	}
-	oldStatus := task.Status
-
 	var input struct {
 		Status string `json:"status"`
 	}
@@ -3637,33 +3510,12 @@ func (a *API) UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "awaiting_approval": true}
-	if !validStatuses[input.Status] {
-		respondError(w, http.StatusBadRequest, "Invalid status")
-		return
-	}
-
-	if err := a.db.UpdateTaskStatus(r.Context(), taskID, input.Status); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Re-fetch to get updated sort_order
-	task, err = a.db.GetTask(r.Context(), taskID)
+	task, err := a.taskService.ChangeStatus(r.Context(), application.ChangeTaskStatusCommand{
+		ProjectID: projectID, TaskID: taskID, Status: input.Status, Actor: application.UserActor(),
+	})
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
-	}
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
-	if input.Status != oldStatus {
-		a.recordTaskHistory(r.Context(), taskID, projectID, "status_change", map[string]interface{}{
-			"old": oldStatus, "new": input.Status,
-		}, "user", "")
-	}
-
-	// Trigger async verification document generation when transitioning to awaiting_approval
-	if input.Status == "awaiting_approval" && a.aiHandler != nil {
-		go a.aiHandler.GenerateVerificationDoc(context.Background(), task)
 	}
 
 	respondJSON(w, http.StatusOK, task)
@@ -3682,32 +3534,11 @@ func (a *API) ApproveTaskVerification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := a.db.GetTask(r.Context(), taskID)
-	if err != nil || task.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Task not found")
+	task, err := a.taskService.ApproveVerification(r.Context(), projectID, taskID, application.UserActor())
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if task.Status != "awaiting_approval" {
-		respondError(w, http.StatusBadRequest, "Task is not awaiting approval")
-		return
-	}
-
-	// Update verification document status if present
-	if task.VerificationDocID != "" {
-		a.db.UpdateTempDocumentStatus(r.Context(), task.VerificationDocID, "approved")
-	}
-
-	// Transition task to done
-	if err := a.db.UpdateTaskStatus(r.Context(), taskID, "done"); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	task, _ = a.db.GetTask(r.Context(), taskID)
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
-	a.recordTaskHistory(r.Context(), taskID, projectID, "verification_approved", map[string]interface{}{
-		"old": "awaiting_approval", "new": "done",
-	}, "user", "")
 
 	respondJSON(w, http.StatusOK, task)
 }
@@ -3725,35 +3556,11 @@ func (a *API) RejectTaskVerification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := a.db.GetTask(r.Context(), taskID)
-	if err != nil || task.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Task not found")
+	task, err := a.taskService.RejectVerification(r.Context(), projectID, taskID, application.UserActor())
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if task.Status != "awaiting_approval" {
-		respondError(w, http.StatusBadRequest, "Task is not awaiting approval")
-		return
-	}
-
-	// Update verification document status if present
-	if task.VerificationDocID != "" {
-		a.db.UpdateTempDocumentStatus(r.Context(), task.VerificationDocID, "rejected")
-	}
-
-	// Clear verification doc and return to in_progress
-	task.VerificationDocID = ""
-	a.db.SetTaskVerificationDoc(r.Context(), taskID, "")
-
-	if err := a.db.UpdateTaskStatus(r.Context(), taskID, "in_progress"); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	task, _ = a.db.GetTask(r.Context(), taskID)
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
-	a.recordTaskHistory(r.Context(), taskID, projectID, "verification_rejected", map[string]interface{}{
-		"old": "awaiting_approval", "new": "in_progress",
-	}, "user", "")
 
 	respondJSON(w, http.StatusOK, task)
 }
@@ -3772,24 +3579,10 @@ func (a *API) ReorderProjectTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(items) == 0 {
-		respondError(w, http.StatusBadRequest, "Empty reorder list")
+	if err := a.taskService.ReorderProject(r.Context(), projectID, items); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if len(items) > 100 {
-		respondError(w, http.StatusBadRequest, "Too many items (max 100)")
-		return
-	}
-
-	if err := a.db.ReorderTasks(r.Context(), projectID, items); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{
-		"action":     "reordered",
-		"project_id": projectID,
-	})
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -3802,23 +3595,10 @@ func (a *API) ReorderAllTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(items) == 0 {
-		respondError(w, http.StatusBadRequest, "Empty reorder list")
+	if err := a.taskService.ReorderGlobal(r.Context(), items); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if len(items) > 200 {
-		respondError(w, http.StatusBadRequest, "Too many items (max 200)")
-		return
-	}
-
-	if err := a.db.ReorderTasksGlobal(r.Context(), items); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{
-		"action": "reordered",
-	})
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -3836,18 +3616,10 @@ func (a *API) DeleteProjectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := a.db.GetTask(r.Context(), taskID)
-	if err != nil || task.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Task not found")
+	if err := a.taskService.Delete(r.Context(), projectID, taskID); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	if err := a.db.DeleteTask(r.Context(), taskID); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "deleted", "project_id": projectID, "id": taskID})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -3864,19 +3636,11 @@ func (a *API) DuplicateProjectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := a.db.GetTask(r.Context(), taskID)
-	if err != nil || task.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Task not found")
-		return
-	}
-
-	clone, err := a.db.DuplicateTask(r.Context(), taskID)
+	clone, err := a.taskService.Duplicate(r.Context(), projectID, taskID, application.UserActor())
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
-
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "created", "project_id": projectID, "task": clone})
 	respondJSON(w, http.StatusCreated, clone)
 }
 
@@ -3901,9 +3665,9 @@ func parseFlexibleTime(s string) (time.Time, error) {
 func (a *API) GetSessionLinkedTask(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
 
-	task, err := a.db.GetTaskForSession(r.Context(), sessionID)
-	if err != nil || task == nil {
-		respondError(w, http.StatusNotFound, "No task linked to this session")
+	task, err := a.taskService.GetSessionTask(r.Context(), sessionID)
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -3913,24 +3677,6 @@ func (a *API) GetSessionLinkedTask(w http.ResponseWriter, r *http.Request) {
 // LinkSessionTask links an active session to an existing task or creates a new task and links it
 func (a *API) LinkSessionTask(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
-
-	sess, err := a.db.GetSession(r.Context(), sessionID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Session not found")
-		return
-	}
-
-	// If session already has a linked task, unlink it first (allows re-linking)
-	existingTask, _ := a.db.GetTaskForSession(r.Context(), sessionID)
-	if existingTask != nil {
-		if _, err := a.db.UnlinkSessionFromTask(r.Context(), sessionID); err != nil {
-			respondError(w, http.StatusInternalServerError, "Failed to unlink existing task")
-			return
-		}
-		a.recordTaskHistory(r.Context(), existingTask.ID, existingTask.ProjectID, "session_unlinked", map[string]interface{}{
-			"session_id": sessionID, "session_name": sess.Name,
-		}, "user", sessionID)
-	}
 
 	var input struct {
 		TaskID   *int64 `json:"task_id,omitempty"`
@@ -3944,132 +3690,39 @@ func (a *API) LinkSessionTask(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-
-	var linkedTask *database.ProjectTask
-
-	if input.TaskID != nil && *input.TaskID > 0 {
-		// Link to existing task
-		linkedTask, err = a.db.GetTask(r.Context(), *input.TaskID)
-		if err != nil {
-			respondError(w, http.StatusNotFound, "Task not found")
-			return
-		}
-		if linkedTask.ProjectID != sess.ProjectID {
-			respondError(w, http.StatusBadRequest, "Task belongs to a different project")
-			return
-		}
-	} else if input.TaskData != nil && strings.TrimSpace(input.TaskData.Title) != "" {
-		// Create new task and link
-		priority := input.TaskData.Priority
-		if priority == "" {
-			priority = "medium"
-		}
-		linkedTask = &database.ProjectTask{
-			ProjectID:   sess.ProjectID,
-			Title:       strings.TrimSpace(input.TaskData.Title),
-			Description: input.TaskData.Description,
-			Status:      "in_progress",
-			Priority:    priority,
-		}
-		if err := a.db.CreateTask(r.Context(), linkedTask); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		a.hub.BroadcastStateUpdate("task", map[string]interface{}{
-			"action":     "created",
-			"project_id": sess.ProjectID,
-			"task":       linkedTask,
-		})
-	} else {
-		respondError(w, http.StatusBadRequest, "Either task_id or task_data with title is required")
-		return
+	command := application.LinkSessionTaskCommand{SessionID: sessionID, Actor: application.UserActor()}
+	if input.TaskID != nil {
+		command.TaskID = input.TaskID
 	}
-
-	// Link session to task and rename
-	newName := "Task: " + linkedTask.Title
-	if err := a.db.LinkSessionToTask(r.Context(), sessionID, linkedTask.ID); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
+	if input.TaskData != nil {
+		command.Title = input.TaskData.Title
+		command.Description = input.TaskData.Description
+		command.Priority = input.TaskData.Priority
 	}
-	a.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, sessionID)
-
-	// Broadcast session rename
-	a.hub.BroadcastStateUpdate("session", map[string]interface{}{
-		"action":     "renamed",
-		"session_id": sessionID,
-		"name":       newName,
-	})
-
-	// Record session linked and task assigned history
-	a.recordTaskHistory(r.Context(), linkedTask.ID, linkedTask.ProjectID, "session_linked", map[string]interface{}{
-		"session_id": sessionID, "session_name": newName,
-	}, "user", sessionID)
-	a.recordTaskHistory(r.Context(), linkedTask.ID, linkedTask.ProjectID, "task_assigned", map[string]interface{}{
-		"session_id": sessionID, "session_name": newName,
-	}, "system", sessionID)
-
-	// Auto-set task to in_progress if currently todo
-	if linkedTask.Status == "todo" {
-		oldStatus := linkedTask.Status
-		a.db.UpdateTaskStatus(r.Context(), linkedTask.ID, "in_progress")
-		linkedTask.Status = "in_progress"
-		a.hub.BroadcastStateUpdate("task", map[string]interface{}{
-			"action":     "updated",
-			"project_id": linkedTask.ProjectID,
-			"task":       linkedTask,
-		})
-		a.recordTaskHistory(r.Context(), linkedTask.ID, linkedTask.ProjectID, "status_change", map[string]interface{}{
-			"old": oldStatus, "new": "in_progress", "reason": "auto_on_link",
-		}, "system", sessionID)
+	result, err := a.taskService.LinkSession(r.Context(), command)
+	if err != nil {
+		respondApplicationError(w, err)
+		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"task":         linkedTask,
-		"session_name": newName,
+		"task":         result.Task,
+		"session_name": result.SessionName,
 	})
 }
 
 // UnlinkSessionTask removes the task link from a session.
 func (a *API) UnlinkSessionTask(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
-
-	sess, err := a.db.GetSession(r.Context(), sessionID)
+	result, err := a.taskService.UnlinkSession(r.Context(), sessionID, application.UserActor())
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Session not found")
+		respondApplicationError(w, err)
 		return
 	}
-
-	task, _ := a.db.GetTaskForSession(r.Context(), sessionID)
-	if task == nil {
-		respondError(w, http.StatusConflict, "Session has no linked task")
-		return
-	}
-
-	if _, err := a.db.UnlinkSessionFromTask(r.Context(), sessionID); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Reset session name (remove "Task: " prefix)
-	newName := sess.Name
-	if strings.HasPrefix(newName, "Task: ") {
-		newName = "Session " + sessionID[:8]
-	}
-	a.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, sessionID)
-
-	a.hub.BroadcastStateUpdate("session", map[string]interface{}{
-		"action":     "renamed",
-		"session_id": sessionID,
-		"name":       newName,
-	})
-
-	a.recordTaskHistory(r.Context(), task.ID, task.ProjectID, "session_unlinked", map[string]interface{}{
-		"session_id": sessionID, "session_name": sess.Name,
-	}, "user", sessionID)
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"unlinked_task_id": task.ID,
-		"session_name":     newName,
+		"unlinked_task_id": result.TaskID,
+		"session_name":     result.SessionName,
 	})
 }
 
@@ -4086,13 +3739,10 @@ func (a *API) ListTaskHistory(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
-	history, err := a.db.ListTaskHistory(r.Context(), taskID, limit)
+	history, err := a.taskService.ListHistory(r.Context(), taskID, limit)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
-	}
-	if history == nil {
-		history = []database.TaskHistory{}
 	}
 	respondJSON(w, http.StatusOK, history)
 }
@@ -4112,13 +3762,14 @@ func (a *API) AddTaskComment(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Comment string `json:"comment"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil || strings.TrimSpace(input.Comment) == "" {
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Comment is required")
 		return
 	}
-	a.recordTaskHistory(r.Context(), taskID, projectID, "comment_added", map[string]interface{}{
-		"comment": strings.TrimSpace(input.Comment),
-	}, "user", "")
+	if err := a.taskService.AddComment(r.Context(), projectID, taskID, input.Comment, application.UserActor()); err != nil {
+		respondApplicationError(w, err)
+		return
+	}
 	respondJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
 }
 
