@@ -3,6 +3,8 @@ package application
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -99,6 +101,87 @@ func TestCreateTaskRollsBackWhenHistoryFails(t *testing.T) {
 	}
 	if len(effects.tasks) != 0 || len(effects.history) != 0 {
 		t.Fatal("external effects ran before a successful commit")
+	}
+	events, err := db.ListEventOutboxAfter(context.Background(), 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("event committed for rolled-back task: %+v", events)
+	}
+}
+
+func TestCreateTaskCommitsExactlyOneOutboxEvent(t *testing.T) {
+	db := applicationTestDB(t)
+	project := createApplicationProject(t, db, "outbox-commit")
+	service := NewProjectTaskService(db, nil)
+	ctx := WithEventMetadata(context.Background(), EventMetadata{
+		Actor: Actor{Type: "automation", ID: "helena"}, CorrelationID: "command-123",
+	})
+
+	task, err := service.Create(ctx, CreateProjectTaskCommand{
+		ProjectID: project.ID, Title: "Transactional event", Actor: UserActor(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := db.ListEventOutboxAfter(context.Background(), 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events=%d, want exactly one: %+v", len(events), events)
+	}
+	event := events[0]
+	if event.EventType != ProjectTaskEventCreated || event.AggregateID != fmt.Sprint(task.ID) {
+		t.Fatalf("unexpected event identity: %+v", event)
+	}
+	if event.Actor != "automation:helena" || event.CorrelationID != "command-123" || event.SchemaVersion != 1 {
+		t.Fatalf("unexpected event metadata: %+v", event)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["task_id"] != float64(task.ID) || payload["project_id"] != float64(project.ID) {
+		t.Fatalf("unexpected event payload: %+v", payload)
+	}
+}
+
+func TestCreateTaskRollsBackWhenOutboxFails(t *testing.T) {
+	db := applicationTestDB(t)
+	project := createApplicationProject(t, db, "outbox-rollback")
+	if _, err := db.Exec(`
+		CREATE TRIGGER reject_event_outbox BEFORE INSERT ON event_outbox
+		BEGIN SELECT RAISE(ABORT, 'outbox unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	effects := &recordingTaskEffects{}
+	service := NewProjectTaskService(db, effects)
+
+	_, err := service.Create(context.Background(), CreateProjectTaskCommand{
+		ProjectID: project.ID, Title: "Must remain atomic", Actor: UserActor(),
+	})
+	if err == nil {
+		t.Fatal("expected outbox failure")
+	}
+	tasks, listErr := db.ListTasksByProject(context.Background(), project.ID)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("task committed without event: %+v", tasks)
+	}
+	var historyCount int
+	if err := db.GetContext(context.Background(), &historyCount,
+		"SELECT COUNT(*) FROM task_history WHERE project_id = ?", project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if historyCount != 0 {
+		t.Fatalf("history committed without event: %d", historyCount)
+	}
+	if len(effects.tasks) != 0 || len(effects.history) != 0 {
+		t.Fatal("external effects ran before outbox commit")
 	}
 }
 
