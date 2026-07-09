@@ -122,17 +122,18 @@ type pendingSkillProposal struct {
 }
 
 type API struct {
-	db           *database.DB
-	hub          *websocket.Hub
-	sessionMgr   *session.Manager
-	configSync   *configsync.ConfigSyncer
-	encryptor    *security.Encryptor
-	notifService *notifications.Service
-	hookHandler  *HookHandler
-	aiHandler    *AIHandler
-	otelHandler  *OTELHandler
-	taskService  *application.ProjectTaskService
-	capabilities *application.CapabilityRegistry
+	db             *database.DB
+	hub            *websocket.Hub
+	sessionMgr     *session.Manager
+	configSync     *configsync.ConfigSyncer
+	encryptor      *security.Encryptor
+	notifService   *notifications.Service
+	hookHandler    *HookHandler
+	aiHandler      *AIHandler
+	otelHandler    *OTELHandler
+	taskService    *application.ProjectTaskService
+	workRunService *application.WorkRunService
+	capabilities   *application.CapabilityRegistry
 
 	// ReinitAIProvider is called when legacy AI settings change (kept for backward compat).
 	ReinitAIProvider func()
@@ -807,7 +808,9 @@ func NewAPI(
 		hookHandler:  hookHandler,
 	}
 	api.taskService = application.NewProjectTaskService(db, api)
+	api.workRunService = application.NewWorkRunService(db)
 	api.capabilities, _ = application.NewProjectTaskCapabilityRegistry(api.taskService)
+	_ = application.RegisterWorkRunCapabilities(api.capabilities, api.workRunService)
 	return api
 }
 
@@ -815,6 +818,10 @@ func NewAPI(
 // Automation, MCP and AI adapters without exposing handler internals.
 func (a *API) ProjectTaskService() *application.ProjectTaskService {
 	return a.taskService
+}
+
+func (a *API) WorkRunService() *application.WorkRunService {
+	return a.workRunService
 }
 
 func (a *API) CapabilityRegistry() *application.CapabilityRegistry {

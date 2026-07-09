@@ -103,10 +103,10 @@ func (a *commandAPI) executeCommand(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if command.ExpectedVersion != nil {
+	if command.ExpectedVersion != nil && !supportsExpectedVersion(capability.Handler) {
 		a.writeCommandError(w, command, &commandFailure{
 			status: http.StatusUnprocessableEntity, code: "expected_version_unsupported",
-			message: "optimistic concurrency is not supported for project tasks in automation API v1",
+			message: "optimistic concurrency is not supported for this capability",
 			details: map[string]any{"expected_version": *command.ExpectedVersion},
 		})
 		return
@@ -199,6 +199,9 @@ func projectTaskServiceFor(registry *application.CapabilityRegistry, name applic
 }
 
 func dispatchProjectTaskCommand(r *http.Request, capability application.Capability, command *commandEnvelope, actor Actor) (any, error) {
+	if service, ok := capability.Service.(*application.WorkRunService); ok && service != nil {
+		return dispatchWorkRunCommand(r, service, capability, command, actor)
+	}
 	service, ok := capability.Service.(*application.ProjectTaskService)
 	if !ok || service == nil {
 		return nil, &commandFailure{status: http.StatusNotImplemented, code: "capability_handler_unsupported", message: "the capability handler is not available"}
@@ -423,6 +426,17 @@ func dispatchProjectTaskCommand(r *http.Request, capability application.Capabili
 	}
 }
 
+func supportsExpectedVersion(handler application.CapabilityHandler) bool {
+	switch handler {
+	case application.CapabilityHandlerWorkRunsPause, application.CapabilityHandlerWorkRunsResume,
+		application.CapabilityHandlerWorkRunsComplete, application.CapabilityHandlerWorkRunsCancel,
+		application.CapabilityHandlerPlansUpsert:
+		return true
+	default:
+		return false
+	}
+}
+
 type taskListPayload struct {
 	ProjectID int64  `json:"project_id,omitempty"`
 	Status    string `json:"status,omitempty"`
@@ -571,6 +585,16 @@ func (t commandTarget) resolveSessionID(fallback string) string {
 	if t.targetKind() == "session" {
 		var value string
 		if err := json.Unmarshal(t.ID, &value); err == nil {
+			return strings.TrimSpace(value)
+		}
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func (t commandTarget) resolveStringID(kind, fallback string) string {
+	if t.targetKind() == kind {
+		var value string
+		if err := json.Unmarshal(t.ID, &value); err == nil && strings.TrimSpace(value) != "" {
 			return strings.TrimSpace(value)
 		}
 	}

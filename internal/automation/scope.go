@@ -21,6 +21,10 @@ const (
 	ScopeNotificationsAck  Scope = "notifications:ack"
 	ScopeEventsRead        Scope = "events:read"
 	ScopeReportsRead       Scope = "reports:read"
+	ScopeWorkRunsRead      Scope = "work_runs:read"
+	ScopeWorkRunsWrite     Scope = "work_runs:write"
+	ScopePlansRead         Scope = "plans:read"
+	ScopePlansWrite        Scope = "plans:write"
 )
 
 var knownScopes = map[Scope]struct{}{
@@ -35,6 +39,10 @@ var knownScopes = map[Scope]struct{}{
 	ScopeNotificationsAck:  {},
 	ScopeEventsRead:        {},
 	ScopeReportsRead:       {},
+	ScopeWorkRunsRead:      {},
+	ScopeWorkRunsWrite:     {},
+	ScopePlansRead:         {},
+	ScopePlansWrite:        {},
 }
 
 type ScopeSet map[Scope]struct{}

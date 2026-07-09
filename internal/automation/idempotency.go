@@ -44,6 +44,13 @@ type Idempotency struct {
 	now               func() time.Time
 }
 
+type idempotencyKeyContextKey struct{}
+
+func idempotencyKeyFromContext(ctx context.Context) string {
+	value, _ := ctx.Value(idempotencyKeyContextKey{}).(string)
+	return value
+}
+
 func NewIdempotency(store IdempotencyStore, options IdempotencyOptions) *Idempotency {
 	if options.TTL <= 0 {
 		options.TTL = defaultIdempotencyTTL
@@ -153,6 +160,7 @@ func (i *Idempotency) Middleware(next http.Handler) http.Handler {
 		}
 
 		capture := newBufferedResponse(i.maxCachedResponse)
+		r = r.WithContext(context.WithValue(r.Context(), idempotencyKeyContextKey{}, key))
 		next.ServeHTTP(capture, r)
 		completionContext := context.WithoutCancel(r.Context())
 		if capture.overflow {

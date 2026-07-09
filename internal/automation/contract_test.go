@@ -24,6 +24,9 @@ func automationContractHandler(t *testing.T, db *database.DB) http.Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := application.RegisterWorkRunCapabilities(registry, application.NewWorkRunService(db)); err != nil {
+		t.Fatal(err)
+	}
 	return CapturePeerAddress(NewHandler(db, Dependencies{
 		Capabilities: registry,
 		Snapshot:     db,
@@ -154,6 +157,83 @@ func TestCommandCreateDerivesActorAndReplaysLedgerResponse(t *testing.T) {
 	}
 	if len(tasks) != 1 {
 		t.Fatalf("idempotent replay created %d tasks", len(tasks))
+	}
+}
+
+func TestWorkRunAndPlanAutomationContracts(t *testing.T) {
+	db := automationTestDB(t)
+	client := provisionTestClient(t, db,
+		ScopeProjectsRead, ScopeTasksRead, ScopeSessionsRead, ScopeNotificationsRead,
+		ScopeWorkRunsRead, ScopeWorkRunsWrite, ScopePlansRead, ScopePlansWrite)
+	handler := automationContractHandler(t, db)
+	startBody := map[string]any{
+		"command_id": "work-start-1", "capability": application.CapabilityWorkRunsStart,
+		"target": map[string]any{},
+		"payload": map[string]any{
+			"title": "Acompanhar implementação", "description": "Core WorkRun",
+			"source": "helena", "expected_minutes": 50,
+			"execution_target": map[string]any{"type": "repository", "id": "openpoet"},
+		},
+	}
+	startedResponse := automationRequest(t, handler, client.Token, http.MethodPost, "/commands", "header-only-start", startBody)
+	if startedResponse.Code != http.StatusOK {
+		t.Fatalf("start status=%d body=%s", startedResponse.Code, startedResponse.Body.String())
+	}
+	_, run := decodeCommandResult[database.WorkRun](t, startedResponse)
+	if run.Status != database.WorkRunStatusRunning || run.Version != 1 || run.ExecutionTarget == nil || run.ExecutionTarget.ID != "openpoet" {
+		t.Fatalf("started run=%+v", run)
+	}
+	pauseBody := map[string]any{
+		"command_id": "work-pause-1", "capability": application.CapabilityWorkRunsPause,
+		"target": map[string]any{"type": "work_run", "id": run.ID}, "payload": map[string]any{},
+		"expected_version": run.Version,
+	}
+	pausedResponse := automationRequest(t, handler, client.Token, http.MethodPost, "/commands", "header-pause", pauseBody)
+	if pausedResponse.Code != http.StatusOK {
+		t.Fatalf("pause status=%d body=%s", pausedResponse.Code, pausedResponse.Body.String())
+	}
+	_, paused := decodeCommandResult[database.WorkRun](t, pausedResponse)
+	if paused.Status != database.WorkRunStatusPaused || paused.Version != 2 {
+		t.Fatalf("paused run=%+v", paused)
+	}
+	resumeBody := map[string]any{
+		"command_id": "work-resume-1", "capability": application.CapabilityWorkRunsResume,
+		"target": map[string]any{"type": "work_run", "id": run.ID}, "payload": map[string]any{},
+		"expected_version": paused.Version,
+	}
+	resumedResponse := automationRequest(t, handler, client.Token, http.MethodPost, "/commands", "header-resume", resumeBody)
+	if resumedResponse.Code != http.StatusOK {
+		t.Fatalf("resume status=%d body=%s", resumedResponse.Code, resumedResponse.Body.String())
+	}
+
+	planBody := map[string]any{
+		"command_id": "plan-upsert-1", "capability": application.CapabilityPlansUpsert,
+		"target": map[string]any{},
+		"payload": map[string]any{
+			"external_ref": "helena:daily:2026-07-09", "kind": "daily", "title": "Plano Helena",
+			"period_start": "2026-07-09", "period_end": "2026-07-09", "timezone": "America/Sao_Paulo",
+			"items": []map[string]any{{"external_ref": "helena:item:1", "title": "Integrar WorkRun", "sort_order": 10}},
+		},
+	}
+	planResponse := automationRequest(t, handler, client.Token, http.MethodPost, "/commands", "header-plan", planBody)
+	if planResponse.Code != http.StatusOK {
+		t.Fatalf("plan status=%d body=%s", planResponse.Code, planResponse.Body.String())
+	}
+	_, plan := decodeCommandResult[database.Plan](t, planResponse)
+	if plan.Version != 1 || len(plan.Items) != 1 || plan.Items[0].ExternalRef != "helena:item:1" {
+		t.Fatalf("plan=%+v", plan)
+	}
+
+	snapshot := automationRequest(t, handler, client.Token, http.MethodGet, "/snapshot", "", nil)
+	if snapshot.Code != http.StatusOK {
+		t.Fatalf("snapshot status=%d body=%s", snapshot.Code, snapshot.Body.String())
+	}
+	var state snapshotResponse
+	if err := json.Unmarshal(snapshot.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.ActiveWorkRuns) != 1 || state.ActiveWorkRuns[0].ID != run.ID || len(state.Plans) != 1 || len(state.Plans[0].Items) != 1 {
+		t.Fatalf("snapshot work_runs=%+v plans=%+v", state.ActiveWorkRuns, state.Plans)
 	}
 }
 
@@ -296,7 +376,7 @@ func TestCapabilitiesAndSnapshotContracts(t *testing.T) {
 	db := automationTestDB(t)
 	project := automationContractProject(t, db, "snapshot")
 	client := provisionTestClient(t, db,
-		ScopeProjectsRead, ScopeTasksRead, ScopeSessionsRead, ScopeNotificationsRead,
+		ScopeProjectsRead, ScopeTasksRead, ScopeSessionsRead, ScopeNotificationsRead, ScopeWorkRunsRead, ScopePlansRead,
 	)
 	handler := automationContractHandler(t, db)
 	task := &database.ProjectTask{ProjectID: project.ID, Title: "Snapshot task", Status: "todo", Priority: "medium"}
@@ -315,6 +395,15 @@ func TestCapabilitiesAndSnapshotContracts(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	workRunService := application.NewWorkRunService(db, application.WorkRunServiceOptions{
+		Now: func() time.Time { return time.Date(2026, 7, 9, 14, 58, 0, 0, time.UTC) },
+	})
+	activeRun, err := workRunService.Start(context.Background(), application.StartWorkRunCommand{
+		Title: "Snapshot active run", Source: "test", ExpectedMinutes: 10, IdempotencyKey: "snapshot-run",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	capabilities := automationRequest(t, handler, client.Token, http.MethodGet, "/capabilities", "", nil)
 	if capabilities.Code != http.StatusOK {
@@ -324,7 +413,7 @@ func TestCapabilitiesAndSnapshotContracts(t *testing.T) {
 	if err := json.Unmarshal(capabilities.Body.Bytes(), &listed); err != nil {
 		t.Fatal(err)
 	}
-	if listed.APIVersion != APIVersion || len(listed.Capabilities) != 14 {
+	if listed.APIVersion != APIVersion || len(listed.Capabilities) != 24 {
 		t.Fatalf("capabilities response=%+v", listed)
 	}
 	foundCreate := false
@@ -348,11 +437,14 @@ func TestCapabilitiesAndSnapshotContracts(t *testing.T) {
 	if err := json.Unmarshal(snapshot.Body.Bytes(), &state); err != nil {
 		t.Fatal(err)
 	}
-	if state.APIVersion != APIVersion || state.Cursor != "0" || !state.GeneratedAt.Equal(time.Date(2026, 7, 9, 15, 0, 0, 0, time.UTC)) {
+	if state.APIVersion != APIVersion || state.Cursor != "1" || !state.GeneratedAt.Equal(time.Date(2026, 7, 9, 15, 0, 0, 0, time.UTC)) {
 		t.Fatalf("snapshot metadata=%+v", state)
 	}
 	if len(state.Projects) != 1 || len(state.Tasks) != 1 || len(state.Sessions) != 1 || len(state.Notifications) != 1 {
 		t.Fatalf("snapshot counts projects=%d tasks=%d sessions=%d notifications=%d", len(state.Projects), len(state.Tasks), len(state.Sessions), len(state.Notifications))
+	}
+	if len(state.ActiveWorkRuns) != 1 || state.ActiveWorkRuns[0].ID != activeRun.ID || state.ActiveWorkRuns[0].ActiveSeconds != 120 {
+		t.Fatalf("snapshot active work runs=%+v", state.ActiveWorkRuns)
 	}
 }
 
@@ -414,6 +506,9 @@ func TestVersionedAutomationSchemasMatchRegistry(t *testing.T) {
 	}
 	registry, err := application.NewProjectTaskCapabilityRegistry(application.NewProjectTaskService(nil, nil))
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := application.RegisterWorkRunCapabilities(registry, application.NewWorkRunService(nil)); err != nil {
 		t.Fatal(err)
 	}
 	registered := registry.List()
