@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -164,6 +165,7 @@ type startSessionInput struct {
 	TaskID                     *int64
 	EnvVars                    map[string]string
 	DangerouslySkipPermissions bool
+	AutoStartTaskPrompt        bool
 }
 
 type startSessionError struct {
@@ -1551,6 +1553,7 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		TaskID                     *int64            `json:"task_id,omitempty"`
 		EnvVars                    map[string]string `json:"env_vars,omitempty"`
 		DangerouslySkipPermissions bool              `json:"dangerously_skip_permissions"`
+		AutoStartTaskPrompt        bool              `json:"auto_start_task_prompt"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
@@ -1562,6 +1565,7 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		TaskID:                     input.TaskID,
 		EnvVars:                    input.EnvVars,
 		DangerouslySkipPermissions: input.DangerouslySkipPermissions,
+		AutoStartTaskPrompt:        input.AutoStartTaskPrompt,
 	})
 	if err != nil {
 		if startErr, ok := err.(*startSessionError); ok {
@@ -1688,8 +1692,10 @@ func (a *API) startManagedSession(ctx context.Context, input startSessionInput) 
 			})
 		}
 
-		// Broadcast task-loaded notification so the frontend shows a decision dialog
-		if a.hookHandler != nil {
+		if input.AutoStartTaskPrompt {
+			a.autoStartTaskSession(sess.ID)
+		} else if a.hookHandler != nil {
+			// Broadcast task-loaded notification so the frontend shows a decision dialog.
 			a.hookHandler.SetTaskNotification(sess.ID, linkedTask.ID, linkedTask.Title, linkedTask.Description)
 		}
 	} else {
@@ -1700,6 +1706,29 @@ func (a *API) startManagedSession(ctx context.Context, input startSessionInput) 
 	}
 
 	return sess, nil
+}
+
+const defaultTaskStartPrompt = "Start working on the assigned task."
+
+func (a *API) autoStartTaskSession(sessionID string) {
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		if err := a.submitSessionLine(sessionID, defaultTaskStartPrompt); err != nil {
+			log.Printf("[Session] failed to auto-submit task start prompt for %s: %v", sessionID, err)
+		}
+	}()
+}
+
+func (a *API) submitSessionLine(sessionID, text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	if err := a.sessionMgr.WriteToSession(sessionID, []byte(text)); err != nil {
+		return err
+	}
+	time.Sleep(150 * time.Millisecond)
+	return a.sessionMgr.WriteToSession(sessionID, []byte("\n"))
 }
 
 func (a *API) GetSession(w http.ResponseWriter, r *http.Request) {
@@ -2082,9 +2111,12 @@ func (a *API) stopManagedSession(ctx context.Context, id string) error {
 		a.hookHandler.MarkUserStopped(id)
 	}
 
-	// Try to stop the running session. It may no longer be in memory, and the UI
-	// has historically treated that as okay as long as DB state is updated.
-	_ = a.sessionMgr.StopSession(ctx, id)
+	// It may no longer be in memory, and the UI has historically treated that
+	// as okay as long as DB state is updated. Other stop errors mean the process
+	// may still be alive and must not be reported as success.
+	if err := a.sessionMgr.StopSession(ctx, id); err != nil && !errors.Is(err, session.ErrSessionNotRunning) {
+		return err
+	}
 
 	if err := a.db.EndSession(ctx, id, "stopped"); err != nil {
 		return err
