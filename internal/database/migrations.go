@@ -65,6 +65,7 @@ var migrations = []Migration{
 	{Version: 47, Description: "sessions: persist runtime model, effort, and harness", Up: migrateV47},
 	{Version: 48, Description: "automation: add scoped API clients", Up: migrateV48},
 	{Version: 49, Description: "automation: add idempotency command ledger", Up: migrateV49},
+	{Version: 50, Description: "automation: add transactional event outbox and consumer cursors", Up: migrateV50},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1280,6 +1281,43 @@ func migrateV49(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV49 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV50(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS event_outbox (
+			sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_id TEXT NOT NULL UNIQUE,
+			event_type TEXT NOT NULL,
+			aggregate_type TEXT NOT NULL,
+			aggregate_id TEXT NOT NULL,
+			actor TEXT NOT NULL,
+			correlation_id TEXT NOT NULL DEFAULT '',
+			schema_version INTEGER NOT NULL DEFAULT 1 CHECK(schema_version > 0),
+			payload_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(payload_json)),
+			occurred_at TIMESTAMP NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS event_outbox_consumers (
+			automation_client_id TEXT NOT NULL REFERENCES automation_clients(id) ON DELETE CASCADE,
+			consumer TEXT NOT NULL,
+			cursor_sequence INTEGER NOT NULL DEFAULT 0 CHECK(cursor_sequence >= 0),
+			acked_at TIMESTAMP,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(automation_client_id, consumer)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_outbox_event_type_sequence ON event_outbox(event_type, sequence)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_outbox_aggregate_sequence ON event_outbox(aggregate_type, aggregate_id, sequence)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_outbox_occurred_sequence ON event_outbox(occurred_at, sequence)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_outbox_consumers_cursor ON event_outbox_consumers(cursor_sequence)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV50 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

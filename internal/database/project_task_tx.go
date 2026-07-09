@@ -35,6 +35,10 @@ func (t *ProjectTaskTx) ProjectExists(ctx context.Context, projectID int64) (boo
 	return exists, err
 }
 
+func (t *ProjectTaskTx) AppendEventOutbox(ctx context.Context, input EventOutboxAppend) (*EventOutboxEvent, error) {
+	return AppendEventOutbox(ctx, t.tx, input)
+}
+
 func (t *ProjectTaskTx) GetTask(ctx context.Context, taskID int64) (*ProjectTask, error) {
 	var task ProjectTask
 	if err := t.tx.GetContext(ctx, &task, "SELECT * FROM project_tasks WHERE id = ?", taskID); err != nil {
