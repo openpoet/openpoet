@@ -1073,17 +1073,23 @@ class StructuredViewManager {
         const newMsg = event.message;
         if (!newMsg) return;
 
-        // Merge content blocks: unique by type+tool_id
-        const seenKeys = new Map(); // key → index in merged.content_blocks
+        // Merge content blocks by stable identity. Claude can rewrite the
+        // same message_id with richer content, and a message may contain
+        // multiple tool_use/text blocks, so type alone is not enough.
+        const seenKeys = new Map(); // key -> index in merged.content_blocks
+        const existingOrdinals = new Map();
         slot.merged.content_blocks.forEach((b, i) => {
-            const key = b.type === 'tool_use' ? `tool_use:${b.tool_id}` : b.type;
-            seenKeys.set(key, i);
+            seenKeys.set(this._contentBlockMergeKey(b, existingOrdinals), i);
         });
+        const newOrdinals = new Map();
         for (const b of (newMsg.content_blocks || [])) {
-            const key = b.type === 'tool_use' ? `tool_use:${b.tool_id}` : b.type;
+            const key = this._contentBlockMergeKey(b, newOrdinals);
             if (seenKeys.has(key)) {
-                // Replace with newer version (text might have grown)
-                slot.merged.content_blocks[seenKeys.get(key)] = { ...b };
+                const idx = seenKeys.get(key);
+                if (this._shouldReplaceContentBlock(slot.merged.content_blocks[idx], b)) {
+                    // Replace with newer version (text might have grown)
+                    slot.merged.content_blocks[idx] = { ...b };
+                }
             } else {
                 seenKeys.set(key, slot.merged.content_blocks.length);
                 slot.merged.content_blocks.push({ ...b });
@@ -1105,6 +1111,33 @@ class StructuredViewManager {
             tokensEl.textContent = `in:${this._formatNum(u.input_tokens)} out:${this._formatNum(u.output_tokens)}`;
         }
         this._setStreamingState(slot.cardEl, !slot.merged.stop_reason);
+    }
+
+    _contentBlockMergeKey(block, ordinals) {
+        if ((block.type === 'tool_use' || block.type === 'tool_result') && block.tool_id) {
+            return `${block.type}:${block.tool_id}`;
+        }
+        const base = block.type || 'unknown';
+        const idx = ordinals.get(base) || 0;
+        ordinals.set(base, idx + 1);
+        return `${base}:${idx}`;
+    }
+
+    _shouldReplaceContentBlock(existing, incoming) {
+        if (!this._contentBlockHasValue(incoming) && this._contentBlockHasValue(existing)) {
+            return false;
+        }
+        return true;
+    }
+
+    _contentBlockHasValue(block) {
+        return !!(
+            block?.text ||
+            block?.tool_name ||
+            block?.tool_id ||
+            block?.tool_input ||
+            block?.content
+        );
     }
 
     _setStreamingState(cardEl, streaming) {

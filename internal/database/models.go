@@ -154,6 +154,29 @@ type MCPServer struct {
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
 }
 
+type MCPHTTPSession struct {
+	ID                string       `db:"id" json:"id"`
+	OpenPoetSessionID string       `db:"openpoet_session_id" json:"openpoet_session_id"`
+	Context           string       `db:"context" json:"context"`
+	Status            string       `db:"status" json:"status"`
+	InitializedAt     time.Time    `db:"initialized_at" json:"initialized_at"`
+	LastUsedAt        time.Time    `db:"last_used_at" json:"last_used_at"`
+	ClosedAt          sql.NullTime `db:"closed_at" json:"closed_at,omitempty"`
+	RequestCount      int          `db:"request_count" json:"request_count"`
+	LastMethod        string       `db:"last_method" json:"last_method"`
+}
+
+type MCPHTTPSessionEvent struct {
+	ID                int64     `db:"id" json:"id"`
+	MCPSessionID      string    `db:"mcp_session_id" json:"mcp_session_id"`
+	OpenPoetSessionID string    `db:"openpoet_session_id" json:"openpoet_session_id"`
+	Method            string    `db:"method" json:"method"`
+	EventType         string    `db:"event_type" json:"event_type"`
+	Status            string    `db:"status" json:"status"`
+	Error             string    `db:"error" json:"error"`
+	CreatedAt         time.Time `db:"created_at" json:"created_at"`
+}
+
 type ProjectMCPServer struct {
 	ID        int64     `db:"id" json:"id"`
 	ProjectID int64     `db:"project_id" json:"project_id"`

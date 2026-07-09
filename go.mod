@@ -4,6 +4,7 @@ go 1.24
 
 require (
 	github.com/SherClockHolmes/webpush-go v1.3.0
+	github.com/UserExistsError/conpty v0.1.4
 	github.com/coder/websocket v1.8.12
 	github.com/creack/pty v1.1.21
 	github.com/go-chi/chi/v5 v5.1.0
@@ -11,14 +12,13 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/pkg/sftp v1.13.6
-	github.com/sashabaranov/go-openai v1.29.2
-	github.com/severity1/claude-agent-sdk-go v0.6.12
+	github.com/sashabaranov/go-openai v1.41.2
+	github.com/severity1/claude-agent-sdk-go v0.6.22
 	golang.org/x/crypto v0.28.0
 	modernc.org/sqlite v1.33.1
 )
 
 require (
-	github.com/UserExistsError/conpty v0.1.4 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/golang-jwt/jwt v3.2.2+incompatible // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
