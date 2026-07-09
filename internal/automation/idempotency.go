@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -82,6 +83,22 @@ func (i *Idempotency) Middleware(next http.Handler) http.Handler {
 		}
 
 		key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+		bodyKey, bodyKeyErr := requestBodyIdempotencyKey(r)
+		if bodyKeyErr != nil && key == "" {
+			var tooLarge *http.MaxBytesError
+			if errors.As(bodyKeyErr, &tooLarge) {
+				writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "automation request body is too large", false)
+				return
+			}
+			writeError(w, http.StatusBadRequest, "request_body_invalid", "automation request body could not be decoded", false)
+			return
+		}
+		if key == "" {
+			key = strings.TrimSpace(bodyKey)
+		} else if bodyKey != "" && bodyKey != key {
+			writeError(w, http.StatusBadRequest, "idempotency_key_conflict", "Idempotency-Key does not match idempotency_key in the command envelope", false)
+			return
+		}
 		if key == "" {
 			writeError(w, http.StatusBadRequest, "idempotency_key_required", "Idempotency-Key is required for automation writes", false)
 			return
@@ -159,6 +176,27 @@ func (i *Idempotency) Middleware(next http.Handler) http.Handler {
 		w.WriteHeader(status)
 		_, _ = w.Write(capture.body.Bytes())
 	})
+}
+
+func requestBodyIdempotencyKey(r *http.Request) (string, error) {
+	if r.Body == nil {
+		return "", nil
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	if len(bytes.TrimSpace(body)) == 0 {
+		return "", io.EOF
+	}
+	var envelope struct {
+		IdempotencyKey string `json:"idempotency_key"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(envelope.IdempotencyKey), nil
 }
 
 func (i *Idempotency) replay(w http.ResponseWriter, command *database.AutomationCommand) {
