@@ -29,6 +29,19 @@ const (
 )
 
 const (
+	CapabilityWorkRunsList     CapabilityName = "work_runs.list"
+	CapabilityWorkRunsGet      CapabilityName = "work_runs.get"
+	CapabilityWorkRunsStart    CapabilityName = "work_runs.start"
+	CapabilityWorkRunsPause    CapabilityName = "work_runs.pause"
+	CapabilityWorkRunsResume   CapabilityName = "work_runs.resume"
+	CapabilityWorkRunsComplete CapabilityName = "work_runs.complete"
+	CapabilityWorkRunsCancel   CapabilityName = "work_runs.cancel"
+	CapabilityPlansUpsert      CapabilityName = "plans.upsert"
+	CapabilityPlansList        CapabilityName = "plans.list"
+	CapabilityPlansItems       CapabilityName = "plans.items"
+)
+
+const (
 	CapabilityTasksList                CapabilityName = "tasks.list"
 	CapabilityTasksGet                 CapabilityName = "tasks.get"
 	CapabilityTasksCreate              CapabilityName = "tasks.create"
@@ -43,6 +56,19 @@ const (
 	CapabilityTasksLinkSession         CapabilityName = "tasks.link_session"
 	CapabilityTasksUnlinkSession       CapabilityName = "tasks.unlink_session"
 	CapabilityTasksAddComment          CapabilityName = "tasks.add_comment"
+)
+
+const (
+	CapabilityHandlerWorkRunsList     CapabilityHandler = "work_runs.list"
+	CapabilityHandlerWorkRunsGet      CapabilityHandler = "work_runs.get"
+	CapabilityHandlerWorkRunsStart    CapabilityHandler = "work_runs.start"
+	CapabilityHandlerWorkRunsPause    CapabilityHandler = "work_runs.pause"
+	CapabilityHandlerWorkRunsResume   CapabilityHandler = "work_runs.resume"
+	CapabilityHandlerWorkRunsComplete CapabilityHandler = "work_runs.complete"
+	CapabilityHandlerWorkRunsCancel   CapabilityHandler = "work_runs.cancel"
+	CapabilityHandlerPlansUpsert      CapabilityHandler = "plans.upsert"
+	CapabilityHandlerPlansList        CapabilityHandler = "plans.list"
+	CapabilityHandlerPlansItems       CapabilityHandler = "plans.items"
 )
 
 const (
@@ -63,12 +89,40 @@ const (
 )
 
 const (
-	CapabilityScopeTasksRead  CapabilityScope = "tasks:read"
-	CapabilityScopeTasksWrite CapabilityScope = "tasks:write"
+	CapabilityScopeTasksRead     CapabilityScope = "tasks:read"
+	CapabilityScopeTasksWrite    CapabilityScope = "tasks:write"
+	CapabilityScopeWorkRunsRead  CapabilityScope = "work_runs:read"
+	CapabilityScopeWorkRunsWrite CapabilityScope = "work_runs:write"
+	CapabilityScopePlansRead     CapabilityScope = "plans:read"
+	CapabilityScopePlansWrite    CapabilityScope = "plans:write"
 )
 
 type CapabilityService interface {
 	CapabilityServiceName() CapabilityServiceName
+}
+
+func RegisterWorkRunCapabilities(registry *CapabilityRegistry, service *WorkRunService) error {
+	if registry == nil || service == nil {
+		return errors.New("capability registry and work run service are required")
+	}
+	definitions := []Capability{
+		{Name: CapabilityWorkRunsList, Scope: CapabilityScopeWorkRunsRead, Risk: CapabilityRiskRead, Approval: ApprovalNone, Handler: CapabilityHandlerWorkRunsList, Service: service},
+		{Name: CapabilityWorkRunsGet, Scope: CapabilityScopeWorkRunsRead, Risk: CapabilityRiskRead, Approval: ApprovalNone, Handler: CapabilityHandlerWorkRunsGet, Service: service},
+		{Name: CapabilityWorkRunsStart, Scope: CapabilityScopeWorkRunsWrite, Risk: CapabilityRiskWrite, Approval: ApprovalByPolicy, Handler: CapabilityHandlerWorkRunsStart, Service: service},
+		{Name: CapabilityWorkRunsPause, Scope: CapabilityScopeWorkRunsWrite, Risk: CapabilityRiskWrite, Approval: ApprovalByPolicy, Handler: CapabilityHandlerWorkRunsPause, Service: service},
+		{Name: CapabilityWorkRunsResume, Scope: CapabilityScopeWorkRunsWrite, Risk: CapabilityRiskWrite, Approval: ApprovalByPolicy, Handler: CapabilityHandlerWorkRunsResume, Service: service},
+		{Name: CapabilityWorkRunsComplete, Scope: CapabilityScopeWorkRunsWrite, Risk: CapabilityRiskWrite, Approval: ApprovalByPolicy, Handler: CapabilityHandlerWorkRunsComplete, Service: service},
+		{Name: CapabilityWorkRunsCancel, Scope: CapabilityScopeWorkRunsWrite, Risk: CapabilityRiskDestructive, Approval: ApprovalExplicit, Handler: CapabilityHandlerWorkRunsCancel, Service: service},
+		{Name: CapabilityPlansUpsert, Scope: CapabilityScopePlansWrite, Risk: CapabilityRiskWrite, Approval: ApprovalByPolicy, Handler: CapabilityHandlerPlansUpsert, Service: service},
+		{Name: CapabilityPlansList, Scope: CapabilityScopePlansRead, Risk: CapabilityRiskRead, Approval: ApprovalNone, Handler: CapabilityHandlerPlansList, Service: service},
+		{Name: CapabilityPlansItems, Scope: CapabilityScopePlansRead, Risk: CapabilityRiskRead, Approval: ApprovalNone, Handler: CapabilityHandlerPlansItems, Service: service},
+	}
+	for _, definition := range definitions {
+		if err := registry.Register(definition); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type Capability struct {

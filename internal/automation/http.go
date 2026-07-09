@@ -60,6 +60,8 @@ func NewHandler(store Store, dependencies ...Dependencies) http.Handler {
 		ScopeTasksRead,
 		ScopeSessionsRead,
 		ScopeNotificationsRead,
+		ScopeWorkRunsRead,
+		ScopePlansRead,
 	)).Get("/snapshot", api.getSnapshot)
 	return router
 }

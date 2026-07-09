@@ -37,7 +37,17 @@
         "tasks.reject_verification",
         "tasks.link_session",
         "tasks.unlink_session",
-        "tasks.add_comment"
+        "tasks.add_comment",
+        "work_runs.list",
+        "work_runs.get",
+        "work_runs.start",
+        "work_runs.pause",
+        "work_runs.resume",
+        "work_runs.complete",
+        "work_runs.cancel",
+        "plans.upsert",
+        "plans.list",
+        "plans.items"
       ]
     },
     "target": {
@@ -48,7 +58,7 @@
     },
     "expected_version": {
       "type": ["integer", "null"],
-      "description": "Reserved for optimistic concurrency. Project task commands currently return expected_version_unsupported when it is set."
+      "description": "Optimistic concurrency version for work-run transitions and plan upserts. Other capabilities return expected_version_unsupported."
     },
     "reason": {
       "type": "string"
@@ -74,11 +84,11 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["project", "task", "project_task", "session"]
+          "enum": ["project", "task", "project_task", "session", "work_run", "plan"]
         },
         "kind": {
           "type": "string",
-          "enum": ["project", "task", "project_task", "session"]
+          "enum": ["project", "task", "project_task", "session", "work_run", "plan"]
         },
         "id": {
           "type": ["integer", "string"]

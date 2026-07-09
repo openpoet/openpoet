@@ -4,17 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 )
 
 const MaxAutomationSnapshotNotifications = 500
 
 type AutomationSnapshot struct {
-	Cursor        int64
-	Projects      []Project
-	Tasks         []ProjectTask
-	TaskSummary   map[string]int
-	Sessions      []Session
-	Notifications []Notification
+	Cursor         int64
+	GeneratedAt    time.Time
+	Projects       []Project
+	Tasks          []ProjectTask
+	TaskSummary    map[string]int
+	Sessions       []Session
+	Notifications  []Notification
+	ActiveWorkRuns []WorkRun
+	Plans          []Plan
 }
 
 // ReadEventOutboxPage returns the page and outbox high-water mark from one
@@ -74,7 +78,7 @@ func (d *DB) ReadAutomationSnapshot(ctx context.Context, notificationLimit int) 
 	}
 	defer tx.Rollback()
 
-	snapshot := &AutomationSnapshot{TaskSummary: make(map[string]int)}
+	snapshot := &AutomationSnapshot{TaskSummary: make(map[string]int), GeneratedAt: time.Now().UTC()}
 	if err := tx.GetContext(ctx, &snapshot.Cursor, eventOutboxSnapshotQuery); err != nil {
 		return nil, err
 	}
@@ -121,6 +125,35 @@ func (d *DB) ReadAutomationSnapshot(ctx context.Context, notificationLimit int) 
 		"SELECT * FROM notifications ORDER BY created_at DESC LIMIT ?", notificationLimit); err != nil {
 		return nil, err
 	}
+	if err := tx.SelectContext(ctx, &snapshot.ActiveWorkRuns, `
+		SELECT * FROM work_runs
+		WHERE status IN ('running', 'paused', 'indeterminate')
+		ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END, started_at DESC`); err != nil {
+		return nil, err
+	}
+	for index := range snapshot.ActiveWorkRuns {
+		snapshot.ActiveWorkRuns[index].Hydrate(snapshot.GeneratedAt)
+	}
+	if err := tx.SelectContext(ctx, &snapshot.Plans, `
+		SELECT * FROM plans
+		WHERE (period_end >= date('now', '-7 days') AND period_start <= date('now', '+7 days'))
+			OR id IN (
+				SELECT item.plan_id FROM plan_items item
+				JOIN work_runs run ON run.plan_item_ref = item.external_ref
+				WHERE run.status IN ('running', 'paused', 'indeterminate')
+			)
+		ORDER BY period_start DESC, kind, external_ref LIMIT 50`); err != nil {
+		return nil, err
+	}
+	for index := range snapshot.Plans {
+		if err := tx.SelectContext(ctx, &snapshot.Plans[index].Items,
+			"SELECT * FROM plan_items WHERE plan_id = ? ORDER BY sort_order, created_at", snapshot.Plans[index].ID); err != nil {
+			return nil, err
+		}
+		if snapshot.Plans[index].Items == nil {
+			snapshot.Plans[index].Items = []PlanItem{}
+		}
+	}
 	if snapshot.Projects == nil {
 		snapshot.Projects = []Project{}
 	}
@@ -132,6 +165,12 @@ func (d *DB) ReadAutomationSnapshot(ctx context.Context, notificationLimit int) 
 	}
 	if snapshot.Notifications == nil {
 		snapshot.Notifications = []Notification{}
+	}
+	if snapshot.ActiveWorkRuns == nil {
+		snapshot.ActiveWorkRuns = []WorkRun{}
+	}
+	if snapshot.Plans == nil {
+		snapshot.Plans = []Plan{}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err

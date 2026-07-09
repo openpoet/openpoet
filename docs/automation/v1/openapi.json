@@ -407,7 +407,7 @@
       },
       "SnapshotResponse": {
         "type": "object",
-        "required": ["api_version", "cursor", "generated_at", "projects", "tasks", "task_summary", "sessions", "notifications"],
+        "required": ["api_version", "cursor", "generated_at", "projects", "tasks", "task_summary", "sessions", "notifications", "active_work_runs", "plans"],
         "properties": {
           "api_version": {"const": "v1"},
           "cursor": {"type": "string", "pattern": "^[0-9]+$"},
@@ -416,7 +416,9 @@
           "tasks": {"type": "array", "items": {"type": "object"}},
           "task_summary": {"type": "object", "additionalProperties": {"type": "integer"}},
           "sessions": {"type": "array", "items": {"type": "object"}},
-          "notifications": {"type": "array", "items": {"type": "object"}}
+          "notifications": {"type": "array", "items": {"type": "object"}},
+          "active_work_runs": {"type": "array", "items": {"type": "object"}},
+          "plans": {"type": "array", "items": {"type": "object"}}
         }
       }
     }
