@@ -19,6 +19,63 @@ func requireCodexTranscriptStatus(t *testing.T, r *CodexRunner, title, text stri
 	t.Fatalf("missing transcript status title=%q text containing %q in %#v", title, text, r.transcript)
 }
 
+func TestCodexRunnerBareEscapeInterruptsActiveTurn(t *testing.T) {
+	var out strings.Builder
+	r := &CodexRunner{
+		outputHandler:    func(b []byte) { out.Write(b) },
+		activeTurnID:     "turn-1",
+		interruptedTurns: make(map[string]bool),
+	}
+
+	if _, err := r.Write([]byte("\x1b")); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		r.mu.Lock()
+		activeTurnID := r.activeTurnID
+		interrupted := r.interruptedTurns["turn-1"]
+		r.mu.Unlock()
+		if activeTurnID == "" && interrupted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ESC did not interrupt turn: activeTurnID=%q interrupted=%v", activeTurnID, interrupted)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(out.String(), "^ESC") {
+		t.Fatalf("ESC output = %q, want marker", out.String())
+	}
+}
+
+func TestCodexRunnerConsumesTerminalEscapeSequencesWithoutInterrupting(t *testing.T) {
+	var out strings.Builder
+	r := &CodexRunner{
+		outputHandler:    func(b []byte) { out.Write(b) },
+		activeTurnID:     "turn-1",
+		interruptedTurns: make(map[string]bool),
+	}
+
+	if _, err := r.Write([]byte("\x1b[A")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	r.mu.Lock()
+	activeTurnID := r.activeTurnID
+	interrupted := r.interruptedTurns["turn-1"]
+	buffer := string(r.inputBuffer)
+	r.mu.Unlock()
+	if activeTurnID != "turn-1" || interrupted {
+		t.Fatalf("CSI sequence interrupted turn: activeTurnID=%q interrupted=%v", activeTurnID, interrupted)
+	}
+	if buffer != "" {
+		t.Fatalf("CSI sequence leaked into input buffer: %q", buffer)
+	}
+}
+
 func TestCodexApprovalDecisionFromHookResponse(t *testing.T) {
 	tests := []struct {
 		name string

@@ -21,6 +21,7 @@ import (
 	"openpoet/internal/files"
 	"openpoet/internal/llm"
 	"openpoet/internal/mcp"
+	"openpoet/internal/sessionmeta"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -2997,7 +2998,9 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			if s.TaskID.Valid {
 				task = fmt.Sprintf("%d", s.TaskID.Int64)
 			}
-			sb.WriteString(fmt.Sprintf("- %s | %s | project: %d | status: %s | task: %s\n", s.ID, s.Name, s.ProjectID, s.Status, task))
+			meta := h.sessionMetadataForTool(ctx, &s)
+			sb.WriteString(fmt.Sprintf("- %s | %s | project: %d | status: %s | task: %s | model: %s | effort: %s | harness: %s\n",
+				s.ID, s.Name, s.ProjectID, s.Status, task, meta.Model, meta.Effort, meta.Harness))
 		}
 		if sb.Len() == 0 {
 			return "No sessions matching filter.", nil
@@ -5119,12 +5122,32 @@ func (h *AIHandler) getAllowedSession(ctx context.Context, conversationID int64,
 func (h *AIHandler) formatSessionForTool(ctx context.Context, sess *database.Session) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Session: %s\nName: %s\nProject ID: %d\nStatus: %s\nBackend: %s\n", sess.ID, sess.Name, sess.ProjectID, sess.Status, sess.Backend))
+	meta := h.sessionMetadataForTool(ctx, sess)
+	sb.WriteString(fmt.Sprintf("Model: %s\nEffort: %s\nHarness: %s\n", meta.Model, meta.Effort, meta.Harness))
+	if meta.HarnessDetails != "" {
+		sb.WriteString(fmt.Sprintf("Harness details: %s\n", meta.HarnessDetails))
+	}
 	if task, err := h.api.db.GetTaskForSession(ctx, sess.ID); err == nil && task != nil {
 		sb.WriteString(fmt.Sprintf("Linked Task: #%d %s (%s, %s)\n", task.ID, task.Title, task.Status, task.Priority))
 	} else {
 		sb.WriteString("Linked Task: none\n")
 	}
 	return sb.String()
+}
+
+func (h *AIHandler) sessionMetadataForTool(ctx context.Context, sess *database.Session) sessionmeta.Metadata {
+	if sess == nil {
+		return sessionmeta.FromProjectConfig("", "")
+	}
+	project, err := h.api.db.GetProject(ctx, sess.ProjectID)
+	if err != nil || project == nil {
+		return sessionmeta.FromProjectConfig(sess.Backend, "")
+	}
+	backend := sess.Backend
+	if strings.TrimSpace(backend) == "" {
+		backend = project.Backend
+	}
+	return sessionmeta.FromProjectConfig(backend, project.BackendConfig)
 }
 
 func (h *AIHandler) linkSessionTaskForTool(ctx context.Context, sess *database.Session, input map[string]interface{}) (*database.ProjectTask, error) {
