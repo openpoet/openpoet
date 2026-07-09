@@ -1469,76 +1469,9 @@ func (d *DB) UpdateTaskStatus(ctx context.Context, id int64, status string) erro
 	}
 	defer tx.Rollback()
 
-	now := time.Now()
-
-	// Get task info
-	var task struct {
-		ProjectID int64         `db:"project_id"`
-		ParentID  sql.NullInt64 `db:"parent_id"`
-		OldStatus string        `db:"status"`
-	}
-	if err := tx.GetContext(ctx, &task, "SELECT project_id, parent_id, status FROM project_tasks WHERE id=?", id); err != nil {
+	if err := changeTaskStatusInTx(ctx, tx, id, status); err != nil {
 		return err
 	}
-
-	if status == "done" {
-		// Done tasks lose both sort_orders
-		_, err = tx.ExecContext(ctx, "UPDATE project_tasks SET status=?, sort_order=0, global_sort_order=0, updated_at=? WHERE id=?", status, now, id)
-	} else if task.OldStatus == "done" {
-		// Undoing: assign next sort_order among siblings
-		var maxOrder sql.NullInt64
-		if task.ParentID.Valid {
-			tx.GetContext(ctx, &maxOrder, "SELECT MAX(sort_order) FROM project_tasks WHERE project_id=? AND parent_id=? AND status != 'done'", task.ProjectID, task.ParentID.Int64)
-		} else {
-			tx.GetContext(ctx, &maxOrder, "SELECT MAX(sort_order) FROM project_tasks WHERE project_id=? AND parent_id IS NULL AND status != 'done'", task.ProjectID)
-		}
-		newOrder := 1
-		if maxOrder.Valid {
-			newOrder = int(maxOrder.Int64) + 1
-		}
-		// Assign next global_sort_order across all tasks
-		var maxGlobal sql.NullInt64
-		tx.GetContext(ctx, &maxGlobal, "SELECT MAX(global_sort_order) FROM project_tasks WHERE status != 'done'")
-		newGlobal := 1
-		if maxGlobal.Valid {
-			newGlobal = int(maxGlobal.Int64) + 1
-		}
-		_, err = tx.ExecContext(ctx, "UPDATE project_tasks SET status=?, sort_order=?, global_sort_order=?, updated_at=? WHERE id=?", status, newOrder, newGlobal, now, id)
-	} else {
-		_, err = tx.ExecContext(ctx, "UPDATE project_tasks SET status=?, updated_at=? WHERE id=?", status, now, id)
-	}
-
-	if err != nil {
-		return err
-	}
-
-	// Renumber ALL active task groups in the project to ensure sequential sort_order
-	if status == "done" || task.OldStatus == "done" {
-		// 1. Renumber top-level active tasks
-		var topLevel []struct {
-			ID int64 `db:"id"`
-		}
-		tx.SelectContext(ctx, &topLevel, "SELECT id FROM project_tasks WHERE project_id=? AND parent_id IS NULL AND status != 'done' ORDER BY sort_order, created_at", task.ProjectID)
-		for i, t := range topLevel {
-			tx.ExecContext(ctx, "UPDATE project_tasks SET sort_order=? WHERE id=?", i+1, t.ID)
-		}
-
-		// 2. Renumber children of each parent that has subtasks
-		var parents []struct {
-			ID int64 `db:"id"`
-		}
-		tx.SelectContext(ctx, &parents, "SELECT DISTINCT parent_id AS id FROM project_tasks WHERE project_id=? AND parent_id IS NOT NULL", task.ProjectID)
-		for _, p := range parents {
-			var children []struct {
-				ID int64 `db:"id"`
-			}
-			tx.SelectContext(ctx, &children, "SELECT id FROM project_tasks WHERE project_id=? AND parent_id=? AND status != 'done' ORDER BY sort_order, created_at", task.ProjectID, p.ID)
-			for i, c := range children {
-				tx.ExecContext(ctx, "UPDATE project_tasks SET sort_order=? WHERE id=?", i+1, c.ID)
-			}
-		}
-	}
-
 	return tx.Commit()
 }
 
