@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -157,6 +158,51 @@ type API struct {
 	tunnelDeps   *TunnelDeps
 	pairingMgr   *tunnel.PairingManager
 }
+
+type startSessionInput struct {
+	ProjectID                  int64
+	TaskID                     *int64
+	EnvVars                    map[string]string
+	DangerouslySkipPermissions bool
+}
+
+type startSessionError struct {
+	status  int
+	message string
+}
+
+func (e *startSessionError) Error() string {
+	return e.message
+}
+
+func newStartSessionError(status int, message string) error {
+	return &startSessionError{status: status, message: message}
+}
+
+type sessionHistoryRequest struct {
+	Mode          string
+	Query         string
+	Regex         bool
+	CaseSensitive bool
+	Lines         int
+	Offset        int
+	Limit         int
+	ContextLines  int
+	MaxChars      int
+}
+
+type sessionHistoryResponse struct {
+	SessionID     string `json:"session_id"`
+	Source        string `json:"source"`
+	Mode          string `json:"mode"`
+	TotalLines    int    `json:"total_lines"`
+	ReturnedLines int    `json:"returned_lines"`
+	Offset        int    `json:"offset"`
+	Truncated     bool   `json:"truncated"`
+	Content       string `json:"content"`
+}
+
+var sessionHistoryANSIRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 
 // DefaultRelayURL is the pre-configured relay URL injected at build time.
 var DefaultRelayURL string
@@ -1511,25 +1557,42 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	project, err := a.db.GetProject(r.Context(), input.ProjectID)
+	sess, err := a.startManagedSession(r.Context(), startSessionInput{
+		ProjectID:                  input.ProjectID,
+		TaskID:                     input.TaskID,
+		EnvVars:                    input.EnvVars,
+		DangerouslySkipPermissions: input.DangerouslySkipPermissions,
+	})
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
+		if startErr, ok := err.(*startSessionError); ok {
+			respondError(w, startErr.status, startErr.message)
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	respondJSON(w, http.StatusCreated, sess)
+}
+
+func (a *API) startManagedSession(ctx context.Context, input startSessionInput) (*database.Session, error) {
+	project, err := a.db.GetProject(ctx, input.ProjectID)
+	if err != nil {
+		return nil, newStartSessionError(http.StatusNotFound, "Project not found")
 	}
 
 	// Validate task if provided
 	var linkedTask *database.ProjectTask
 	if input.TaskID != nil && *input.TaskID > 0 {
-		linkedTask, err = a.db.GetTask(r.Context(), *input.TaskID)
+		linkedTask, err = a.db.GetTask(ctx, *input.TaskID)
 		if err != nil || linkedTask.ProjectID != project.ID {
-			respondError(w, http.StatusBadRequest, "Task not found or belongs to different project")
-			return
+			return nil, newStartSessionError(http.StatusBadRequest, "Task not found or belongs to different project")
 		}
 	}
 
 	// Auto-sync config (hooks, skills, mcp) to project before starting session
 	if a.configSync != nil {
-		if syncErr := a.configSync.SyncToProject(r.Context(), project); syncErr != nil {
+		if syncErr := a.configSync.SyncToProject(ctx, project); syncErr != nil {
 			log.Printf("Warning: config sync failed before session start: %v", syncErr)
 		}
 	}
@@ -1596,28 +1659,27 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 
 	var sess *database.Session
 	if project.Type == "local" {
-		sess, err = a.sessionMgr.StartSession(r.Context(), project, input.EnvVars)
+		sess, err = a.sessionMgr.StartSession(ctx, project, input.EnvVars)
 	} else {
-		sess, err = a.sessionMgr.StartRemoteSession(r.Context(), project, input.EnvVars, a.encryptor.Decrypt)
+		sess, err = a.sessionMgr.StartRemoteSession(ctx, project, input.EnvVars, a.encryptor.Decrypt)
 	}
 
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, err
 	}
 
 	// Auto-generate session name
 	if linkedTask != nil {
 		// Task-linked session: use task title
 		autoName := "Task: " + linkedTask.Title
-		a.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", autoName, sess.ID)
+		a.db.ExecContext(ctx, "UPDATE sessions SET name = ? WHERE id = ?", autoName, sess.ID)
 		sess.Name = autoName
 
-		a.db.LinkSessionToTask(r.Context(), sess.ID, linkedTask.ID)
+		a.db.LinkSessionToTask(ctx, sess.ID, linkedTask.ID)
 
 		// Auto-set task status to in_progress if it's currently todo
 		if linkedTask.Status == "todo" {
-			a.db.UpdateTaskStatus(r.Context(), linkedTask.ID, "in_progress")
+			a.db.UpdateTaskStatus(ctx, linkedTask.ID, "in_progress")
 			linkedTask.Status = "in_progress"
 			a.hub.BroadcastStateUpdate("task", map[string]interface{}{
 				"action":     "updated",
@@ -1633,11 +1695,11 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Regular session: use project name + timestamp
 		autoName := project.Name + " (" + time.Now().Format("15:04:05") + ")"
-		a.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", autoName, sess.ID)
+		a.db.ExecContext(ctx, "UPDATE sessions SET name = ? WHERE id = ?", autoName, sess.ID)
 		sess.Name = autoName
 	}
 
-	respondJSON(w, http.StatusCreated, sess)
+	return sess, nil
 }
 
 func (a *API) GetSession(w http.ResponseWriter, r *http.Request) {
@@ -1667,6 +1729,275 @@ func (a *API) GetSessionOutput(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
 	w.Write(output)
+}
+
+func (a *API) GetSessionHistory(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	q := r.URL.Query()
+
+	req := sessionHistoryRequest{
+		Mode:          q.Get("mode"),
+		Query:         q.Get("query"),
+		Regex:         parseBoolQuery(q.Get("regex")),
+		CaseSensitive: parseBoolQuery(q.Get("case_sensitive")),
+		Lines:         parseIntQuery(q.Get("lines"), 80),
+		Offset:        parseIntQuery(q.Get("offset"), 1),
+		Limit:         parseIntQuery(q.Get("limit"), 0),
+		ContextLines:  parseIntQuery(q.Get("context"), 2),
+		MaxChars:      parseIntQuery(q.Get("max_chars"), 12000),
+	}
+
+	result, err := a.readSessionHistory(r.Context(), id, req)
+	if err != nil {
+		respondError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, result)
+}
+
+func parseBoolQuery(v string) bool {
+	v = strings.ToLower(strings.TrimSpace(v))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func parseIntQuery(v string, fallback int) int {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func (a *API) readSessionHistory(ctx context.Context, sessionID string, req sessionHistoryRequest) (*sessionHistoryResponse, error) {
+	sess, err := a.db.GetSession(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session not found")
+	}
+
+	source := "terminal_buffer"
+	content := ""
+
+	if sess.Backend == string(session.BackendCodex) {
+		if events, err := a.db.ListCodexTranscriptEvents(ctx, sessionID, 4000); err == nil && len(events) > 0 {
+			content = renderCodexTranscriptEvents(events)
+			source = "codex_transcript"
+		}
+	}
+
+	if content == "" {
+		if output, err := a.sessionMgr.GetSessionOutput(sessionID); err == nil && len(output) > 0 {
+			content = cleanSessionHistoryOutput(string(output))
+		}
+	}
+
+	if strings.TrimSpace(content) == "" {
+		return nil, fmt.Errorf("session has no readable history; terminal buffers are only available for active sessions unless a durable transcript exists")
+	}
+
+	return sliceSessionHistory(sessionID, source, content, req), nil
+}
+
+func renderCodexTranscriptEvents(events []database.CodexTranscriptEvent) string {
+	var sb strings.Builder
+	for _, e := range events {
+		label := e.Kind
+		if e.Title != "" {
+			label += ":" + e.Title
+		}
+		text := strings.TrimSpace(e.Text)
+		if e.Command != "" {
+			text = "$ " + e.Command
+			if strings.TrimSpace(e.Text) != "" {
+				text += "\n" + strings.TrimSpace(e.Text)
+			}
+		}
+		if text == "" {
+			continue
+		}
+		for _, line := range strings.Split(text, "\n") {
+			line = strings.TrimRight(line, " \t")
+			if line != "" {
+				sb.WriteString(fmt.Sprintf("[%s] %s\n", label, line))
+			}
+		}
+	}
+	return sb.String()
+}
+
+func cleanSessionHistoryOutput(content string) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+	content = sessionHistoryANSIRe.ReplaceAllString(content, "")
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, content)
+}
+
+func sliceSessionHistory(sessionID, source, content string, req sessionHistoryRequest) *sessionHistoryResponse {
+	req.Mode = strings.ToLower(strings.TrimSpace(req.Mode))
+	if req.Mode == "" {
+		req.Mode = "tail"
+	}
+	if strings.TrimSpace(req.Query) != "" {
+		req.Mode = "search"
+	}
+	if req.Lines <= 0 {
+		req.Lines = 80
+	}
+	if req.Limit <= 0 {
+		req.Limit = req.Lines
+	}
+	if req.ContextLines < 0 {
+		req.ContextLines = 0
+	}
+	if req.MaxChars <= 0 {
+		req.MaxChars = 12000
+	}
+	if req.MaxChars > 50000 {
+		req.MaxChars = 50000
+	}
+
+	content = strings.TrimRight(content, "\n")
+	lines := []string{}
+	if content != "" {
+		lines = strings.Split(content, "\n")
+	}
+
+	start, end := 0, len(lines)
+	selected := []string{}
+	switch req.Mode {
+	case "head":
+		end = minInt(len(lines), req.Lines)
+		selected = lines[:end]
+	case "window":
+		if req.Offset <= 0 {
+			req.Offset = 1
+		}
+		start = minInt(maxInt(req.Offset-1, 0), len(lines))
+		end = minInt(start+req.Limit, len(lines))
+		selected = lines[start:end]
+	case "search":
+		selected, start = searchSessionHistoryLines(lines, req)
+	default:
+		req.Mode = "tail"
+		start = maxInt(len(lines)-req.Lines, 0)
+		selected = lines[start:]
+	}
+
+	out := strings.Join(selected, "\n")
+	truncated := false
+	if len(out) > req.MaxChars {
+		truncated = true
+		if req.Mode == "tail" {
+			out = out[len(out)-req.MaxChars:]
+		} else {
+			out = out[:req.MaxChars]
+		}
+	}
+
+	return &sessionHistoryResponse{
+		SessionID:     sessionID,
+		Source:        source,
+		Mode:          req.Mode,
+		TotalLines:    len(lines),
+		ReturnedLines: len(selected),
+		Offset:        start + 1,
+		Truncated:     truncated,
+		Content:       out,
+	}
+}
+
+func searchSessionHistoryLines(lines []string, req sessionHistoryRequest) ([]string, int) {
+	query := strings.TrimSpace(req.Query)
+	if query == "" {
+		return []string{}, 0
+	}
+
+	matches := make([]int, 0)
+	if req.Regex {
+		pattern := query
+		if !req.CaseSensitive {
+			pattern = "(?i)" + pattern
+		}
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return []string{fmt.Sprintf("Invalid regex: %v", err)}, 0
+		}
+		for i, line := range lines {
+			if re.MatchString(line) {
+				matches = append(matches, i)
+			}
+		}
+	} else {
+		needle := query
+		if !req.CaseSensitive {
+			needle = strings.ToLower(needle)
+		}
+		for i, line := range lines {
+			haystack := line
+			if !req.CaseSensitive {
+				haystack = strings.ToLower(haystack)
+			}
+			if strings.Contains(haystack, needle) {
+				matches = append(matches, i)
+			}
+		}
+	}
+
+	if len(matches) == 0 {
+		return []string{fmt.Sprintf("No matches for %q.", query)}, 0
+	}
+	if req.Limit > 0 && len(matches) > req.Limit {
+		matches = matches[:req.Limit]
+	}
+
+	selected := make([]string, 0)
+	firstStart := 0
+	lastEnd := -1
+	for idx, match := range matches {
+		start := maxInt(match-req.ContextLines, 0)
+		end := minInt(match+req.ContextLines+1, len(lines))
+		if idx == 0 {
+			firstStart = start
+		}
+		if start <= lastEnd {
+			start = lastEnd
+		} else if len(selected) > 0 {
+			selected = append(selected, "...")
+		}
+		for i := start; i < end; i++ {
+			prefix := "  "
+			if i == match {
+				prefix = "> "
+			}
+			selected = append(selected, fmt.Sprintf("%s%d | %s", prefix, i+1, lines[i]))
+		}
+		lastEnd = end
+	}
+	return selected, firstStart
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (a *API) GetSessionPlan(w http.ResponseWriter, r *http.Request) {
@@ -1737,24 +2068,30 @@ func (a *API) ListSessionDocuments(w http.ResponseWriter, r *http.Request) {
 func (a *API) DeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	// Mark as user-initiated stop so the Stop hook doesn't send a push notification
-	if a.hookHandler != nil {
-		a.hookHandler.MarkUserStopped(id)
-	}
-
-	// Try to stop the running session
-	if err := a.sessionMgr.StopSession(r.Context(), id); err != nil {
-		// Session might not be running in memory, that's OK
-	}
-
-	// Always update DB to mark session as stopped
-	if err := a.db.EndSession(r.Context(), id, "stopped"); err != nil {
+	if err := a.stopManagedSession(r.Context(), id); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	a.hub.BroadcastSessionStatus(id, "stopped")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) stopManagedSession(ctx context.Context, id string) error {
+	// Mark as user-initiated stop so the Stop hook doesn't send a push notification.
+	if a.hookHandler != nil {
+		a.hookHandler.MarkUserStopped(id)
+	}
+
+	// Try to stop the running session. It may no longer be in memory, and the UI
+	// has historically treated that as okay as long as DB state is updated.
+	_ = a.sessionMgr.StopSession(ctx, id)
+
+	if err := a.db.EndSession(ctx, id, "stopped"); err != nil {
+		return err
+	}
+
+	a.hub.BroadcastSessionStatus(id, "stopped")
+	return nil
 }
 
 func (a *API) ReopenSession(w http.ResponseWriter, r *http.Request) {
