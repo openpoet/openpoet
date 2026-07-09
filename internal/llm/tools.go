@@ -795,6 +795,7 @@ func AllToolDefs() []ToolDef {
 					"project_id":                   {Type: "string", Description: "Project ID (number)"},
 					"task_id":                      {Type: "string", Description: "Optional existing task ID to link to the new session"},
 					"dangerously_skip_permissions": {Type: "boolean", Description: "Request skip-permissions mode. Only takes effect if the project allows it."},
+					"auto_start_task_prompt":       {Type: "boolean", Description: "When starting from a task, automatically submit the default initial prompt so the session begins without user intervention. Defaults to true for task-linked tool starts."},
 				},
 				Required: []string{"project_id"},
 			},
@@ -859,14 +860,15 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:        "send_to_session",
-			Description: "Send a prompt or text input to a running OpenPoet session terminal. Enter is appended automatically.",
+			Description: "Send a prompt or text input to a running OpenPoet session terminal. Enter is appended automatically. Provide either text or prompt.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
 					"session_id": {Type: "string", Description: "Session ID"},
 					"text":       {Type: "string", Description: "Text or prompt to send (Enter appended automatically)"},
+					"prompt":     {Type: "string", Description: "Prompt to send. Alias for text."},
 				},
-				Required: []string{"session_id", "text"},
+				Required: []string{"session_id"},
 			},
 			Context: ToolContextBoth,
 		},
