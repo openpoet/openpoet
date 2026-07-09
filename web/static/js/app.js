@@ -9845,7 +9845,8 @@ class OpenPoet {
 
             const payload = {
                 project_id: projectId,
-                task_id: taskId
+                task_id: taskId,
+                auto_start_task_prompt: true
             };
             if (skipPermissions) payload.dangerously_skip_permissions = true;
 
