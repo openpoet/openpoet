@@ -97,6 +97,94 @@
         }
       }
     },
+    "/events": {
+      "get": {
+        "operationId": "listAutomationEvents",
+        "description": "Registers the bounded consumer for the authenticated automation client. Requires events:read.",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "string", "pattern": "^[0-9]+$"}
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}
+          },
+          {
+            "name": "consumer",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$", "default": "events"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ordered event page compatible with the myLifeOS EventPage contract",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/EventPage"}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/events/ack": {
+      "post": {
+        "operationId": "ackAutomationEvents",
+        "description": "Monotonic acknowledgement scoped to bearer client and consumer. This operation is intrinsically idempotent and does not use the command ledger.",
+        "parameters": [
+          {
+            "name": "consumer",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$", "default": "events"}
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["through"],
+                "properties": {
+                  "through": {"type": "string", "pattern": "^[0-9]+$"},
+                  "consumer": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current monotonic acknowledgement cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["acknowledged"],
+                  "properties": {"acknowledged": {"type": "string", "pattern": "^[0-9]+$"}}
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
     "/snapshot": {
       "get": {
         "operationId": "getAutomationSnapshot",
@@ -208,11 +296,43 @@
           }
         }
       },
+      "AutomationEvent": {
+        "type": "object",
+        "required": ["sequence", "event_id", "event_type", "aggregate", "actor", "occurred_at", "schema_version", "payload"],
+        "properties": {
+          "sequence": {"type": "integer", "minimum": 1},
+          "event_id": {"type": "string"},
+          "event_type": {"type": "string"},
+          "aggregate": {
+            "type": "object",
+            "required": ["type", "id"],
+            "properties": {"type": {"type": "string"}, "id": {"type": "string"}}
+          },
+          "actor": {
+            "type": "object",
+            "required": ["type", "id"],
+            "properties": {"type": {"type": "string"}, "id": {"type": "string"}}
+          },
+          "occurred_at": {"type": "string", "format": "date-time"},
+          "schema_version": {"type": "integer", "minimum": 1},
+          "payload": {}
+        }
+      },
+      "EventPage": {
+        "type": "object",
+        "required": ["events", "next_cursor", "has_more"],
+        "properties": {
+          "events": {"type": "array", "items": {"$ref": "#/components/schemas/AutomationEvent"}},
+          "next_cursor": {"type": ["string", "null"], "pattern": "^[0-9]+$"},
+          "has_more": {"type": "boolean"}
+        }
+      },
       "SnapshotResponse": {
         "type": "object",
-        "required": ["api_version", "generated_at", "projects", "tasks", "task_summary", "sessions", "notifications"],
+        "required": ["api_version", "cursor", "generated_at", "projects", "tasks", "task_summary", "sessions", "notifications"],
         "properties": {
           "api_version": {"const": "v1"},
+          "cursor": {"type": "string", "pattern": "^[0-9]+$"},
           "generated_at": {"type": "string", "format": "date-time"},
           "projects": {"type": "array", "items": {"type": "object"}},
           "tasks": {"type": "array", "items": {"type": "object"}},

@@ -72,6 +72,13 @@ func (i *Idempotency) Middleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// Event ACK is already idempotent and monotonic in the V50 cursor
+		// transaction. It deliberately does not consume the command ledger,
+		// whose keys and replay payloads are reserved for command envelopes.
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/events/ack") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		actor, ok := ActorFromContext(r.Context())
 		if !ok {
 			writeError(w, http.StatusUnauthorized, "authentication_required", "automation actor is missing", false)
