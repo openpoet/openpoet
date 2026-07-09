@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -216,21 +217,26 @@ func extractToolResultContent(v any) string {
 }
 
 // mergeAssistantMessage merges content blocks from a newer partial message into
-// the existing one. Claude Code streams assistant messages as partial chunks where
-// each chunk may contain different block types (text, thinking, tool_use).
-// This keeps all unique blocks and updates metadata (usage, stop_reason) from the newer version.
+// the existing one. Claude Code may rewrite the same assistant message_id with
+// richer content, so matching by type alone would drop repeated tool calls or
+// keep an early, shorter text block.
 func mergeAssistantMessage(dst, src *EventMessage) {
-	// Build a set of block types already present in dst
-	existingTypes := make(map[string]bool)
-	for _, b := range dst.ContentBlocks {
-		existingTypes[b.Type] = true
+	existing := make(map[string]int)
+	dstOrdinals := make(map[string]int)
+	for i, b := range dst.ContentBlocks {
+		existing[contentBlockMergeKey(b, dstOrdinals)] = i
 	}
 
-	// Append blocks from src that aren't already in dst
+	srcOrdinals := make(map[string]int)
 	for _, b := range src.ContentBlocks {
-		if !existingTypes[b.Type] {
+		key := contentBlockMergeKey(b, srcOrdinals)
+		if idx, ok := existing[key]; ok {
+			if shouldReplaceContentBlock(dst.ContentBlocks[idx], b) {
+				dst.ContentBlocks[idx] = b
+			}
+		} else {
 			dst.ContentBlocks = append(dst.ContentBlocks, b)
-			existingTypes[b.Type] = true
+			existing[key] = len(dst.ContentBlocks) - 1
 		}
 	}
 
@@ -244,6 +250,35 @@ func mergeAssistantMessage(dst, src *EventMessage) {
 	if src.Model != "" {
 		dst.Model = src.Model
 	}
+}
+
+func contentBlockMergeKey(block ContentBlock, ordinals map[string]int) string {
+	switch block.Type {
+	case "tool_use", "tool_result":
+		if block.ToolID != "" {
+			return block.Type + ":" + block.ToolID
+		}
+	}
+
+	base := block.Type
+	idx := ordinals[base]
+	ordinals[base] = idx + 1
+	return fmt.Sprintf("%s:%d", base, idx)
+}
+
+func shouldReplaceContentBlock(dst, src ContentBlock) bool {
+	if !contentBlockHasValue(src) && contentBlockHasValue(dst) {
+		return false
+	}
+	return true
+}
+
+func contentBlockHasValue(block ContentBlock) bool {
+	return block.Text != "" ||
+		block.ToolName != "" ||
+		block.ToolID != "" ||
+		block.ToolInput != nil ||
+		block.Content != ""
 }
 
 // ParseFile reads an entire JSONL file and returns all parsed events.
@@ -338,19 +373,7 @@ func ParseReaderFromOffset(rs io.ReadSeeker, fileSize, offset int64) ([]*Session
 		return nil, offset, err
 	}
 
-	var events []*SessionEvent
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
-		event, err := ParseLine(scanner.Bytes())
-		if err != nil || event == nil {
-			continue
-		}
-		events = append(events, event)
-	}
-
-	return events, offset + int64(len(data)), scanner.Err()
+	return parseCompleteOffsetData(data, offset)
 }
 
 // ParseFileFromOffset reads a JSONL file starting from a byte offset and returns
@@ -381,8 +404,26 @@ func ParseFileFromOffset(path string, offset int64) ([]*SessionEvent, int64, err
 		return nil, offset, err
 	}
 
+	return parseCompleteOffsetData(data, offset)
+}
+
+func parseCompleteOffsetData(data []byte, offset int64) ([]*SessionEvent, int64, error) {
+	consumeLen := len(data)
+	if consumeLen == 0 {
+		return nil, offset, nil
+	}
+
+	if data[consumeLen-1] != '\n' {
+		lastNewline := bytes.LastIndexByte(data, '\n')
+		if lastNewline < 0 {
+			return nil, offset, nil
+		}
+		consumeLen = lastNewline + 1
+	}
+
+	completeData := data[:consumeLen]
 	var events []*SessionEvent
-	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner := bufio.NewScanner(bytes.NewReader(completeData))
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	for scanner.Scan() {
@@ -393,5 +434,9 @@ func ParseFileFromOffset(path string, offset int64) ([]*SessionEvent, int64, err
 		events = append(events, event)
 	}
 
-	return events, offset + int64(len(data)), scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return events, offset, err
+	}
+
+	return events, offset + int64(consumeLen), nil
 }

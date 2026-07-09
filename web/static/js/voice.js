@@ -26,6 +26,9 @@ class VoiceInput {
         this.pendingAudioBlob = null;
         this.pendingSubmit = false;
         this.uploadAttemptCount = 0;
+        this.maxSingleUploadBytes = 20 * 1024 * 1024;
+        this.maxChunkUploadBytes = 18 * 1024 * 1024;
+        this.maxChunkSeconds = 90;
 
         this.setupEventListeners();
     }
@@ -205,48 +208,190 @@ class VoiceInput {
     async uploadWithRetry() {
         if (!this.pendingAudioBlob) return;
 
+        this.showUploading();
+
+        try {
+            const result = await this.transcribeBlob(this.pendingAudioBlob);
+            // Success: clear pending state, deliver text.
+            this.hideUploading();
+            this.pendingAudioBlob = null;
+            if (result && result.text) {
+                if (this.targetCallback) {
+                    this.targetCallback(result.text);
+                    this.targetCallback = null;
+                } else {
+                    this.insertText(result.text, this.pendingSubmit);
+                }
+            }
+        } catch (err) {
+            // All retries exhausted: keep the blob and offer manual retry.
+            this.showRetryAvailable(err);
+        }
+    }
+
+    async transcribeBlob(audioBlob) {
+        if (audioBlob.size > this.maxSingleUploadBytes) {
+            return this.uploadInChunks(audioBlob);
+        }
+
+        try {
+            return await this.uploadBlobWithRetry(audioBlob);
+        } catch (err) {
+            if (this.isAudioTooLargeError(err)) {
+                return this.uploadInChunks(audioBlob);
+            }
+            throw err;
+        }
+    }
+
+    async uploadBlobWithRetry(audioBlob, options = {}) {
         // Backoff: immediate, 1.5s, 4s — total ~5.5s before giving up.
         const backoffsMs = [0, 1500, 4000];
-        const sizeKB = Math.round(this.pendingAudioBlob.size / 1024);
-
-        this.showUploading();
+        const sizeKB = Math.round(audioBlob.size / 1024);
+        const filename = options.filename || 'recording.webm';
 
         let lastError = null;
         for (let attempt = 0; attempt < backoffsMs.length; attempt++) {
             this.uploadAttemptCount++;
             if (backoffsMs[attempt] > 0) {
-                this.setStatusLabel(`Retrying (${attempt + 1}/${backoffsMs.length})…`);
+                const retryLabel = options.totalChunks
+                    ? `Retrying part ${options.chunkIndex}/${options.totalChunks}`
+                    : 'Retrying';
+                this.setStatusLabel(`${retryLabel} (${attempt + 1}/${backoffsMs.length})…`);
                 await new Promise(resolve => setTimeout(resolve, backoffsMs[attempt]));
+            } else if (options.totalChunks) {
+                this.setStatusLabel(`Sending part ${options.chunkIndex}/${options.totalChunks} (${sizeKB} KB)…`);
             } else {
                 this.setStatusLabel(`Sending ${sizeKB} KB…`);
             }
 
             try {
-                const result = await this.uploadOnce(this.pendingAudioBlob);
-                // Success: clear pending state, deliver text.
-                this.hideUploading();
-                this.pendingAudioBlob = null;
-                if (result && result.text) {
-                    if (this.targetCallback) {
-                        this.targetCallback(result.text);
-                        this.targetCallback = null;
-                    } else {
-                        this.insertText(result.text, this.pendingSubmit);
-                    }
-                }
-                return;
+                return await this.uploadOnce(audioBlob, filename);
             } catch (err) {
                 lastError = err;
                 console.warn(`[voice] attempt ${attempt + 1} failed:`, err);
+                if (this.isAudioTooLargeError(err)) throw err;
                 if (!this.isRetryableError(err)) break;
             }
         }
 
-        // All retries exhausted: keep the blob and offer manual retry.
-        this.showRetryAvailable(lastError);
+        throw lastError || new Error('Upload failed');
     }
 
-    async uploadOnce(audioBlob) {
+    async uploadInChunks(audioBlob) {
+        this.setStatusLabel('Splitting audio…');
+        const chunks = await this.createTranscriptionChunks(audioBlob);
+        const texts = [];
+
+        for (let i = 0; i < chunks.length; i++) {
+            const result = await this.uploadBlobWithRetry(chunks[i].blob, {
+                filename: chunks[i].filename,
+                chunkIndex: i + 1,
+                totalChunks: chunks.length
+            });
+            const text = result?.text?.trim();
+            if (text) texts.push(text);
+        }
+
+        return { text: texts.join(' ').replace(/\s+/g, ' ').trim() };
+    }
+
+    async createTranscriptionChunks(audioBlob) {
+        const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextCtor) {
+            const err = new Error('Recording too large and this browser cannot split audio');
+            err.nonRetryable = true;
+            throw err;
+        }
+
+        const audioContext = new AudioContextCtor();
+        let decoded;
+        try {
+            const arrayBuffer = await audioBlob.arrayBuffer();
+            decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+        } catch (err) {
+            const splitErr = new Error('Recording too large and could not be split');
+            splitErr.cause = err;
+            splitErr.nonRetryable = true;
+            throw splitErr;
+        } finally {
+            if (audioContext.close) {
+                const closeResult = audioContext.close();
+                if (closeResult?.catch) closeResult.catch(() => {});
+            }
+        }
+
+        const sampleRate = decoded.sampleRate;
+        const totalFrames = decoded.length;
+        const channelCount = decoded.numberOfChannels || 1;
+        const monoSamples = new Float32Array(totalFrames);
+
+        for (let channel = 0; channel < channelCount; channel++) {
+            const source = decoded.getChannelData(channel);
+            for (let i = 0; i < totalFrames; i++) {
+                monoSamples[i] += source[i] / channelCount;
+            }
+        }
+
+        const bytesPerSecond = sampleRate * 2; // mono 16-bit PCM
+        const maxSecondsBySize = Math.floor((this.maxChunkUploadBytes - 44) / bytesPerSecond);
+        const chunkSeconds = Math.max(10, Math.min(this.maxChunkSeconds, maxSecondsBySize));
+        const framesPerChunk = Math.max(sampleRate * 10, Math.floor(chunkSeconds * sampleRate));
+        const chunks = [];
+
+        for (let start = 0; start < totalFrames; start += framesPerChunk) {
+            const end = Math.min(start + framesPerChunk, totalFrames);
+            const wavBuffer = this.encodeWavMono(monoSamples.subarray(start, end), sampleRate);
+            chunks.push({
+                blob: new Blob([wavBuffer], { type: 'audio/wav' }),
+                filename: `recording-part-${chunks.length + 1}.wav`
+            });
+        }
+
+        if (chunks.length === 0) {
+            throw new Error('No audio recorded');
+        }
+
+        return chunks;
+    }
+
+    encodeWavMono(samples, sampleRate) {
+        const bytesPerSample = 2;
+        const blockAlign = bytesPerSample;
+        const dataSize = samples.length * bytesPerSample;
+        const buffer = new ArrayBuffer(44 + dataSize);
+        const view = new DataView(buffer);
+
+        this.writeAscii(view, 0, 'RIFF');
+        view.setUint32(4, 36 + dataSize, true);
+        this.writeAscii(view, 8, 'WAVE');
+        this.writeAscii(view, 12, 'fmt ');
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, 1, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * blockAlign, true);
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, 16, true);
+        this.writeAscii(view, 36, 'data');
+        view.setUint32(40, dataSize, true);
+
+        let offset = 44;
+        for (let i = 0; i < samples.length; i++, offset += 2) {
+            const sample = Math.max(-1, Math.min(1, samples[i]));
+            view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+        }
+
+        return buffer;
+    }
+
+    writeAscii(view, offset, text) {
+        for (let i = 0; i < text.length; i++) {
+            view.setUint8(offset + i, text.charCodeAt(i));
+        }
+    }
+
+    async uploadOnce(audioBlob, filename = 'recording.webm') {
         // Detect relay: binary multipart data gets corrupted through the
         // tunnel JSON serialization, so send base64-encoded JSON instead.
         const isTunnel = window.location.hostname !== 'localhost'
@@ -271,12 +416,12 @@ class VoiceInput {
                 response = await fetch('/api/voice/transcribe', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ audio: base64, filename: 'recording.webm' }),
+                    body: JSON.stringify({ audio: base64, filename }),
                     signal: controller.signal
                 });
             } else {
                 const formData = new FormData();
-                formData.append('audio', audioBlob, 'recording.webm');
+                formData.append('audio', audioBlob, filename);
                 response = await fetch('/api/voice/transcribe', {
                     method: 'POST',
                     body: formData,
@@ -328,9 +473,25 @@ class VoiceInput {
         return `Request failed (${status})`;
     }
 
+    isAudioTooLargeError(err) {
+        if (!err) return false;
+        if (err.status === 413) return true;
+
+        const message = String(err.message || '').toLowerCase();
+        return message.includes('too large')
+            || message.includes('maximum')
+            || message.includes('exceeds')
+            || message.includes('file size')
+            || message.includes('request entity too large')
+            || message.includes('25mb')
+            || message.includes('25 mb');
+    }
+
     isRetryableError(err) {
         // AbortError, network failure (TypeError from fetch), 5xx, 429.
         if (!err) return false;
+        if (err.nonRetryable) return false;
+        if (this.isAudioTooLargeError(err)) return false;
         if (err.name === 'AbortError') return true;
         if (err.parseError) return true;
         if (err.status === 429) return true;
@@ -498,9 +659,11 @@ class VoiceInput {
         this.indicator?.classList.remove('uploading');
         this.indicator?.classList.add('retry-available');
         const msg = err && err.message ? err.message : 'Upload failed';
-        this.setStatusLabel(`${msg} — tap Retry`);
+        const canRetry = !err?.nonRetryable;
+        this.setStatusLabel(canRetry ? `${msg} — tap Retry` : msg);
         this.toggleRecordingButtons(false);
-        this.toggleRetryButtons(true);
+        this.retryBtn?.classList.toggle('hidden', !canRetry);
+        this.discardBtn?.classList.remove('hidden');
     }
 
     setStatusLabel(text) {

@@ -19,9 +19,18 @@ type DB struct {
 const (
 	DefaultCodexTranscriptRetentionDays = 14
 	DefaultCodexTranscriptMaxEvents     = 10000
+	DefaultMCPHTTPSessionRetentionDays  = 7
+	DefaultMCPHTTPEventRetentionDays    = 14
+	DefaultMCPHTTPMaxEventsPerSession   = 1000
 )
 
 type CodexTranscriptCleanupStats struct {
+	ExpiredDeleted  int64
+	OverflowDeleted int64
+}
+
+type MCPHTTPCleanupStats struct {
+	SessionsDeleted int64
 	ExpiredDeleted  int64
 	OverflowDeleted int64
 }
@@ -323,6 +332,138 @@ func (d *DB) GetSessionPlan(ctx context.Context, id string) (string, *time.Time,
 func (d *DB) DeleteSession(ctx context.Context, id string) error {
 	_, err := d.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
 	return err
+}
+
+func (d *DB) UpsertMCPHTTPSession(ctx context.Context, s *MCPHTTPSession) error {
+	if s == nil || strings.TrimSpace(s.ID) == "" {
+		return nil
+	}
+	if s.Context == "" {
+		s.Context = "http"
+	}
+	if s.Status == "" {
+		s.Status = "active"
+	}
+	now := time.Now()
+	_, err := d.ExecContext(ctx, `
+		INSERT INTO mcp_http_sessions
+			(id, openpoet_session_id, context, status, initialized_at, last_used_at, request_count, last_method)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			openpoet_session_id = excluded.openpoet_session_id,
+			context = excluded.context,
+			status = excluded.status,
+			last_used_at = excluded.last_used_at,
+			closed_at = CASE WHEN excluded.status = 'active' THEN NULL ELSE mcp_http_sessions.closed_at END,
+			last_method = excluded.last_method`,
+		s.ID, s.OpenPoetSessionID, s.Context, s.Status, now, now, s.RequestCount, s.LastMethod)
+	return err
+}
+
+func (d *DB) GetMCPHTTPSession(ctx context.Context, id string) (*MCPHTTPSession, error) {
+	var s MCPHTTPSession
+	err := d.GetContext(ctx, &s, "SELECT * FROM mcp_http_sessions WHERE id = ?", id)
+	return &s, err
+}
+
+func (d *DB) TouchMCPHTTPSession(ctx context.Context, id, method string) error {
+	_, err := d.ExecContext(ctx,
+		`UPDATE mcp_http_sessions
+		 SET last_used_at = ?, request_count = request_count + 1, last_method = ?
+		 WHERE id = ?`,
+		time.Now(), method, id)
+	return err
+}
+
+func (d *DB) CloseMCPHTTPSession(ctx context.Context, id, status string) error {
+	if status == "" {
+		status = "closed"
+	}
+	_, err := d.ExecContext(ctx,
+		`UPDATE mcp_http_sessions
+		 SET status = ?, closed_at = ?, last_used_at = ?
+		 WHERE id = ?`,
+		status, time.Now(), time.Now(), id)
+	return err
+}
+
+func (d *DB) ExpireStaleMCPHTTPSessions(ctx context.Context, before time.Time) (int64, error) {
+	res, err := d.ExecContext(ctx,
+		`UPDATE mcp_http_sessions
+		 SET status = 'expired', closed_at = COALESCE(closed_at, ?)
+		 WHERE status = 'active' AND last_used_at < ?`,
+		time.Now(), before)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (d *DB) CleanupMCPHTTPSessions(ctx context.Context, closedBefore time.Time, eventBefore time.Time, maxEventsPerSession int) (MCPHTTPCleanupStats, error) {
+	var stats MCPHTTPCleanupStats
+	if maxEventsPerSession <= 0 {
+		maxEventsPerSession = DefaultMCPHTTPMaxEventsPerSession
+	}
+
+	res, err := d.ExecContext(ctx,
+		`DELETE FROM mcp_http_session_events
+		 WHERE created_at < ?`,
+		eventBefore)
+	if err != nil {
+		return stats, err
+	}
+	stats.ExpiredDeleted, _ = res.RowsAffected()
+
+	res, err = d.ExecContext(ctx, `
+		DELETE FROM mcp_http_session_events
+		WHERE id IN (
+			SELECT id FROM (
+				SELECT id,
+				       ROW_NUMBER() OVER (PARTITION BY mcp_session_id ORDER BY id DESC) AS rn
+				FROM mcp_http_session_events
+			)
+			WHERE rn > ?
+		)`, maxEventsPerSession)
+	if err != nil {
+		return stats, err
+	}
+	stats.OverflowDeleted, _ = res.RowsAffected()
+
+	res, err = d.ExecContext(ctx,
+		`DELETE FROM mcp_http_sessions
+		 WHERE status IN ('closed', 'expired')
+		   AND COALESCE(closed_at, last_used_at, initialized_at) < ?`,
+		closedBefore)
+	if err != nil {
+		return stats, err
+	}
+	stats.SessionsDeleted, _ = res.RowsAffected()
+	return stats, nil
+}
+
+func (d *DB) CreateMCPHTTPSessionEvent(ctx context.Context, e *MCPHTTPSessionEvent) error {
+	if e == nil || strings.TrimSpace(e.MCPSessionID) == "" {
+		return nil
+	}
+	_, err := d.ExecContext(ctx, `
+		INSERT INTO mcp_http_session_events
+			(mcp_session_id, openpoet_session_id, method, event_type, status, error)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		e.MCPSessionID, e.OpenPoetSessionID, e.Method, e.EventType, e.Status, e.Error)
+	return err
+}
+
+func (d *DB) ListMCPHTTPSessionEvents(ctx context.Context, sessionID string, limit int) ([]MCPHTTPSessionEvent, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	var events []MCPHTTPSessionEvent
+	err := d.SelectContext(ctx, &events,
+		`SELECT * FROM mcp_http_session_events
+		 WHERE mcp_session_id = ?
+		 ORDER BY id DESC LIMIT ?`,
+		sessionID, limit)
+	return events, err
 }
 
 func (d *DB) InsertCodexTranscriptEvent(ctx context.Context, event *CodexTranscriptEvent) error {
