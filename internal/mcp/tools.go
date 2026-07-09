@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"openpoet/internal/llm"
+	"openpoet/internal/sessionmeta"
 )
 
 // MCPTool is a type alias for llm.MCPToolDef — the unified tool definition for MCP protocol.
@@ -822,7 +823,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		if err != nil {
 			return "", err
 		}
-		return formatSessionsList(body, params)
+		return formatSessionsList(client, body, params)
 
 	case "openpoet_get_session":
 		sid, _ := params["session_id"].(string)
@@ -1193,12 +1194,13 @@ func executeBatch(client *APIClient, args json.RawMessage, sessionID, conversati
 }
 
 // formatSessionsList formats and optionally filters the sessions list.
-func formatSessionsList(body []byte, params map[string]interface{}) (string, error) {
+func formatSessionsList(client *APIClient, body []byte, params map[string]interface{}) (string, error) {
 	var sessions []struct {
 		ID        string `json:"id"`
 		ProjectID int64  `json:"project_id"`
 		Status    string `json:"status"`
 		Name      string `json:"name"`
+		Backend   string `json:"backend"`
 		TaskID    *struct {
 			Int64 int64 `json:"Int64"`
 			Valid bool  `json:"Valid"`
@@ -1236,7 +1238,9 @@ func formatSessionsList(body []byte, params map[string]interface{}) (string, err
 		if s.TaskID != nil && s.TaskID.Valid {
 			task = fmt.Sprintf("%d", s.TaskID.Int64)
 		}
-		result += fmt.Sprintf("- %s | %s | project: %d | status: %s | task: %s\n", s.ID, name, s.ProjectID, s.Status, task)
+		meta := fetchSessionMetadata(client, s.ProjectID, s.Backend)
+		result += fmt.Sprintf("- %s | %s | project: %d | status: %s | task: %s | model: %s | effort: %s | harness: %s\n",
+			s.ID, name, s.ProjectID, s.Status, task, meta.Model, meta.Effort, meta.Harness)
 	}
 	if result == "" {
 		return "No sessions matching filter.", nil
@@ -1262,6 +1266,11 @@ func formatSessionDetail(client *APIClient, body []byte) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Session: %s\n", sess.ID))
 	sb.WriteString(fmt.Sprintf("Name: %s\nProject ID: %d\nStatus: %s\nBackend: %s\n", sess.Name, sess.ProjectID, sess.Status, sess.Backend))
+	meta := fetchSessionMetadata(client, sess.ProjectID, sess.Backend)
+	sb.WriteString(fmt.Sprintf("Model: %s\nEffort: %s\nHarness: %s\n", meta.Model, meta.Effort, meta.Harness))
+	if meta.HarnessDetails != "" {
+		sb.WriteString(fmt.Sprintf("Harness details: %s\n", meta.HarnessDetails))
+	}
 	if taskBody, err := client.Get(fmt.Sprintf("/api/sessions/%s/task", sess.ID)); err == nil {
 		var task struct {
 			ID       int64  `json:"id"`
@@ -1276,6 +1285,29 @@ func formatSessionDetail(client *APIClient, body []byte) (string, error) {
 		sb.WriteString("Linked Task: none\n")
 	}
 	return sb.String(), nil
+}
+
+func fetchSessionMetadata(client *APIClient, projectID int64, backend string) sessionmeta.Metadata {
+	meta := sessionmeta.FromProjectConfig(backend, "")
+	if client == nil || projectID <= 0 {
+		return meta
+	}
+	body, err := client.Get(fmt.Sprintf("/api/projects/%d", projectID))
+	if err != nil {
+		return meta
+	}
+	var project struct {
+		Backend       string `json:"backend"`
+		BackendConfig string `json:"backend_config"`
+	}
+	if err := json.Unmarshal(body, &project); err != nil {
+		return meta
+	}
+	projectBackend := backend
+	if strings.TrimSpace(projectBackend) == "" {
+		projectBackend = project.Backend
+	}
+	return sessionmeta.FromProjectConfig(projectBackend, project.BackendConfig)
 }
 
 func formatSessionHistory(body []byte) (string, error) {
