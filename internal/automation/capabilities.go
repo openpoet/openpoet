@@ -12,6 +12,7 @@ type commandAPI struct {
 	capabilities *application.CapabilityRegistry
 	snapshot     SnapshotStore
 	events       EventStore
+	reports      DailyReportService
 	now          func() time.Time
 }
 
