@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"openpoet/internal/acpagent"
+	"openpoet/internal/automation"
 	"openpoet/internal/benchmark"
 	"openpoet/internal/config"
 	"openpoet/internal/configsync"
@@ -412,6 +413,7 @@ func main() {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Compress(5))
+	r.Use(automation.CapturePeerAddress)
 	r.Use(middleware.RealIP)
 
 	// DEBUG: Log static file requests with Content-Type and User-Agent
@@ -439,6 +441,10 @@ func main() {
 	// CORS for development
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/api/automation/") {
+				next.ServeHTTP(w, r)
+				return
+			}
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type")
@@ -455,6 +461,10 @@ func main() {
 
 	// MCP HTTP endpoint (always registered, auth-protected)
 	r.Handle("/mcp", mcpHandler)
+
+	// Server-to-server automation API. Authentication is mandatory even for
+	// localhost and the handler rejects browser origins and non-loopback peers.
+	r.Mount("/api/automation/v1", automation.NewHandler(db))
 
 	// API routes
 	// DEBUG: Client error reporting endpoint
