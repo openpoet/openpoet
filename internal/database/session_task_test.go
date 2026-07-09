@@ -70,6 +70,40 @@ func TestLinkSessionToTask(t *testing.T) {
 	}
 }
 
+func TestSessionRuntimeMetadataPersistsAndUpdates(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	proj := &Project{Name: "runtime-metadata-project", Path: "/tmp/test", Type: "local"}
+	if err := db.CreateProject(ctx, proj); err != nil {
+		t.Fatal(err)
+	}
+	sess := &Session{
+		ID:        "runtime-session",
+		ProjectID: proj.ID,
+		Status:    "running",
+		StartTime: time.Now(),
+		Backend:   "codex",
+		Model:     "gpt-old",
+		Effort:    "medium",
+		Harness:   "codex/app-server",
+	}
+	if err := db.CreateSession(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateSessionRuntimeMetadata(ctx, sess.ID, "gpt-new", "high", sess.Harness); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.GetSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Model != "gpt-new" || got.Effort != "high" || got.Harness != "codex/app-server" {
+		t.Fatalf("runtime metadata = model %q effort %q harness %q", got.Model, got.Effort, got.Harness)
+	}
+}
+
 func TestGetSessionsForTask(t *testing.T) {
 	db := setupTestDB(t)
 	ctx := context.Background()

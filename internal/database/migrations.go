@@ -62,6 +62,7 @@ var migrations = []Migration{
 	{Version: 44, Description: "codex: add transcript retention cleanup index", Up: migrateV44},
 	{Version: 45, Description: "mcp: persist HTTP transport session status and history", Up: migrateV45},
 	{Version: 46, Description: "mcp: add HTTP transport retention cleanup indexes", Up: migrateV46},
+	{Version: 47, Description: "sessions: persist runtime model, effort, and harness", Up: migrateV47},
 	{Version: 48, Description: "automation: add scoped API clients", Up: migrateV48},
 	{Version: 49, Description: "automation: add idempotency command ledger", Up: migrateV49},
 }
@@ -1216,9 +1217,20 @@ func migrateV46(tx *sqlx.Tx) error {
 	return nil
 }
 
-// Version 47 is intentionally owned by the in-flight session runtime metadata
-// change. Automation starts at 48 so the two workstreams can be merged without
-// renumbering either migration.
+func migrateV47(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN effort TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN harness TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV47 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
 func migrateV48(tx *sqlx.Tx) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS automation_clients (
