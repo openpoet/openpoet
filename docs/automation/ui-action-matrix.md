@@ -19,8 +19,8 @@ o wiring aguarda #697.
 | Estado | Quantidade | Significado |
 | --- | ---: | --- |
 | `implemented` | 12 | Application Service e capability de tasks já existem |
-| `application_service_ready` | 68 | Service novo pronto; ainda sem registry/HTTP automation |
-| `gap` | 36 | Ainda precisa de Application Service/capability |
+| `application_service_ready` | 101 | Service novo pronto; ainda sem registry/HTTP automation |
+| `gap` | 3 | Ainda precisa de Application Service/capability |
 | `internal_only` | 2 | Ingestão de hooks, não ação autônoma de usuário |
 
 ## Matriz por domínio
@@ -28,25 +28,25 @@ o wiring aguarda #697.
 | Domínio | Total | Implementado | Service pronto | Gap | Interno | Riscos |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | agents | 3 | 0 | 3 | 0 | 0 | R2, R3 |
-| ai | 16 | 0 | 0 | 16 | 0 | R1, R2, R3 |
+| ai | 16 | 0 | 16 | 0 | 0 | R1, R2, R3 |
 | ai_configs | 4 | 0 | 4 | 0 | 0 | R4 |
 | config | 1 | 0 | 1 | 0 | 0 | R4 |
-| documents | 2 | 0 | 0 | 2 | 0 | R2 |
+| documents | 2 | 0 | 2 | 0 | 0 | R2 |
 | files | 4 | 0 | 4 | 0 | 0 | R2, R3 |
 | git | 3 | 0 | 3 | 0 | 0 | R2, R3 |
 | hooks | 4 | 0 | 2 | 0 | 2 | R1, R2, R3 |
 | mcp | 8 | 0 | 8 | 0 | 0 | R4 |
-| notifications | 6 | 0 | 2 | 4 | 0 | R1, R2, R3 |
+| notifications | 6 | 0 | 6 | 0 | 0 | R1, R2, R3 |
 | projects | 8 | 0 | 6 | 2 | 0 | R1, R2, R3, R4 |
-| proposals | 9 | 0 | 0 | 9 | 0 | R1, R2, R4 |
+| proposals | 9 | 0 | 9 | 0 | 0 | R1, R2, R3, R4 |
 | sessions | 9 | 0 | 8 | 1 | 0 | R1, R2, R3 |
 | settings | 1 | 0 | 1 | 0 | 0 | R4 |
 | skills | 10 | 0 | 10 | 0 | 0 | R2, R3 |
 | tags | 4 | 0 | 4 | 0 | 0 | R2, R3 |
 | task_links | 2 | 2 | 0 | 0 | 0 | R2 |
 | tasks | 10 | 10 | 0 | 0 | 0 | R2, R3 |
-| token_usage | 1 | 0 | 0 | 1 | 0 | R3 |
-| tools | 6 | 0 | 5 | 1 | 0 | R4 |
+| token_usage | 1 | 0 | 1 | 0 | 0 | R3 |
+| tools | 6 | 0 | 6 | 0 | 0 | R4 |
 | tunnel | 5 | 0 | 5 | 0 | 0 | R4 |
 | update | 1 | 0 | 1 | 0 | 0 | R4 |
 | voice | 1 | 0 | 1 | 0 | 0 | R1 |
@@ -98,6 +98,16 @@ o wiring aguarda #697.
   tokens ou chaves de dispositivo.
 - `UpdateMutationService`: apply com bloqueio de instalação gerenciada/sessões
   ativas e autorização separada para `force`.
+- `DocumentService`: memory docs e documentos temporários bounded, com secrets
+  redigidos antes da persistência e respostas sem conteúdo bruto na criação.
+- `ProposalService`: memory/task/skill/tool proposals via backend durável;
+  accept/reject atômicos e risco R3/R4 com aprovação explícita.
+- `AIAssistantService`: chat, conversations, initiate, suggestions,
+  generate/validate/test e execução de tool via ports, sem transcript/prompt
+  bruto e com outputs bounded/redigidos.
+- `NotificationDeliveryService`: subscribe/unsubscribe, preferência e teste de
+  push via port; chaves de subscription nunca aparecem na resposta.
+- `TokenUsageService`: clear total com aprovação R3 e effect pós-commit.
 
 Operações que manipulam segredo, comando, policy de tools, assignment de
 provider ou sincronização externa exigem `R4Boundary` explícito com aprovação,
@@ -105,16 +115,20 @@ aprovador e justificativa. Credenciais, env e comandos não fazem parte dos DTOs
 de saída; updates parciais preservam segredo omitido. Effects e reinit são
 executados somente após persistência/sincronização bem-sucedida.
 
+Conteúdo, prompts, argumentos JSON e outputs de AI/proposals possuem limites
+explícitos. Secrets são removidos antes de provider/tool/persistência; respostas
+de chat não incluem prompt, transcript, proactive context ou mensagens brutas.
+Deletes, clear de usage e execução/aprovação de tool usam
+`ActionAuthorization` com aprovação explícita.
+
 Nenhum deles foi registrado em `internal/automation`. Os services de sessão,
 hooks, files, git e voz possuem adapters diretos sobre os componentes atuais;
 os demais ainda aguardam wiring.
 
 ## Gaps priorizados
 
-1. R4: execução de custom tools e operações auxiliares de projeto que carregam
-   credenciais/unsafe permissions.
-2. Documents/proposals, notifications push/preferences e AI conversations.
-3. Sugestão de dados de task em sessão e operações auxiliares.
+1. Validação de projeto e browse remoto.
+2. Sugestão de dados de task em sessão.
 
 O teste `TestUIActionManifestCoversBackendAndFrontendMutations` falha quando uma
 nova mutation de router/frontend ou um novo `onclick="app.*"` não recebe
