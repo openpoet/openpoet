@@ -1,0 +1,226 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OpenPoet Automation API",
+    "version": "1.0.0",
+    "description": "Local server-to-server API used by durable automation connectors. Browser origins and non-loopback peers are rejected."
+  },
+  "servers": [
+    {
+      "url": "/api/automation/v1"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "automationHealth",
+        "responses": {
+          "200": {
+            "description": "Authenticated automation API health",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status", "version", "client_id"],
+                  "properties": {
+                    "status": {"const": "ok"},
+                    "version": {"const": "v1"},
+                    "client_id": {"type": "string"}
+                  }
+                }
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/capabilities": {
+      "get": {
+        "operationId": "listAutomationCapabilities",
+        "responses": {
+          "200": {
+            "description": "Registered capabilities and authorization metadata for the bearer actor",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/CapabilitiesResponse"}
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/commands": {
+      "post": {
+        "operationId": "executeAutomationCommand",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required unless idempotency_key is present in the command envelope. Both values must match when supplied together.",
+            "schema": {"type": "string", "minLength": 1, "maxLength": 200}
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "./command-envelope.schema.json"}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command result, including dry-run results",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/CommandResponse"}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"},
+          "500": {"$ref": "#/components/responses/Error"},
+          "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/snapshot": {
+      "get": {
+        "operationId": "getAutomationSnapshot",
+        "description": "Requires projects:read, tasks:read, sessions:read, and notifications:read.",
+        "parameters": [
+          {
+            "name": "notification_limit",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Initial read-only state for reconciliation",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/SnapshotResponse"}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "OpenPoet automation token"
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Stable automation error envelope",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Actor": {
+        "type": "object",
+        "required": ["type", "id", "name", "client_id"],
+        "properties": {
+          "type": {"const": "automation_client"},
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "client_id": {"type": "string"}
+        }
+      },
+      "Capability": {
+        "type": "object",
+        "required": ["name", "scope", "risk", "approval", "handler", "service", "allowed", "approval_required"],
+        "properties": {
+          "name": {"type": "string"},
+          "scope": {"type": "string"},
+          "risk": {"enum": ["read", "write", "destructive", "unsafe"]},
+          "approval": {"enum": ["none", "policy", "explicit"]},
+          "handler": {"type": "string"},
+          "service": {"type": "string"},
+          "allowed": {"type": "boolean"},
+          "approval_required": {"type": "boolean"}
+        }
+      },
+      "CapabilitiesResponse": {
+        "type": "object",
+        "required": ["api_version", "capabilities"],
+        "properties": {
+          "api_version": {"const": "v1"},
+          "capabilities": {"type": "array", "items": {"$ref": "#/components/schemas/Capability"}}
+        }
+      },
+      "CommandResponse": {
+        "type": "object",
+        "required": ["api_version", "command_id", "capability", "status", "actor", "result"],
+        "properties": {
+          "api_version": {"const": "v1"},
+          "command_id": {"type": "string"},
+          "correlation_id": {"type": "string"},
+          "capability": {"type": "string"},
+          "status": {"enum": ["succeeded", "dry_run"]},
+          "actor": {"$ref": "#/components/schemas/Actor"},
+          "result": {}
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["api_version", "error"],
+        "properties": {
+          "api_version": {"const": "v1"},
+          "command_id": {"type": "string"},
+          "correlation_id": {"type": "string"},
+          "error": {
+            "type": "object",
+            "required": ["code", "message", "retryable"],
+            "properties": {
+              "code": {"type": "string"},
+              "message": {"type": "string"},
+              "retryable": {"type": "boolean"},
+              "details": {"type": "object"}
+            }
+          }
+        }
+      },
+      "SnapshotResponse": {
+        "type": "object",
+        "required": ["api_version", "generated_at", "projects", "tasks", "task_summary", "sessions", "notifications"],
+        "properties": {
+          "api_version": {"const": "v1"},
+          "generated_at": {"type": "string", "format": "date-time"},
+          "projects": {"type": "array", "items": {"type": "object"}},
+          "tasks": {"type": "array", "items": {"type": "object"}},
+          "task_summary": {"type": "object", "additionalProperties": {"type": "integer"}},
+          "sessions": {"type": "array", "items": {"type": "object"}},
+          "notifications": {"type": "array", "items": {"type": "object"}}
+        }
+      }
+    }
+  }
+}
