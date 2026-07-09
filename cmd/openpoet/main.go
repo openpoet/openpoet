@@ -611,6 +611,7 @@ func main() {
 		r.Post("/sessions", api.CreateSession)
 		r.Get("/sessions/{id}", api.GetSession)
 		r.Get("/sessions/{id}/output", api.GetSessionOutput)
+		r.Get("/sessions/{id}/history", api.GetSessionHistory)
 		r.Get("/sessions/{id}/events", api.GetSessionEvents)
 		r.Post("/sessions/{id}/events/watch", api.StartWatchingSessionEvents)
 		r.Delete("/sessions/{id}/events/watch", api.StopWatchingSessionEvents)
