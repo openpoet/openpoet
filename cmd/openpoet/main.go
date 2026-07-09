@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"openpoet/internal/acpagent"
+	"openpoet/internal/application"
 	"openpoet/internal/automation"
 	"openpoet/internal/benchmark"
 	"openpoet/internal/config"
@@ -182,6 +183,10 @@ func main() {
 	// Collect active sessions for auto-restore after server is fully initialized
 	ctx := context.Background()
 	sessionsToRestore, _ := db.ListActiveSessions(ctx)
+	reportService, reportServiceErr := application.NewReportService(db)
+	if reportServiceErr != nil {
+		log.Printf("Warning: structured reports unavailable: %v", reportServiceErr)
+	}
 
 	// Clean up stale streaming AI messages (server restart means in-flight streams are lost)
 	if err := db.FixStaleStreamingMessages(ctx); err != nil {
@@ -268,6 +273,9 @@ func main() {
 	apiURL := fmt.Sprintf("http://localhost:%d", cfg.Port)
 	providerMgr := initProviderManager(db, encryptor, apiURL)
 	aiHandler := handlers.NewAIHandler(api, providerMgr)
+	if reportService != nil {
+		aiHandler.SetReportService(reportService)
+	}
 
 	// Wire AI handler into API for AI chat functionality
 	api.SetAIHandler(aiHandler)
@@ -324,6 +332,11 @@ func main() {
 		// Expire all notifications for this session and clean up hook state
 		go notifService.MarkSessionRead(context.Background(), sessionID)
 		hookHandler.ClearSession(sessionID)
+		if reportService != nil {
+			if _, err := reportService.CaptureSessionLifecycle(context.Background(), sessionID); err != nil {
+				log.Printf("[Reports] Failed to persist lifecycle report for session %s: %v", sessionID, err)
+			}
+		}
 	}
 	sessionMgr.OnSessionEnd = func(sessionID string, output []byte) {
 		log.Printf("[AI-Session] >>> OnSessionEnd callback fired for session %s (outputLen=%d)", sessionID[:8], len(output))
@@ -464,10 +477,14 @@ func main() {
 
 	// Server-to-server automation API. Authentication is mandatory even for
 	// localhost and the handler rejects browser origins and non-loopback peers.
-	r.Mount("/api/automation/v1", automation.NewHandler(db, automation.Dependencies{
+	automationDeps := automation.Dependencies{
 		Capabilities: api.CapabilityRegistry(),
 		Snapshot:     db,
-	}))
+	}
+	if reportService != nil {
+		automationDeps.Reports = reportService
+	}
+	r.Mount("/api/automation/v1", automation.NewHandler(db, automationDeps))
 
 	// API routes
 	// DEBUG: Client error reporting endpoint

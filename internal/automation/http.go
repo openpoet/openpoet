@@ -22,6 +22,7 @@ type Dependencies struct {
 	Capabilities *application.CapabilityRegistry
 	Snapshot     SnapshotStore
 	Events       EventStore
+	Reports      DailyReportService
 	Now          func() time.Time
 }
 
@@ -39,7 +40,10 @@ func NewHandler(store Store, dependencies ...Dependencies) http.Handler {
 	if deps.Now == nil {
 		deps.Now = time.Now
 	}
-	api := &commandAPI{capabilities: deps.Capabilities, snapshot: deps.Snapshot, events: deps.Events, now: deps.Now}
+	api := &commandAPI{
+		capabilities: deps.Capabilities, snapshot: deps.Snapshot,
+		events: deps.Events, reports: deps.Reports, now: deps.Now,
+	}
 
 	router := chi.NewRouter()
 	router.Use(BodyLimit(DefaultBodyLimit))
@@ -50,6 +54,7 @@ func NewHandler(store Store, dependencies ...Dependencies) http.Handler {
 	router.Post("/commands", api.executeCommand)
 	router.With(RequireScopes(ScopeEventsRead)).Get("/events", api.listEvents)
 	router.With(RequireScopes(ScopeEventsRead)).Post("/events/ack", api.ackEvents)
+	router.With(RequireScopes(ScopeReportsRead)).Get("/reports/daily", api.getDailyReport)
 	router.With(RequireScopes(
 		ScopeProjectsRead,
 		ScopeTasksRead,
