@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,8 +29,12 @@ func UserActor() Actor {
 }
 
 func (a Actor) historyValue() string {
-	if strings.TrimSpace(a.Type) != "" {
-		return strings.TrimSpace(a.Type)
+	actorType := strings.TrimSpace(a.Type)
+	if actorType != "" {
+		if actorID := strings.TrimSpace(a.ID); actorID != "" {
+			return actorType + ":" + actorID
+		}
+		return actorType
 	}
 	return "system"
 }
@@ -65,10 +70,15 @@ type ProjectTaskEffects interface {
 type ProjectTaskService struct {
 	store   ProjectTaskStore
 	effects ProjectTaskEffects
+	events  ProjectTaskEventPublisher
 }
 
-func NewProjectTaskService(store ProjectTaskStore, effects ProjectTaskEffects) *ProjectTaskService {
-	return &ProjectTaskService{store: store, effects: effects}
+func NewProjectTaskService(store ProjectTaskStore, effects ProjectTaskEffects, publishers ...ProjectTaskEventPublisher) *ProjectTaskService {
+	publisher := ProjectTaskEventPublisher(NewTransactionalProjectTaskEventPublisher())
+	if len(publishers) > 0 && publishers[0] != nil {
+		publisher = publishers[0]
+	}
+	return &ProjectTaskService{store: store, effects: effects, events: publisher}
 }
 
 func (s *ProjectTaskService) CapabilityServiceName() CapabilityServiceName {
@@ -208,7 +218,13 @@ func (s *ProjectTaskService) Create(ctx context.Context, command CreateProjectTa
 		if task.Status == TaskStatusAwaitingApproval {
 			mutation.verify = task
 		}
-		return nil
+		return s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
+			EventType: ProjectTaskEventCreated, AggregateType: "project_task",
+			AggregateID: strconv.FormatInt(task.ID, 10), Actor: command.Actor,
+			Payload: map[string]any{
+				"project_id": task.ProjectID, "task_id": task.ID, "status": task.Status,
+			},
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -324,7 +340,13 @@ func (s *ProjectTaskService) Update(ctx context.Context, command UpdateProjectTa
 		if old.Status != TaskStatusAwaitingApproval && fresh.Status == TaskStatusAwaitingApproval {
 			mutation.verify = fresh
 		}
-		return nil
+		return s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
+			EventType: ProjectTaskEventUpdated, AggregateType: "project_task",
+			AggregateID: strconv.FormatInt(fresh.ID, 10), Actor: command.Actor,
+			Payload: map[string]any{
+				"project_id": fresh.ProjectID, "task_id": fresh.ID, "status": fresh.Status,
+			},
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -371,7 +393,14 @@ func (s *ProjectTaskService) ChangeStatus(ctx context.Context, command ChangeTas
 		if oldStatus != TaskStatusAwaitingApproval && command.Status == TaskStatusAwaitingApproval {
 			mutation.verify = updated
 		}
-		return nil
+		return s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
+			EventType: ProjectTaskEventStatusChanged, AggregateType: "project_task",
+			AggregateID: strconv.FormatInt(task.ID, 10), Actor: command.Actor,
+			Payload: map[string]any{
+				"project_id": task.ProjectID, "task_id": task.ID,
+				"old_status": oldStatus, "new_status": command.Status,
+			},
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -391,7 +420,11 @@ func (s *ProjectTaskService) Delete(ctx context.Context, projectID, taskID int64
 			return err
 		}
 		mutation.tasks = append(mutation.tasks, TaskChange{Action: "deleted", ProjectID: projectID, TaskID: taskID})
-		return nil
+		return s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
+			EventType: ProjectTaskEventDeleted, AggregateType: "project_task",
+			AggregateID: strconv.FormatInt(taskID, 10), Actor: UserActor(),
+			Payload: map[string]any{"project_id": projectID, "task_id": taskID},
+		})
 	})
 	if err != nil {
 		return err
@@ -446,7 +479,14 @@ func (s *ProjectTaskService) Duplicate(ctx context.Context, projectID, taskID in
 			mutation.tasks = append(mutation.tasks, TaskChange{Action: "created", ProjectID: projectID, Task: createdTask})
 			mutation.history = append(mutation.history, history)
 		}
-		return nil
+		return s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
+			EventType: ProjectTaskEventDuplicated, AggregateType: "project_task",
+			AggregateID: strconv.FormatInt(clone.ID, 10), Actor: actor,
+			Payload: map[string]any{
+				"project_id": projectID, "task_id": clone.ID,
+				"source_task_id": original.ID, "created_count": len(createdTasks),
+			},
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -475,7 +515,11 @@ func (s *ProjectTaskService) ReorderProject(ctx context.Context, projectID int64
 			return err
 		}
 		mutation.tasks = append(mutation.tasks, TaskChange{Action: "reordered", ProjectID: projectID})
-		return nil
+		return s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
+			EventType: ProjectTaskEventReordered, AggregateType: "project",
+			AggregateID: strconv.FormatInt(projectID, 10), Actor: UserActor(),
+			Payload: map[string]any{"project_id": projectID, "item_count": len(items)},
+		})
 	})
 	if err != nil {
 		return err
@@ -500,7 +544,11 @@ func (s *ProjectTaskService) ReorderGlobal(ctx context.Context, items []database
 			return err
 		}
 		mutation.tasks = append(mutation.tasks, TaskChange{Action: "reordered"})
-		return nil
+		return s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
+			EventType: ProjectTasksEventReorderedGlobal, AggregateType: "project_tasks",
+			AggregateID: "global", Actor: UserActor(),
+			Payload: map[string]any{"item_count": len(items)},
+		})
 	})
 	if err != nil {
 		return err
@@ -561,7 +609,17 @@ func (s *ProjectTaskService) verify(ctx context.Context, projectID, taskID int64
 		}
 		mutation.tasks = append(mutation.tasks, TaskChange{Action: "updated", ProjectID: projectID, Task: updated})
 		mutation.history = append(mutation.history, history)
-		return nil
+		eventType := ProjectTaskEventVerificationRejected
+		if approve {
+			eventType = ProjectTaskEventVerificationApproved
+		}
+		return s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
+			EventType: eventType, AggregateType: "project_task",
+			AggregateID: strconv.FormatInt(task.ID, 10), Actor: actor,
+			Payload: map[string]any{
+				"project_id": projectID, "task_id": task.ID, "status": status,
+			},
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -689,7 +747,15 @@ func (s *ProjectTaskService) LinkSession(ctx context.Context, command LinkSessio
 		}
 		mutation.sessions = append(mutation.sessions, SessionRename{SessionID: command.SessionID, Name: newName})
 		result = &LinkSessionTaskResult{Task: linked, SessionName: newName}
-		return nil
+		return s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
+			EventType: ProjectTaskEventSessionLinked, AggregateType: "project_task",
+			AggregateID: strconv.FormatInt(linked.ID, 10), Actor: command.Actor,
+			CorrelationID: command.SessionID,
+			Payload: map[string]any{
+				"project_id": linked.ProjectID, "task_id": linked.ID,
+				"session_id": command.SessionID, "task_created": created,
+			},
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -737,7 +803,14 @@ func (s *ProjectTaskService) UnlinkSession(ctx context.Context, sessionID string
 		mutation.history = append(mutation.history, history)
 		mutation.sessions = append(mutation.sessions, SessionRename{SessionID: sessionID, Name: name})
 		result = &UnlinkSessionTaskResult{TaskID: task.ID, SessionName: name}
-		return nil
+		return s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
+			EventType: ProjectTaskEventSessionUnlinked, AggregateType: "project_task",
+			AggregateID: strconv.FormatInt(task.ID, 10), Actor: actor,
+			CorrelationID: sessionID,
+			Payload: map[string]any{
+				"project_id": task.ProjectID, "task_id": task.ID, "session_id": sessionID,
+			},
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -787,7 +860,13 @@ func (s *ProjectTaskService) AddComment(ctx context.Context, projectID, taskID i
 			return err
 		}
 		mutation.history = append(mutation.history, history)
-		return nil
+		return s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
+			EventType: ProjectTaskEventCommentAdded, AggregateType: "project_task",
+			AggregateID: strconv.FormatInt(taskID, 10), Actor: actor,
+			Payload: map[string]any{
+				"project_id": projectID, "task_id": taskID, "history_id": history.ID,
+			},
+		})
 	})
 	if err != nil {
 		return err
@@ -801,6 +880,21 @@ type mutationEffects struct {
 	history  []*database.TaskHistory
 	sessions []SessionRename
 	verify   *database.ProjectTask
+}
+
+func (s *ProjectTaskService) publishProjectTaskEvent(
+	ctx context.Context,
+	tx *database.ProjectTaskTx,
+	event ProjectTaskEvent,
+) error {
+	metadata := eventMetadataFromContext(ctx)
+	if strings.TrimSpace(metadata.Actor.Type) != "" || strings.TrimSpace(metadata.Actor.ID) != "" {
+		event.Actor = metadata.Actor
+	}
+	if correlationID := strings.TrimSpace(metadata.CorrelationID); correlationID != "" {
+		event.CorrelationID = correlationID
+	}
+	return s.events.PublishProjectTaskEvent(ctx, tx, event)
 }
 
 func (s *ProjectTaskService) publish(mutation mutationEffects) {
