@@ -2943,10 +2943,15 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			}
 			taskID = &id
 		}
+		autoStartTaskPrompt := taskID != nil
+		if _, ok := input["auto_start_task_prompt"]; ok {
+			autoStartTaskPrompt = boolInput(input, "auto_start_task_prompt")
+		}
 		sess, err := h.api.startManagedSession(ctx, startSessionInput{
 			ProjectID:                  projectID,
 			TaskID:                     taskID,
 			DangerouslySkipPermissions: boolInput(input, "dangerously_skip_permissions"),
+			AutoStartTaskPrompt:        autoStartTaskPrompt,
 		})
 		if err != nil {
 			return "", err

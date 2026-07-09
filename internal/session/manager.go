@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"openpoet/internal/database"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/google/uuid"
 )
+
+var ErrSessionNotRunning = errors.New("session not running")
 
 type Runner interface {
 	Start(ctx context.Context) error
@@ -694,7 +697,7 @@ func (m *Manager) StopSession(ctx context.Context, sessionID string) error {
 	m.mu.RUnlock()
 
 	if !ok {
-		return fmt.Errorf("session not found: %s", sessionID)
+		return fmt.Errorf("%w: %s", ErrSessionNotRunning, sessionID)
 	}
 
 	rs.userStopped = true
@@ -725,10 +728,24 @@ func (m *Manager) StopSession(ctx context.Context, sessionID string) error {
 
 	rs.cancel()
 	if err := rs.runner.Stop(); err != nil {
-		log.Printf("Error stopping runner: %v", err)
+		return fmt.Errorf("stop runner: %w", err)
 	}
 
-	return nil
+	stopCtx := ctx
+	if stopCtx == nil {
+		stopCtx = context.Background()
+	}
+	if _, ok := stopCtx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		stopCtx, cancel = context.WithTimeout(stopCtx, 10*time.Second)
+		defer cancel()
+	}
+	select {
+	case <-rs.runner.Done():
+		return nil
+	case <-stopCtx.Done():
+		return fmt.Errorf("session %s did not stop: %w", sessionID, stopCtx.Err())
+	}
 }
 
 func (m *Manager) WriteToSession(sessionID string, data []byte) error {
