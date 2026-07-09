@@ -66,6 +66,7 @@ var migrations = []Migration{
 	{Version: 48, Description: "automation: add scoped API clients", Up: migrateV48},
 	{Version: 49, Description: "automation: add idempotency command ledger", Up: migrateV49},
 	{Version: 50, Description: "automation: add transactional event outbox and consumer cursors", Up: migrateV50},
+	{Version: 51, Description: "reports: add structured session turns and deterministic daily materializations", Up: migrateV51},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1318,6 +1319,66 @@ func migrateV50(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV50 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV51(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS structured_session_reports (
+			report_id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			turn_id TEXT NOT NULL,
+			report_date TEXT NOT NULL,
+			timezone TEXT NOT NULL,
+			project_id INTEGER NOT NULL,
+			project_name TEXT NOT NULL,
+			task_id INTEGER,
+			task_title TEXT NOT NULL DEFAULT '',
+			session_name TEXT NOT NULL DEFAULT '',
+			session_status TEXT NOT NULL,
+			session_started_at TIMESTAMP NOT NULL,
+			session_ended_at TIMESTAMP,
+			state TEXT NOT NULL CHECK(state IN ('updated', 'finalized')),
+			incomplete INTEGER NOT NULL DEFAULT 0,
+			objective TEXT NOT NULL DEFAULT '',
+			outcome TEXT NOT NULL DEFAULT '',
+			work_summary TEXT NOT NULL DEFAULT '',
+			decisions_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(decisions_json) AND json_type(decisions_json) = 'array'),
+			verification_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(verification_json) AND json_type(verification_json) = 'object'),
+			evidence_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(evidence_json) AND json_type(evidence_json) = 'array'),
+			completed_task_ids_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(completed_task_ids_json) AND json_type(completed_task_ids_json) = 'array'),
+			changed_task_ids_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(changed_task_ids_json) AND json_type(changed_task_ids_json) = 'array'),
+			incomplete_reasons_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(incomplete_reasons_json) AND json_type(incomplete_reasons_json) = 'array'),
+			through_cursor INTEGER NOT NULL DEFAULT 0 CHECK(through_cursor >= 0),
+			turn_started_at TIMESTAMP NOT NULL,
+			turn_ended_at TIMESTAMP,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			finalized_at TIMESTAMP,
+			UNIQUE(session_id, turn_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS structured_daily_reports (
+			report_date TEXT PRIMARY KEY,
+			timezone TEXT NOT NULL,
+			through_cursor INTEGER NOT NULL DEFAULT 0 CHECK(through_cursor >= 0),
+			report_json TEXT NOT NULL CHECK(json_valid(report_json) AND json_type(report_json) = 'object'),
+			content_sha256 TEXT NOT NULL CHECK(length(content_sha256) = 64),
+			session_count INTEGER NOT NULL DEFAULT 0 CHECK(session_count >= 0),
+			incomplete_session_count INTEGER NOT NULL DEFAULT 0 CHECK(incomplete_session_count >= 0),
+			generated_at TIMESTAMP NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_structured_session_reports_date_session ON structured_session_reports(report_date, session_id, turn_started_at, turn_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_structured_session_reports_project_date ON structured_session_reports(project_id, report_date)`,
+		`CREATE INDEX IF NOT EXISTS idx_structured_session_reports_task_date ON structured_session_reports(task_id, report_date)`,
+		`CREATE INDEX IF NOT EXISTS idx_structured_session_reports_state_updated ON structured_session_reports(state, updated_at)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV51 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

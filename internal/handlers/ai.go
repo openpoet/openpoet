@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"openpoet/internal/application"
 	"openpoet/internal/database"
 	"openpoet/internal/files"
 	"openpoet/internal/llm"
@@ -134,6 +135,7 @@ type AIHandler struct {
 	api         *API
 	providerMgr *llm.ProviderManager
 	mu          sync.RWMutex
+	reports     *application.ReportService
 
 	activeStreams   map[int64]*activeStreamInfo
 	activeStreamsMu sync.Mutex
@@ -152,6 +154,10 @@ type AIHandler struct {
 	// Used to detect skill_customization context for intercepting skill tools.
 	streamProactiveTypesMu sync.Mutex
 	streamProactiveTypes   map[int64]string
+}
+
+func (h *AIHandler) SetReportService(reports *application.ReportService) {
+	h.reports = reports
 }
 
 // NewAIHandler creates a new AI handler.
@@ -5577,6 +5583,21 @@ Instructions:
 		return false
 	}
 
+	// Persist the structured summary before suggestion early exits. Reports are
+	// lifecycle records, not a side effect of whether a task suggestion exists.
+	if trigger == "session_end" && strings.TrimSpace(result.Summary) != "" {
+		if hasLinkedTask {
+			h.api.recordTaskHistory(ctx, linkedTask.ID, linkedTask.ProjectID, "session_ended", map[string]interface{}{
+				"session_id": sessionID, "summary": result.Summary,
+			}, "ai", sessionID)
+		}
+		if h.reports != nil {
+			if _, err := h.reports.EnrichSessionSummary(ctx, sessionID, result.Summary); err != nil {
+				log.Printf("[AI-Session] Failed to enrich structured report for session %s: %v", sessionID, err)
+			}
+		}
+	}
+
 	if len(result.Suggestions) == 0 {
 		log.Printf("[AI-Session] No suggestions for session %s (%s)", sessionID[:8], trigger)
 		return false
@@ -5603,13 +5624,6 @@ Instructions:
 		filtered = append(filtered, s)
 	}
 	result.Suggestions = filtered
-
-	// Record AI summary in task history (for session_end with linked task)
-	if trigger == "session_end" && hasLinkedTask && result.Summary != "" {
-		h.api.recordTaskHistory(ctx, linkedTask.ID, linkedTask.ProjectID, "session_ended", map[string]interface{}{
-			"session_id": sessionID, "summary": result.Summary,
-		}, "ai", sessionID)
-	}
 
 	if len(result.Suggestions) == 0 {
 		log.Printf("[AI-Session] All suggestions filtered out for session %s (%s)", sessionID[:8], trigger)
