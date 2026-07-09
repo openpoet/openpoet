@@ -250,6 +250,12 @@ class StructuredViewManager {
         if (!tm?.isCodexAppServerSession?.(sessionId) || !palette) return false;
 
         const data = this._codexSlashKeyData(event);
+        if ((data === '\x1b' || data === '\x03') && tm._isCodexTurnActive?.(sessionId)) {
+            event.preventDefault();
+            tm.stopCodexTurn?.(sessionId);
+            return true;
+        }
+
         if (palette.open) {
             if (!data) return false;
             event.preventDefault();

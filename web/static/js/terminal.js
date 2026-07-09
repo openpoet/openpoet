@@ -142,8 +142,12 @@ class TerminalManager {
             .catch(() => {});
     }
 
-    async stopCodexTurn() {
-        const sessionId = this.activeSessionId;
+    _isCodexTurnActive(sessionId) {
+        const state = this._codexState.get(sessionId);
+        return !!(state?.activeTurn || state?.activeTurnId);
+    }
+
+    async stopCodexTurn(sessionId = this.activeSessionId) {
         if (!sessionId || !this.isCodexAppServerSession(sessionId)) return;
         try {
             await this.requestCodexCommand(sessionId, 'turn/stop', {});
@@ -151,6 +155,14 @@ class TerminalManager {
         } catch (err) {
             window.app?.showToast?.('Codex', err.message || 'Failed to stop turn', 'error');
         }
+    }
+
+    _handleCodexInterruptInput(sessionId, data) {
+        if (!this.isCodexAppServerSession(sessionId)) return false;
+        if (data !== '\x1b' && data !== '\x03') return false;
+        if (!this._isCodexTurnActive(sessionId)) return false;
+        this.stopCodexTurn(sessionId);
+        return true;
     }
 
     _escapeHTML(value) {
@@ -616,6 +628,7 @@ class TerminalManager {
             terminal.onData((data) => {
                 // Block input when structured view is active — let SV textarea handle it
                 if (this.structuredViewActive.get(sessionId)) return;
+                if (this._handleCodexInterruptInput(sessionId, data)) return;
                 if (this._handleCodexSlashInput(sessionId, data)) return;
                 data = this._sanitizeTerminalClientInput(data);
                 if (!data) return;
@@ -880,6 +893,7 @@ class TerminalManager {
                 td.terminal.onData((data) => {
                     // Block input when structured view is active
                     if (this.structuredViewActive.get(sessionId)) return;
+                    if (this._handleCodexInterruptInput(sessionId, data)) return;
                     if (this._handleCodexSlashInput(sessionId, data)) return;
                     data = this._sanitizeTerminalClientInput(data);
                     if (!data) return;
