@@ -21,6 +21,7 @@ type Store interface {
 type Dependencies struct {
 	Capabilities *application.CapabilityRegistry
 	Snapshot     SnapshotStore
+	Events       EventStore
 	Now          func() time.Time
 }
 
@@ -32,10 +33,13 @@ func NewHandler(store Store, dependencies ...Dependencies) http.Handler {
 	if deps.Snapshot == nil {
 		deps.Snapshot, _ = store.(SnapshotStore)
 	}
+	if deps.Events == nil {
+		deps.Events, _ = store.(EventStore)
+	}
 	if deps.Now == nil {
 		deps.Now = time.Now
 	}
-	api := &commandAPI{capabilities: deps.Capabilities, snapshot: deps.Snapshot, now: deps.Now}
+	api := &commandAPI{capabilities: deps.Capabilities, snapshot: deps.Snapshot, events: deps.Events, now: deps.Now}
 
 	router := chi.NewRouter()
 	router.Use(BodyLimit(DefaultBodyLimit))
@@ -44,6 +48,8 @@ func NewHandler(store Store, dependencies ...Dependencies) http.Handler {
 	router.Get("/health", health)
 	router.Get("/capabilities", api.listCapabilities)
 	router.Post("/commands", api.executeCommand)
+	router.With(RequireScopes(ScopeEventsRead)).Get("/events", api.listEvents)
+	router.With(RequireScopes(ScopeEventsRead)).Post("/events/ack", api.ackEvents)
 	router.With(RequireScopes(
 		ScopeProjectsRead,
 		ScopeTasksRead,
