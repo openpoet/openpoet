@@ -1204,9 +1204,26 @@ class HookManager {
             prompt = 'Start working on the assigned task.';
         }
 
-        // Use the canonical terminal input function (Ctrl+U, text, Enter with delay)
-        if (window.app) {
-            window.app.sendQuickCommand(prompt);
+        // Send to the notification's session, not whichever terminal is currently active.
+        // The HTTP endpoint writes the prompt and newline directly to the PTY, avoiding
+        // races while the terminal WebSocket is still opening.
+        try {
+            const resp = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/input`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: prompt })
+            });
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+        } catch (err) {
+            console.error('Failed to send task prompt via API:', err);
+            const tm = window.terminalManager;
+            if (tm?.submitTerminalLine) {
+                tm.submitTerminalLine(sessionId, prompt);
+            } else if (window.app) {
+                window.app.showToast?.('Error', 'Failed to send task prompt', 'error');
+            }
         }
 
         this.hideTaskLoadedDialog();
