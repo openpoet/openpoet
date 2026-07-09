@@ -110,15 +110,17 @@ func (w *RemoteWatcher) poll() {
 	}
 
 	if len(newEvents) == 0 {
+		if newOffset != w.offset {
+			w.offset = newOffset
+		}
 		return
 	}
 
-	w.offset = newOffset
-
 	select {
 	case w.events <- newEvents:
+		w.offset = newOffset
 	default:
-		// Channel full, skip (consumer is slow)
+		// Keep the offset unchanged so the batch is retried instead of lost.
 	}
 }
 

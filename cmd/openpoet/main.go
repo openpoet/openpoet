@@ -401,6 +401,7 @@ func main() {
 			policyStr, _ := db.GetSetting(context.Background(), "mcp_tool_policy_http")
 			return mcp.ParsePolicy(policyStr)
 		},
+		db,
 	)
 	_ = *mcpHTTP // kept for backward compatibility
 

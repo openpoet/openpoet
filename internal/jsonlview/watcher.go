@@ -69,14 +69,16 @@ func (w *Watcher) run() {
 func (w *Watcher) poll() {
 	newEvents, newOffset, err := ParseFileFromOffset(w.path, w.offset)
 	if err != nil || len(newEvents) == 0 {
+		if err == nil && newOffset != w.offset {
+			w.offset = newOffset
+		}
 		return
 	}
 
-	w.offset = newOffset
-
 	select {
 	case w.events <- newEvents:
+		w.offset = newOffset
 	default:
-		// Channel full, skip this batch (consumer is slow)
+		// Keep the offset unchanged so the batch is retried instead of lost.
 	}
 }

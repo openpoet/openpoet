@@ -60,6 +60,8 @@ var migrations = []Migration{
 	{Version: 42, Description: "sessions: add provider_session_id for native backend resume cursors", Up: migrateV42},
 	{Version: 43, Description: "codex: persist app-server structured transcript events", Up: migrateV43},
 	{Version: 44, Description: "codex: add transcript retention cleanup index", Up: migrateV44},
+	{Version: 45, Description: "mcp: persist HTTP transport session status and history", Up: migrateV45},
+	{Version: 46, Description: "mcp: add HTTP transport retention cleanup indexes", Up: migrateV46},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1159,6 +1161,55 @@ func migrateV44(tx *sqlx.Tx) error {
 	_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_status_end_time ON sessions(status, end_time)`)
 	if err != nil {
 		return fmt.Errorf("migrateV44 failed: %w", err)
+	}
+	return nil
+}
+
+func migrateV45(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS mcp_http_sessions (
+			id TEXT PRIMARY KEY,
+			openpoet_session_id TEXT NOT NULL DEFAULT '',
+			context TEXT NOT NULL DEFAULT 'http',
+			status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'closed', 'expired')),
+			initialized_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_used_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			closed_at TIMESTAMP,
+			request_count INTEGER NOT NULL DEFAULT 0,
+			last_method TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE TABLE IF NOT EXISTS mcp_http_session_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			mcp_session_id TEXT NOT NULL REFERENCES mcp_http_sessions(id) ON DELETE CASCADE,
+			openpoet_session_id TEXT NOT NULL DEFAULT '',
+			method TEXT NOT NULL DEFAULT '',
+			event_type TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			error TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_http_sessions_status_last_used ON mcp_http_sessions(status, last_used_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_http_sessions_openpoet_session ON mcp_http_sessions(openpoet_session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_http_session_events_session ON mcp_http_session_events(mcp_session_id, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_http_session_events_created ON mcp_http_session_events(created_at)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV45 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV46(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE INDEX IF NOT EXISTS idx_mcp_http_sessions_status_closed ON mcp_http_sessions(status, closed_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_http_session_events_created ON mcp_http_session_events(created_at)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV46 failed: %w\nSQL: %s", err, s)
+		}
 	}
 	return nil
 }

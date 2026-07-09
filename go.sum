@@ -45,10 +45,10 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
-github.com/sashabaranov/go-openai v1.29.2 h1:jYpp1wktFoOvxHnum24f/w4+DFzUdJnu83trr5+Slh0=
-github.com/sashabaranov/go-openai v1.29.2/go.mod h1:lj5b/K+zjTSFxVLijLSTDZuP7adOgerWeFyZLUhAKRg=
-github.com/severity1/claude-agent-sdk-go v0.6.12 h1:sBZQLBdHQc7MvGA3eKW1FKkp+TquCf5mXJuSJ+p1Pak=
-github.com/severity1/claude-agent-sdk-go v0.6.12/go.mod h1:1581ih7J7T89idAMBfrtVAcQfNGkFWUtWcnQ1O9efYA=
+github.com/sashabaranov/go-openai v1.41.2 h1:vfPRBZNMpnqu8ELsclWcAvF19lDNgh1t6TVfFFOPiSM=
+github.com/sashabaranov/go-openai v1.41.2/go.mod h1:lj5b/K+zjTSFxVLijLSTDZuP7adOgerWeFyZLUhAKRg=
+github.com/severity1/claude-agent-sdk-go v0.6.22 h1:DAVTK3N1JmuAeyROiQiAgtBBZbrhMaLq93z6iXeIDdA=
+github.com/severity1/claude-agent-sdk-go v0.6.22/go.mod h1:1581ih7J7T89idAMBfrtVAcQfNGkFWUtWcnQ1O9efYA=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.4.0/go.mod h1:YvHI0jy2hoMjB+UWwv71VJQ9isScKT/TqJzVSSt89Yw=
 github.com/stretchr/testify v1.7.1/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
