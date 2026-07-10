@@ -2,21 +2,23 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-	"time"
 
+	"openpoet/internal/application"
 	"openpoet/internal/updater"
 )
 
 // CheckUpdate queries GitHub Releases for a newer version.
 func (a *API) CheckUpdate(w http.ResponseWriter, r *http.Request) {
-	if a.updater == nil {
+	services, ready := a.platformApplicationServices()
+	if !ready || services.Execution.Updates == nil || a.updater == nil {
 		respondError(w, http.StatusServiceUnavailable, "updater not initialized")
 		return
 	}
 
-	status, err := a.updater.CheckForUpdate(r.Context())
+	status, err := services.Execution.Updates.CheckForUpdate(platformUIContext(r))
 	if err != nil {
 		respondJSON(w, http.StatusOK, &updater.UpdateStatus{
 			CurrentVersion: a.updater.CurrentVersion,
@@ -31,7 +33,8 @@ func (a *API) CheckUpdate(w http.ResponseWriter, r *http.Request) {
 
 // ApplyUpdate downloads and installs the latest release, then restarts the process.
 func (a *API) ApplyUpdate(w http.ResponseWriter, r *http.Request) {
-	if a.updater == nil {
+	services, ready := a.platformApplicationServices()
+	if !ready || services.Execution.UpdateMutations == nil || a.updater == nil {
 		respondError(w, http.StatusServiceUnavailable, "updater not initialized")
 		return
 	}
@@ -41,60 +44,49 @@ func (a *API) ApplyUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&body)
 
-	// Check for package manager
-	if mgr := a.updater.DetectPackageManager(); mgr != "" {
-		respondJSON(w, http.StatusConflict, map[string]interface{}{
-			"error":   "managed_install",
-			"message": fmt.Sprintf("Binary is managed by %s. Use '%s upgrade openpoet' instead.", mgr, mgr),
-			"manager": mgr,
-		})
-		return
+	authorization := platformUIAuthorization(r)
+	command := application.ApplyUpdateCommand{Force: body.Force, Authorization: authorization}
+	if body.Force {
+		command.ForceAuthorization = &application.ForceUpdateAuthorization{
+			Authorization:              platformUIAuthorization(r),
+			AcknowledgesActiveSessions: true,
+		}
 	}
-
-	// Check for active sessions
-	runningSessions := a.sessionMgr.ListRunningSessions()
-	if len(runningSessions) > 0 && !body.Force {
-		respondJSON(w, http.StatusConflict, map[string]interface{}{
-			"error":         "active_sessions",
-			"message":       fmt.Sprintf("%d Claude Code session(s) are running. Stop them first or force update.", len(runningSessions)),
-			"session_count": len(runningSessions),
-		})
-		return
-	}
-
-	// Check for available update
-	status, err := a.updater.CheckForUpdate(r.Context())
+	result, err := services.Execution.UpdateMutations.Apply(platformUIContext(r), command)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		var appErr *application.Error
+		if errors.As(err, &appErr) && appErr.Kind == application.ErrorConflict {
+			switch appErr.Code {
+			case "managed_install":
+				mgr := a.updater.DetectPackageManager()
+				respondJSON(w, http.StatusConflict, map[string]interface{}{
+					"error":   appErr.Code,
+					"message": fmt.Sprintf("Binary is managed by %s. Use '%s upgrade openpoet' instead.", mgr, mgr),
+					"manager": mgr,
+				})
+				return
+			case "active_sessions":
+				count := a.ActiveSessionCount()
+				respondJSON(w, http.StatusConflict, map[string]interface{}{
+					"error":         appErr.Code,
+					"message":       fmt.Sprintf("%d Claude Code session(s) are running. Stop them first or force update.", count),
+					"session_count": count,
+				})
+				return
+			}
+		}
+		respondApplicationError(w, err)
 		return
 	}
-	if !status.Available {
-		respondJSON(w, http.StatusOK, map[string]string{"status": "already_up_to_date"})
-		return
-	}
-
-	// Download and apply
-	if err := a.updater.DownloadAndApply(r.Context(), status); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	if result.Status == "already_up_to_date" {
+		respondJSON(w, http.StatusOK, map[string]string{"status": result.Status})
 		return
 	}
 
 	// Respond success
 	respondJSON(w, http.StatusOK, map[string]string{
-		"status":  "applied",
-		"version": status.LatestVersion,
+		"status":  result.Status,
+		"version": result.Version,
 		"message": "Update applied. Restarting...",
 	})
-
-	// Broadcast restart notification to all connected clients
-	a.hub.BroadcastStateUpdate("update", map[string]interface{}{
-		"action":  "restarting",
-		"version": status.LatestVersion,
-	})
-
-	// Schedule restart after response is flushed
-	go func() {
-		time.Sleep(1 * time.Second) // let response flush to client
-		updater.RestartSelf()
-	}()
 }

@@ -119,10 +119,38 @@ func (d *DB) CompleteAutomationCommand(
 	body []byte,
 	errorCode string,
 ) error {
+	return d.CompleteAutomationCommandWithEvent(ctx, id, status, responseStatus, contentType, body, errorCode, nil)
+}
+
+// CompleteAutomationCommandWithEvent closes the command ledger and optionally
+// appends its success audit event in the same transaction. A failure in either
+// write rolls back both, leaving the command in processing for reconciliation.
+func (d *DB) CompleteAutomationCommandWithEvent(
+	ctx context.Context,
+	id string,
+	status string,
+	responseStatus int,
+	contentType string,
+	body []byte,
+	errorCode string,
+	event *EventOutboxAppend,
+) error {
 	if status != "succeeded" && status != "failed" && status != "indeterminate" {
 		return fmt.Errorf("invalid automation command status %q", status)
 	}
-	result, err := d.ExecContext(ctx, `
+	if event != nil && status != "succeeded" {
+		return errors.New("automation command event requires succeeded ledger status")
+	}
+	if body == nil {
+		body = []byte{}
+	}
+	tx, err := d.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `
 		UPDATE automation_commands
 		SET status = ?, response_status = ?, response_content_type = ?,
 			response_body = ?, error_code = ?, updated_at = CURRENT_TIMESTAMP
@@ -138,7 +166,12 @@ func (d *DB) CompleteAutomationCommand(
 	if rows != 1 {
 		return ErrAutomationCommandNotProcessing
 	}
-	return nil
+	if event != nil {
+		if _, err := AppendEventOutbox(ctx, tx, *event); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (d *DB) GetAutomationCommand(ctx context.Context, id string) (*AutomationCommand, error) {

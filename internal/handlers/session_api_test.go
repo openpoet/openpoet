@@ -86,13 +86,11 @@ done
 	hub := websocket.NewHub()
 	mgr := session.NewManager(db, hub, "localhost:0")
 	api := NewAPI(db, hub, mgr, nil, nil, nil, nil)
+	configureSessionPlatformFixture(t, api, db, mgr, backendScript)
 
 	sess, err := api.startManagedSession(ctx, startSessionInput{
 		ProjectID: proj.ID,
 		TaskID:    &task.ID,
-		EnvVars: map[string]string{
-			"OPENPOET_BACKEND_BINARY": backendScript,
-		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -181,14 +179,12 @@ done
 	hub := websocket.NewHub()
 	mgr := session.NewManager(db, hub, "localhost:0")
 	api := NewAPI(db, hub, mgr, nil, nil, nil, nil)
+	configureSessionPlatformFixture(t, api, db, mgr, backendScript)
 
 	sess, err := api.startManagedSession(ctx, startSessionInput{
 		ProjectID:           proj.ID,
 		TaskID:              &task.ID,
 		AutoStartTaskPrompt: true,
-		EnvVars: map[string]string{
-			"OPENPOET_BACKEND_BINARY": backendScript,
-		},
 	})
 	if err != nil {
 		t.Fatal(err)

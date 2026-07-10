@@ -51,6 +51,8 @@ type Config struct {
 	StopTimeout    time.Duration
 	HealthTimeout  time.Duration
 	HealthInterval time.Duration
+	EncryptKey     string
+	MigrateSecrets bool
 }
 
 var releaseIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
@@ -102,6 +104,7 @@ func BuildPlan(operation Operation) ([]Step, error) {
 			{Name: "backup", Description: "criar snapshot SQLite consistente e validá-lo", Mutating: true},
 			{Name: "graceful-stop", Description: "enviar SIGTERM via launchctl bootout e aguardar a porta fechar", Mutating: true},
 			{Name: "switch-binary", Description: "preservar binário anterior e trocar candidato atomicamente", Mutating: true},
+			{Name: "secret-migration", Description: "migrar plaintext legado após backup e antes do restart", Mutating: true},
 			{Name: "start", Description: "subir o LaunchAgent com o binário candidato", Mutating: true},
 			{Name: "health-gates", Description: "exigir versão esperada, checks consecutivos e quick_check"},
 			{Name: "rollback-on-failure", Description: "restaurar binário anterior e reabrir serviço se algum gate falhar", Mutating: true},

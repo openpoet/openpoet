@@ -68,6 +68,7 @@ func (a *commandAPI) executeCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	command.CommandID = strings.TrimSpace(command.CommandID)
+	rawCorrelationID := command.CorrelationID
 	command.CorrelationID = strings.TrimSpace(command.CorrelationID)
 	if command.CommandID == "" {
 		a.writeCommandError(w, command, &commandFailure{status: http.StatusBadRequest, code: "command_id_required", message: "command_id is required"})
@@ -81,7 +82,7 @@ func (a *commandAPI) executeCommand(w http.ResponseWriter, r *http.Request) {
 		a.writeCommandError(w, command, &commandFailure{status: http.StatusBadRequest, code: "correlation_id_invalid", message: "correlation_id is too long"})
 		return
 	}
-	if a == nil || a.capabilities == nil {
+	if a == nil || (a.capabilities == nil && a.platform == nil) {
 		a.writeCommandError(w, command, &commandFailure{status: http.StatusServiceUnavailable, code: "capability_registry_unavailable", message: "the capability registry is unavailable", retryable: true})
 		return
 	}
@@ -90,13 +91,33 @@ func (a *commandAPI) executeCommand(w http.ResponseWriter, r *http.Request) {
 		a.writeCommandError(w, command, &commandFailure{status: http.StatusUnauthorized, code: "authentication_required", message: "automation actor is missing"})
 		return
 	}
-	capability, ok := a.capabilities.Lookup(command.Capability)
+	capability, platformBinding, isPlatform, ok := a.lookupCapability(command.Capability)
 	if !ok {
 		a.writeCommandError(w, command, &commandFailure{status: http.StatusNotFound, code: "capability_not_found", message: "the requested capability is not registered"})
 		return
 	}
-	requiredScope := Scope(capability.Scope)
-	if !actor.Scopes.Has(requiredScope) {
+	if isPlatform {
+		requiredScopes := make([]Scope, 0, len(platformBinding.definition.Scopes))
+		missingScopes := make([]Scope, 0, len(platformBinding.definition.Scopes))
+		for _, scope := range platformBinding.definition.Scopes {
+			required := Scope(scope)
+			requiredScopes = append(requiredScopes, required)
+			if !actor.Scopes.Has(required) {
+				missingScopes = append(missingScopes, required)
+			}
+		}
+		if len(missingScopes) > 0 {
+			a.writeCommandError(w, command, &commandFailure{
+				status: http.StatusForbidden, code: "insufficient_scope", message: "the automation client lacks a required platform capability scope",
+				details: map[string]any{
+					"required_scope":  requiredScopes[0],
+					"required_scopes": requiredScopes,
+					"missing_scopes":  missingScopes,
+				},
+			})
+			return
+		}
+	} else if requiredScope := Scope(capability.Scope); !actor.Scopes.Has(requiredScope) {
 		a.writeCommandError(w, command, &commandFailure{
 			status: http.StatusForbidden, code: "insufficient_scope", message: "the automation client lacks the capability scope",
 			details: map[string]any{"required_scope": requiredScope},
@@ -115,8 +136,66 @@ func (a *commandAPI) executeCommand(w http.ResponseWriter, r *http.Request) {
 		a.writeCommandError(w, command, &commandFailure{status: http.StatusBadRequest, code: "reason_required", message: "reason is required for destructive commands"})
 		return
 	}
+	if !command.DryRun && isPlatform && capability.Risk == application.CapabilityRiskUnsafe && strings.TrimSpace(command.Reason) == "" {
+		a.writeCommandError(w, command, &commandFailure{status: http.StatusBadRequest, code: "platform_reason_required", message: "a reason is required for unsafe platform commands"})
+		return
+	}
+	approvalNeedsCorrelation := capability.Approval == application.ApprovalExplicit ||
+		(isPlatform && capability.Approval == application.ApprovalByPolicy)
+	if !command.DryRun && approvalNeedsCorrelation && !validAuthorizationRef(rawCorrelationID) {
+		a.writeCommandError(w, command, &commandFailure{status: http.StatusBadRequest, code: "correlation_id_required", message: "a valid authorization correlation_id is required for this capability"})
+		return
+	}
 	if !command.DryRun && capability.Approval == application.ApprovalExplicit && strings.TrimSpace(command.ApprovalToken) == "" {
 		a.writeCommandError(w, command, &commandFailure{status: http.StatusConflict, code: "approval_required", message: "approval_token is required for this capability"})
+		return
+	}
+	var consumedApproval *database.AutomationApprovalGrant
+	if !command.DryRun && capability.Approval == application.ApprovalExplicit {
+		if a.approvals == nil {
+			a.writeCommandError(w, command, &commandFailure{status: http.StatusServiceUnavailable, code: "approval_unavailable", message: "approval grant validation is unavailable", retryable: true})
+			return
+		}
+		consumedApproval, err = a.consumeExplicitApproval(r.Context(), actor, capability, command)
+		if err != nil {
+			a.writeCommandError(w, command, err)
+			return
+		}
+	}
+	if isPlatform {
+		approval := PlatformApprovalDecision{}
+		if !command.DryRun {
+			var approver string
+			switch capability.Approval {
+			case application.ApprovalByPolicy:
+				approver = actor.ClientID
+			case application.ApprovalExplicit:
+				if consumedApproval == nil {
+					a.writeCommandError(w, command, &commandFailure{status: http.StatusServiceUnavailable, code: "approval_unavailable", message: "consumed approval metadata is unavailable", retryable: true})
+					return
+				}
+				approver = consumedApproval.IssuedByClientID
+			}
+			if approver != "" {
+				approval, err = NewValidatedPlatformApproval(approver)
+				if err != nil {
+					a.writeCommandError(w, command, &commandFailure{status: http.StatusUnprocessableEntity, code: "platform_approval_invalid", message: "validated platform approval metadata is invalid"})
+					return
+				}
+			}
+		}
+		commandContext := application.WithEventMetadata(r.Context(), application.EventMetadata{
+			Actor: application.Actor{Type: actor.Type, ID: actor.ClientID}, CorrelationID: command.CorrelationID,
+		})
+		platformResult, dispatchErr := dispatchRegisteredPlatformCommand(commandContext, a.platform, command, actor, approval)
+		if dispatchErr != nil {
+			a.writeCommandError(w, command, dispatchErr)
+			return
+		}
+		writeJSON(w, http.StatusOK, commandResponse{
+			APIVersion: APIVersion, CommandID: command.CommandID, CorrelationID: command.CorrelationID,
+			Capability: command.Capability, Status: platformResult.Status, Actor: actor, Result: platformResult.Result,
+		})
 		return
 	}
 
@@ -155,9 +234,15 @@ func (a *commandAPI) writeCommandError(w http.ResponseWriter, command *commandEn
 	failure := &commandFailure{status: http.StatusInternalServerError, code: "command_failed", message: "the command could not be completed", retryable: true}
 	var typedFailure *commandFailure
 	var applicationError *application.Error
+	var platformError *PlatformDispatchError
 	switch {
 	case errors.As(err, &typedFailure):
 		failure = typedFailure
+	case errors.As(err, &platformError):
+		failure = &commandFailure{
+			status: platformDispatchHTTPStatus(platformError), code: platformError.Code,
+			message: platformError.Message, retryable: platformError.Retryable,
+		}
 	case errors.As(err, &applicationError):
 		failure.code = applicationError.Code
 		failure.message = applicationError.Message
@@ -181,6 +266,28 @@ func (a *commandAPI) writeCommandError(w http.ResponseWriter, command *commandEn
 		correlationID = command.CorrelationID
 	}
 	writeErrorWithMetadata(w, failure.status, failure.code, failure.message, failure.retryable, commandID, correlationID, failure.details)
+}
+
+func platformDispatchHTTPStatus(err *PlatformDispatchError) int {
+	if err == nil {
+		return http.StatusInternalServerError
+	}
+	switch err.Code {
+	case "platform_capability_not_found":
+		return http.StatusNotFound
+	case "platform_insufficient_scope":
+		return http.StatusForbidden
+	case "platform_target_too_large", "platform_payload_too_large":
+		return http.StatusRequestEntityTooLarge
+	case "platform_command_timeout":
+		return http.StatusGatewayTimeout
+	case "platform_command_canceled":
+		return http.StatusRequestTimeout
+	}
+	if err.Retryable {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusUnprocessableEntity
 }
 
 func projectTaskServiceFor(registry *application.CapabilityRegistry, name application.CapabilityName) (*application.ProjectTaskService, error) {

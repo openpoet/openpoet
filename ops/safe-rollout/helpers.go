@@ -180,6 +180,63 @@ func BackupSQLite(sourcePath, destinationPath string) error {
 	return syncFile(destinationPath)
 }
 
+// RestoreSQLiteBackup atomically replaces an offline live database with a
+// verified snapshot. WAL sidecars are removed only while the service is down.
+func RestoreSQLiteBackup(backupPath, livePath string) error {
+	if backupPath == "" || livePath == "" {
+		return errors.New("backup e live database são obrigatórios")
+	}
+	if err := QuickCheckSQLite(backupPath); err != nil {
+		return fmt.Errorf("verify SQLite restore source: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(livePath), 0o700); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(livePath), ".restore-sqlite-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	keep := false
+	defer func() {
+		_ = temporary.Close()
+		if !keep {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	source, err := os.Open(backupPath)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(temporary, source)
+	closeSourceErr := source.Close()
+	if copyErr != nil || closeSourceErr != nil {
+		return errors.Join(copyErr, closeSourceErr)
+	}
+	if err := temporary.Chmod(0o600); err != nil {
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	for _, sidecar := range []string{livePath + "-wal", livePath + "-shm"} {
+		if err := os.Remove(sidecar); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove stale SQLite sidecar: %w", err)
+		}
+	}
+	if err := os.Rename(temporaryPath, livePath); err != nil {
+		return err
+	}
+	keep = true
+	if err := syncDir(filepath.Dir(livePath)); err != nil {
+		return err
+	}
+	return QuickCheckSQLite(livePath)
+}
+
 func sqliteReadOnlyDSN(path string) string {
 	u := &url.URL{Scheme: "file", Path: path}
 	query := u.Query()

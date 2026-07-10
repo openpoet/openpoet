@@ -312,6 +312,32 @@ func main() {
 		PairingMgr: pairingMgr,
 	})
 
+	// Compose the typed platform services only after every process-owned
+	// dependency exists. Failure is intentionally isolated to Automation's
+	// platform surface; the legacy UI and routes remain available.
+	if err := api.ConfigurePlatformServices(handlers.PlatformServices{
+		DB:             db,
+		Hub:            hub,
+		SessionManager: sessionMgr,
+		ConfigSync:     configSync,
+		Encryptor:      encryptor,
+		HookHandler:    hookHandler,
+		FileHandler:    fileHandler,
+		GitHandler:     gitHandler,
+		VoiceHandler:   voiceHandler,
+		StructuredView: svHandler,
+		Updater:        appUpdater,
+		AIHandler:      aiHandler,
+		Notifications:  notifService,
+		WebPush:        webpush,
+		ReinitializeAI: api.ReinitAIProviders,
+	}); err != nil {
+		log.Printf("[Automation] Platform capabilities unavailable: %v", err)
+	} else {
+		readiness := api.PlatformAutomationReadiness()
+		log.Printf("[Automation] Platform capabilities ready: total=%d mutations=%d reads=%d", readiness.Total, readiness.Mutations, readiness.Reads)
+	}
+
 	// Initialize OTEL handler for Claude Code token tracking
 	otelHandler := handlers.NewOTELHandler(db)
 
@@ -410,7 +436,7 @@ func main() {
 	// The --mcp-http flag and mcp_http_enabled setting are kept for backward compatibility.
 	mcpHandler := mcp.NewHTTPHandler(
 		fmt.Sprintf("http://localhost:%d", cfg.Port),
-		func() string { key, _ := db.GetSetting(context.Background(), "mcp_api_key"); return key },
+		func() string { return loadMCPAPIKey(context.Background(), db, encryptor) },
 		func() mcp.ToolPolicy {
 			policyStr, _ := db.GetSetting(context.Background(), "mcp_tool_policy_http")
 			return mcp.ParsePolicy(policyStr)
@@ -478,8 +504,9 @@ func main() {
 	// Server-to-server automation API. Authentication is mandatory even for
 	// localhost and the handler rejects browser origins and non-loopback peers.
 	automationDeps := automation.Dependencies{
-		Capabilities: api.CapabilityRegistry(),
-		Snapshot:     db,
+		Capabilities:         api.CapabilityRegistry(),
+		PlatformCapabilities: api.PlatformCapabilityRegistry(),
+		Snapshot:             db,
 	}
 	if reportService != nil {
 		automationDeps.Reports = reportService
@@ -1027,6 +1054,34 @@ func main() {
 	}
 
 	fmt.Println("OpenPoet stopped")
+}
+
+// loadMCPAPIKey supports legacy plaintext rows while keeping encrypted rows
+// fail-closed: a missing IV or decryption failure can never turn ciphertext
+// into an accepted credential.
+func loadMCPAPIKey(ctx context.Context, db *database.DB, encryptor *security.Encryptor) string {
+	if db == nil {
+		return ""
+	}
+	key, err := db.GetSetting(ctx, "mcp_api_key")
+	if err != nil || key == "" {
+		return ""
+	}
+	iv, err := db.GetSetting(ctx, "mcp_api_key_iv")
+	if err != nil || iv == "" {
+		if strings.HasPrefix(key, "dm_") {
+			return key
+		}
+		return ""
+	}
+	if encryptor == nil {
+		return ""
+	}
+	plaintext, err := encryptor.Decrypt(key, iv)
+	if err != nil {
+		return ""
+	}
+	return plaintext
 }
 
 // initDatabase tries to open/migrate the database. On failure, it silently

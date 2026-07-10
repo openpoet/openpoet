@@ -9,27 +9,31 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"openpoet/internal/database"
+	"openpoet/internal/security"
 )
 
 type Workflow struct {
-	Runner CommandRunner
-	Health HealthClient
-	Now    func() time.Time
-	Output io.Writer
+	Runner         CommandRunner
+	Health         HealthClient
+	Now            func() time.Time
+	Output         io.Writer
+	MigrateSecrets func(context.Context, string, string) (database.LegacyRuntimeSecretMigrationReport, error)
 }
 
 type ApplyResult struct {
-	ReleaseID      string
-	BackupPath     string
-	PreviousBinary string
+	ReleaseID       string
+	BackupPath      string
+	PreviousBinary  string
+	SecretMigration database.LegacyRuntimeSecretMigrationReport
 }
 
 func NewWorkflow(output io.Writer) Workflow {
 	return Workflow{
 		Runner: ExecRunner{},
 		Health: defaultHealthClient(),
-		Now:    time.Now,
-		Output: output,
+		Now:    time.Now, Output: output, MigrateSecrets: migrateRuntimeSecrets,
 	}
 }
 
@@ -253,6 +257,25 @@ func (workflow Workflow) Apply(ctx context.Context, config Config) (ApplyResult,
 		_, startErr := workflow.Runner.Run(ctx, "", "launchctl", "bootstrap", config.LaunchDomain, config.PlistPath)
 		return result, errors.Join(fmt.Errorf("binary switch: %w", err), startErr)
 	}
+	if config.MigrateSecrets {
+		if workflow.MigrateSecrets == nil {
+			rollbackErr := workflow.rollback(ctx, config, result.PreviousBinary, manifest.ReleaseID, "")
+			return result, errors.Join(errors.New("secret migration runner unavailable"), rollbackErr)
+		}
+		result.SecretMigration, err = workflow.MigrateSecrets(ctx, config.DBPath, config.EncryptKey)
+		if err != nil {
+			rollbackErr := workflow.rollback(ctx, config, result.PreviousBinary, manifest.ReleaseID, "")
+			return result, errors.Join(fmt.Errorf("secret migration: %w", err), rollbackErr)
+		}
+		fmt.Fprintf(
+			workflow.Output,
+			"secret migration: global_mcp=%d project_mcp=%d custom_tools=%d fields=%d\n",
+			result.SecretMigration.GlobalMCPRecords,
+			result.SecretMigration.ProjectMCPRecords,
+			result.SecretMigration.CustomToolRecords,
+			result.SecretMigration.Fields,
+		)
+	}
 
 	startAndGate := func() error {
 		if _, err := workflow.Runner.Run(ctx, "", "launchctl", "bootstrap", config.LaunchDomain, config.PlistPath); err != nil {
@@ -272,19 +295,27 @@ func (workflow Workflow) Apply(ctx context.Context, config Config) (ApplyResult,
 		return QuickCheckSQLite(config.DBPath)
 	}
 	if err := startAndGate(); err != nil {
-		rollbackErr := workflow.rollback(ctx, config, result.PreviousBinary, manifest.ReleaseID)
+		databaseBackup := ""
+		if result.SecretMigration.Executed {
+			databaseBackup = result.BackupPath
+		}
+		rollbackErr := workflow.rollback(ctx, config, result.PreviousBinary, manifest.ReleaseID, databaseBackup)
 		return result, errors.Join(fmt.Errorf("candidate health gates: %w", err), rollbackErr)
 	}
 
 	return result, nil
 }
 
-func (workflow Workflow) rollback(ctx context.Context, config Config, previousPath, releaseID string) error {
+func (workflow Workflow) rollback(ctx context.Context, config Config, previousPath, releaseID, databaseBackup string) error {
 	target := config.LaunchDomain + "/" + config.ServiceLabel
 	_, stopErr := workflow.Runner.Run(ctx, "", "launchctl", "bootout", target)
 	restoreErr := RestoreBinary(previousPath, config.LiveBinary, releaseID)
+	var restoreDatabaseErr error
+	if databaseBackup != "" {
+		restoreDatabaseErr = RestoreSQLiteBackup(databaseBackup, config.DBPath)
+	}
 	_, startErr := workflow.Runner.Run(ctx, "", "launchctl", "bootstrap", config.LaunchDomain, config.PlistPath)
-	if restoreErr == nil && startErr == nil {
+	if restoreErr == nil && restoreDatabaseErr == nil && startErr == nil {
 		healthCtx, cancel := context.WithTimeout(ctx, config.HealthTimeout)
 		defer cancel()
 		startErr = workflow.Health.WaitForHealth(
@@ -295,7 +326,20 @@ func (workflow Workflow) rollback(ctx context.Context, config Config, previousPa
 			2,
 		)
 	}
-	return errors.Join(stopErr, restoreErr, startErr)
+	return errors.Join(stopErr, restoreErr, restoreDatabaseErr, startErr)
+}
+
+func migrateRuntimeSecrets(ctx context.Context, dbPath, encryptKey string) (database.LegacyRuntimeSecretMigrationReport, error) {
+	db, err := database.OpenExisting(dbPath)
+	if err != nil {
+		return database.LegacyRuntimeSecretMigrationReport{}, err
+	}
+	defer db.Close()
+	encryptor, err := security.NewEncryptor(encryptKey)
+	if err != nil {
+		return database.LegacyRuntimeSecretMigrationReport{}, errors.New("initialize rollout secret encryption")
+	}
+	return database.MigrateLegacyRuntimeSecrets(ctx, db, encryptor, true)
 }
 
 func validatePrepareConfig(config Config) error {

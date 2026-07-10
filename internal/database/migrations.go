@@ -68,6 +68,7 @@ var migrations = []Migration{
 	{Version: 50, Description: "automation: add transactional event outbox and consumer cursors", Up: migrateV50},
 	{Version: 51, Description: "reports: add structured session turns and deterministic daily materializations", Up: migrateV51},
 	{Version: 52, Description: "automation: add first-class work runs and durable plans", Up: migrateV52},
+	{Version: 53, Description: "automation: add one-time explicit approval grants", Up: migrateV53},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1475,6 +1476,35 @@ func migrateV52(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV52 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV53(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS automation_approval_grants (
+			id TEXT PRIMARY KEY,
+			token_hash BLOB NOT NULL UNIQUE CHECK(length(token_hash) = 32),
+			issued_by_client_id TEXT NOT NULL REFERENCES automation_clients(id) ON DELETE CASCADE,
+			target_client_id TEXT NOT NULL REFERENCES automation_clients(id) ON DELETE CASCADE,
+			capability TEXT NOT NULL CHECK(length(capability) BETWEEN 1 AND 200),
+			command_id TEXT NOT NULL CHECK(length(command_id) BETWEEN 1 AND 200),
+			authorization_ref TEXT NOT NULL CHECK(length(authorization_ref) BETWEEN 1 AND 200),
+			expires_at TIMESTAMP NOT NULL,
+			used_at TIMESTAMP,
+			created_at TIMESTAMP NOT NULL,
+			CHECK(expires_at > created_at),
+			CHECK(used_at IS NULL OR used_at >= created_at)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_automation_approval_grants_target
+			ON automation_approval_grants(target_client_id, capability, command_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_automation_approval_grants_expiry
+			ON automation_approval_grants(expires_at, used_at)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV53 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

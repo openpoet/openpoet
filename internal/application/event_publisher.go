@@ -90,6 +90,18 @@ func eventMetadataFromContext(ctx context.Context) EventMetadata {
 	return metadata
 }
 
+// EventMetadataFromContext exposes the bounded event identity to composition
+// adapters without making those adapters depend on transport-specific values.
+func EventMetadataFromContext(ctx context.Context) EventMetadata {
+	return eventMetadataFromContext(ctx)
+}
+
+// EventActorValue returns the canonical, non-secret audit representation of
+// an actor for outbox publishers outside the application package.
+func EventActorValue(actor Actor) string {
+	return actor.eventValue()
+}
+
 func (a Actor) eventValue() string {
 	actorType := strings.TrimSpace(a.Type)
 	if actorType == "" {
