@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"openpoet/internal/database"
+	runtime "openpoet/internal/session"
 	"openpoet/internal/voice"
 )
 
@@ -115,6 +116,27 @@ func (e *phase3SessionEffects) PublishSessionChange(_ context.Context, change Se
 	e.changes = append(e.changes, change)
 }
 
+type phase3SessionSettings struct {
+	model, effort string
+	err           error
+}
+
+func (s *phase3SessionSettings) SetSessionModel(_ context.Context, id, model string) (*database.Session, error) {
+	s.model = model
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &database.Session{ID: id, Status: "running", Model: model, Effort: s.effort}, nil
+}
+
+func (s *phase3SessionSettings) SetSessionEffort(_ context.Context, id, effort string) (*database.Session, error) {
+	s.effort = effort
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &database.Session{ID: id, Status: "running", Model: s.model, Effort: effort}, nil
+}
+
 func TestSessionServiceCreateGuardsEnvironmentAndPublishesAfterStart(t *testing.T) {
 	store := &phase3Store{project: &database.Project{ID: 7, Type: "local"}}
 	manager := &phase3SessionManager{}
@@ -171,6 +193,34 @@ func TestSessionServiceStateAndEffectBoundaries(t *testing.T) {
 	}
 	if err := service.SendInput(context.Background(), SendSessionInputCommand{SessionID: "s1", Text: "hello", Authorization: phase3Actor}); !ErrorIsKind(err, ErrorConflict) {
 		t.Fatalf("input into stopped session must conflict, got %v", err)
+	}
+}
+
+func TestSessionServiceOwnsRuntimeModelAndEffortMutations(t *testing.T) {
+	store := &phase3Store{session: &database.Session{ID: "s1", ProjectID: 7, Status: "running"}}
+	manager := &phase3SessionManager{running: true}
+	settings := &phase3SessionSettings{}
+	effects := &phase3SessionEffects{}
+	service := NewSessionService(store, manager, nil, nil, nil, nil, nil, effects, SessionCreationCollaborators{Settings: settings})
+
+	updated, err := service.SetModel(context.Background(), SetSessionModelCommand{SessionID: "s1", Model: " gpt-test ", Authorization: phase3Actor})
+	if err != nil || updated.Model != "gpt-test" || settings.model != "gpt-test" {
+		t.Fatalf("set model failed: updated=%+v settings=%+v err=%v", updated, settings, err)
+	}
+	updated, err = service.SetEffort(context.Background(), SetSessionEffortCommand{SessionID: "s1", Effort: " high ", Authorization: phase3Actor})
+	if err != nil || updated.Effort != "high" || settings.effort != "high" {
+		t.Fatalf("set effort failed: updated=%+v settings=%+v err=%v", updated, settings, err)
+	}
+	if len(effects.changes) != 2 || effects.changes[0].Action != "model_changed" || effects.changes[1].Action != "effort_changed" {
+		t.Fatalf("runtime setting effects=%+v", effects.changes)
+	}
+
+	settings.err = runtime.ErrInvalidSessionSetting
+	if _, err = service.SetModel(context.Background(), SetSessionModelCommand{SessionID: "s1", Model: "unknown", Authorization: phase3Actor}); !ErrorIsKind(err, ErrorValidation) {
+		t.Fatalf("invalid runtime setting was not translated: %v", err)
+	}
+	if len(effects.changes) != 2 {
+		t.Fatalf("failed setting published an effect: %+v", effects.changes)
 	}
 }
 

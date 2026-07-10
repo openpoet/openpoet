@@ -735,11 +735,16 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 			ProjectID int64  `json:"project_id"`
 			Status    string `json:"status"`
 			Name      string `json:"name"`
+			Backend   string `json:"backend"`
+			Model     string `json:"model"`
+			Effort    string `json:"effort"`
+			Harness   string `json:"harness"`
 		}
 		if err := json.Unmarshal(body, &sess); err != nil {
 			return string(body), nil
 		}
-		result := fmt.Sprintf("Session: %s\nName: %s\nProject ID: %d\nStatus: %s", sess.ID, sess.Name, sess.ProjectID, sess.Status)
+		meta := sessionmeta.WithSessionValues(fetchSessionMetadata(client, sess.ProjectID, sess.Backend), sess.Model, sess.Effort, sess.Harness)
+		result := fmt.Sprintf("Session: %s\nName: %s\nProject ID: %d\nStatus: %s\nModel: %s\nEffort: %s\nHarness: %s", sess.ID, sess.Name, sess.ProjectID, sess.Status, meta.Model, meta.Effort, meta.Harness)
 		// Try to get linked task
 		taskBody, taskErr := client.Get(fmt.Sprintf("/api/sessions/%s/task", sessionID))
 		if taskErr == nil {
@@ -835,6 +840,48 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 			return "", err
 		}
 		return formatSessionDetail(client, body)
+
+	case "openpoet_set_session_model":
+		sid, _ := params["session_id"].(string)
+		model, _ := params["model"].(string)
+		if strings.TrimSpace(sid) == "" || strings.TrimSpace(model) == "" {
+			return "", fmt.Errorf("session_id and model are required")
+		}
+		payload, _ := json.Marshal(map[string]string{"model": model})
+		body, err := client.Post(fmt.Sprintf("/api/sessions/%s/model", sid), string(payload))
+		if err != nil {
+			return "", err
+		}
+		var updated struct {
+			Model   string `json:"model"`
+			Effort  string `json:"effort"`
+			Harness string `json:"harness"`
+		}
+		if json.Unmarshal(body, &updated) == nil && updated.Model != "" {
+			return fmt.Sprintf("Session %s model changed to %s (effort: %s, harness: %s)", shortID(sid), updated.Model, updated.Effort, updated.Harness), nil
+		}
+		return string(body), nil
+
+	case "openpoet_set_session_effort":
+		sid, _ := params["session_id"].(string)
+		effort, _ := params["effort"].(string)
+		if strings.TrimSpace(sid) == "" || strings.TrimSpace(effort) == "" {
+			return "", fmt.Errorf("session_id and effort are required")
+		}
+		payload, _ := json.Marshal(map[string]string{"effort": effort})
+		body, err := client.Post(fmt.Sprintf("/api/sessions/%s/effort", sid), string(payload))
+		if err != nil {
+			return "", err
+		}
+		var updated struct {
+			Model   string `json:"model"`
+			Effort  string `json:"effort"`
+			Harness string `json:"harness"`
+		}
+		if json.Unmarshal(body, &updated) == nil && updated.Effort != "" {
+			return fmt.Sprintf("Session %s effort changed to %s (model: %s, harness: %s)", shortID(sid), updated.Effort, updated.Model, updated.Harness), nil
+		}
+		return string(body), nil
 
 	case "openpoet_read_session_history":
 		sid, _ := params["session_id"].(string)
@@ -1201,6 +1248,9 @@ func formatSessionsList(client *APIClient, body []byte, params map[string]interf
 		Status    string `json:"status"`
 		Name      string `json:"name"`
 		Backend   string `json:"backend"`
+		Model     string `json:"model"`
+		Effort    string `json:"effort"`
+		Harness   string `json:"harness"`
 		TaskID    *struct {
 			Int64 int64 `json:"Int64"`
 			Valid bool  `json:"Valid"`
@@ -1238,7 +1288,7 @@ func formatSessionsList(client *APIClient, body []byte, params map[string]interf
 		if s.TaskID != nil && s.TaskID.Valid {
 			task = fmt.Sprintf("%d", s.TaskID.Int64)
 		}
-		meta := fetchSessionMetadata(client, s.ProjectID, s.Backend)
+		meta := sessionmeta.WithSessionValues(fetchSessionMetadata(client, s.ProjectID, s.Backend), s.Model, s.Effort, s.Harness)
 		result += fmt.Sprintf("- %s | %s | project: %d | status: %s | task: %s | model: %s | effort: %s | harness: %s\n",
 			s.ID, name, s.ProjectID, s.Status, task, meta.Model, meta.Effort, meta.Harness)
 	}
@@ -1259,6 +1309,9 @@ func formatSessionDetail(client *APIClient, body []byte) (string, error) {
 			Valid bool  `json:"Valid"`
 		} `json:"task_id"`
 		Backend string `json:"backend"`
+		Model   string `json:"model"`
+		Effort  string `json:"effort"`
+		Harness string `json:"harness"`
 	}
 	if err := json.Unmarshal(body, &sess); err != nil {
 		return string(body), nil
@@ -1266,7 +1319,7 @@ func formatSessionDetail(client *APIClient, body []byte) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Session: %s\n", sess.ID))
 	sb.WriteString(fmt.Sprintf("Name: %s\nProject ID: %d\nStatus: %s\nBackend: %s\n", sess.Name, sess.ProjectID, sess.Status, sess.Backend))
-	meta := fetchSessionMetadata(client, sess.ProjectID, sess.Backend)
+	meta := sessionmeta.WithSessionValues(fetchSessionMetadata(client, sess.ProjectID, sess.Backend), sess.Model, sess.Effort, sess.Harness)
 	sb.WriteString(fmt.Sprintf("Model: %s\nEffort: %s\nHarness: %s\n", meta.Model, meta.Effort, meta.Harness))
 	if meta.HarnessDetails != "" {
 		sb.WriteString(fmt.Sprintf("Harness details: %s\n", meta.HarnessDetails))

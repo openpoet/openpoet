@@ -115,7 +115,7 @@ func (a *commandAPI) health(w http.ResponseWriter, r *http.Request) {
 		"status":                "ok",
 		"version":               APIVersion,
 		"client_id":             actor.ClientID,
-		"platform_ready":        total == 153 && mutations == 104 && reads == 49,
+		"platform_ready":        total == 155 && mutations == 106 && reads == 49,
 		"platform_capabilities": total,
 		"platform_mutations":    mutations,
 		"platform_reads":        reads,

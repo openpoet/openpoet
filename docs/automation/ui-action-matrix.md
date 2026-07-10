@@ -9,7 +9,7 @@ verificado para o mesmo Application Service usado pela UI e pela Automation API.
 
 | Item | Quantidade |
 | --- | ---: |
-| Rotas mutáveis `/api` | 118 |
+| Rotas mutáveis `/api` | 120 |
 | Ações inline de negócio | 57 |
 | Ações `presentation_only` | 49 |
 | Listeners estáticos de negócio | 19 |
@@ -18,7 +18,7 @@ verificado para o mesmo Application Service usado pela UI e pela Automation API.
 
 | Estado | Quantidade | Significado |
 | --- | ---: | --- |
-| `implemented` | 116 | UI e Automation compartilham Application Service/invariantes |
+| `implemented` | 118 | UI e Automation compartilham Application Service/invariantes |
 | `application_service_ready` | 0 | Nenhuma rota permanece em caminho intermediário |
 | `gap` | 0 | Nenhum gap de Application Service |
 | `internal_only` | 2 | Ingestão de hooks, não ação autônoma de usuário |
@@ -121,8 +121,8 @@ de chat não incluem prompt, transcript, proactive context ou mensagens brutas.
 Deletes, clear de usage e execução/aprovação de tool usam
 `ActionAuthorization` com aprovação explícita.
 
-Os services estão registrados em um registry tipado de 153 capabilities
-(104 mutations e 49 reads) e compostos sobre as dependências reais do processo.
+Os services estão registrados em um registry tipado de 155 capabilities
+(106 mutations e 49 reads) e compostos sobre as dependências reais do processo.
 Os handlers humanos falham fechados se o bundle não estiver pronto; não existe
 fallback mutável para o caminho legado. SSE, multipart e WebSocket permanecem
 somente como bordas de transporte.

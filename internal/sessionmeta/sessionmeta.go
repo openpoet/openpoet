@@ -13,9 +13,55 @@ type Metadata struct {
 	HarnessDetails string
 }
 
-// FromProjectConfig derives reportable session metadata from a project's backend
-// configuration. Sessions store the backend used at creation time; the model and
-// harness options currently live in the project backend_config JSON.
+// WithSessionValues overlays runtime values persisted for a specific session.
+// Empty values retain the project-derived fallback for pre-migration sessions.
+func WithSessionValues(meta Metadata, model, effort, harness string) Metadata {
+	if value := strings.TrimSpace(model); value != "" {
+		meta.Model = value
+	}
+	if value := strings.TrimSpace(effort); value != "" {
+		meta.Effort = value
+	}
+	if value := strings.TrimSpace(harness); value != "" {
+		meta.Harness = value
+	}
+	return meta
+}
+
+// ApplyRuntimeValues returns a backend config snapshot with the session's
+// persisted model and effort. "default" removes the project-level override.
+func ApplyRuntimeValues(rawConfig, model, effort string) string {
+	var cfg map[string]interface{}
+	if strings.TrimSpace(rawConfig) != "" {
+		_ = json.Unmarshal([]byte(rawConfig), &cfg)
+	}
+	if cfg == nil {
+		cfg = make(map[string]interface{})
+	}
+	if value := strings.TrimSpace(model); value != "" {
+		if strings.EqualFold(value, "default") {
+			delete(cfg, "model")
+		} else {
+			cfg["model"] = value
+		}
+	}
+	if value := strings.TrimSpace(effort); value != "" {
+		delete(cfg, "effort")
+		if strings.EqualFold(value, "default") {
+			delete(cfg, "reasoning_effort")
+		} else {
+			cfg["reasoning_effort"] = value
+		}
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		return rawConfig
+	}
+	return string(encoded)
+}
+
+// FromProjectConfig derives initial/fallback session metadata from a project's
+// backend configuration. Runtime changes are overlaid with WithSessionValues.
 func FromProjectConfig(backend, rawConfig string) Metadata {
 	backend = strings.TrimSpace(backend)
 	var cfg map[string]interface{}

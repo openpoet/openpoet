@@ -1142,6 +1142,11 @@ func (a *API) startManagedSession(ctx context.Context, input startSessionInput) 
 
 const defaultTaskStartPrompt = "Start working on the assigned task."
 
+const (
+	localSessionLineSubmitDelay  = 1500 * time.Millisecond
+	remoteSessionLineSubmitDelay = 2 * time.Second
+)
+
 func (a *API) autoStartTaskSession(sessionID string) {
 	go func() {
 		time.Sleep(500 * time.Millisecond)
@@ -1152,15 +1157,31 @@ func (a *API) autoStartTaskSession(sessionID string) {
 }
 
 func (a *API) submitSessionLine(sessionID, text string) error {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return nil
+	delay := a.sessionLineSubmitDelay(context.Background(), sessionID)
+	return a.sessionMgr.SubmitLineToSession(sessionID, text, delay)
+}
+
+func (a *API) sessionLineSubmitDelay(ctx context.Context, sessionID string) time.Duration {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	if err := a.sessionMgr.WriteToSession(sessionID, []byte(text)); err != nil {
-		return err
+	if a == nil || a.db == nil {
+		return localSessionLineSubmitDelay
 	}
-	time.Sleep(150 * time.Millisecond)
-	return a.sessionMgr.WriteToSession(sessionID, []byte("\n"))
+
+	sess, err := a.db.GetSession(ctx, sessionID)
+	if err != nil || sess == nil {
+		return localSessionLineSubmitDelay
+	}
+
+	project, err := a.db.GetProject(ctx, sess.ProjectID)
+	if err != nil || project == nil {
+		return localSessionLineSubmitDelay
+	}
+	if project.Type == "remote" {
+		return remoteSessionLineSubmitDelay
+	}
+	return localSessionLineSubmitDelay
 }
 
 func (a *API) GetSession(w http.ResponseWriter, r *http.Request) {
@@ -3118,6 +3139,79 @@ func (a *API) SendSessionInput(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+}
+
+// SetSessionModel changes the model used by future turns of an active session.
+func (a *API) SetSessionModel(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var input struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	updated, err := services.Execution.Sessions.SetModel(platformUIContext(r), application.SetSessionModelCommand{
+		SessionID: id, Model: input.Model, Authorization: platformUIAuthorization(r),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{
+		"session_id": updated.ID,
+		"model":      updated.Model,
+		"effort":     updated.Effort,
+		"harness":    updated.Harness,
+	})
+}
+
+// SetSessionEffort changes the reasoning/thinking level used by future turns.
+func (a *API) SetSessionEffort(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var input struct {
+		Effort string `json:"effort"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	updated, err := services.Execution.Sessions.SetEffort(platformUIContext(r), application.SetSessionEffortCommand{
+		SessionID: id, Effort: input.Effort, Authorization: platformUIAuthorization(r),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{
+		"session_id": updated.ID,
+		"model":      updated.Model,
+		"effort":     updated.Effort,
+		"harness":    updated.Harness,
+	})
+}
+
+func respondSessionSettingError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	switch {
+	case errors.Is(err, session.ErrInvalidSessionSetting):
+		status = http.StatusBadRequest
+	case errors.Is(err, session.ErrSessionNotRunning):
+		status = http.StatusConflict
+	case errors.Is(err, session.ErrSessionSettingUnsupported):
+		status = http.StatusUnprocessableEntity
+	}
+	respondError(w, status, err.Error())
 }
 
 // GenerateMCPAPIKey generates a new random API key for MCP HTTP access.

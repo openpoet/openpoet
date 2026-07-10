@@ -85,6 +85,32 @@ func (n platformSessionTaskNotifier) NotifyTaskLoaded(_ context.Context, session
 	return nil
 }
 
+type platformSessionInputSubmitter struct{ api *API }
+
+func (s platformSessionInputSubmitter) SubmitSessionLine(ctx context.Context, sessionID, text string) error {
+	if s.api == nil || s.api.sessionMgr == nil {
+		return errors.New("session input submitter unavailable")
+	}
+	delay := s.api.sessionLineSubmitDelay(ctx, sessionID)
+	return s.api.sessionMgr.SubmitLineToSession(sessionID, text, delay)
+}
+
+type platformSessionRuntimeSettings struct{ api *API }
+
+func (s platformSessionRuntimeSettings) SetSessionModel(ctx context.Context, sessionID, model string) (*database.Session, error) {
+	if s.api == nil || s.api.sessionMgr == nil {
+		return nil, errors.New("session runtime settings unavailable")
+	}
+	return s.api.sessionMgr.SetSessionModel(ctx, sessionID, model, s.api.sessionLineSubmitDelay(ctx, sessionID))
+}
+
+func (s platformSessionRuntimeSettings) SetSessionEffort(ctx context.Context, sessionID, effort string) (*database.Session, error) {
+	if s.api == nil || s.api.sessionMgr == nil {
+		return nil, errors.New("session runtime settings unavailable")
+	}
+	return s.api.sessionMgr.SetSessionEffort(ctx, sessionID, effort, s.api.sessionLineSubmitDelay(ctx, sessionID))
+}
+
 type platformSessionEventReader struct{ handler *StructuredViewHandler }
 
 func (r platformSessionEventReader) SessionEventStatus(ctx context.Context, sessionID string) (automation.SessionEventStatusView, error) {
