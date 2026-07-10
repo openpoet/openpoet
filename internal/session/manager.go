@@ -10,6 +10,7 @@ import (
 	"openpoet/internal/database"
 	"openpoet/internal/mcp"
 	"openpoet/internal/secretvalue"
+	"openpoet/internal/sessionmeta"
 	"openpoet/internal/websocket"
 	"os"
 	"path/filepath"
@@ -21,6 +22,11 @@ import (
 )
 
 var ErrSessionNotRunning = errors.New("session not running")
+
+var (
+	ErrInvalidSessionSetting     = errors.New("invalid session setting")
+	ErrSessionSettingUnsupported = errors.New("session setting unsupported")
+)
 
 type Runner interface {
 	Start(ctx context.Context) error
@@ -57,6 +63,7 @@ type Manager struct {
 	secretDecrypt secretvalue.DecryptFunc
 
 	mu           sync.RWMutex
+	settingsMu   sync.Mutex
 	sessions     map[string]*runningSession
 	clientSizes  map[string]map[string]TermSize // sessionID -> clientID -> size
 	ptySizes     map[string]TermSize            // sessionID -> last size applied to PTY
@@ -172,12 +179,16 @@ func (m *Manager) SetSecretDecryptor(decrypt func(string, string) (string, error
 func (m *Manager) StartSession(ctx context.Context, project *database.Project, envVars map[string]string) (*database.Session, error) {
 	backend := GetBackend(project.Backend)
 	sessionID := uuid.New().String()
+	meta := sessionmeta.FromProjectConfig(project.Backend, project.BackendConfig)
 	session := &database.Session{
 		ID:        sessionID,
 		ProjectID: project.ID,
 		Status:    "starting",
 		StartTime: time.Now(),
 		Backend:   project.Backend,
+		Model:     meta.Model,
+		Effort:    meta.Effort,
+		Harness:   meta.Harness,
 	}
 
 	if err := m.db.CreateSession(ctx, session); err != nil {
@@ -302,6 +313,18 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, project *database.Project, envVars map[string]string, decryptFunc func(string, string) (string, error)) error {
 	backend := GetBackend(session.Backend)
 	sessionID := session.ID
+	meta := sessionmeta.WithSessionValues(
+		sessionmeta.FromProjectConfig(session.Backend, project.BackendConfig),
+		session.Model,
+		session.Effort,
+		session.Harness,
+	)
+	session.Model = meta.Model
+	session.Effort = meta.Effort
+	session.Harness = meta.Harness
+	if err := m.db.UpdateSessionRuntimeMetadata(ctx, sessionID, session.Model, session.Effort, session.Harness); err != nil {
+		return fmt.Errorf("failed to restore session runtime metadata: %w", err)
+	}
 
 	// Check backend supports resume
 	if !backend.SupportsResume() {
@@ -351,6 +374,9 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 		ExecPath:          m.execPath,
 		IsReopen:          true,
 		BackendConfig:     project.BackendConfig,
+	}
+	if backend.Type() == BackendCodex {
+		cfg.BackendConfig = sessionmeta.ApplyRuntimeValues(project.BackendConfig, session.Model, session.Effort)
 	}
 
 	// Extract special env vars set by API handler
@@ -783,6 +809,272 @@ func (m *Manager) WriteToSession(sessionID string, data []byte) error {
 	if err == nil && m.isCodexTerminalSubmit(rs, data) {
 		m.notifyUserPromptSubmitted(sessionID)
 	}
+	return err
+}
+
+// SubmitLineToSession sends a full prompt line as separate text and Enter writes.
+// Some terminal TUIs need time to ingest pasted input before Enter arrives.
+func (m *Manager) SubmitLineToSession(sessionID string, text string, textToEnterDelay time.Duration) error {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	if err := m.WriteToSession(sessionID, []byte(text)); err != nil {
+		return err
+	}
+	if textToEnterDelay > 0 {
+		time.Sleep(textToEnterDelay)
+	}
+	return m.WriteToSession(sessionID, []byte("\r"))
+}
+
+// SetSessionModel changes the model used by future turns of an active session.
+// Codex app-server sessions use the structured command channel and validate the
+// ID against model/list. Claude Code and Codex TUI sessions use their slash command.
+func (m *Manager) SetSessionModel(ctx context.Context, sessionID, model string, textToEnterDelay time.Duration) (*database.Session, error) {
+	m.settingsMu.Lock()
+	defer m.settingsMu.Unlock()
+
+	model, err := validateSessionModelID(model)
+	if err != nil {
+		return nil, err
+	}
+
+	rs, err := m.runningSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	if rs.session.Backend == string(BackendCodex) {
+		if handler, ok := rs.runner.(CodexCommandHandler); ok {
+			if err := setCodexSessionModel(ctx, handler, model); err != nil {
+				return nil, err
+			}
+			return m.persistSessionRuntimeMetadata(ctx, sessionID, model, "")
+		}
+	}
+
+	switch BackendType(rs.session.Backend) {
+	case BackendClaudeCode, BackendCodex:
+		if err := m.SubmitLineToSession(sessionID, "/model "+model, textToEnterDelay); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("%w: backend %q cannot change model in an active session", ErrSessionSettingUnsupported, rs.session.Backend)
+	}
+	return m.persistSessionRuntimeMetadata(ctx, sessionID, model, "")
+}
+
+// SetSessionEffort changes the reasoning/thinking level used by future turns.
+func (m *Manager) SetSessionEffort(ctx context.Context, sessionID, effort string, textToEnterDelay time.Duration) (*database.Session, error) {
+	m.settingsMu.Lock()
+	defer m.settingsMu.Unlock()
+
+	effort, err := validateSessionEffort(effort)
+	if err != nil {
+		return nil, err
+	}
+
+	rs, err := m.runningSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	if rs.session.Backend == string(BackendCodex) {
+		if handler, ok := rs.runner.(CodexCommandHandler); ok {
+			if err := setCodexSessionEffort(ctx, handler, rs.session.Model, effort); err != nil {
+				return nil, err
+			}
+			return m.persistSessionRuntimeMetadata(ctx, sessionID, "", effort)
+		}
+		return nil, fmt.Errorf("%w: Codex TUI does not expose a non-interactive effort command; use the app-server runtime", ErrSessionSettingUnsupported)
+	}
+
+	if BackendType(rs.session.Backend) != BackendClaudeCode {
+		return nil, fmt.Errorf("%w: backend %q cannot change effort in an active session", ErrSessionSettingUnsupported, rs.session.Backend)
+	}
+	if err := m.SubmitLineToSession(sessionID, "/effort "+effort, textToEnterDelay); err != nil {
+		return nil, err
+	}
+	return m.persistSessionRuntimeMetadata(ctx, sessionID, "", effort)
+}
+
+func (m *Manager) runningSession(sessionID string) (*runningSession, error) {
+	m.mu.RLock()
+	rs, ok := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if !ok || rs == nil || rs.session == nil {
+		return nil, fmt.Errorf("%w: %s", ErrSessionNotRunning, sessionID)
+	}
+	return rs, nil
+}
+
+func (m *Manager) persistSessionRuntimeMetadata(ctx context.Context, sessionID, model, effort string) (*database.Session, error) {
+	m.mu.RLock()
+	rs, ok := m.sessions[sessionID]
+	if !ok || rs == nil || rs.session == nil {
+		m.mu.RUnlock()
+		return nil, fmt.Errorf("%w: %s", ErrSessionNotRunning, sessionID)
+	}
+	currentModel := rs.session.Model
+	currentEffort := rs.session.Effort
+	harness := rs.session.Harness
+	m.mu.RUnlock()
+	if model != "" {
+		currentModel = model
+	}
+	if effort != "" {
+		currentEffort = effort
+	}
+
+	if m.db != nil {
+		if err := m.db.UpdateSessionRuntimeMetadata(ctx, sessionID, currentModel, currentEffort, harness); err != nil {
+			return nil, fmt.Errorf("failed to persist session runtime metadata: %w", err)
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rs, ok = m.sessions[sessionID]
+	if !ok || rs == nil || rs.session == nil {
+		return nil, fmt.Errorf("%w: %s", ErrSessionNotRunning, sessionID)
+	}
+	rs.session.Model = currentModel
+	rs.session.Effort = currentEffort
+	copy := *rs.session
+	return &copy, nil
+}
+
+func validateSessionModelID(model string) (string, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "", fmt.Errorf("%w: model is required", ErrInvalidSessionSetting)
+	}
+	if len(model) > 128 {
+		return "", fmt.Errorf("%w: model id must be at most 128 characters", ErrInvalidSessionSetting)
+	}
+	for i, ch := range model {
+		allowed := ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || strings.ContainsRune("-._:/@+", ch)
+		if !allowed || i == 0 && strings.ContainsRune("-._:/@+", ch) {
+			return "", fmt.Errorf("%w: model id %q contains unsupported characters", ErrInvalidSessionSetting, model)
+		}
+	}
+	if strings.EqualFold(model, "reset") {
+		return "default", nil
+	}
+	return model, nil
+}
+
+func validateSessionEffort(effort string) (string, error) {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "reset" {
+		effort = "default"
+	}
+	allowed := map[string]bool{
+		"default": true,
+		"minimal": true,
+		"low":     true,
+		"medium":  true,
+		"high":    true,
+		"xhigh":   true,
+		"max":     true,
+	}
+	if !allowed[effort] {
+		return "", fmt.Errorf("%w: effort must be one of default, minimal, low, medium, high, xhigh, or max", ErrInvalidSessionSetting)
+	}
+	return effort, nil
+}
+
+type codexModelCatalog struct {
+	Data []struct {
+		ID                        string `json:"id"`
+		Model                     string `json:"model"`
+		SupportedReasoningEfforts []struct {
+			ReasoningEffort string `json:"reasoningEffort"`
+		} `json:"supportedReasoningEfforts"`
+	} `json:"data"`
+}
+
+func getCodexModelCatalog(ctx context.Context, handler CodexCommandHandler) (codexModelCatalog, error) {
+	request := json.RawMessage(`{"action":"model/list","params":{"limit":100,"includeHidden":true}}`)
+	result, err := handler.HandleCodexCommand(ctx, request)
+	if err != nil {
+		return codexModelCatalog{}, fmt.Errorf("could not list Codex models for validation: %w", err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return codexModelCatalog{}, fmt.Errorf("could not decode Codex model catalog: %w", err)
+	}
+	var catalog codexModelCatalog
+	if err := json.Unmarshal(encoded, &catalog); err != nil {
+		return codexModelCatalog{}, fmt.Errorf("could not decode Codex model catalog: %w", err)
+	}
+	if len(catalog.Data) == 0 {
+		return codexModelCatalog{}, errors.New("Codex returned an empty model catalog; model was not changed")
+	}
+	return catalog, nil
+}
+
+func setCodexSessionModel(ctx context.Context, handler CodexCommandHandler, model string) error {
+	if model != "default" {
+		catalog, err := getCodexModelCatalog(ctx, handler)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, candidate := range catalog.Data {
+			if model == candidate.Model || model == candidate.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("%w: Codex model %q does not exist or is not available to this session", ErrInvalidSessionSetting, model)
+		}
+	}
+	payload, _ := json.Marshal(map[string]interface{}{
+		"action": "session/model/set",
+		"params": map[string]string{"model": model},
+	})
+	_, err := handler.HandleCodexCommand(ctx, payload)
+	return err
+}
+
+func setCodexSessionEffort(ctx context.Context, handler CodexCommandHandler, currentModel, effort string) error {
+	if effort != "default" {
+		catalog, err := getCodexModelCatalog(ctx, handler)
+		if err != nil {
+			return err
+		}
+		modelMatched := false
+		hasEffortCatalog := false
+		effortSupported := false
+		for _, candidate := range catalog.Data {
+			if currentModel != "" && currentModel != "default" && currentModel != candidate.Model && currentModel != candidate.ID {
+				continue
+			}
+			modelMatched = true
+			if len(candidate.SupportedReasoningEfforts) > 0 {
+				hasEffortCatalog = true
+			}
+			for _, supported := range candidate.SupportedReasoningEfforts {
+				if effort == strings.ToLower(strings.TrimSpace(supported.ReasoningEffort)) {
+					effortSupported = true
+					break
+				}
+			}
+			if effortSupported {
+				break
+			}
+		}
+		if modelMatched && hasEffortCatalog && !effortSupported {
+			return fmt.Errorf("%w: effort %q is not supported by Codex model %q", ErrInvalidSessionSetting, effort, currentModel)
+		}
+	}
+	payload, _ := json.Marshal(map[string]interface{}{
+		"action": "session/effort/set",
+		"params": map[string]string{"effort": effort},
+	})
+	_, err := handler.HandleCodexCommand(ctx, payload)
 	return err
 }
 
@@ -1252,12 +1544,16 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 		return nil, fmt.Errorf("remote runner factory not set")
 	}
 	sessionID := uuid.New().String()
+	meta := sessionmeta.FromProjectConfig(project.Backend, project.BackendConfig)
 	session := &database.Session{
 		ID:        sessionID,
 		ProjectID: project.ID,
 		Status:    "starting",
 		StartTime: time.Now(),
 		Backend:   project.Backend,
+		Model:     meta.Model,
+		Effort:    meta.Effort,
+		Harness:   meta.Harness,
 	}
 
 	if err := m.db.CreateSession(ctx, session); err != nil {

@@ -81,6 +81,8 @@ func sessionPlatformDefinitions() []PlatformCapabilityDefinition {
 		executionDestructiveCapability("sessions.stop", "sessions", "sessions:write"),
 		executionWriteCapability("sessions.reopen", "sessions", "sessions:write"),
 		executionPayloadLimit(executionWriteCapability("sessions.send_input", "sessions", "sessions:write"), 20<<10),
+		executionWriteCapability("sessions.set_model", "sessions", "sessions:write"),
+		executionWriteCapability("sessions.set_effort", "sessions", "sessions:write"),
 		executionWriteCapability("sessions.evaluate", "sessions", "sessions:write", "tasks:write"),
 		executionPayloadLimit(platformMutation(executionReadCapability("sessions.image_prompt_hint", "sessions", "sessions:write")), 20<<10),
 	}
@@ -112,6 +114,14 @@ type sessionReopenPayload struct {
 
 type sessionInputPayload struct {
 	Text string `json:"text"`
+}
+
+type sessionModelPayload struct {
+	Model string `json:"model"`
+}
+
+type sessionEffortPayload struct {
+	Effort string `json:"effort"`
 }
 
 type sessionImageHintPayload struct {
@@ -317,6 +327,46 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 				return nil, err
 			}
 			return map[string]any{"sent": true, "session_id": sessionID}, nil
+		}}, nil
+	case "sessions.set_model":
+		sessionID, err := executionStringID(target, "session id")
+		if err != nil {
+			return nil, err
+		}
+		var payload sessionModelPayload
+		if err := decodeExecutionPayload(input.Payload, &payload); err != nil {
+			return nil, err
+		}
+		payload.Model = strings.TrimSpace(payload.Model)
+		if payload.Model == "" || utf8.RuneCountInString(payload.Model) > 200 {
+			return nil, platformFailure("platform_payload_invalid", "session model is required and must not exceed 200 characters", false)
+		}
+		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"session_id": sessionID, "model": payload.Model}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+			item, err := e.service.SetModel(ctx, application.SetSessionModelCommand{SessionID: sessionID, Model: payload.Model, Authorization: authorization})
+			if err != nil {
+				return nil, err
+			}
+			return sessionAutomationView(*item, e.runtime), nil
+		}}, nil
+	case "sessions.set_effort":
+		sessionID, err := executionStringID(target, "session id")
+		if err != nil {
+			return nil, err
+		}
+		var payload sessionEffortPayload
+		if err := decodeExecutionPayload(input.Payload, &payload); err != nil {
+			return nil, err
+		}
+		payload.Effort = strings.TrimSpace(payload.Effort)
+		if payload.Effort == "" || utf8.RuneCountInString(payload.Effort) > 50 {
+			return nil, platformFailure("platform_payload_invalid", "session effort is required and must not exceed 50 characters", false)
+		}
+		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"session_id": sessionID, "effort": payload.Effort}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+			item, err := e.service.SetEffort(ctx, application.SetSessionEffortCommand{SessionID: sessionID, Effort: payload.Effort, Authorization: authorization})
+			if err != nil {
+				return nil, err
+			}
+			return sessionAutomationView(*item, e.runtime), nil
 		}}, nil
 	case "sessions.evaluate":
 		return e.sessionWithoutPayload(input, target, func(ctx context.Context, sessionID string, authorization application.ActionAuthorization) (any, error) {

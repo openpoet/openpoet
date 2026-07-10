@@ -2963,6 +2963,48 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		}
 		return h.formatSessionForTool(ctx, sess), nil
 
+	case "set_session_model":
+		sessionID, _ := input["session_id"].(string)
+		model, _ := input["model"].(string)
+		if sessionID == "" || strings.TrimSpace(model) == "" {
+			return "", fmt.Errorf("session_id and model are required")
+		}
+		if _, err := h.getAllowedSession(ctx, conversationID, sessionID); err != nil {
+			return "", err
+		}
+		services, ok := h.api.platformApplicationServices()
+		if !ok {
+			return "", errors.New("platform application services unavailable")
+		}
+		updated, err := services.Execution.Sessions.SetModel(ctx, application.SetSessionModelCommand{
+			SessionID: sessionID, Model: model, Authorization: authorization,
+		})
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Session %s model changed to %s (effort: %s, harness: %s)", sessionID, updated.Model, updated.Effort, updated.Harness), nil
+
+	case "set_session_effort":
+		sessionID, _ := input["session_id"].(string)
+		effort, _ := input["effort"].(string)
+		if sessionID == "" || strings.TrimSpace(effort) == "" {
+			return "", fmt.Errorf("session_id and effort are required")
+		}
+		if _, err := h.getAllowedSession(ctx, conversationID, sessionID); err != nil {
+			return "", err
+		}
+		services, ok := h.api.platformApplicationServices()
+		if !ok {
+			return "", errors.New("platform application services unavailable")
+		}
+		updated, err := services.Execution.Sessions.SetEffort(ctx, application.SetSessionEffortCommand{
+			SessionID: sessionID, Effort: effort, Authorization: authorization,
+		})
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Session %s effort changed to %s (model: %s, harness: %s)", sessionID, updated.Effort, updated.Model, updated.Harness), nil
+
 	case "read_session_history":
 		sessionID, _ := input["session_id"].(string)
 		if sessionID == "" {
@@ -3004,7 +3046,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if _, err := h.getAllowedSession(ctx, conversationID, sessionID); err != nil {
 			return "", err
 		}
-		if err := h.api.sessionMgr.WriteToSession(sessionID, []byte(text+"\n")); err != nil {
+		if err := h.api.submitSessionLine(sessionID, text); err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("Sent to session %s: %s", sessionID, truncateForTool(text, 100)), nil
@@ -4732,13 +4774,13 @@ func (h *AIHandler) sessionMetadataForTool(ctx context.Context, sess *database.S
 	}
 	project, err := h.api.db.GetProject(ctx, sess.ProjectID)
 	if err != nil || project == nil {
-		return sessionmeta.FromProjectConfig(sess.Backend, "")
+		return sessionmeta.WithSessionValues(sessionmeta.FromProjectConfig(sess.Backend, ""), sess.Model, sess.Effort, sess.Harness)
 	}
 	backend := sess.Backend
 	if strings.TrimSpace(backend) == "" {
 		backend = project.Backend
 	}
-	return sessionmeta.FromProjectConfig(backend, project.BackendConfig)
+	return sessionmeta.WithSessionValues(sessionmeta.FromProjectConfig(backend, project.BackendConfig), sess.Model, sess.Effort, sess.Harness)
 }
 
 func (h *AIHandler) linkSessionTaskForTool(ctx context.Context, sess *database.Session, input map[string]interface{}) (*database.ProjectTask, error) {

@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	expectedPlatformCapabilities = 153
-	expectedPlatformMutations    = 104
+	expectedPlatformCapabilities = 155
+	expectedPlatformMutations    = 106
 	expectedPlatformReads        = 49
 )
 
@@ -91,6 +91,8 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 			Environment: platformSessionEnvironmentProvider{handler: services.AIHandler},
 			Names:       platformSessionNameStore{db: services.DB},
 			Tasks:       platformSessionTaskNotifier{hook: services.HookHandler},
+			Input:       platformSessionInputSubmitter{api: a},
+			Settings:    platformSessionRuntimeSettings{api: a},
 		},
 	)
 	execution := automation.ExecutionPlatformServices{

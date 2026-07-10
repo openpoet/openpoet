@@ -1220,7 +1220,6 @@ func migrateV46(tx *sqlx.Tx) error {
 	}
 	return nil
 }
-
 func migrateV47(tx *sqlx.Tx) error {
 	stmts := []string{
 		`ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''`,

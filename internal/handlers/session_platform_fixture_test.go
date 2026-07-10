@@ -27,6 +27,8 @@ func configureSessionPlatformFixture(t *testing.T, api *API, db *database.DB, ma
 		application.SessionCreationCollaborators{
 			Environment: sessionFixtureEnvironment{binary: binary},
 			Names:       platformSessionNameStore{db: db},
+			Input:       platformSessionInputSubmitter{api: api},
+			Settings:    platformSessionRuntimeSettings{api: api},
 		},
 	)
 	api.platformMu.Lock()
