@@ -72,10 +72,25 @@ type SessionTaskNotifier interface {
 	NotifyTaskLoaded(context.Context, string, *database.ProjectTask) error
 }
 
+// SessionInputSubmitter owns backend-specific Enter timing. UI and Automation
+// share this port so Codex/local/remote sessions receive identical input.
+type SessionInputSubmitter interface {
+	SubmitSessionLine(context.Context, string, string) error
+}
+
+// SessionRuntimeSettings applies mutable runtime metadata through the same
+// backend-specific channel used by the interactive UI.
+type SessionRuntimeSettings interface {
+	SetSessionModel(context.Context, string, string) (*database.Session, error)
+	SetSessionEffort(context.Context, string, string) (*database.Session, error)
+}
+
 type SessionCreationCollaborators struct {
 	Environment SessionEnvironmentProvider
 	Names       SessionNameStore
 	Tasks       SessionTaskNotifier
+	Input       SessionInputSubmitter
+	Settings    SessionRuntimeSettings
 	Now         func() time.Time
 }
 
@@ -213,7 +228,7 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 		}
 		created.Name = result.SessionName
 		if command.AutoStartTaskPrompt {
-			if err := s.writeLine(created.ID, "Start working on the assigned task."); err != nil {
+			if err := s.writeLine(ctx, created.ID, "Start working on the assigned task."); err != nil {
 				s.compensateFailedCreate(ctx, created.ID)
 				return nil, err
 			}
@@ -351,11 +366,80 @@ func (s *SessionService) SendInput(ctx context.Context, command SendSessionInput
 	if len([]byte(text)) > maxSessionInputBytes {
 		return validationError("session_input_too_large", "Session input exceeds 16 KiB")
 	}
-	if err := s.writeLine(command.SessionID, text); err != nil {
+	if err := s.writeLine(ctx, command.SessionID, text); err != nil {
 		return err
 	}
 	s.publish(ctx, SessionChange{Action: "input_sent", ID: command.SessionID, Actor: command.Authorization.Actor})
 	return nil
+}
+
+type SetSessionModelCommand struct {
+	SessionID     string
+	Model         string
+	Authorization ActionAuthorization
+}
+
+func (s *SessionService) SetModel(ctx context.Context, command SetSessionModelCommand) (*database.Session, error) {
+	if err := requireActionActor(command.Authorization); err != nil {
+		return nil, err
+	}
+	if _, err := s.requireRunningSession(ctx, command.SessionID); err != nil {
+		return nil, err
+	}
+	command.Model = strings.TrimSpace(command.Model)
+	if command.Model == "" || utf8.RuneCountInString(command.Model) > 200 {
+		return nil, validationError("session_model_invalid", "Session model is required and must not exceed 200 characters")
+	}
+	if s.creation.Settings == nil {
+		return nil, validationError("session_settings_unavailable", "Session runtime settings are unavailable")
+	}
+	updated, err := s.creation.Settings.SetSessionModel(ctx, command.SessionID, command.Model)
+	if err != nil {
+		return nil, sessionSettingApplicationError(err)
+	}
+	s.publish(ctx, SessionChange{Action: "model_changed", Session: updated, ID: command.SessionID, Actor: command.Authorization.Actor})
+	return updated, nil
+}
+
+type SetSessionEffortCommand struct {
+	SessionID     string
+	Effort        string
+	Authorization ActionAuthorization
+}
+
+func (s *SessionService) SetEffort(ctx context.Context, command SetSessionEffortCommand) (*database.Session, error) {
+	if err := requireActionActor(command.Authorization); err != nil {
+		return nil, err
+	}
+	if _, err := s.requireRunningSession(ctx, command.SessionID); err != nil {
+		return nil, err
+	}
+	command.Effort = strings.TrimSpace(command.Effort)
+	if command.Effort == "" || utf8.RuneCountInString(command.Effort) > 50 {
+		return nil, validationError("session_effort_invalid", "Session effort is required and must not exceed 50 characters")
+	}
+	if s.creation.Settings == nil {
+		return nil, validationError("session_settings_unavailable", "Session runtime settings are unavailable")
+	}
+	updated, err := s.creation.Settings.SetSessionEffort(ctx, command.SessionID, command.Effort)
+	if err != nil {
+		return nil, sessionSettingApplicationError(err)
+	}
+	s.publish(ctx, SessionChange{Action: "effort_changed", Session: updated, ID: command.SessionID, Actor: command.Authorization.Actor})
+	return updated, nil
+}
+
+func sessionSettingApplicationError(err error) error {
+	switch {
+	case errors.Is(err, runtime.ErrInvalidSessionSetting):
+		return &Error{Kind: ErrorValidation, Code: "session_setting_invalid", Message: err.Error(), Cause: err}
+	case errors.Is(err, runtime.ErrSessionNotRunning):
+		return &Error{Kind: ErrorConflict, Code: "session_not_running", Message: err.Error(), Cause: err}
+	case errors.Is(err, runtime.ErrSessionSettingUnsupported):
+		return &Error{Kind: ErrorValidation, Code: "session_setting_unsupported", Message: err.Error(), Cause: err}
+	default:
+		return err
+	}
 }
 
 type EvaluateSessionCommand struct {
@@ -445,7 +529,10 @@ func (s *SessionService) requireRunningSession(ctx context.Context, sessionID st
 	return session, nil
 }
 
-func (s *SessionService) writeLine(sessionID, text string) error {
+func (s *SessionService) writeLine(ctx context.Context, sessionID, text string) error {
+	if s.creation.Input != nil {
+		return s.creation.Input.SubmitSessionLine(ctx, sessionID, text)
+	}
 	if err := s.manager.WriteToSession(sessionID, []byte(text)); err != nil {
 		return err
 	}

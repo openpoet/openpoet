@@ -192,8 +192,8 @@ func executionPlatformActor(definitions []PlatformCapabilityDefinition) Actor {
 
 func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := executionPlatformDefinitionsForTest()
-	if len(definitions) != 42 {
-		t.Fatalf("execution surface has %d capabilities, want 42", len(definitions))
+	if len(definitions) != 44 {
+		t.Fatalf("execution surface has %d capabilities, want 44", len(definitions))
 	}
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -203,11 +203,11 @@ func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 		seen[definition.Name] = struct{}{}
 	}
 	capabilities, registry := executionPlatformTestRegistry(t, &executionPlatformFakePorts{})
-	if got := len(capabilities.List()); got != 42 {
-		t.Fatalf("application registry has %d execution capabilities, want 42", got)
+	if got := len(capabilities.List()); got != 44 {
+		t.Fatalf("application registry has %d execution capabilities, want 44", got)
 	}
-	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 42 {
-		t.Fatalf("platform discovery has %d execution capabilities, want 42", got)
+	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 44 {
+		t.Fatalf("platform discovery has %d execution capabilities, want 44", got)
 	}
 }
 
@@ -287,8 +287,8 @@ func TestExecutionPlatformMutationMetadataMatchesManifest(t *testing.T) {
 		}
 		checked++
 	}
-	if checked != 25 {
-		t.Fatalf("checked %d execution mutations, want 25", checked)
+	if checked != 27 {
+		t.Fatalf("checked %d execution mutations, want 27", checked)
 	}
 }
 
@@ -353,6 +353,8 @@ func executionDryRunCases() []executionDryRunCase {
 		{name: "sessions.stop", target: `{"id":"s1"}`, payload: `{}`},
 		{name: "sessions.reopen", target: `{"id":"s1"}`, payload: `{}`},
 		{name: "sessions.send_input", target: `{"id":"s1"}`, payload: `{"text":"input-secret"}`, secretText: []string{"input-secret"}},
+		{name: "sessions.set_model", target: `{"id":"s1"}`, payload: `{"model":"gpt-test"}`},
+		{name: "sessions.set_effort", target: `{"id":"s1"}`, payload: `{"effort":"high"}`},
 		{name: "sessions.evaluate", target: `{"id":"s1"}`, payload: `{}`},
 		{name: "sessions.image_prompt_hint", target: `{"id":"s1"}`, payload: `{"user_prompt":"prompt-secret","image_count":1}`, secretText: []string{"prompt-secret"}},
 		{name: "sessions.events_status", target: `{"id":"s1"}`, payload: `{}`},

@@ -680,6 +680,8 @@ func main() {
 
 		// Session input
 		r.Post("/sessions/{id}/input", api.SendSessionInput)
+		r.Post("/sessions/{id}/model", api.SetSessionModel)
+		r.Post("/sessions/{id}/effort", api.SetSessionEffort)
 		r.Get("/sessions/{id}/tools", api.GetResolvedSessionTools)
 
 		// Session-Task integration
