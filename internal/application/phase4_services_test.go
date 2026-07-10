@@ -206,18 +206,28 @@ type fakeAIConversationBackend struct {
 	suggestion      *AISuggestionRecord
 }
 
-func (b *fakeAIConversationBackend) EnsureChatConversation(_ context.Context, id, projectID int64, agentID *int64, title string) (*AIConversationReference, error) {
+func (b *fakeAIConversationBackend) PrepareChatAtomic(_ context.Context, request AIChatPreparationRequest) (*AIChatPreparation, error) {
+	id := request.ConversationID
 	if id == 0 {
 		id = 41
 	}
-	return &AIConversationReference{ID: id, Title: title, Source: "user", IsRead: true}, nil
+	b.persistedPrompt = request.Prompt
+	return &AIChatPreparation{Conversation: AIConversationReference{ID: id, Title: request.Title, Source: "user", IsRead: true}, Prompt: request.Prompt}, nil
 }
 
-func (b *fakeAIConversationBackend) PersistExchangeAtomic(_ context.Context, id int64, prompt, output string) error {
+func (b *fakeAIConversationBackend) BeginAssistantMessage(context.Context, int64) (int64, error) {
+	return 99, nil
+}
+
+func (b *fakeAIConversationBackend) UpdateAssistantMessageProgress(context.Context, AIChatProgress) error {
+	return nil
+}
+
+func (b *fakeAIConversationBackend) CompleteAssistantMessageAtomic(_ context.Context, completion AIChatCompletion) error {
 	if b.failPersist {
 		return errors.New("persist failed secret=database-secret")
 	}
-	b.persistedPrompt, b.persistedOutput = prompt, output
+	b.persistedOutput = completion.Content
 	return nil
 }
 

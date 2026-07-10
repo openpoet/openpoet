@@ -119,6 +119,31 @@ func TestAuthenticatedHealthSecurityBoundary(t *testing.T) {
 	}
 }
 
+func TestHealthExposesPlatformReadinessWithoutWeakeningLegacyHealth(t *testing.T) {
+	db := automationTestDB(t)
+	client := provisionTestClient(t, db, ScopeTasksRead)
+	req := httptest.NewRequest(http.MethodGet, "http://openpoet/health", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Authorization", "Bearer "+client.Token)
+	recorder := httptest.NewRecorder()
+	CapturePeerAddress(NewHandler(db)).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		PlatformReady        bool `json:"platform_ready"`
+		PlatformCapabilities int  `json:"platform_capabilities"`
+		PlatformMutations    int  `json:"platform_mutations"`
+		PlatformReads        int  `json:"platform_reads"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.PlatformReady || payload.PlatformCapabilities != 0 || payload.PlatformMutations != 0 || payload.PlatformReads != 0 {
+		t.Fatalf("unexpected platform readiness without registry: %+v", payload)
+	}
+}
+
 func TestAuthenticationUsesCapturedPeerNotForwardedHeader(t *testing.T) {
 	db := automationTestDB(t)
 	client := provisionTestClient(t, db)

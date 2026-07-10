@@ -72,7 +72,9 @@ func parseConfig(operation Operation, args []string) (Config, error) {
 	}
 
 	flags := flag.NewFlagSet(string(operation), flag.ContinueOnError)
-	config := Config{Operation: operation}
+	config := Config{
+		Operation: operation, EncryptKey: os.Getenv("OPENPOET_ENCRYPT_KEY"), MigrateSecrets: true,
+	}
 	flags.BoolVar(&config.Execute, "execute", false, "executa o plano; sem esta flag é sempre dry-run")
 	flags.StringVar(&config.ConfirmToken, "confirm-token", "", "token exato do manifest; obrigatório para apply real")
 	flags.StringVar(&config.RepoDir, "repo", cwd, "raiz do repositório OpenPoet")

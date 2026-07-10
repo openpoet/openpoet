@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"openpoet/internal/database"
@@ -56,6 +57,28 @@ type SessionPromptHintStore interface {
 	StoreImagePromptHint(context.Context, string, string, int) error
 }
 
+// SessionEnvironmentProvider materializes provider credentials only at the
+// runtime boundary. Implementations must not persist or publish the returned
+// values.
+type SessionEnvironmentProvider interface {
+	SessionEnvironment(context.Context, *database.Project) (map[string]string, error)
+}
+
+type SessionNameStore interface {
+	RenameSession(context.Context, string, string) error
+}
+
+type SessionTaskNotifier interface {
+	NotifyTaskLoaded(context.Context, string, *database.ProjectTask) error
+}
+
+type SessionCreationCollaborators struct {
+	Environment SessionEnvironmentProvider
+	Names       SessionNameStore
+	Tasks       SessionTaskNotifier
+	Now         func() time.Time
+}
+
 type SessionChange struct {
 	Action  string
 	Session *database.Session
@@ -76,6 +99,7 @@ type SessionService struct {
 	promptHint SessionPromptHintStore
 	decrypt    func(string, string) (string, error)
 	effects    SessionEffects
+	creation   SessionCreationCollaborators
 }
 
 func NewSessionService(
@@ -87,11 +111,19 @@ func NewSessionService(
 	promptHint SessionPromptHintStore,
 	decrypt func(string, string) (string, error),
 	effects SessionEffects,
+	creation ...SessionCreationCollaborators,
 ) *SessionService {
-	return &SessionService{
+	service := &SessionService{
 		store: store, manager: manager, syncer: syncer, linker: linker,
 		evaluator: evaluator, promptHint: promptHint, decrypt: decrypt, effects: effects,
 	}
+	if len(creation) > 0 {
+		service.creation = creation[0]
+	}
+	if service.creation.Now == nil {
+		service.creation.Now = time.Now
+	}
+	return service
 }
 
 type CreateSessionCommand struct {
@@ -128,6 +160,15 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 			return nil, validationError("task_project_mismatch", "Task does not belong to the project")
 		}
 		injectTaskEnvironment(environment, linkedTask, false)
+	}
+	if s.creation.Environment != nil {
+		providerEnvironment, providerErr := s.creation.Environment.SessionEnvironment(ctx, project)
+		if providerErr != nil {
+			return nil, fmt.Errorf("resolve session provider environment: %w", providerErr)
+		}
+		if err := mergeTrustedSessionEnvironment(environment, providerEnvironment); err != nil {
+			return nil, err
+		}
 	}
 	if command.DangerouslySkipPermissions {
 		if !project.DangerouslySkipPermissions || !command.Authorization.AllowUnsafePermissions {
@@ -173,6 +214,19 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 		created.Name = result.SessionName
 		if command.AutoStartTaskPrompt {
 			if err := s.writeLine(created.ID, "Start working on the assigned task."); err != nil {
+				s.compensateFailedCreate(ctx, created.ID)
+				return nil, err
+			}
+		} else if s.creation.Tasks != nil {
+			if err := s.creation.Tasks.NotifyTaskLoaded(ctx, created.ID, linkedTask); err != nil {
+				s.compensateFailedCreate(ctx, created.ID)
+				return nil, err
+			}
+		}
+	} else {
+		if s.creation.Names != nil {
+			created.Name = project.Name + " (" + s.creation.Now().Format("15:04:05") + ")"
+			if err := s.creation.Names.RenameSession(ctx, created.ID, created.Name); err != nil {
 				s.compensateFailedCreate(ctx, created.ID)
 				return nil, err
 			}
@@ -439,6 +493,34 @@ func normalizeSessionEnvironment(values map[string]string, boundary ActionAuthor
 		result[key] = value
 	}
 	return result, nil
+}
+
+func mergeTrustedSessionEnvironment(destination, source map[string]string) error {
+	if len(destination)+len(source) > maxSessionEnvironmentVariables {
+		return validationError("session_environment_too_large", "At most 64 environment variables are allowed")
+	}
+	total := 0
+	for key, value := range destination {
+		total += len(key) + len(value)
+	}
+	for key, value := range source {
+		key = strings.TrimSpace(key)
+		if !sessionEnvironmentKeyPattern.MatchString(key) || strings.HasPrefix(key, "OPENPOET_") && key != "OPENPOET_BACKEND_BINARY" {
+			return validationError("session_environment_key_invalid", "Provider environment key is invalid")
+		}
+		if strings.IndexByte(value, 0) >= 0 {
+			return validationError("session_environment_value_invalid", "Environment values may not contain NUL")
+		}
+		if previous, exists := destination[key]; exists {
+			total -= len(key) + len(previous)
+		}
+		total += len(key) + len(value)
+		if total > maxSessionEnvironmentBytes {
+			return validationError("session_environment_too_large", "Environment payload exceeds 64 KiB")
+		}
+		destination[key] = value
+	}
+	return nil
 }
 
 func injectTaskEnvironment(environment map[string]string, task *database.ProjectTask, resumed bool) {
