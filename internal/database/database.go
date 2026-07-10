@@ -249,8 +249,13 @@ func (d *DB) ReplaceProjectTagIDs(ctx context.Context, projectID int64, tagIDs [
 
 // Session operations
 func (d *DB) CreateSession(ctx context.Context, s *Session) error {
-	query := `INSERT INTO sessions (id, project_id, status, pid, name, task_id, start_time, backend, skip_permissions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.ExecContext(ctx, query, s.ID, s.ProjectID, s.Status, s.PID, s.Name, s.TaskID, s.StartTime, s.Backend, s.SkipPermissions)
+	query := `INSERT INTO sessions (id, project_id, status, pid, name, task_id, start_time, backend, skip_permissions, model, effort, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.ExecContext(ctx, query, s.ID, s.ProjectID, s.Status, s.PID, s.Name, s.TaskID, s.StartTime, s.Backend, s.SkipPermissions, s.Model, s.Effort, s.Harness)
+	return err
+}
+
+func (d *DB) UpdateSessionRuntimeMetadata(ctx context.Context, id, model, effort, harness string) error {
+	_, err := d.ExecContext(ctx, "UPDATE sessions SET model=?, effort=?, harness=? WHERE id=?", model, effort, harness, id)
 	return err
 }
 

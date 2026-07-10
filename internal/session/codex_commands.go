@@ -38,6 +38,10 @@ func (r *CodexRunner) HandleCodexCommand(ctx context.Context, data json.RawMessa
 		return r.codexCommandModelList(ctx, req.Params)
 	case "model/set":
 		return r.codexCommandModelSet(req.Params)
+	case "session/model/set":
+		return r.codexCommandSessionModelSet(req.Params)
+	case "session/effort/set":
+		return r.codexCommandSessionEffortSet(req.Params)
 	case "permissions/list":
 		return r.codexCommandPermissionsList(ctx)
 	case "permissions/set":
@@ -238,6 +242,75 @@ func (r *CodexRunner) codexCommandModelSet(raw json.RawMessage) (interface{}, er
 	}
 	r.addCodexCommandFeedback("Model", msg+".")
 	r.write([]byte(msg + ".\r\n"))
+	r.writePrompt()
+	r.publishCodexState()
+	return r.codexCommandCurrentModel(), nil
+}
+
+// codexCommandSessionModelSet changes only the model override. Unlike the UI's
+// model/set action, it intentionally preserves reasoning effort and service tier.
+func (r *CodexRunner) codexCommandSessionModelSet(raw json.RawMessage) (interface{}, error) {
+	var in struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return nil, fmt.Errorf("invalid model selection: %w", err)
+	}
+	model := strings.TrimSpace(in.Model)
+	if model == "" {
+		return nil, errors.New("model is required")
+	}
+
+	r.mu.Lock()
+	if strings.EqualFold(model, "default") || strings.EqualFold(model, "reset") {
+		r.modelOverride = ""
+		r.modelOverrideSet = false
+		model = "default"
+	} else {
+		if strings.ContainsAny(model, "\r\n\t ") {
+			r.mu.Unlock()
+			return nil, errors.New("model id cannot contain whitespace")
+		}
+		r.modelOverride = model
+		r.modelOverrideSet = true
+	}
+	r.mu.Unlock()
+
+	msg := fmt.Sprintf("Session model set to %s for future turns.", model)
+	r.addCodexCommandFeedback("Model", msg)
+	r.write([]byte(msg + "\r\n"))
+	r.writePrompt()
+	r.publishCodexState()
+	return r.codexCommandCurrentModel(), nil
+}
+
+// codexCommandSessionEffortSet changes only the reasoning effort override.
+func (r *CodexRunner) codexCommandSessionEffortSet(raw json.RawMessage) (interface{}, error) {
+	var in struct {
+		Effort string `json:"effort"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return nil, fmt.Errorf("invalid effort selection: %w", err)
+	}
+	effort := strings.ToLower(strings.TrimSpace(in.Effort))
+	if effort == "" {
+		return nil, errors.New("effort is required")
+	}
+
+	r.mu.Lock()
+	if effort == "default" || effort == "reset" {
+		r.reasoningOverride = ""
+		r.reasoningSet = false
+		effort = "default"
+	} else {
+		r.reasoningOverride = effort
+		r.reasoningSet = true
+	}
+	r.mu.Unlock()
+
+	msg := fmt.Sprintf("Session reasoning effort set to %s for future turns.", effort)
+	r.addCodexCommandFeedback("Reasoning effort", msg)
+	r.write([]byte(msg + "\r\n"))
 	r.writePrompt()
 	r.publishCodexState()
 	return r.codexCommandCurrentModel(), nil

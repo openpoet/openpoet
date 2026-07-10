@@ -1616,9 +1616,18 @@ func (r *CodexRunner) handleServerRequest(msg *codexWireMessage) {
 	case "item/commandExecution/requestApproval":
 		decision := r.requestOpenPoetApproval("Bash", msg.Params)
 		r.respond(msg.ID, map[string]interface{}{"decision": decision})
+	case "execCommandApproval":
+		decision := r.requestOpenPoetApproval("Bash", msg.Params)
+		r.respond(msg.ID, map[string]interface{}{"decision": codexLegacyReviewDecision(decision)})
 	case "item/fileChange/requestApproval":
 		decision := r.requestOpenPoetApproval("FileChange", msg.Params)
 		r.respond(msg.ID, map[string]interface{}{"decision": decision})
+	case "applyPatchApproval":
+		decision := r.requestOpenPoetApproval("FileChange", msg.Params)
+		r.respond(msg.ID, map[string]interface{}{"decision": codexLegacyReviewDecision(decision)})
+	case "item/permissions/requestApproval":
+		result := r.requestOpenPoetPermissionsApproval(msg.Params)
+		r.respond(msg.ID, result)
 	case "item/tool/requestUserInput":
 		answers := r.requestOpenPoetUserInput(msg.Params)
 		r.respond(msg.ID, map[string]interface{}{"answers": answers})
@@ -1627,6 +1636,19 @@ func (r *CodexRunner) handleServerRequest(msg *codexWireMessage) {
 		r.respond(msg.ID, result)
 	default:
 		r.respondError(msg.ID, -32601, "Unsupported Codex app-server request: "+msg.Method)
+	}
+}
+
+func codexLegacyReviewDecision(decision string) string {
+	switch decision {
+	case "accept":
+		return "approved"
+	case "acceptForSession":
+		return "approved_for_session"
+	case "decline":
+		return "denied"
+	default:
+		return "abort"
 	}
 }
 
@@ -1714,9 +1736,9 @@ func codexApprovalDecisionFromHookResponse(resp json.RawMessage) string {
 func codexApprovalCacheKey(toolName string, payload map[string]interface{}) (string, bool) {
 	switch toolName {
 	case "Bash":
-		command := codexPayloadString(payload, "command")
+		command := codexPayloadCommand(payload, "command")
 		if command == "" {
-			command = codexPayloadString(payload, "action.command")
+			command = codexPayloadCommand(payload, "action.command")
 		}
 		if command == "" {
 			return "", false
@@ -1744,6 +1766,82 @@ func codexPayloadString(payload map[string]interface{}, dotted string) string {
 	}
 	s, _ := cur.(string)
 	return s
+}
+
+func codexPayloadCommand(payload map[string]interface{}, dotted string) string {
+	v := codexPayloadValue(payload, dotted)
+	switch command := v.(type) {
+	case string:
+		return command
+	case []interface{}:
+		parts := make([]string, 0, len(command))
+		for _, part := range command {
+			if s, ok := part.(string); ok {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, " ")
+	case []string:
+		return strings.Join(command, " ")
+	default:
+		return ""
+	}
+}
+
+func codexPayloadValue(payload map[string]interface{}, dotted string) interface{} {
+	var cur interface{} = payload
+	for _, part := range strings.Split(dotted, ".") {
+		m, ok := cur.(map[string]interface{})
+		if !ok {
+			return nil
+		}
+		cur = m[part]
+	}
+	return cur
+}
+
+func (r *CodexRunner) requestOpenPoetPermissionsApproval(params json.RawMessage) map[string]interface{} {
+	var payload map[string]interface{}
+	_ = json.Unmarshal(params, &payload)
+
+	hookEvent := map[string]interface{}{
+		"hook_event_name": "PermissionRequest",
+		"tool_name":       "Permissions",
+		"tool_input":      payload,
+	}
+	if reason, ok := payload["reason"].(string); ok && reason != "" {
+		hookEvent["message"] = reason
+	}
+
+	resp, err := r.postHook("permission", hookEvent)
+	if err != nil {
+		r.write([]byte(fmt.Sprintf("\r\n\x1b[31mOpenPoet permissions request failed: %v\x1b[0m\r\n", err)))
+		return codexDeniedPermissionProfile()
+	}
+
+	decision := codexApprovalDecisionFromHookResponse(resp)
+	if decision != "accept" && decision != "acceptForSession" {
+		return codexDeniedPermissionProfile()
+	}
+
+	permissions, _ := payload["permissions"].(map[string]interface{})
+	result := map[string]interface{}{
+		"permissions": permissions,
+		"scope":       "turn",
+	}
+	if decision == "acceptForSession" {
+		result["scope"] = "session"
+	}
+	return result
+}
+
+func codexDeniedPermissionProfile() map[string]interface{} {
+	return map[string]interface{}{
+		"permissions": map[string]interface{}{
+			"network": map[string]interface{}{"enabled": false},
+		},
+		"scope": "turn",
+	}
 }
 
 func (r *CodexRunner) requestOpenPoetMCPElicitation(params json.RawMessage) map[string]interface{} {

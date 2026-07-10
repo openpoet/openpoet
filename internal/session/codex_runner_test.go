@@ -2,6 +2,9 @@ package session
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +117,27 @@ func TestCodexApprovalDecisionFromHookResponse(t *testing.T) {
 	}
 }
 
+func TestCodexLegacyReviewDecision(t *testing.T) {
+	tests := []struct {
+		decision string
+		want     string
+	}{
+		{decision: "accept", want: "approved"},
+		{decision: "acceptForSession", want: "approved_for_session"},
+		{decision: "decline", want: "denied"},
+		{decision: "cancel", want: "abort"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.decision, func(t *testing.T) {
+			got := codexLegacyReviewDecision(tt.decision)
+			if got != tt.want {
+				t.Fatalf("legacy decision = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCodexApprovalCacheKey(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -127,6 +151,13 @@ func TestCodexApprovalCacheKey(t *testing.T) {
 			toolName: "Bash",
 			payload:  map[string]interface{}{"command": "go test ./..."},
 			wantKey:  "Bash:go test ./...",
+			wantOK:   true,
+		},
+		{
+			name:     "bash legacy argv command",
+			toolName: "Bash",
+			payload:  map[string]interface{}{"command": []interface{}{"go", "test", "./internal/session"}},
+			wantKey:  "Bash:go test ./internal/session",
 			wantOK:   true,
 		},
 		{
@@ -285,6 +316,68 @@ func TestCodexInputPreservesUTF8Characters(t *testing.T) {
 	}
 	if got := out.String(); !strings.HasSuffix(got, codexPromptANSI+input) {
 		t.Fatalf("output suffix = %q, want suffix %q", got, codexPromptANSI+input)
+	}
+}
+
+func TestCodexPermissionsApprovalResponse(t *testing.T) {
+	tests := []struct {
+		name      string
+		hookBody  string
+		wantScope string
+		wantNet   bool
+	}{
+		{
+			name:      "allow grants requested profile for turn",
+			hookBody:  `{"hookSpecificOutput":{"decision":{"behavior":"allow"}}}`,
+			wantScope: "turn",
+			wantNet:   true,
+		},
+		{
+			name:      "allow always grants requested profile for session",
+			hookBody:  `{"hookSpecificOutput":{"decision":{"behavior":"allow","originalBehavior":"allowAlways"}}}`,
+			wantScope: "session",
+			wantNet:   true,
+		},
+		{
+			name:      "deny returns restrictive profile",
+			hookBody:  `{"hookSpecificOutput":{"decision":{"behavior":"deny"}}}`,
+			wantScope: "turn",
+			wantNet:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/hooks/permission" {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, tt.hookBody)
+			}))
+			t.Cleanup(server.Close)
+
+			r := &CodexRunner{
+				cfg: &SessionConfig{
+					SessionID:  "session-1",
+					ServerAddr: strings.TrimPrefix(server.URL, "http://"),
+				},
+			}
+			got := r.requestOpenPoetPermissionsApproval(json.RawMessage(`{
+				"reason":"need network",
+				"permissions":{"network":{"enabled":true}}
+			}`))
+
+			if got["scope"] != tt.wantScope {
+				t.Fatalf("scope = %q, want %q", got["scope"], tt.wantScope)
+			}
+			permissions, _ := got["permissions"].(map[string]interface{})
+			network, _ := permissions["network"].(map[string]interface{})
+			if network["enabled"] != tt.wantNet {
+				t.Fatalf("network.enabled = %#v, want %v; response=%#v", network["enabled"], tt.wantNet, got)
+			}
+		})
 	}
 }
 
@@ -526,6 +619,28 @@ func TestCodexCommandModelSetUpdatesFutureTurnOverrides(t *testing.T) {
 	}
 	if params["serviceTier"] != "fast" {
 		t.Fatalf("turn serviceTier = %#v, want fast", params["serviceTier"])
+	}
+}
+
+func TestCodexSessionSettingCommandsPreserveIndependentOverrides(t *testing.T) {
+	r := &CodexRunner{
+		cfg: &SessionConfig{BackendConfig: `{"model":"gpt-default","reasoning_effort":"medium","service_tier":"standard"}`},
+	}
+
+	if _, err := r.codexCommandSessionModelSet(json.RawMessage(`{"model":"gpt-new"}`)); err != nil {
+		t.Fatalf("codexCommandSessionModelSet returned error: %v", err)
+	}
+	params := r.turnStartParams("thread-1", "hello")
+	if params["model"] != "gpt-new" || params["effort"] != "medium" || params["serviceTier"] != "standard" {
+		t.Fatalf("turn params after model change = %#v", params)
+	}
+
+	if _, err := r.codexCommandSessionEffortSet(json.RawMessage(`{"effort":"high"}`)); err != nil {
+		t.Fatalf("codexCommandSessionEffortSet returned error: %v", err)
+	}
+	params = r.turnStartParams("thread-1", "hello")
+	if params["model"] != "gpt-new" || params["effort"] != "high" || params["serviceTier"] != "standard" {
+		t.Fatalf("turn params after effort change = %#v", params)
 	}
 }
 

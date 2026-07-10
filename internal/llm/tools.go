@@ -815,7 +815,7 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:        "list_sessions",
-			Description: "List all sessions with status.",
+			Description: "List all sessions with status, current model, reasoning effort, and harness/backend runtime.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
@@ -827,13 +827,43 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:        "get_session",
-			Description: "Get details for a session, including project, status, name, and linked task if any.",
+			Description: "Get details for a session, including project, status, name, current model, reasoning effort, harness/backend runtime, and linked task if any.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
 					"session_id": {Type: "string", Description: "Session ID"},
 				},
 				Required: []string{"session_id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "set_session_model",
+			Description: "Change the model used by future turns of an active OpenPoet session. Codex app-server model IDs are validated against its live model catalog; Claude Code model IDs are validated for safe syntax and then applied through /model.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"session_id": {Type: "string", Description: "Active OpenPoet session ID"},
+					"model":      {Type: "string", Description: "Model ID or alias, for example fable, claude-opus-4-5, gpt-5.4, or default"},
+				},
+				Required: []string{"session_id", "model"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "set_session_effort",
+			Description: "Change the reasoning/thinking effort used by future turns of an active OpenPoet session. Accepted levels are default, minimal, low, medium, high, xhigh, and max; backend/model support is validated before applying when the live catalog is available.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"session_id": {Type: "string", Description: "Active OpenPoet session ID"},
+					"effort": {
+						Type:        "string",
+						Description: "Reasoning/thinking level for future turns",
+						Enum:        []string{"default", "minimal", "low", "medium", "high", "xhigh", "max"},
+					},
+				},
+				Required: []string{"session_id", "effort"},
 			},
 			Context: ToolContextBoth,
 		},
