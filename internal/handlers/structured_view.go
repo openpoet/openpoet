@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"openpoet/internal/database"
@@ -8,6 +9,7 @@ import (
 	"openpoet/internal/jsonlview"
 	"openpoet/internal/websocket"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/go-chi/chi/v5"
@@ -19,12 +21,14 @@ type StructuredViewHandler struct {
 	hub         *websocket.Hub
 	decryptFunc func(string, string) (string, error)
 
-	mu       sync.Mutex
-	watchers map[string]*watcherEntry // sessionID → watcher
+	mu                    sync.Mutex
+	watchers              map[string]*watcherEntry // sessionID → watcher
+	nextWatcherGeneration uint64
 }
 
 type watcherEntry struct {
-	stopFunc func()
+	stopFunc   func()
+	generation uint64
 }
 
 // jsonlSource describes where the JSONL file for a session lives.
@@ -121,6 +125,48 @@ func (h *StructuredViewHandler) StopSessionWatcher(sessionID string) {
 	h.stopWatcher(sessionID)
 }
 
+// HandleSessionSourceChange follows a Claude Code transcript switch (notably
+// /resume) without requiring the user to close or reopen Structured View. If a
+// watcher is active, the replacement watcher replays the resumed JSONL from the
+// beginning after telling connected clients to reset their rendered timeline.
+func (h *StructuredViewHandler) HandleSessionSourceChange(sessionID, providerSessionID string) {
+	source, reason := h.resolveJSONLSourceContext(context.Background(), sessionID)
+	if reason != "" {
+		return
+	}
+
+	wasWatching := h.stopWatcher(sessionID)
+	broadcastReset := func(replaying bool) {
+		h.hub.BroadcastToChannel("session:"+sessionID, &websocket.Message{
+			Type: websocket.MsgTypeStructuredViewSourceChanged,
+			Data: map[string]interface{}{
+				"session_id":          sessionID,
+				"provider_session_id": providerSessionID,
+				"replaying":           replaying,
+			},
+		})
+	}
+
+	if !wasWatching {
+		// A client may have loaded the view while watching was unavailable. It
+		// can refetch the now-correct source when it receives this notification.
+		broadcastReset(false)
+		return
+	}
+
+	var started bool
+	if source.isRemote {
+		started = h.startRemoteWatchingAtOffset(sessionID, source, 0, func() { broadcastReset(true) })
+	} else {
+		started = h.startLocalWatchingAtOffset(sessionID, source.localPath, 0, func() { broadcastReset(true) })
+	}
+	if !started {
+		broadcastReset(false)
+		return
+	}
+	log.Printf("[StructuredView] Switched session %s to Claude transcript %s", sessionID, source.sessionID)
+}
+
 // StopAllWatchers stops all active watchers (called on shutdown).
 func (h *StructuredViewHandler) StopAllWatchers() {
 	h.mu.Lock()
@@ -131,25 +177,31 @@ func (h *StructuredViewHandler) StopAllWatchers() {
 	}
 }
 
-func (h *StructuredViewHandler) stopWatcher(sessionID string) {
+func (h *StructuredViewHandler) stopWatcher(sessionID string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if entry, exists := h.watchers[sessionID]; exists {
 		entry.stopFunc()
 		delete(h.watchers, sessionID)
 		log.Printf("[StructuredView] Stopped watching session %s", sessionID)
+		return true
 	}
+	return false
 }
 
 // resolveJSONLSource resolves where the JSONL file lives for a session.
 // Returns (source, "") on success, or (nil, reason) on failure.
 func (h *StructuredViewHandler) resolveJSONLSource(r *http.Request, sessionID string) (*jsonlSource, string) {
-	sess, err := h.db.GetSession(r.Context(), sessionID)
+	return h.resolveJSONLSourceContext(r.Context(), sessionID)
+}
+
+func (h *StructuredViewHandler) resolveJSONLSourceContext(ctx context.Context, sessionID string) (*jsonlSource, string) {
+	sess, err := h.db.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, "not_found"
 	}
 
-	project, err := h.db.GetProject(r.Context(), sess.ProjectID)
+	project, err := h.db.GetProject(ctx, sess.ProjectID)
 	if err != nil {
 		return nil, "not_found"
 	}
@@ -157,12 +209,16 @@ func (h *StructuredViewHandler) resolveJSONLSource(r *http.Request, sessionID st
 	if sess.Backend == "copilot" || sess.Backend == "codex" || sess.Backend == "opencode" {
 		return nil, "unsupported_backend"
 	}
+	providerSessionID := strings.TrimSpace(sess.ProviderSessionID)
+	if providerSessionID == "" {
+		providerSessionID = sessionID
+	}
 
 	if project.Type == "local" {
 		return &jsonlSource{
 			isRemote:  false,
-			localPath: jsonlview.ResolveJSONLPath(project.Path, sessionID),
-			sessionID: sessionID,
+			localPath: jsonlview.ResolveJSONLPath(project.Path, providerSessionID),
+			sessionID: providerSessionID,
 		}, ""
 	}
 
@@ -170,7 +226,7 @@ func (h *StructuredViewHandler) resolveJSONLSource(r *http.Request, sessionID st
 	return &jsonlSource{
 		isRemote:  true,
 		project:   project,
-		sessionID: sessionID,
+		sessionID: providerSessionID,
 	}, ""
 }
 
@@ -208,25 +264,32 @@ func (h *StructuredViewHandler) startLocalWatching(sessionID, jsonlPath string) 
 	if info, err := os.Stat(jsonlPath); err == nil {
 		offset = info.Size()
 	}
+	h.startLocalWatchingAtOffset(sessionID, jsonlPath, offset, nil)
+}
 
+func (h *StructuredViewHandler) startLocalWatchingAtOffset(sessionID, jsonlPath string, offset int64, beforeStart func()) bool {
 	watcher := jsonlview.NewWatcher(jsonlPath, offset)
-	watcher.Start()
-
 	stopCh := make(chan struct{})
-	go h.forwardEvents(sessionID, watcher.Events(), stopCh)
-
-	h.mu.Lock()
-	h.watchers[sessionID] = &watcherEntry{
+	generation := h.registerWatcher(sessionID, &watcherEntry{
 		stopFunc: func() {
 			watcher.Stop()
 			close(stopCh)
 		},
+	})
+	if beforeStart != nil {
+		beforeStart()
 	}
-	h.mu.Unlock()
+	go h.forwardEvents(sessionID, generation, watcher.Events(), stopCh)
+	watcher.Start()
+	return true
 }
 
 // startRemoteWatching starts an SFTP-based remote watcher for a session.
 func (h *StructuredViewHandler) startRemoteWatching(sessionID string, source *jsonlSource) {
+	h.startRemoteWatchingAtOffset(sessionID, source, -1, nil)
+}
+
+func (h *StructuredViewHandler) startRemoteWatchingAtOffset(sessionID string, source *jsonlSource, requestedOffset int64, beforeStart func()) bool {
 	fm := files.NewRemoteFileManager(source.project, h.decryptFunc)
 	connector := fm.NewSFTPConnector()
 
@@ -234,7 +297,7 @@ func (h *StructuredViewHandler) startRemoteWatching(sessionID string, source *js
 	sshClient, sftpClient, err := connector.Connect()
 	if err != nil {
 		log.Printf("[StructuredView] Failed to connect for remote session %s: %v", sessionID, err)
-		return
+		return false
 	}
 
 	homeDir, err := sftpClient.Getwd()
@@ -242,38 +305,41 @@ func (h *StructuredViewHandler) startRemoteWatching(sessionID string, source *js
 		sftpClient.Close()
 		sshClient.Close()
 		log.Printf("[StructuredView] Failed to get remote home dir for session %s: %v", sessionID, err)
-		return
+		return false
 	}
 
 	remotePath := jsonlview.ResolveRemoteJSONLPath(source.project.Path, source.sessionID, homeDir)
 
 	// Get initial file size for offset
-	var offset int64
-	if info, err := sftpClient.Stat(remotePath); err == nil {
-		offset = info.Size()
+	offset := requestedOffset
+	if offset < 0 {
+		offset = 0
+		if info, err := sftpClient.Stat(remotePath); err == nil {
+			offset = info.Size()
+		}
 	}
 
 	sftpClient.Close()
 	sshClient.Close()
 
 	rw := jsonlview.NewRemoteWatcher(connector, remotePath, offset)
-	rw.Start()
-
 	stopCh := make(chan struct{})
-	go h.forwardEvents(sessionID, rw.Events(), stopCh)
-
-	h.mu.Lock()
-	h.watchers[sessionID] = &watcherEntry{
+	generation := h.registerWatcher(sessionID, &watcherEntry{
 		stopFunc: func() {
 			rw.Stop()
 			close(stopCh)
 		},
+	})
+	if beforeStart != nil {
+		beforeStart()
 	}
-	h.mu.Unlock()
+	go h.forwardEvents(sessionID, generation, rw.Events(), stopCh)
+	rw.Start()
+	return true
 }
 
 // forwardEvents reads events from either watcher type and broadcasts them via WebSocket.
-func (h *StructuredViewHandler) forwardEvents(sessionID string, eventsCh <-chan []*jsonlview.SessionEvent, stopCh <-chan struct{}) {
+func (h *StructuredViewHandler) forwardEvents(sessionID string, generation uint64, eventsCh <-chan []*jsonlview.SessionEvent, stopCh <-chan struct{}) {
 	for {
 		select {
 		case <-stopCh:
@@ -283,6 +349,9 @@ func (h *StructuredViewHandler) forwardEvents(sessionID string, eventsCh <-chan 
 				return
 			}
 			for _, event := range events {
+				if !h.isCurrentWatcher(sessionID, generation) {
+					return
+				}
 				h.hub.BroadcastToChannel("session:"+sessionID, &websocket.Message{
 					Type: websocket.MsgTypeSessionEvent,
 					Data: event,
@@ -290,4 +359,20 @@ func (h *StructuredViewHandler) forwardEvents(sessionID string, eventsCh <-chan 
 			}
 		}
 	}
+}
+
+func (h *StructuredViewHandler) registerWatcher(sessionID string, entry *watcherEntry) uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.nextWatcherGeneration++
+	entry.generation = h.nextWatcherGeneration
+	h.watchers[sessionID] = entry
+	return entry.generation
+}
+
+func (h *StructuredViewHandler) isCurrentWatcher(sessionID string, generation uint64) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	entry, ok := h.watchers[sessionID]
+	return ok && entry.generation == generation
 }

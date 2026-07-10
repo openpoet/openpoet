@@ -1,6 +1,9 @@
 package session
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ClaudeCodeBackend implements BackendStrategy for Claude Code CLI.
 type ClaudeCodeBackend struct{}
@@ -18,7 +21,11 @@ func (b *ClaudeCodeBackend) BuildCLIArgs(cfg *SessionConfig) []string {
 	var args []string
 
 	if cfg.IsReopen {
-		args = append(args, "--resume", cfg.SessionID)
+		resumeID := strings.TrimSpace(cfg.ProviderSessionID)
+		if resumeID == "" {
+			resumeID = cfg.SessionID
+		}
+		args = append(args, "--resume", resumeID)
 	} else {
 		args = append(args, "--session-id", cfg.SessionID)
 	}

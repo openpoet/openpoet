@@ -226,6 +226,7 @@ func main() {
 	// Initialize structured view handler (JSONL event browser)
 	svHandler := handlers.NewStructuredViewHandler(db, hub, api.DecryptFunc())
 	api.SetStructuredView(svHandler)
+	sessionMgr.OnProviderSessionIDChange = svHandler.HandleSessionSourceChange
 
 	// Initialize other handlers
 	fileHandler := handlers.NewFileHandler(api)
