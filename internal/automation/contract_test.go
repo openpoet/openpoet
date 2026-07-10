@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"sort"
 	"testing"
 	"time"
 
@@ -140,7 +139,8 @@ func TestCommandCreateDerivesActorAndReplaysLedgerResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Actor != "automation_client:"+client.Client.ID || events[0].CorrelationID != "corr-create-1" {
+	if len(events) != 2 || events[0].Actor != "automation_client:"+client.Client.ID || events[0].CorrelationID != "corr-create-1" ||
+		events[1].EventType != automationCommandSucceededEventType || events[1].Actor != "automation_client:"+client.Client.ID || events[1].CorrelationID != "corr-create-1" {
 		t.Fatalf("outbox did not receive authenticated command metadata: %+v", events)
 	}
 
@@ -241,6 +241,7 @@ func TestTaskCommandLifecycleUsesTypedApplicationService(t *testing.T) {
 	db := automationTestDB(t)
 	project := automationContractProject(t, db, "command-lifecycle")
 	client := provisionTestClient(t, db, ScopeTasksRead, ScopeTasksWrite)
+	broker := provisionApprovalTestClient(t, db, "lifecycle-approval-broker", ScopeApprovalsGrant)
 	handler := automationContractHandler(t, db)
 
 	execute := func(commandID string, capability application.CapabilityName, target, payload map[string]any, extras map[string]any) *httptest.ResponseRecorder {
@@ -325,13 +326,16 @@ func TestTaskCommandLifecycleUsesTypedApplicationService(t *testing.T) {
 	}
 
 	missingApproval := execute("delete-no-approval", application.CapabilityTasksDelete,
-		map[string]any{"project_id": project.ID, "task_id": second.ID}, map[string]any{}, map[string]any{"reason": "cleanup"})
+		map[string]any{"project_id": project.ID, "task_id": second.ID}, map[string]any{},
+		map[string]any{"reason": "cleanup", "correlation_id": "task:authorization:lifecycle-delete-no-approval"})
 	if missingApproval.Code != http.StatusConflict || decodeAutomationErrorCode(t, missingApproval) != "approval_required" {
 		t.Fatalf("missing approval status=%d body=%s", missingApproval.Code, missingApproval.Body.String())
 	}
+	grant := issueApprovalGrantForTest(t, handler, broker.Token, client.Client.ID,
+		application.CapabilityTasksDelete, "delete", "task:authorization:lifecycle-delete", 0)
 	deleted := execute("delete", application.CapabilityTasksDelete,
 		map[string]any{"project_id": project.ID, "task_id": second.ID}, map[string]any{},
-		map[string]any{"reason": "cleanup", "approval_token": "explicit-user-approval"})
+		map[string]any{"reason": "cleanup", "approval_token": grant.ApprovalToken, "correlation_id": grant.AuthorizationRef})
 	if deleted.Code != http.StatusOK {
 		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
 	}
@@ -418,9 +422,12 @@ func TestCapabilitiesAndSnapshotContracts(t *testing.T) {
 	}
 	foundCreate := false
 	for _, capability := range listed.Capabilities {
+		if len(capability.Scopes) != 1 || capability.Scopes[0] != capability.Scope {
+			t.Fatalf("legacy capability did not emit compatible scopes: %+v", capability)
+		}
 		if capability.Name == application.CapabilityTasksCreate {
 			foundCreate = true
-			if capability.Allowed || capability.Handler != application.CapabilityHandlerTasksCreate || capability.Service != application.CapabilityServiceProjectTasks {
+			if capability.Allowed || !capability.Mutation || capability.Handler != application.CapabilityHandlerTasksCreate || capability.Service != application.CapabilityServiceProjectTasks {
 				t.Fatalf("unexpected create descriptor: %+v", capability)
 			}
 		}
@@ -470,8 +477,16 @@ func TestVersionedAutomationSchemasMatchRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	var openAPI struct {
-		OpenAPI string                     `json:"openapi"`
-		Paths   map[string]json.RawMessage `json:"paths"`
+		OpenAPI    string                     `json:"openapi"`
+		Paths      map[string]json.RawMessage `json:"paths"`
+		Components struct {
+			Schemas struct {
+				Capability struct {
+					Required   []string                   `json:"required"`
+					Properties map[string]json.RawMessage `json:"properties"`
+				} `json:"Capability"`
+			} `json:"schemas"`
+		} `json:"components"`
 	}
 	if err := json.Unmarshal(openAPIBytes, &openAPI); err != nil {
 		t.Fatalf("invalid OpenAPI JSON: %v", err)
@@ -479,10 +494,23 @@ func TestVersionedAutomationSchemasMatchRegistry(t *testing.T) {
 	if openAPI.OpenAPI != "3.1.0" {
 		t.Fatalf("OpenAPI version=%q", openAPI.OpenAPI)
 	}
-	for _, path := range []string{"/health", "/capabilities", "/commands", "/events", "/events/ack", "/snapshot"} {
+	for _, path := range []string{"/health", "/capabilities", "/approvals", "/commands", "/events", "/events/ack", "/snapshot"} {
 		if _, ok := openAPI.Paths[path]; !ok {
 			t.Fatalf("OpenAPI path %s missing", path)
 		}
+	}
+	if _, ok := openAPI.Components.Schemas.Capability.Properties["scopes"]; !ok {
+		t.Fatal("OpenAPI capability contract is missing scopes")
+	}
+	hasRequiredScopes := false
+	for _, field := range openAPI.Components.Schemas.Capability.Required {
+		if field == "scopes" {
+			hasRequiredScopes = true
+			break
+		}
+	}
+	if !hasRequiredScopes {
+		t.Fatal("OpenAPI capability contract does not require scopes")
 	}
 
 	schemaBytes, err := os.ReadFile(filepath.Join(root, "command-envelope.schema.json"))
@@ -494,7 +522,8 @@ func TestVersionedAutomationSchemasMatchRegistry(t *testing.T) {
 		Required   []string `json:"required"`
 		Properties struct {
 			Capability struct {
-				Enum []string `json:"enum"`
+				Type    string `json:"type"`
+				Pattern string `json:"pattern"`
 			} `json:"capability"`
 		} `json:"properties"`
 	}
@@ -504,27 +533,7 @@ func TestVersionedAutomationSchemasMatchRegistry(t *testing.T) {
 	if schema.ID == "" {
 		t.Fatal("command schema is not versioned with an $id")
 	}
-	registry, err := application.NewProjectTaskCapabilityRegistry(application.NewProjectTaskService(nil, nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := application.RegisterWorkRunCapabilities(registry, application.NewWorkRunService(nil)); err != nil {
-		t.Fatal(err)
-	}
-	registered := registry.List()
-	want := make([]string, len(registered))
-	for index, capability := range registered {
-		want[index] = string(capability.Name)
-	}
-	got := append([]string(nil), schema.Properties.Capability.Enum...)
-	sort.Strings(want)
-	sort.Strings(got)
-	if len(got) != len(want) {
-		t.Fatalf("schema capabilities=%v registry=%v", got, want)
-	}
-	for index := range want {
-		if got[index] != want[index] {
-			t.Fatalf("schema capabilities=%v registry=%v", got, want)
-		}
+	if schema.Properties.Capability.Type != "string" || schema.Properties.Capability.Pattern != platformIdentifierPattern.String() {
+		t.Fatalf("command schema capability contract=%+v", schema.Properties.Capability)
 	}
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"openpoet/internal/application"
 	"openpoet/internal/database"
 	"openpoet/internal/files"
 )
@@ -308,15 +309,16 @@ func (h *GitHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 
 // StageFiles stages files for commit (git add).
 func (h *GitHandler) StageFiles(w http.ResponseWriter, r *http.Request) {
-	project, ok := h.getProject(w, r)
-	if !ok {
+	projectID, err := parseID(chi.URLParam(r, "id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
 
 	var req struct {
 		Files []string `json:"files"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err = json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -325,9 +327,17 @@ func (h *GitHandler) StageFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	args := append([]string{"add", "--"}, req.Files...)
-	if _, err := h.runGitCmd(r.Context(), project, args...); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	services, ready := h.api.platformApplicationServices()
+	if !ready || services.Execution.GitMutations == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform git service is unavailable")
+		return
+	}
+	if err := services.Execution.GitMutations.Stage(platformUIContext(r), application.StageGitFilesCommand{
+		ProjectID:     projectID,
+		Files:         req.Files,
+		Authorization: platformUIAuthorization(r),
+	}); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -336,15 +346,16 @@ func (h *GitHandler) StageFiles(w http.ResponseWriter, r *http.Request) {
 
 // UnstageFiles unstages files (git reset HEAD).
 func (h *GitHandler) UnstageFiles(w http.ResponseWriter, r *http.Request) {
-	project, ok := h.getProject(w, r)
-	if !ok {
+	projectID, err := parseID(chi.URLParam(r, "id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
 
 	var req struct {
 		Files []string `json:"files"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err = json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -353,9 +364,17 @@ func (h *GitHandler) UnstageFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	args := append([]string{"reset", "HEAD", "--"}, req.Files...)
-	if _, err := h.runGitCmd(r.Context(), project, args...); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	services, ready := h.api.platformApplicationServices()
+	if !ready || services.Execution.GitMutations == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform git service is unavailable")
+		return
+	}
+	if err := services.Execution.GitMutations.Unstage(platformUIContext(r), application.UnstageGitFilesCommand{
+		ProjectID:     projectID,
+		Files:         req.Files,
+		Authorization: platformUIAuthorization(r),
+	}); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -364,15 +383,16 @@ func (h *GitHandler) UnstageFiles(w http.ResponseWriter, r *http.Request) {
 
 // Commit creates a git commit with the staged changes.
 func (h *GitHandler) Commit(w http.ResponseWriter, r *http.Request) {
-	project, ok := h.getProject(w, r)
-	if !ok {
+	projectID, err := parseID(chi.URLParam(r, "id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
 
 	var req struct {
 		Message string `json:"message"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err = json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -381,23 +401,25 @@ func (h *GitHandler) Commit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := h.runGitCmd(r.Context(), project, "commit", "-m", req.Message)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	services, ready := h.api.platformApplicationServices()
+	if !ready || services.Execution.GitMutations == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform git service is unavailable")
 		return
 	}
-
-	// Extract commit hash from output
-	hash := ""
-	hashOut, err := h.runGitCmd(r.Context(), project, "rev-parse", "HEAD")
-	if err == nil {
-		hash = strings.TrimSpace(hashOut)
+	result, err := services.Execution.GitMutations.Commit(platformUIContext(r), application.CommitGitCommand{
+		ProjectID:     projectID,
+		Message:       req.Message,
+		Authorization: platformUIAuthorization(r),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{
 		"status":  "ok",
-		"message": strings.TrimSpace(out),
-		"hash":    hash,
+		"message": result.Message,
+		"hash":    result.Hash,
 	})
 }
 

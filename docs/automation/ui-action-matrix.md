@@ -2,8 +2,8 @@
 
 Fonte canônica: [`ui-action-manifest.v1.json`](./ui-action-manifest.v1.json).
 Esta matriz cobre mutations HTTP declaradas no router, chamadas mutáveis do
-frontend e ações inline puramente locais. Não registra capabilities no runtime;
-o wiring aguarda #697.
+frontend e ações inline puramente locais. Cada rota de negócio possui binding
+verificado para o mesmo Application Service usado pela UI e pela Automation API.
 
 ## Cobertura
 
@@ -18,38 +18,38 @@ o wiring aguarda #697.
 
 | Estado | Quantidade | Significado |
 | --- | ---: | --- |
-| `implemented` | 12 | Application Service e capability de tasks já existem |
-| `application_service_ready` | 101 | Service novo pronto; ainda sem registry/HTTP automation |
-| `gap` | 3 | Ainda precisa de Application Service/capability |
+| `implemented` | 116 | UI e Automation compartilham Application Service/invariantes |
+| `application_service_ready` | 0 | Nenhuma rota permanece em caminho intermediário |
+| `gap` | 0 | Nenhum gap de Application Service |
 | `internal_only` | 2 | Ingestão de hooks, não ação autônoma de usuário |
 
 ## Matriz por domínio
 
 | Domínio | Total | Implementado | Service pronto | Gap | Interno | Riscos |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| agents | 3 | 0 | 3 | 0 | 0 | R2, R3 |
-| ai | 16 | 0 | 16 | 0 | 0 | R1, R2, R3 |
-| ai_configs | 4 | 0 | 4 | 0 | 0 | R4 |
-| config | 1 | 0 | 1 | 0 | 0 | R4 |
-| documents | 2 | 0 | 2 | 0 | 0 | R2 |
-| files | 4 | 0 | 4 | 0 | 0 | R2, R3 |
-| git | 3 | 0 | 3 | 0 | 0 | R2, R3 |
-| hooks | 4 | 0 | 2 | 0 | 2 | R1, R2, R3 |
-| mcp | 8 | 0 | 8 | 0 | 0 | R4 |
-| notifications | 6 | 0 | 6 | 0 | 0 | R1, R2, R3 |
-| projects | 8 | 0 | 6 | 2 | 0 | R1, R2, R3, R4 |
-| proposals | 9 | 0 | 9 | 0 | 0 | R1, R2, R3, R4 |
-| sessions | 9 | 0 | 8 | 1 | 0 | R1, R2, R3 |
-| settings | 1 | 0 | 1 | 0 | 0 | R4 |
-| skills | 10 | 0 | 10 | 0 | 0 | R2, R3 |
-| tags | 4 | 0 | 4 | 0 | 0 | R2, R3 |
+| agents | 3 | 3 | 0 | 0 | 0 | R2, R3 |
+| ai | 16 | 16 | 0 | 0 | 0 | R1, R2, R3 |
+| ai_configs | 4 | 4 | 0 | 0 | 0 | R4 |
+| config | 1 | 1 | 0 | 0 | 0 | R4 |
+| documents | 2 | 2 | 0 | 0 | 0 | R2 |
+| files | 4 | 4 | 0 | 0 | 0 | R2, R3 |
+| git | 3 | 3 | 0 | 0 | 0 | R2, R3 |
+| hooks | 4 | 2 | 0 | 0 | 2 | R1, R2, R3 |
+| mcp | 8 | 8 | 0 | 0 | 0 | R4 |
+| notifications | 6 | 6 | 0 | 0 | 0 | R1, R2, R3 |
+| projects | 8 | 8 | 0 | 0 | 0 | R1, R2, R3, R4 |
+| proposals | 9 | 9 | 0 | 0 | 0 | R1, R2, R3, R4 |
+| sessions | 9 | 9 | 0 | 0 | 0 | R1, R2, R3 |
+| settings | 1 | 1 | 0 | 0 | 0 | R4 |
+| skills | 10 | 10 | 0 | 0 | 0 | R2, R3 |
+| tags | 4 | 4 | 0 | 0 | 0 | R2, R3 |
 | task_links | 2 | 2 | 0 | 0 | 0 | R2 |
 | tasks | 10 | 10 | 0 | 0 | 0 | R2, R3 |
-| token_usage | 1 | 0 | 1 | 0 | 0 | R3 |
-| tools | 6 | 0 | 6 | 0 | 0 | R4 |
-| tunnel | 5 | 0 | 5 | 0 | 0 | R4 |
-| update | 1 | 0 | 1 | 0 | 0 | R4 |
-| voice | 1 | 0 | 1 | 0 | 0 | R1 |
+| token_usage | 1 | 1 | 0 | 0 | 0 | R3 |
+| tools | 6 | 6 | 0 | 0 | 0 | R4 |
+| tunnel | 5 | 5 | 0 | 0 | 0 | R4 |
+| update | 1 | 1 | 0 | 0 | 0 | R4 |
+| voice | 1 | 1 | 0 | 0 | 0 | R1 |
 
 ## Segurança
 
@@ -62,7 +62,7 @@ o wiring aguarda #697.
 - Telemetria, OTLP e endpoint test-only ficam numa allowlist machine-readable
   com justificativa; não viram capabilities.
 
-## Application Services prontos
+## Application Services compartilhados
 
 - `ProjectService`: list/get/create/update/delete/duplicate, boundary de
   credencial criptografada, validação e effects desacoplados.
@@ -121,14 +121,18 @@ de chat não incluem prompt, transcript, proactive context ou mensagens brutas.
 Deletes, clear de usage e execução/aprovação de tool usam
 `ActionAuthorization` com aprovação explícita.
 
-Nenhum deles foi registrado em `internal/automation`. Os services de sessão,
-hooks, files, git e voz possuem adapters diretos sobre os componentes atuais;
-os demais ainda aguardam wiring.
+Os services estão registrados em um registry tipado de 153 capabilities
+(104 mutations e 49 reads) e compostos sobre as dependências reais do processo.
+Os handlers humanos falham fechados se o bundle não estiver pronto; não existe
+fallback mutável para o caminho legado. SSE, multipart e WebSocket permanecem
+somente como bordas de transporte.
 
-## Gaps priorizados
+## Gates operacionais restantes
 
-1. Validação de projeto e browse remoto.
-2. Sugestão de dados de task em sessão.
+1. Ensaio integrado em banco e porta descartáveis.
+2. Shadow mode com identities/scopes reais.
+3. Backup, migração idempotente de secrets e rollback ensaiados.
+4. Autorização explícita do presidente antes do cutover.
 
 O teste `TestUIActionManifestCoversBackendAndFrontendMutations` falha quando uma
 nova mutation de router/frontend ou um novo `onclick="app.*"` não recebe

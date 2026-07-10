@@ -10,8 +10,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
+	"openpoet/internal/application"
 	"openpoet/internal/database"
 	"openpoet/internal/files"
 
@@ -180,16 +180,9 @@ func (h *FileHandler) UploadFiles(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
 	targetDir := r.URL.Query().Get("dir")
 
-	// Get session and project
-	sess, err := h.api.db.GetSession(r.Context(), sessionID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Session not found")
-		return
-	}
-
-	project, err := h.api.db.GetProject(r.Context(), sess.ProjectID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
+	services, ready := h.api.platformApplicationServices()
+	if !ready || services.Execution.FileMutations == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform file service is unavailable")
 		return
 	}
 
@@ -198,37 +191,48 @@ func (h *FileHandler) UploadFiles(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Failed to parse form: "+err.Error())
 		return
 	}
+	defer r.MultipartForm.RemoveAll()
 
-	uploadedFiles := []string{}
+	writes := make([]application.FileWrite, 0)
+	const maxSessionUploadBytes = 100 << 20
+	totalBytes := 0
 
 	for _, fileHeaders := range r.MultipartForm.File {
 		for _, fh := range fileHeaders {
 			file, err := fh.Open()
 			if err != nil {
-				continue
+				respondError(w, http.StatusBadRequest, "Failed to open uploaded file")
+				return
 			}
-
-			targetPath := filepath.Join(targetDir, fh.Filename)
-
-			if project.Type == "local" {
-				fm := files.NewLocalFileManager(project.Path)
-				if err := fm.WriteStream(targetPath, file); err != nil {
-					file.Close()
-					respondError(w, http.StatusInternalServerError, err.Error())
-					return
-				}
-			} else {
-				fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
-				if err := fm.WriteStream(targetPath, file); err != nil {
-					file.Close()
-					respondError(w, http.StatusInternalServerError, err.Error())
-					return
-				}
-			}
-
+			remaining := maxSessionUploadBytes - totalBytes
+			data, readErr := io.ReadAll(io.LimitReader(file, int64(remaining)+1))
 			file.Close()
-			uploadedFiles = append(uploadedFiles, targetPath)
+			if readErr != nil {
+				respondError(w, http.StatusBadRequest, "Failed to read uploaded file")
+				return
+			}
+			totalBytes += len(data)
+			if totalBytes > maxSessionUploadBytes {
+				respondError(w, http.StatusBadRequest, "Session upload exceeds 100 MiB")
+				return
+			}
+			writes = append(writes, application.FileWrite{Path: fh.Filename, Data: data})
 		}
+	}
+
+	uploaded, err := services.Execution.FileMutations.UploadSessionFiles(platformUIContext(r), application.UploadSessionFilesCommand{
+		SessionID:     sessionID,
+		Directory:     targetDir,
+		Files:         writes,
+		Authorization: platformUIAuthorization(r),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	uploadedFiles := make([]string, len(uploaded))
+	for i, file := range uploaded {
+		uploadedFiles[i] = file.Path
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
@@ -239,16 +243,9 @@ func (h *FileHandler) UploadFiles(w http.ResponseWriter, r *http.Request) {
 func (h *FileHandler) PasteImage(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
 
-	// Get session and project
-	sess, err := h.api.db.GetSession(r.Context(), sessionID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Session not found")
-		return
-	}
-
-	project, err := h.api.db.GetProject(r.Context(), sess.ProjectID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
+	services, ready := h.api.platformApplicationServices()
+	if !ready || services.Execution.FileMutations == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform file service is unavailable")
 		return
 	}
 
@@ -262,60 +259,19 @@ func (h *FileHandler) PasteImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine file extension from data URL
-	ext := ".png"
-	if strings.HasPrefix(input.Data, "data:image/jpeg") {
-		ext = ".jpg"
-	} else if strings.HasPrefix(input.Data, "data:image/gif") {
-		ext = ".gif"
-	} else if strings.HasPrefix(input.Data, "data:image/webp") {
-		ext = ".webp"
+	write, err := services.Execution.FileMutations.PasteSessionImage(platformUIContext(r), application.PasteSessionImageCommand{
+		SessionID:     sessionID,
+		Directory:     input.Dir,
+		Filename:      input.Filename,
+		DataURL:       input.Data,
+		Authorization: platformUIAuthorization(r),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
 	}
 
-	filename := input.Filename
-	if filename == "" {
-		filename = fmt.Sprintf("paste_%d%s", time.Now().UnixNano(), ext)
-	}
-
-	targetPath := filepath.Join(input.Dir, filename)
-
-	if project.Type == "local" {
-		fm := files.NewLocalFileManager(project.Path)
-		savedPath, err := fm.SaveBase64Image(input.Data, targetPath)
-		if err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		respondJSON(w, http.StatusOK, map[string]string{
-			"path": savedPath,
-		})
-	} else {
-		// For remote, decode base64 and upload
-		data := input.Data
-		if idx := strings.Index(data, ","); idx != -1 {
-			data = data[idx+1:]
-		}
-
-		fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
-
-		// Decode base64
-		var decoded []byte
-		decoded = make([]byte, len(data))
-		n, err := decodeBase64(data, decoded)
-		if err != nil {
-			respondError(w, http.StatusBadRequest, "Invalid base64 data")
-			return
-		}
-
-		if err := fm.Write(targetPath, decoded[:n]); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-		respondJSON(w, http.StatusOK, map[string]string{
-			"path": targetPath,
-		})
-	}
+	respondJSON(w, http.StatusOK, map[string]string{"path": write.Path})
 }
 
 func (h *FileHandler) ViewFile(w http.ResponseWriter, r *http.Request) {
@@ -580,31 +536,26 @@ func (h *FileHandler) WriteProjectFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	project, err := h.api.db.GetProject(r.Context(), id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
+	services, ready := h.api.platformApplicationServices()
+	if !ready || services.Execution.FileMutations == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform file service is unavailable")
 		return
 	}
 
-	data := []byte(req.Content)
-
-	if project.Type == "local" {
-		fm := files.NewLocalFileManager(project.Path)
-		if err := fm.Write(req.Path, data); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-	} else {
-		fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
-		if err := fm.Write(req.Path, data); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
+	write, err := services.Execution.FileMutations.WriteProjectFile(platformUIContext(r), application.WriteProjectFileCommand{
+		ProjectID:     id,
+		Path:          req.Path,
+		Content:       req.Content,
+		Authorization: platformUIAuthorization(r),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"path": req.Path,
-		"size": len(data),
+		"path": write.Path,
+		"size": len(write.Data),
 	})
 }
 
@@ -809,35 +760,32 @@ func (h *FileHandler) UploadProjectFile(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	project, err := h.api.db.GetProject(r.Context(), id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
+	services, ready := h.api.platformApplicationServices()
+	if !ready || services.Execution.FileMutations == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform file service is unavailable")
 		return
 	}
 
-	data, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024)) // 10MB limit
+	data, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024+1)) // detect, rather than truncate, oversized uploads
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to read request body")
 		return
 	}
 
-	if project.Type == "local" {
-		fm := files.NewLocalFileManager(project.Path)
-		if err := fm.Write(filePath, data); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-	} else {
-		fm := files.NewRemoteFileManager(project, h.api.DecryptFunc())
-		if err := fm.Write(filePath, data); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
+	write, err := services.Execution.FileMutations.UploadProjectFile(platformUIContext(r), application.UploadProjectFileCommand{
+		ProjectID:     id,
+		Path:          filePath,
+		Data:          data,
+		Authorization: platformUIAuthorization(r),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"path": filePath,
-		"size": len(data),
+		"path": write.Path,
+		"size": len(write.Data),
 	})
 }
 

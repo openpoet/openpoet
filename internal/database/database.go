@@ -51,6 +51,18 @@ func New(path string) (*DB, error) {
 	return d, nil
 }
 
+// OpenExisting opens an already-migrated database without applying schema
+// migrations. Offline dry-run/cutover tools use it so inspection itself cannot
+// change production schema.
+func OpenExisting(path string) (*DB, error) {
+	db, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)")
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to existing database: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	return &DB{DB: db}, nil
+}
+
 func (d *DB) migrate() error {
 	return RunMigrations(d.DB)
 }

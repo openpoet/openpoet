@@ -9,6 +9,7 @@ import (
 	"log"
 	"openpoet/internal/database"
 	"openpoet/internal/mcp"
+	"openpoet/internal/secretvalue"
 	"openpoet/internal/websocket"
 	"os"
 	"path/filepath"
@@ -49,10 +50,11 @@ type TermSize struct {
 }
 
 type Manager struct {
-	db         *database.DB
-	hub        *websocket.Hub
-	serverAddr string // OpenPoet server address (e.g. "localhost:8080")
-	execPath   string // Resolved path to this binary (for MCP subprocess)
+	db            *database.DB
+	hub           *websocket.Hub
+	serverAddr    string // OpenPoet server address (e.g. "localhost:8080")
+	execPath      string // Resolved path to this binary (for MCP subprocess)
+	secretDecrypt secretvalue.DecryptFunc
 
 	mu           sync.RWMutex
 	sessions     map[string]*runningSession
@@ -156,6 +158,17 @@ func NewManager(db *database.DB, hub *websocket.Hub, serverAddr string) *Manager
 	}
 }
 
+// SetSecretDecryptor injects the process-owned decryptor used only while
+// materializing runtime MCP configuration. Plaintext is never retained.
+func (m *Manager) SetSecretDecryptor(decrypt func(string, string) (string, error)) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.secretDecrypt = secretvalue.DecryptFunc(decrypt)
+	m.mu.Unlock()
+}
+
 func (m *Manager) StartSession(ctx context.Context, project *database.Project, envVars map[string]string) (*database.Session, error) {
 	backend := GetBackend(project.Backend)
 	sessionID := uuid.New().String()
@@ -198,7 +211,12 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	}
 
 	// Build MCP config
-	cfg.MCPConfigJSON = m.buildMCPConfigJSON(ctx, project, sessionID)
+	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID)
+	if configErr != nil {
+		_ = m.db.EndSession(ctx, sessionID, "error")
+		return nil, fmt.Errorf("build MCP configuration: %w", configErr)
+	}
+	cfg.MCPConfigJSON = mcpConfig
 
 	// Let the backend build its CLI args and env vars
 	for k, v := range backend.BuildEnvVars(cfg) {
@@ -347,7 +365,11 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	}
 
 	// Build MCP config
-	cfg.MCPConfigJSON = m.buildMCPConfigJSON(ctx, project, sessionID)
+	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID)
+	if configErr != nil {
+		return fmt.Errorf("build MCP configuration: %w", configErr)
+	}
+	cfg.MCPConfigJSON = mcpConfig
 
 	// Let the backend build its CLI args and env vars
 	for k, v := range backend.BuildEnvVars(cfg) {
@@ -1057,8 +1079,11 @@ func (m *Manager) checkForNotificationTriggers(sessionID string, data []byte) {
 // buildMCPConfigJSON builds a JSON string for the --mcp-config CLI flag.
 // It includes user-configured MCP servers from the DB plus OpenPoet's own MCP server.
 // OpenPoet's MCP server is only included if the effective tool policy allows at least one tool.
-func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Project, sessionID string) string {
+func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Project, sessionID string) (string, error) {
 	mcpServers := make(map[string]interface{})
+	m.mu.RLock()
+	decrypt := m.secretDecrypt
+	m.mu.RUnlock()
 
 	// Add user-configured MCP servers from DB
 	servers, err := m.db.ListEnabledMCPServers(ctx)
@@ -1066,13 +1091,13 @@ func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Proj
 		log.Printf("Warning: failed to list MCP servers: %v", err)
 	}
 	for _, server := range servers {
-		var args []string
-		var env map[string]string
-		json.Unmarshal([]byte(server.Args), &args)
-		json.Unmarshal([]byte(server.Env), &env)
+		command, args, env, decodeErr := resolveSessionMCPParts(server.Name, server.Command, server.Args, server.Env, decrypt)
+		if decodeErr != nil {
+			return "", decodeErr
+		}
 
 		serverConfig := map[string]interface{}{
-			"command": server.Command,
+			"command": command,
 		}
 		if len(args) > 0 {
 			serverConfig["args"] = args
@@ -1089,13 +1114,13 @@ func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Proj
 		log.Printf("Warning: failed to list project MCP servers: %v", err)
 	}
 	for _, server := range projectServers {
-		var args []string
-		var env map[string]string
-		json.Unmarshal([]byte(server.Args), &args)
-		json.Unmarshal([]byte(server.Env), &env)
+		command, args, env, decodeErr := resolveSessionMCPParts(server.Name, server.Command, server.Args, server.Env, decrypt)
+		if decodeErr != nil {
+			return "", decodeErr
+		}
 
 		serverConfig := map[string]interface{}{
-			"command": server.Command,
+			"command": command,
 		}
 		if len(args) > 0 {
 			serverConfig["args"] = args
@@ -1135,7 +1160,7 @@ func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Proj
 	}
 
 	if len(mcpServers) == 0 {
-		return ""
+		return "", nil
 	}
 
 	config := map[string]interface{}{
@@ -1143,10 +1168,37 @@ func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Proj
 	}
 	jsonBytes, err := json.Marshal(config)
 	if err != nil {
-		log.Printf("Warning: failed to marshal MCP config: %v", err)
-		return ""
+		return "", fmt.Errorf("marshal MCP configuration: %w", err)
 	}
-	return string(jsonBytes)
+	return string(jsonBytes), nil
+}
+
+func resolveSessionMCPParts(name, command, argsJSON, envJSON string, decrypt secretvalue.DecryptFunc) (string, []string, map[string]string, error) {
+	command, err := secretvalue.Resolve(command, decrypt)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("resolve MCP server %q command: %w", name, err)
+	}
+	argsJSON, err = secretvalue.Resolve(argsJSON, decrypt)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("resolve MCP server %q args: %w", name, err)
+	}
+	envJSON, err = secretvalue.Resolve(envJSON, decrypt)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("resolve MCP server %q environment: %w", name, err)
+	}
+	var args []string
+	var env map[string]string
+	if strings.TrimSpace(argsJSON) != "" {
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return "", nil, nil, fmt.Errorf("MCP server %q args are invalid", name)
+		}
+	}
+	if strings.TrimSpace(envJSON) != "" {
+		if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
+			return "", nil, nil, fmt.Errorf("MCP server %q environment is invalid", name)
+		}
+	}
+	return command, args, env, nil
 }
 
 func (m *Manager) StopAll() {
@@ -1235,7 +1287,12 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	}
 
 	// Build MCP config
-	cfg.MCPConfigJSON = m.buildMCPConfigJSON(ctx, project, sessionID)
+	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID)
+	if configErr != nil {
+		_ = m.db.EndSession(ctx, sessionID, "error")
+		return nil, fmt.Errorf("build MCP configuration: %w", configErr)
+	}
+	cfg.MCPConfigJSON = mcpConfig
 
 	// Let the backend build its CLI args and env vars
 	cliArgs := backend.BuildCLIArgs(cfg)

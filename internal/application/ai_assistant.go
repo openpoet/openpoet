@@ -28,6 +28,7 @@ type AIProviderChatRequest struct {
 	ProjectID      int64
 	AgentID        *int64
 	Prompt         string
+	Feedback       string
 }
 
 type AIProviderTextResult struct {
@@ -49,6 +50,13 @@ type AIProviderPort interface {
 	Chat(context.Context, AIProviderChatRequest) (AIProviderTextResult, error)
 	GenerateSkill(context.Context, string) (AIProviderTextResult, error)
 	ValidateSkill(context.Context, string) (AISkillValidationResult, error)
+}
+
+// AIProviderStreamingPort is an optional provider extension used by the human
+// SSE transport. The Application Service still owns validation, output bounds,
+// effects, and the final result; the callback only carries presentation deltas.
+type AIProviderStreamingPort interface {
+	GenerateSkillStream(context.Context, string, func(string) error) (AIProviderTextResult, error)
 }
 
 type AIConversationReference struct {
@@ -96,12 +104,44 @@ type AISuggestionAcceptance struct {
 	Message string
 }
 
+type AIChatPreparationRequest struct {
+	ConversationID int64
+	ProjectID      int64
+	AgentID        *int64
+	Prompt         string
+	Title          string
+}
+
+type AIChatPreparation struct {
+	Conversation AIConversationReference
+	Prompt       string
+	Feedback     string
+}
+
+type AIChatCompletion struct {
+	ConversationID int64
+	MessageID      int64
+	Content        string
+	ToolCallsJSON  string
+	Status         string
+	Error          string
+}
+
+type AIChatProgress struct {
+	ConversationID int64
+	MessageID      int64
+	Content        string
+	ToolCallsJSON  string
+}
+
 // AIConversationBackend owns persistence and runtime coordination. Methods
 // named Atomic must commit the conversation/suggestion status and all related
 // database mutations as one unit before returning.
 type AIConversationBackend interface {
-	EnsureChatConversation(context.Context, int64, int64, *int64, string) (*AIConversationReference, error)
-	PersistExchangeAtomic(context.Context, int64, string, string) error
+	PrepareChatAtomic(context.Context, AIChatPreparationRequest) (*AIChatPreparation, error)
+	BeginAssistantMessage(context.Context, int64) (int64, error)
+	UpdateAssistantMessageProgress(context.Context, AIChatProgress) error
+	CompleteAssistantMessageAtomic(context.Context, AIChatCompletion) error
 	DeleteConversationAtomic(context.Context, int64, ActionAuthorization) error
 	DeleteAllConversationsAtomic(context.Context, ActionAuthorization) (int64, error)
 	StopConversation(context.Context, int64) error
@@ -229,35 +269,138 @@ type AIChatCommand struct {
 }
 
 func (s *AIAssistantService) Chat(ctx context.Context, command AIChatCommand) (AIChatResult, error) {
-	if err := requireActionActor(command.Authorization); err != nil {
-		return AIChatResult{}, err
-	}
-	if command.ConversationID < 0 || command.ProjectID < 0 || (command.AgentID != nil && *command.AgentID <= 0) {
-		return AIChatResult{}, validationError("invalid_ai_chat_reference", "Conversation, project and agent references are invalid")
-	}
-	prompt, err := boundedRedactedInput(command.Prompt, maxApplicationPromptRunes, "AI prompt", true)
+	preparation, err := s.PrepareChat(ctx, command)
 	if err != nil {
 		return AIChatResult{}, err
 	}
-	if s.provider == nil || s.conversations == nil {
-		return AIChatResult{}, validationError("ai_backend_unavailable", "AI backend is unavailable")
-	}
-	title, _ := boundedRedactedOutput(prompt, 60)
-	reference, err := s.conversations.EnsureChatConversation(ctx, command.ConversationID, command.ProjectID, command.AgentID, title)
-	if err != nil || reference == nil {
-		return AIChatResult{}, safeBackendError("AI conversation could not be prepared", err)
-	}
-	providerResult, err := s.provider.Chat(ctx, AIProviderChatRequest{ConversationID: reference.ID, ProjectID: command.ProjectID, AgentID: command.AgentID, Prompt: prompt})
+	messageID, err := s.BeginChatResponse(ctx, preparation.Conversation.ID, command.Authorization)
 	if err != nil {
+		return AIChatResult{}, err
+	}
+	providerResult, err := s.provider.Chat(ctx, AIProviderChatRequest{
+		ConversationID: preparation.Conversation.ID, ProjectID: command.ProjectID,
+		AgentID: command.AgentID, Prompt: preparation.Prompt, Feedback: preparation.Feedback,
+	})
+	if err != nil {
+		_ = s.CompleteChatResponse(ctx, AIChatCompletion{
+			ConversationID: preparation.Conversation.ID, MessageID: messageID,
+			Status: "error", Error: "AI chat failed",
+		}, command.Authorization)
 		return AIChatResult{}, safeBackendError("AI chat failed", err)
 	}
 	output, truncated := boundedRedactedOutput(providerResult.Text, maxApplicationOutputRunes)
 	model, _ := boundedRedactedOutput(providerResult.Model, 200)
-	if err = s.conversations.PersistExchangeAtomic(ctx, reference.ID, prompt, output); err != nil {
-		return AIChatResult{}, safeBackendError("AI exchange could not be persisted", err)
+	if err = s.CompleteChatResponse(ctx, AIChatCompletion{
+		ConversationID: preparation.Conversation.ID, MessageID: messageID,
+		Content: output, ToolCallsJSON: "[]", Status: "completed",
+	}, command.Authorization); err != nil {
+		return AIChatResult{}, err
 	}
-	publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "ai", Action: "chat_completed", ID: reference.ID})
-	return AIChatResult{ConversationID: reference.ID, Output: output, Model: model, WasTruncated: truncated}, nil
+	return AIChatResult{ConversationID: preparation.Conversation.ID, Output: output, Model: model, WasTruncated: truncated}, nil
+}
+
+func (s *AIAssistantService) PrepareChat(ctx context.Context, command AIChatCommand) (AIChatPreparation, error) {
+	if err := requireActionActor(command.Authorization); err != nil {
+		return AIChatPreparation{}, err
+	}
+	if command.ConversationID < 0 || command.ProjectID < 0 || (command.AgentID != nil && *command.AgentID <= 0) {
+		return AIChatPreparation{}, validationError("invalid_ai_chat_reference", "Conversation, project and agent references are invalid")
+	}
+	prompt, err := boundedRedactedInput(command.Prompt, maxApplicationPromptRunes, "AI prompt", true)
+	if err != nil {
+		return AIChatPreparation{}, err
+	}
+	if s.provider == nil || s.conversations == nil {
+		return AIChatPreparation{}, validationError("ai_backend_unavailable", "AI backend is unavailable")
+	}
+	titleRunes := []rune(prompt)
+	if len(titleRunes) > 100 {
+		titleRunes = titleRunes[:100]
+		titleRunes = append(titleRunes, []rune("...")...)
+	}
+	preparation, err := s.conversations.PrepareChatAtomic(ctx, AIChatPreparationRequest{
+		ConversationID: command.ConversationID, ProjectID: command.ProjectID,
+		AgentID: command.AgentID, Prompt: prompt, Title: string(titleRunes),
+	})
+	if err != nil || preparation == nil || preparation.Conversation.ID <= 0 {
+		if ErrorIsKind(err, ErrorValidation) || ErrorIsKind(err, ErrorNotFound) || ErrorIsKind(err, ErrorConflict) {
+			return AIChatPreparation{}, err
+		}
+		return AIChatPreparation{}, safeBackendError("AI conversation could not be prepared", err)
+	}
+	preparation.Prompt = prompt
+	preparation.Feedback, _ = boundedRedactedOutput(preparation.Feedback, maxApplicationSummaryRunes)
+	return *preparation, nil
+}
+
+func (s *AIAssistantService) BeginChatResponse(ctx context.Context, conversationID int64, authorization ActionAuthorization) (int64, error) {
+	if err := requireActionActor(authorization); err != nil {
+		return 0, err
+	}
+	if err := validateBoundedID(conversationID, "Conversation"); err != nil {
+		return 0, err
+	}
+	if s.conversations == nil {
+		return 0, validationError("ai_backend_unavailable", "AI conversation backend is unavailable")
+	}
+	messageID, err := s.conversations.BeginAssistantMessage(ctx, conversationID)
+	if err != nil || messageID <= 0 {
+		return 0, safeBackendError("AI response could not be initialized", err)
+	}
+	return messageID, nil
+}
+
+func (s *AIAssistantService) UpdateChatResponse(ctx context.Context, progress AIChatProgress, authorization ActionAuthorization) error {
+	if err := requireActionActor(authorization); err != nil {
+		return err
+	}
+	if progress.ConversationID <= 0 || progress.MessageID <= 0 {
+		return validationError("invalid_ai_chat_reference", "Conversation and message references must be positive")
+	}
+	progress.Content, _ = boundedRedactedOutput(progress.Content, maxApplicationOutputRunes)
+	if progress.ToolCallsJSON == "" {
+		progress.ToolCallsJSON = "[]"
+	}
+	if utf8.RuneCountInString(progress.ToolCallsJSON) > maxApplicationContentRunes || validateJSONArray(progress.ToolCallsJSON, "invalid_ai_tool_calls", "AI tool calls must be a bounded JSON array") != nil {
+		return validationError("invalid_ai_tool_calls", "AI tool calls must be a bounded JSON array")
+	}
+	if s.conversations == nil {
+		return validationError("ai_backend_unavailable", "AI conversation backend is unavailable")
+	}
+	if err := s.conversations.UpdateAssistantMessageProgress(ctx, progress); err != nil {
+		return safeBackendError("AI response progress could not be persisted", err)
+	}
+	return nil
+}
+
+func (s *AIAssistantService) CompleteChatResponse(ctx context.Context, completion AIChatCompletion, authorization ActionAuthorization) error {
+	if err := requireActionActor(authorization); err != nil {
+		return err
+	}
+	if completion.ConversationID <= 0 || completion.MessageID <= 0 {
+		return validationError("invalid_ai_chat_reference", "Conversation and message references must be positive")
+	}
+	if completion.Status != "completed" && completion.Status != "error" {
+		return validationError("invalid_ai_message_status", "AI message status must be completed or error")
+	}
+	completion.Content, _ = boundedRedactedOutput(completion.Content, maxApplicationOutputRunes)
+	completion.Error, _ = boundedRedactedOutput(completion.Error, maxApplicationSummaryRunes)
+	if completion.ToolCallsJSON == "" {
+		completion.ToolCallsJSON = "[]"
+	}
+	if utf8.RuneCountInString(completion.ToolCallsJSON) > maxApplicationContentRunes || validateJSONArray(completion.ToolCallsJSON, "invalid_ai_tool_calls", "AI tool calls must be a bounded JSON array") != nil {
+		return validationError("invalid_ai_tool_calls", "AI tool calls must be a bounded JSON array")
+	}
+	if s.conversations == nil {
+		return validationError("ai_backend_unavailable", "AI conversation backend is unavailable")
+	}
+	if err := s.conversations.CompleteAssistantMessageAtomic(ctx, completion); err != nil {
+		return safeBackendError("AI response could not be persisted", err)
+	}
+	if completion.Status == "completed" {
+		publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "ai", Action: "chat_completed", ID: completion.ConversationID})
+	}
+	return nil
 }
 
 func (s *AIAssistantService) DeleteConversation(ctx context.Context, id int64, authorization ActionAuthorization) error {
@@ -384,6 +527,9 @@ func (s *AIAssistantService) initiate(ctx context.Context, request AIInitiationR
 	}
 	reference, err := s.conversations.InitiateConversationAtomic(ctx, request)
 	if err != nil || reference == nil {
+		if ErrorIsKind(err, ErrorValidation) || ErrorIsKind(err, ErrorNotFound) || ErrorIsKind(err, ErrorConflict) {
+			return AIConversationView{}, err
+		}
 		return AIConversationView{}, safeBackendError("AI conversation could not be initiated", err)
 	}
 	view := aiConversationView(reference)
@@ -392,6 +538,14 @@ func (s *AIAssistantService) initiate(ctx context.Context, request AIInitiationR
 }
 
 func (s *AIAssistantService) GenerateSkill(ctx context.Context, description string, authorization ActionAuthorization) (AIGeneratedSkill, error) {
+	return s.generateSkill(ctx, description, authorization, nil)
+}
+
+func (s *AIAssistantService) GenerateSkillStream(ctx context.Context, description string, authorization ActionAuthorization, onDelta func(string) error) (AIGeneratedSkill, error) {
+	return s.generateSkill(ctx, description, authorization, onDelta)
+}
+
+func (s *AIAssistantService) generateSkill(ctx context.Context, description string, authorization ActionAuthorization, onDelta func(string) error) (AIGeneratedSkill, error) {
 	if err := requireActionActor(authorization); err != nil {
 		return AIGeneratedSkill{}, err
 	}
@@ -402,7 +556,33 @@ func (s *AIAssistantService) GenerateSkill(ctx context.Context, description stri
 	if s.provider == nil {
 		return AIGeneratedSkill{}, validationError("ai_provider_unavailable", "AI provider is unavailable")
 	}
-	result, err := s.provider.GenerateSkill(ctx, description)
+	var result AIProviderTextResult
+	if streamingProvider, ok := s.provider.(AIProviderStreamingPort); ok && onDelta != nil {
+		emittedRunes := 0
+		result, err = streamingProvider.GenerateSkillStream(ctx, description, func(delta string) error {
+			remaining := maxApplicationContentRunes - emittedRunes
+			if remaining <= 0 {
+				return nil
+			}
+			runes := []rune(delta)
+			if len(runes) > remaining {
+				runes = runes[:remaining]
+			}
+			emittedRunes += len(runes)
+			if len(runes) == 0 {
+				return nil
+			}
+			return onDelta(string(runes))
+		})
+	} else {
+		result, err = s.provider.GenerateSkill(ctx, description)
+		if err == nil && onDelta != nil {
+			bounded, _ := boundedRedactedOutput(result.Text, maxApplicationContentRunes)
+			if callbackErr := onDelta(bounded); callbackErr != nil {
+				return AIGeneratedSkill{}, callbackErr
+			}
+		}
+	}
 	if err != nil {
 		return AIGeneratedSkill{}, safeBackendError("AI skill generation failed", err)
 	}

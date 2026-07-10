@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"openpoet/internal/application"
 	"openpoet/internal/notifications"
 	"openpoet/internal/websocket"
 )
@@ -93,6 +94,11 @@ func (h *WebSocketHandler) HandlePushSubscribe(w http.ResponseWriter, r *http.Re
 		respondError(w, http.StatusServiceUnavailable, "Push notifications not configured")
 		return
 	}
+	services, ready := h.api.platformApplicationServices()
+	if !ready || services.Collaboration.NotificationDelivery == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform notification service is unavailable")
+		return
+	}
 
 	var sub struct {
 		Endpoint string `json:"endpoint"`
@@ -107,8 +113,12 @@ func (h *WebSocketHandler) HandlePushSubscribe(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	if err := h.webpush.Subscribe(r.Context(), sub.Endpoint, sub.Keys.P256dh, sub.Keys.Auth); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	if _, err := services.Collaboration.NotificationDelivery.Subscribe(platformUIContext(r), application.PushSubscriptionInput{
+		Endpoint: sub.Endpoint,
+		P256dh:   sub.Keys.P256dh,
+		Auth:     sub.Keys.Auth,
+	}, platformUIAuthorization(r)); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -121,6 +131,11 @@ func (h *WebSocketHandler) HandlePushUnsubscribe(w http.ResponseWriter, r *http.
 		respondError(w, http.StatusServiceUnavailable, "Push notifications not configured")
 		return
 	}
+	services, ready := h.api.platformApplicationServices()
+	if !ready || services.Collaboration.NotificationDelivery == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform notification service is unavailable")
+		return
+	}
 
 	var sub struct {
 		Endpoint string `json:"endpoint"`
@@ -131,8 +146,11 @@ func (h *WebSocketHandler) HandlePushUnsubscribe(w http.ResponseWriter, r *http.
 		return
 	}
 
-	if err := h.webpush.Unsubscribe(r.Context(), sub.Endpoint); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	if _, err := services.Collaboration.NotificationDelivery.Unsubscribe(
+		platformUIContext(r), sub.Endpoint,
+		platformUIAuthorization(r),
+	); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -153,13 +171,26 @@ func (h *WebSocketHandler) HandleVAPIDPublicKey(w http.ResponseWriter, r *http.R
 
 // HandleNotificationPreference returns the server-side push notification opt-out preference
 func (h *WebSocketHandler) HandleNotificationPreference(w http.ResponseWriter, r *http.Request) {
-	val, _ := h.api.GetDB().GetSetting(r.Context(), "push_notifications_disabled")
-	disabled := val == "true"
-	respondJSON(w, http.StatusOK, map[string]bool{"disabled": disabled})
+	services, ready := h.api.platformApplicationServices()
+	if !ready || services.Collaboration.NotificationDelivery == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform notification service is unavailable")
+		return
+	}
+	preference, err := services.Collaboration.NotificationDelivery.Preference(platformUIContext(r))
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]bool{"disabled": preference.Disabled})
 }
 
 // HandleSetNotificationPreference sets the server-side push notification opt-out preference
 func (h *WebSocketHandler) HandleSetNotificationPreference(w http.ResponseWriter, r *http.Request) {
+	services, ready := h.api.platformApplicationServices()
+	if !ready || services.Collaboration.NotificationDelivery == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform notification service is unavailable")
+		return
+	}
 	var body struct {
 		Disabled bool `json:"disabled"`
 	}
@@ -168,17 +199,12 @@ func (h *WebSocketHandler) HandleSetNotificationPreference(w http.ResponseWriter
 		return
 	}
 
-	ctx := r.Context()
-	if body.Disabled {
-		if err := h.api.GetDB().SetSetting(ctx, "push_notifications_disabled", "true"); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-	} else {
-		if err := h.api.GetDB().DeleteSetting(ctx, "push_notifications_disabled"); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
+	if _, err := services.Collaboration.NotificationDelivery.SetPreference(
+		platformUIContext(r), body.Disabled,
+		platformUIAuthorization(r),
+	); err != nil {
+		respondApplicationError(w, err)
+		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -190,10 +216,15 @@ func (h *WebSocketHandler) HandleTestPush(w http.ResponseWriter, r *http.Request
 		respondError(w, http.StatusServiceUnavailable, "Push notifications not configured")
 		return
 	}
+	services, ready := h.api.platformApplicationServices()
+	if !ready || services.Collaboration.NotificationDelivery == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform notification service is unavailable")
+		return
+	}
 
-	err := h.webpush.SendToAll(r.Context(), "OpenPoet Test", "Push notifications are working!", map[string]string{
-		"type": "test",
-	})
+	_, err := services.Collaboration.NotificationDelivery.Test(
+		platformUIContext(r), platformUIAuthorization(r),
+	)
 	if err != nil {
 		respondJSON(w, http.StatusOK, map[string]string{
 			"status":  "partial",

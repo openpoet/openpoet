@@ -23,32 +23,8 @@
     },
     "capability": {
       "type": "string",
-      "enum": [
-        "tasks.list",
-        "tasks.get",
-        "tasks.create",
-        "tasks.update",
-        "tasks.change_status",
-        "tasks.delete",
-        "tasks.duplicate",
-        "tasks.reorder_project",
-        "tasks.reorder_global",
-        "tasks.approve_verification",
-        "tasks.reject_verification",
-        "tasks.link_session",
-        "tasks.unlink_session",
-        "tasks.add_comment",
-        "work_runs.list",
-        "work_runs.get",
-        "work_runs.start",
-        "work_runs.pause",
-        "work_runs.resume",
-        "work_runs.complete",
-        "work_runs.cancel",
-        "plans.upsert",
-        "plans.list",
-        "plans.items"
-      ]
+      "pattern": "^[a-z][a-z0-9_.:-]{0,199}$",
+      "description": "Capability discovered dynamically from GET /capabilities."
     },
     "target": {
       "$ref": "#/$defs/target"
@@ -69,12 +45,13 @@
     },
     "correlation_id": {
       "type": "string",
-      "maxLength": 200
+      "maxLength": 200,
+      "description": "For platform policy approvals, a canonical audit reference is required. For explicit approvals, it must also equal the grant authorization_ref (ain:, inbound:, signal:, task:, or policy:)."
     },
     "approval_token": {
       "type": "string",
-	  "minLength": 1,
-      "description": "Opaque explicit-approval marker required by capabilities whose approval policy is explicit."
+      "pattern": "^opagv1_[A-Za-z0-9_-]{43}$",
+      "description": "One-time approval grant issued by POST /approvals and bound to this bearer client, capability, command_id, and correlation_id authorization evidence."
     }
   },
   "$defs": {
@@ -84,11 +61,11 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["project", "task", "project_task", "session", "work_run", "plan"]
+          "pattern": "^[a-z][a-z0-9_.:-]{0,199}$"
         },
         "kind": {
           "type": "string",
-          "enum": ["project", "task", "project_task", "session", "work_run", "plan"]
+          "pattern": "^[a-z][a-z0-9_.:-]{0,199}$"
         },
         "id": {
           "type": ["integer", "string"]

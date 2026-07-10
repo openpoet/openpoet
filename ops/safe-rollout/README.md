@@ -78,26 +78,43 @@ Ordem real:
 3. faz `launchctl bootout`, que entrega SIGTERM ao OpenPoet;
 4. aguarda `/api/version` ficar indisponível, sem `kill -9`;
 5. preserva o binário anterior e troca o candidato por rename atômico;
-6. faz `launchctl bootstrap`;
-7. exige três health checks consecutivos com a versão exata da release;
-8. repete `PRAGMA quick_check` no banco live.
+6. migra, em uma única transação, MCPs/custom tools legacy para envelopes
+   criptografados usando `OPENPOET_ENCRYPT_KEY` (ou o fallback já usado pelo
+   runtime);
+7. faz `launchctl bootstrap`;
+8. exige três health checks consecutivos com a versão exata da release;
+9. repete `PRAGMA quick_check` no banco live.
 
-Se start ou health falhar, o binário anterior é restaurado e o LaunchAgent é
-aberto novamente. O snapshot SQLite nunca é restaurado automaticamente.
+Se start ou health falhar depois da migração de secrets, o binário anterior e
+o snapshot SQLite são restaurados antes de reabrir o LaunchAgent. A saída da
+migração contém somente contagens.
+
+### Preflight offline da migração de secrets
+
+O utilitário dedicado exige caminho explícito e é dry-run por padrão. Ele não
+aplica migrations de schema nem imprime nomes, comandos, env ou ciphertext.
+
+```bash
+go run ./cmd/openpoet-secret-migrate --db /caminho/openpoet.db
+
+# Somente após backup e aprovação explícita:
+OPENPOET_ENCRYPT_KEY='mesma-chave-do-runtime' \
+  go run ./cmd/openpoet-secret-migrate --db /caminho/openpoet.db --execute
+```
 
 ## Limites intencionais
 
 - Dois processos OpenPoet nunca compartilham o SQLite durante o apply.
 - Não há fallback para `kill -9`; graceful stop que excede o timeout aborta.
-- Rollback automático é apenas de binário. Antes de introduzir migrations, a
-  versão N-1 precisa ser testada contra o schema novo. Caso contrário, o plano
-  seguro é forward-fix ou restauração manual do snapshot com perda explícita
-  dos writes posteriores.
+- O rollback restaura o banco automaticamente somente quando esta migração de
+  secrets foi executada; outras migrations de schema continuam exigindo uma
+  estratégia própria de compatibilidade N-1.
 - O operador deve verificar que sessões estão idle antes do apply. Auto-restore
   não garante exactly-once para ações externas em andamento.
-- O backup é consistente no instante do `VACUUM INTO`; callbacks gravados entre
-  o snapshot e o graceful stop permanecem no banco live e não são descartados
-  pelo rollback de binário.
+- O backup é consistente no instante do `VACUUM INTO`; se o candidato falhar
+  depois da migração de secrets, writes entre snapshot e graceful stop são
+  descartados pela restauração. Por isso o operador deve drenar atividade antes
+  do apply.
 - Releases e backups ficam fora de `.run` e fora do repositório por padrão.
 
 ## Testes
