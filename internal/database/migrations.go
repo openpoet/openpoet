@@ -62,6 +62,7 @@ var migrations = []Migration{
 	{Version: 44, Description: "codex: add transcript retention cleanup index", Up: migrateV44},
 	{Version: 45, Description: "mcp: persist HTTP transport session status and history", Up: migrateV45},
 	{Version: 46, Description: "mcp: add HTTP transport retention cleanup indexes", Up: migrateV46},
+	{Version: 47, Description: "sessions: persist runtime model, effort, and harness", Up: migrateV47},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1209,6 +1210,20 @@ func migrateV46(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV46 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV47(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN effort TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN harness TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV47 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

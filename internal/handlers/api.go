@@ -1710,25 +1710,110 @@ func (a *API) startManagedSession(ctx context.Context, input startSessionInput) 
 
 const defaultTaskStartPrompt = "Start working on the assigned task."
 
+const (
+	localSessionLineSubmitDelay   = 1500 * time.Millisecond
+	remoteSessionLineSubmitDelay  = 2 * time.Second
+	taskSessionInitialDelay       = 500 * time.Millisecond
+	taskSessionReadyPollInterval  = 50 * time.Millisecond
+	taskSessionReadyQuietPeriod   = 250 * time.Millisecond
+	taskSessionReadyTimeout       = 30 * time.Second
+	claudeAlternateScreenSequence = "\x1b[?1049h"
+)
+
 func (a *API) autoStartTaskSession(sessionID string) {
 	go func() {
-		time.Sleep(500 * time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), taskSessionReadyTimeout)
+		defer cancel()
+		if err := a.waitForTaskSessionReady(ctx, sessionID); err != nil {
+			log.Printf("[Session] task prompt readiness wait ended for %s: %v", sessionID, err)
+		}
 		if err := a.submitSessionLine(sessionID, defaultTaskStartPrompt); err != nil {
 			log.Printf("[Session] failed to auto-submit task start prompt for %s: %v", sessionID, err)
 		}
 	}()
 }
 
-func (a *API) submitSessionLine(sessionID, text string) error {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return nil
+// waitForTaskSessionReady prevents the automatic task prompt from reaching
+// Claude Code while its terminal is still starting. During that window Claude
+// preserves typed text but can discard Enter, leaving the prompt stranded in
+// the input. The alternate-screen sequence marks TUI startup; a short quiet
+// period lets its initial render finish before input is sent.
+func (a *API) waitForTaskSessionReady(ctx context.Context, sessionID string) error {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	if err := a.sessionMgr.WriteToSession(sessionID, []byte(text)); err != nil {
+	if a == nil || a.db == nil || a.sessionMgr == nil {
+		return errors.New("session readiness dependencies are unavailable")
+	}
+
+	sess, err := a.db.GetSession(ctx, sessionID)
+	if err != nil {
 		return err
 	}
-	time.Sleep(150 * time.Millisecond)
-	return a.sessionMgr.WriteToSession(sessionID, []byte("\n"))
+	if sess.Backend != string(session.BackendClaudeCode) {
+		timer := time.NewTimer(taskSessionInitialDelay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		}
+	}
+
+	ticker := time.NewTicker(taskSessionReadyPollInterval)
+	defer ticker.Stop()
+	lastOutputSize := -1
+	var quietSince time.Time
+
+	for {
+		output, outputErr := a.sessionMgr.GetSessionOutput(sessionID)
+		if outputErr != nil {
+			return outputErr
+		}
+		if strings.Contains(string(output), claudeAlternateScreenSequence) {
+			if len(output) != lastOutputSize {
+				lastOutputSize = len(output)
+				quietSince = time.Now()
+			} else if !quietSince.IsZero() && time.Since(quietSince) >= taskSessionReadyQuietPeriod {
+				return nil
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (a *API) submitSessionLine(sessionID, text string) error {
+	delay := a.sessionLineSubmitDelay(context.Background(), sessionID)
+	return a.sessionMgr.SubmitLineToSession(sessionID, text, delay)
+}
+
+func (a *API) sessionLineSubmitDelay(ctx context.Context, sessionID string) time.Duration {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if a == nil || a.db == nil {
+		return localSessionLineSubmitDelay
+	}
+
+	sess, err := a.db.GetSession(ctx, sessionID)
+	if err != nil || sess == nil {
+		return localSessionLineSubmitDelay
+	}
+
+	project, err := a.db.GetProject(ctx, sess.ProjectID)
+	if err != nil || project == nil {
+		return localSessionLineSubmitDelay
+	}
+	if project.Type == "remote" {
+		return remoteSessionLineSubmitDelay
+	}
+	return localSessionLineSubmitDelay
 }
 
 func (a *API) GetSession(w http.ResponseWriter, r *http.Request) {
@@ -4267,14 +4352,73 @@ func (a *API) SendSessionInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Append newline to simulate Enter
-	data := []byte(input.Text + "\n")
-	if err := a.sessionMgr.WriteToSession(id, data); err != nil {
+	if err := a.submitSessionLine(id, input.Text); err != nil {
 		respondError(w, http.StatusNotFound, err.Error())
 		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+}
+
+// SetSessionModel changes the model used by future turns of an active session.
+func (a *API) SetSessionModel(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var input struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	updated, err := a.sessionMgr.SetSessionModel(r.Context(), id, input.Model, a.sessionLineSubmitDelay(r.Context(), id))
+	if err != nil {
+		respondSessionSettingError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{
+		"session_id": updated.ID,
+		"model":      updated.Model,
+		"effort":     updated.Effort,
+		"harness":    updated.Harness,
+	})
+}
+
+// SetSessionEffort changes the reasoning/thinking level used by future turns.
+func (a *API) SetSessionEffort(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var input struct {
+		Effort string `json:"effort"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	updated, err := a.sessionMgr.SetSessionEffort(r.Context(), id, input.Effort, a.sessionLineSubmitDelay(r.Context(), id))
+	if err != nil {
+		respondSessionSettingError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{
+		"session_id": updated.ID,
+		"model":      updated.Model,
+		"effort":     updated.Effort,
+		"harness":    updated.Harness,
+	})
+}
+
+func respondSessionSettingError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	switch {
+	case errors.Is(err, session.ErrInvalidSessionSetting):
+		status = http.StatusBadRequest
+	case errors.Is(err, session.ErrSessionNotRunning):
+		status = http.StatusConflict
+	case errors.Is(err, session.ErrSessionSettingUnsupported):
+		status = http.StatusUnprocessableEntity
+	}
+	respondError(w, status, err.Error())
 }
 
 // GenerateMCPAPIKey generates a new random API key for MCP HTTP access.

@@ -72,6 +72,9 @@ type Session struct {
 	Backend           string        `db:"backend" json:"backend"` // 'claude_code', 'copilot', 'acp', 'codex', or 'opencode'
 	ProviderSessionID string        `db:"provider_session_id" json:"provider_session_id,omitempty"`
 	SkipPermissions   bool          `db:"skip_permissions" json:"skip_permissions"`
+	Model             string        `db:"model" json:"model"`
+	Effort            string        `db:"effort" json:"effort"`
+	Harness           string        `db:"harness" json:"harness"`
 }
 
 type CodexTranscriptEvent struct {

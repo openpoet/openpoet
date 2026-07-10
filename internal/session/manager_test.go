@@ -56,12 +56,22 @@ func (f *fakeRunner) stoppedCalled() bool {
 
 type fakeCodexCommandRunner struct {
 	fakeRunner
-	err error
+	err     error
+	catalog interface{}
+	actions []string
 }
 
 func (f *fakeCodexCommandRunner) HandleCodexCommand(ctx context.Context, data json.RawMessage) (interface{}, error) {
 	if f.err != nil {
 		return nil, f.err
+	}
+	var request struct {
+		Action string `json:"action"`
+	}
+	_ = json.Unmarshal(data, &request)
+	f.actions = append(f.actions, request.Action)
+	if request.Action == "model/list" && f.catalog != nil {
+		return f.catalog, nil
 	}
 	return map[string]string{"ok": "true"}, nil
 }
@@ -155,6 +165,160 @@ func TestManagerNonCodexTerminalEnterDoesNotNotifyUserPrompt(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("OnUserPromptSubmitted calls = %d, want 0", calls)
+	}
+}
+
+func TestManagerSubmitLineToSessionSeparatesTextAndEnter(t *testing.T) {
+	runner := &fakeRunner{}
+	m := &Manager{
+		sessions: map[string]*runningSession{
+			"sess-1": {
+				session: &database.Session{ID: "sess-1", Backend: string(BackendClaudeCode)},
+				runner:  runner,
+			},
+		},
+	}
+
+	if err := m.SubmitLineToSession("sess-1", "build it", 0); err != nil {
+		t.Fatalf("SubmitLineToSession returned error: %v", err)
+	}
+
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if len(runner.writes) != 2 {
+		t.Fatalf("writes = %#v, want text and enter writes", runner.writes)
+	}
+	if string(runner.writes[0]) != "build it" {
+		t.Fatalf("first write = %q, want prompt text", string(runner.writes[0]))
+	}
+	if string(runner.writes[1]) != "\r" {
+		t.Fatalf("second write = %q, want carriage return", string(runner.writes[1]))
+	}
+}
+
+func TestManagerSubmitLineToSessionHonorsTextToEnterDelay(t *testing.T) {
+	runner := &fakeRunner{}
+	m := &Manager{
+		sessions: map[string]*runningSession{
+			"sess-1": {
+				session: &database.Session{ID: "sess-1", Backend: string(BackendClaudeCode)},
+				runner:  runner,
+			},
+		},
+	}
+
+	delay := 25 * time.Millisecond
+	start := time.Now()
+	if err := m.SubmitLineToSession("sess-1", "build it", delay); err != nil {
+		t.Fatalf("SubmitLineToSession returned error: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed < delay {
+		t.Fatalf("SubmitLineToSession elapsed = %s, want at least %s", elapsed, delay)
+	}
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if len(runner.writes) != 2 {
+		t.Fatalf("writes = %#v, want text and enter writes", runner.writes)
+	}
+}
+
+func TestManagerSetSessionModelAndEffortViaCodexCommandChannel(t *testing.T) {
+	runner := &fakeCodexCommandRunner{catalog: map[string]interface{}{
+		"data": []map[string]interface{}{
+			{
+				"model": "gpt-new",
+				"supportedReasoningEfforts": []map[string]string{
+					{"reasoningEffort": "medium"},
+					{"reasoningEffort": "high"},
+				},
+			},
+		},
+	}}
+	m := &Manager{
+		sessions: map[string]*runningSession{
+			"sess-1": {
+				session: &database.Session{
+					ID:      "sess-1",
+					Backend: string(BackendCodex),
+					Model:   "gpt-old",
+					Effort:  "medium",
+					Harness: "codex/app-server",
+				},
+				runner: runner,
+			},
+		},
+	}
+
+	updated, err := m.SetSessionModel(context.Background(), "sess-1", "gpt-new", 0)
+	if err != nil {
+		t.Fatalf("SetSessionModel returned error: %v", err)
+	}
+	if updated.Model != "gpt-new" || updated.Effort != "medium" {
+		t.Fatalf("updated metadata = model %q effort %q", updated.Model, updated.Effort)
+	}
+	updated, err = m.SetSessionEffort(context.Background(), "sess-1", "high", 0)
+	if err != nil {
+		t.Fatalf("SetSessionEffort returned error: %v", err)
+	}
+	if updated.Model != "gpt-new" || updated.Effort != "high" {
+		t.Fatalf("updated metadata = model %q effort %q", updated.Model, updated.Effort)
+	}
+	wantActions := []string{"model/list", "session/model/set", "model/list", "session/effort/set"}
+	if strings.Join(runner.actions, ",") != strings.Join(wantActions, ",") {
+		t.Fatalf("Codex actions = %#v, want %#v", runner.actions, wantActions)
+	}
+}
+
+func TestManagerSetSessionModelRejectsUnknownCodexModel(t *testing.T) {
+	runner := &fakeCodexCommandRunner{catalog: map[string]interface{}{
+		"data": []map[string]string{{"model": "gpt-known"}},
+	}}
+	m := &Manager{sessions: map[string]*runningSession{
+		"sess-1": {
+			session: &database.Session{ID: "sess-1", Backend: string(BackendCodex), Model: "gpt-known"},
+			runner:  runner,
+		},
+	}}
+
+	_, err := m.SetSessionModel(context.Background(), "sess-1", "gpt-missing", 0)
+	if !errors.Is(err, ErrInvalidSessionSetting) {
+		t.Fatalf("SetSessionModel error = %v, want ErrInvalidSessionSetting", err)
+	}
+	if len(runner.actions) != 1 || runner.actions[0] != "model/list" {
+		t.Fatalf("Codex actions = %#v, model change should not be applied", runner.actions)
+	}
+}
+
+func TestManagerSetClaudeSessionSettingsUsesSlashCommands(t *testing.T) {
+	runner := &fakeRunner{}
+	m := &Manager{sessions: map[string]*runningSession{
+		"sess-1": {
+			session: &database.Session{ID: "sess-1", Backend: string(BackendClaudeCode), Model: "default", Effort: "default", Harness: "claude_code"},
+			runner:  runner,
+		},
+	}}
+
+	if _, err := m.SetSessionModel(context.Background(), "sess-1", "fable", 0); err != nil {
+		t.Fatalf("SetSessionModel returned error: %v", err)
+	}
+	updated, err := m.SetSessionEffort(context.Background(), "sess-1", "max", 0)
+	if err != nil {
+		t.Fatalf("SetSessionEffort returned error: %v", err)
+	}
+	if updated.Model != "fable" || updated.Effort != "max" {
+		t.Fatalf("updated metadata = model %q effort %q", updated.Model, updated.Effort)
+	}
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	gotWrites := make([]string, len(runner.writes))
+	for i, write := range runner.writes {
+		gotWrites[i] = string(write)
+	}
+	wantWrites := []string{"/model fable", "\r", "/effort max", "\r"}
+	if strings.Join(gotWrites, "|") != strings.Join(wantWrites, "|") {
+		t.Fatalf("writes = %#v, want %#v", gotWrites, wantWrites)
 	}
 }
 
