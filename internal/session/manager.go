@@ -72,6 +72,9 @@ type Manager struct {
 	OnSessionEnd          func(sessionID string, output []byte)
 	OnUserPromptSubmitted func(sessionID string)
 	OnSessionFlush        func(sessionID string) // Always called on session end (even user-stopped) for OTEL flush
+	// OnProviderSessionIDChange is called when a native backend switches to a
+	// different transcript/thread, for example after Claude Code's /resume.
+	OnProviderSessionIDChange func(sessionID, providerSessionID string)
 }
 
 // OutputBuffer is a ring buffer for storing recent terminal output
@@ -614,11 +617,31 @@ func (m *Manager) PersistProviderSessionID(ctx context.Context, sessionID, provi
 	if providerID == "" {
 		return
 	}
+	sess, err := m.db.GetSession(ctx, sessionID)
+	if err != nil {
+		log.Printf("[%s] failed to read OpenPoet session %s before persisting provider session id: %v", backend, sessionID, err)
+		return
+	}
+	previousID := strings.TrimSpace(sess.ProviderSessionID)
+	if previousID == providerID {
+		return
+	}
 	if err := m.db.UpdateSessionProviderSessionID(ctx, sessionID, providerID); err != nil {
 		log.Printf("[%s] failed to persist provider session id %s for OpenPoet session %s: %v", backend, providerID, sessionID, err)
 		return
 	}
 	log.Printf("[%s] persisted provider session id %s for OpenPoet session %s", backend, providerID, sessionID)
+
+	// An empty provider id means the backend was using OpenPoet's session id as
+	// its transcript id. Persist that initial identity without needlessly
+	// rebuilding consumers that are already following the same source.
+	previousEffectiveID := previousID
+	if previousEffectiveID == "" {
+		previousEffectiveID = sessionID
+	}
+	if previousEffectiveID != providerID && m.OnProviderSessionIDChange != nil {
+		m.OnProviderSessionIDChange(sessionID, providerID)
+	}
 }
 
 func (m *Manager) captureOpenCodeProviderSessionID(sessionID, workDir string, envVars map[string]string, since time.Time) {

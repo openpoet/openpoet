@@ -61,6 +61,14 @@ func assertFileContent(t *testing.T, path, want string) {
 	}
 }
 
+func TestClaudeHooksTrackSessionStartForResume(t *testing.T) {
+	cs, _ := setupConfigSyncTest(t)
+	hooks := cs.buildHooksConfig()
+	if _, ok := hooks["SessionStart"]; !ok {
+		t.Fatal("Claude hooks do not include SessionStart")
+	}
+}
+
 func TestSyncCodexMemoryDocLocalUsesNewerClaude(t *testing.T) {
 	cs, project := setupConfigSyncTest(t)
 	now := time.Now()
