@@ -600,6 +600,8 @@ class TerminalManager {
                 if (window.structuredView) {
                     window.structuredView.appendEvent(sessionId, msg.data);
                 }
+            } else if (msg.type === 'structured_view_source_changed') {
+                window.structuredView?.handleSourceChange?.(sessionId, msg.data || {});
             }
         };
 
@@ -874,6 +876,8 @@ class TerminalManager {
                     if (window.structuredView) {
                         window.structuredView.appendEvent(sessionId, msg.data);
                     }
+                } else if (msg.type === 'structured_view_source_changed') {
+                    window.structuredView?.handleSourceChange?.(sessionId, msg.data || {});
                 }
             };
 

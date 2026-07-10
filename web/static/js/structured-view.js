@@ -227,6 +227,7 @@ class StructuredViewManager {
             // the final stop_reason chunk has the authoritative usage)
             tokenAccountedIds: new Set(),
             loaded: false,
+            sourceGeneration: 0,
             codexMode: false,
             codexState: null,
             codexTranscript: { order: [], items: new Map() },
@@ -304,12 +305,14 @@ class StructuredViewManager {
     async loadEvents(sessionId) {
         const view = this.views.get(sessionId);
         if (!view || view.loaded) return;
+        const sourceGeneration = view.sourceGeneration;
 
         view.messagesEl.innerHTML = '<div class="sv-empty">Loading events...</div>';
 
         try {
             const resp = await fetch(`/api/sessions/${sessionId}/events`);
             const data = await resp.json();
+            if (view.sourceGeneration !== sourceGeneration) return;
 
             let events;
             if (Array.isArray(data)) {
@@ -343,8 +346,39 @@ class StructuredViewManager {
                 this.startWatching(sessionId);
             }
         } catch (err) {
+            if (view.sourceGeneration !== sourceGeneration) return;
             console.error('Failed to load events:', err);
             view.messagesEl.innerHTML = '<div class="sv-empty">Failed to load events</div>';
+        }
+    }
+
+    /**
+     * Reset the Claude timeline when the CLI switches transcripts via /resume
+     * (or another command such as /clear). When the server already had a file
+     * watcher, it replays the replacement JSONL from byte zero; otherwise fetch
+     * the replacement history through the normal REST path.
+     */
+    handleSourceChange(sessionId, change = {}) {
+        const view = this.views.get(sessionId);
+        if (!view || view.codexMode) return;
+
+        view.sourceGeneration += 1;
+        this._stopStreamingPreview(view);
+        view.events = [];
+        view.uuidTypeMap.clear();
+        view.toolIdMap.clear();
+        view.messageIdMap.clear();
+        view.tokenAccountedIds.clear();
+        view.totalTokens = { input: 0, output: 0, cache_read: 0, cache_create: 0 };
+        view.currentProgressWidget = null;
+        view.messagesEl.innerHTML = change.replaying
+            ? '<div class="sv-empty">Loading resumed conversation...</div>'
+            : '<div class="sv-empty">Reloading resumed conversation...</div>';
+        this._updateTokenBar(view);
+
+        view.loaded = !!change.replaying;
+        if (!change.replaying) {
+            this.loadEvents(sessionId);
         }
     }
 

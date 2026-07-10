@@ -1253,6 +1253,7 @@ func (cs *ConfigSyncer) buildHooksConfig() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
+		"SessionStart":       hookEntry,
 		"PermissionRequest":  hookEntry,
 		"PreToolUse":         hookEntry,
 		"PostToolUse":        hookEntry,
@@ -2288,7 +2289,7 @@ case "$EVENT" in
             echo "$RESPONSE"
         fi
         ;;
-    PreToolUse|PostToolUse|PostToolUseFailure|Notification|Stop|UserPromptSubmit)
+    SessionStart|PreToolUse|PostToolUse|PostToolUseFailure|Notification|Stop|UserPromptSubmit)
         curl -s -X POST "${HOOK_URL}/api/hooks/event" \
             -H "Content-Type: application/json" \
             -H "X-Session-ID: ${SESSION_ID}" \
@@ -2335,7 +2336,7 @@ case "$EVENT" in
             echo "$RESPONSE"
         fi
         ;;
-    PreToolUse|PostToolUse|PostToolUseFailure|Notification|Stop|UserPromptSubmit)
+    SessionStart|PreToolUse|PostToolUse|PostToolUseFailure|Notification|Stop|UserPromptSubmit)
         curl -s -X POST "${HOOK_URL}/api/hooks/event" \
             -H "Content-Type: application/json" \
             -H "X-Session-ID: ${SESSION_ID}" \

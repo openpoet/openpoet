@@ -173,6 +173,26 @@ func hookBackendDisplayName(backend string) string {
 	}
 }
 
+// trackClaudeProviderSessionID keeps the OpenPoet session attached to the
+// transcript Claude Code is actually writing. The two ids diverge when a user
+// starts a fresh terminal and selects an older conversation with /resume.
+func (h *HookHandler) trackClaudeProviderSessionID(openPoetSessionID string, hookEvent map[string]interface{}, backend string) {
+	if h.sessionMgr == nil {
+		return
+	}
+	// Claude's bridge historically sends no X-Backend header. Do not interpret
+	// session_id fields from the other backend hook formats as Claude ids.
+	if backend != "" && backend != "claude" && backend != "claude_code" {
+		return
+	}
+	providerSessionID, _ := hookEvent["session_id"].(string)
+	providerSessionID = strings.TrimSpace(providerSessionID)
+	if providerSessionID == "" {
+		return
+	}
+	h.sessionMgr.PersistProviderSessionID(context.Background(), openPoetSessionID, providerSessionID, "Claude")
+}
+
 // setSessionMode updates the mode and broadcasts if changed. Must NOT hold h.mu.
 func (h *HookHandler) setSessionMode(sessionID, newMode, reason string) {
 	h.mu.Lock()
@@ -269,6 +289,7 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	if backend != "" {
 		hookEvent["backend"] = backend
 	}
+	h.trackClaudeProviderSessionID(sessionID, hookEvent, backend)
 
 	// Normalize Copilot event names
 	if isCopilot {
@@ -726,9 +747,11 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-	if backend := r.Header.Get("X-Backend"); backend != "" {
+	backend := r.Header.Get("X-Backend")
+	if backend != "" {
 		hookEvent["backend"] = backend
 	}
+	h.trackClaudeProviderSessionID(sessionID, hookEvent, backend)
 
 	eventName, _ := hookEvent["hook_event_name"].(string)
 
