@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -17,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"openpoet/internal/application"
 	"openpoet/internal/database"
 	"openpoet/internal/files"
 	"openpoet/internal/llm"
@@ -134,6 +136,7 @@ type AIHandler struct {
 	api         *API
 	providerMgr *llm.ProviderManager
 	mu          sync.RWMutex
+	reports     *application.ReportService
 
 	activeStreams   map[int64]*activeStreamInfo
 	activeStreamsMu sync.Mutex
@@ -154,6 +157,10 @@ type AIHandler struct {
 	streamProactiveTypes   map[int64]string
 }
 
+func (h *AIHandler) SetReportService(reports *application.ReportService) {
+	h.reports = reports
+}
+
 // NewAIHandler creates a new AI handler.
 func NewAIHandler(api *API, providerMgr *llm.ProviderManager) *AIHandler {
 	return &AIHandler{
@@ -161,6 +168,22 @@ func NewAIHandler(api *API, providerMgr *llm.ProviderManager) *AIHandler {
 		providerMgr:   providerMgr,
 		activeStreams: make(map[int64]*activeStreamInfo),
 	}
+}
+
+func (h *AIHandler) sharedAIAssistantService(w http.ResponseWriter) (*application.AIAssistantService, bool) {
+	var api *API
+	if h != nil {
+		api = h.api
+	}
+	services, ok := requirePlatformApplicationServices(api, w)
+	if !ok {
+		return nil, false
+	}
+	if services.Collaboration.AI == nil {
+		respondError(w, http.StatusServiceUnavailable, "AI application service unavailable")
+		return nil, false
+	}
+	return services.Collaboration.AI, true
 }
 
 // SetProviderManager replaces the provider manager (used during reinit).
@@ -307,6 +330,16 @@ func (h *AIHandler) HandleStopChat(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid conversation ID")
 		return
 	}
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
+		return
+	}
+	if err := service.StopConversation(platformUIContext(r), id, platformUIAuthorization(r)); err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	// Removing the stream registry and closing SSE subscribers remain transport
+	// concerns. The shared service owns the stop mutation and provider disconnect.
 	h.stopStream(id)
 	respondJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }
@@ -491,136 +524,171 @@ func testClaudeCLI(model string) error {
 	return nil
 }
 
+func (h *AIHandler) probeAIConnection(ctx context.Context, request application.AIConnectionTestRequest) (application.AIConnectionTestResult, error) {
+	if request.APIKey == "" && request.ConfigID != nil {
+		config, err := h.api.db.GetAIConfig(ctx, *request.ConfigID)
+		if err != nil {
+			return application.AIConnectionTestResult{}, &application.Error{Kind: application.ErrorNotFound, Code: "ai_config_not_found", Message: "AI configuration not found", Cause: err}
+		}
+		if config.APIKeyEncrypted != "" && config.APIKeyIV != "" {
+			request.APIKey, err = h.api.encryptor.Decrypt(config.APIKeyEncrypted, config.APIKeyIV)
+			if err != nil {
+				return application.AIConnectionTestResult{}, errors.New("AI configuration credential could not be decrypted")
+			}
+		}
+		if request.ProviderType == "" {
+			request.ProviderType = config.ProviderType
+		}
+		if request.Model == "" {
+			request.Model = config.Model
+		}
+		if request.BaseURL == "" {
+			request.BaseURL = config.BaseURL
+		}
+	}
+	result := application.AIConnectionTestResult{Provider: request.ProviderType, Model: request.Model}
+	fail := func(message string) (application.AIConnectionTestResult, error) {
+		result.Configured = false
+		result.Message = message
+		return result, nil
+	}
+	switch request.ProviderType {
+	case "gosdk":
+		if !llm.IsClaudeCLIAvailable() {
+			return fail("Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code")
+		}
+		if err := testClaudeCLI(request.Model); err != nil {
+			return fail(err.Error())
+		}
+	case "apikey":
+		if request.APIKey == "" {
+			return fail("No API key provided")
+		}
+		if result.Model == "" {
+			result.Model = llm.DefaultModel
+		}
+		if err := testAnthropicAPI(request.APIKey, result.Model); err != nil {
+			return fail(err.Error())
+		}
+	case "ollama", "ollama-sdk":
+		baseURL := strings.TrimRight(request.BaseURL, "/")
+		if baseURL == "" {
+			baseURL = "http://localhost:11434"
+		}
+		if result.Model == "" {
+			result.Model = "qwen3-coder"
+		}
+		if request.ProviderType == "ollama-sdk" && !llm.IsClaudeCLIAvailable() {
+			return fail("Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code")
+		}
+		testBody, _ := json.Marshal(map[string]any{
+			"model": result.Model, "max_tokens": 1,
+			"messages": []map[string]string{{"role": "user", "content": "hi"}},
+		})
+		httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(testBody))
+		if err != nil {
+			return fail("Cannot create AI connection test request")
+		}
+		httpRequest.Header.Set("Content-Type", "application/json")
+		if request.APIKey != "" {
+			httpRequest.Header.Set("Authorization", "Bearer "+request.APIKey)
+		}
+		response, err := (&http.Client{Timeout: 30 * time.Second}).Do(httpRequest)
+		if err != nil {
+			return fail("Cannot connect to server at " + baseURL)
+		}
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+		response.Body.Close()
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			return fail("Authentication failed (status " + strconv.Itoa(response.StatusCode) + ")")
+		}
+		if response.StatusCode != http.StatusOK {
+			var errorResponse struct {
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if json.Unmarshal(body, &errorResponse) == nil && errorResponse.Error.Message != "" {
+				return fail(errorResponse.Error.Message)
+			}
+			return fail("Server returned error (status " + strconv.Itoa(response.StatusCode) + ")")
+		}
+	default:
+		return fail("Unknown provider type: " + request.ProviderType)
+	}
+	result.Configured = true
+	result.Message = "Connection successful"
+	return result, nil
+}
+
 // HandleTestConnection tests an AI provider connection without saving settings.
 // Accepts the new AI config format: provider_type, api_key, model, base_url.
 func (h *AIHandler) HandleTestConnection(w http.ResponseWriter, r *http.Request) {
-	var params struct {
+	var input struct {
 		ProviderType string `json:"provider_type"`
 		APIKey       string `json:"api_key"`
 		Model        string `json:"model"`
 		BaseURL      string `json:"base_url"`
 		ConfigID     *int64 `json:"config_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
+		return
+	}
+	result, err := service.TestConnection(platformUIContext(r), application.AIConnectionTestRequest{
+		ProviderType: input.ProviderType, APIKey: input.APIKey, Model: input.Model,
+		BaseURL: input.BaseURL, ConfigID: input.ConfigID,
+	}, platformUIAuthorization(r))
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	response := map[string]any{
+		"provider": result.Provider, "model": result.Model, "configured": result.Configured,
+	}
+	if !result.Configured && result.Message != "" {
+		response["error"] = result.Message
+	}
+	respondJSON(w, http.StatusOK, response)
+}
 
-	// If no API key provided but config_id given, use stored key
-	if params.APIKey == "" && params.ConfigID != nil {
-		cfg, err := h.api.db.GetAIConfig(r.Context(), *params.ConfigID)
-		if err == nil && cfg != nil && cfg.APIKeyEncrypted != "" && cfg.APIKeyIV != "" {
-			decrypted, decErr := h.api.encryptor.Decrypt(cfg.APIKeyEncrypted, cfg.APIKeyIV)
-			if decErr == nil {
-				params.APIKey = decrypted
-			}
+func (h *AIHandler) buildChatRuntime(ctx context.Context, conversation *database.AIConversation, sessionProvider bool) (string, *database.AIAgent) {
+	proactiveContext := ""
+	if conversation.Source == "ai" && conversation.ProactiveContext != "" && conversation.ProactiveContext != "{}" {
+		proactiveContext = conversation.ProactiveContext
+		var suggestionStatus string
+		_ = h.api.db.GetContext(ctx, &suggestionStatus, `SELECT status FROM ai_suggestions WHERE conversation_id=? LIMIT 1`, conversation.ID)
+		if suggestionStatus == "accepted" || suggestionStatus == "dismissed" {
+			proactiveContext += fmt.Sprintf("\n\n**IMPORTANT: This suggestion has already been %s by the user. Do NOT repeat or re-offer it. Continue the conversation acknowledging this.**", suggestionStatus)
 		}
 	}
-
-	result := map[string]interface{}{
-		"provider": params.ProviderType,
-		"model":    params.Model,
+	var agent *database.AIAgent
+	if conversation.AgentID.Valid {
+		agent, _ = h.api.db.GetAIAgent(ctx, conversation.AgentID.Int64)
 	}
-
-	switch params.ProviderType {
-	case "gosdk":
-		if !llm.IsClaudeCLIAvailable() {
-			result["configured"] = false
-			result["error"] = "Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code"
-			break
-		}
-
-		// Run a real CLI command to validate the model
-		model := params.Model
-		if err := testClaudeCLI(model); err != nil {
-			result["configured"] = false
-			result["error"] = err.Error()
-		} else {
-			result["configured"] = true
-		}
-
-	case "apikey":
-		if params.APIKey == "" {
-			result["configured"] = false
-			result["error"] = "No API key provided"
-			break
-		}
-		model := params.Model
-		if model == "" {
-			model = llm.DefaultModel
-		}
-		result["model"] = model
-		if err := testAnthropicAPI(params.APIKey, model); err != nil {
-			result["configured"] = false
-			result["error"] = err.Error()
-		} else {
-			result["configured"] = true
-		}
-
-	case "ollama", "ollama-sdk":
-		baseURL := params.BaseURL
-		if baseURL == "" {
-			baseURL = "http://localhost:11434"
-		}
-		model := params.Model
-		if model == "" {
-			model = "qwen3-coder"
-		}
-		result["model"] = model
-
-		if params.ProviderType == "ollama-sdk" && !llm.IsClaudeCLIAvailable() {
-			result["configured"] = false
-			result["error"] = "Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code"
-			break
-		}
-
-		// Test with a real API call to validate connectivity, auth, and model
-		client := &http.Client{Timeout: 30 * time.Second}
-		testBody, _ := json.Marshal(map[string]interface{}{
-			"model":      model,
-			"max_tokens": 1,
-			"messages": []map[string]string{
-				{"role": "user", "content": "hi"},
-			},
-		})
-		req, _ := http.NewRequest("POST", baseURL+"/v1/chat/completions", bytes.NewReader(testBody))
-		req.Header.Set("Content-Type", "application/json")
-		if params.APIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+params.APIKey)
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			result["configured"] = false
-			result["error"] = "Cannot connect to server at " + baseURL
-		} else {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode == 401 || resp.StatusCode == 403 {
-				result["configured"] = false
-				result["error"] = "Authentication failed (status " + strconv.Itoa(resp.StatusCode) + ")"
-			} else if resp.StatusCode != 200 {
-				result["configured"] = false
-				var errResp struct {
-					Error struct {
-						Message string `json:"message"`
-					} `json:"error"`
-				}
-				if json.Unmarshal(body, &errResp) == nil && errResp.Error.Message != "" {
-					result["error"] = errResp.Error.Message
-				} else {
-					result["error"] = "Server returned error (status " + strconv.Itoa(resp.StatusCode) + ")"
-				}
-			} else {
-				result["configured"] = true
-			}
-		}
-
-	default:
-		result["configured"] = false
-		result["error"] = "Unknown provider type: " + params.ProviderType
+	if agent == nil {
+		agent, _ = h.api.db.GetDefaultAIAgent(ctx)
 	}
-
-	respondJSON(w, http.StatusOK, result)
+	systemPrompt := h.buildSystemPromptWithContext(ctx, proactiveContext, sessionProvider, agent)
+	if agent != nil && !agent.IsDefault {
+		systemPrompt += "\n\n## Agent Identity\nYou are the \"" + agent.Name + "\" agent."
+		if agent.SystemPrompt != "" {
+			systemPrompt += "\n\n### Instructions\n" + agent.SystemPrompt
+		}
+		if agent.ProjectFilter != "" {
+			systemPrompt += "\n\n### Project Access\nYou only have access to the projects listed above. Do not reference or attempt to access any other projects."
+		}
+		if agent.ToolPolicy != "" {
+			systemPrompt += "\n\n### Tool Restrictions\nYou only have access to a subset of tools. Do not attempt to perform actions outside your available tools."
+		}
+	} else if agent != nil && agent.SystemPrompt != "" {
+		systemPrompt += "\n\n## Additional Instructions\n" + agent.SystemPrompt
+	}
+	return systemPrompt, agent
 }
 
 // HandleChat handles the main chat endpoint with SSE streaming.
@@ -642,64 +710,27 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Truncate input
-	if len(input.Message) > 10000 {
-		input.Message = input.Message[:10000]
-	}
-
-	input.Message = strings.TrimSpace(input.Message)
-	if input.Message == "" {
-		respondError(w, http.StatusBadRequest, "Message is required")
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
 		return
 	}
-
-	ctx := r.Context()
-
-	// Create or get conversation
-	var conv *database.AIConversation
-	if input.ConversationID > 0 {
-		var err error
-		conv, err = h.api.db.GetAIConversation(ctx, input.ConversationID)
-		if err != nil {
-			respondError(w, http.StatusNotFound, "Conversation not found")
-			return
-		}
-		// Update project context if provided and not already set
-		if input.ProjectID > 0 && (conv.ProactiveContext == "" || conv.ProactiveContext == "{}") {
-			ctx := fmt.Sprintf(`{"project_id":%d}`, input.ProjectID)
-			h.api.db.ExecContext(r.Context(), "UPDATE ai_conversations SET proactive_context = ? WHERE id = ? AND (proactive_context = '' OR proactive_context = '{}')", ctx, conv.ID)
-			conv.ProactiveContext = ctx
-		}
-	} else {
-		// Create new conversation
-		title := input.Message
-		if len(title) > 100 {
-			title = title[:100] + "..."
-		}
-		conv = &database.AIConversation{Title: title}
-		// Set agent if provided
-		if input.AgentID > 0 {
-			conv.AgentID = sql.NullInt64{Int64: input.AgentID, Valid: true}
-		}
-		// Set project context if provided
-		if input.ProjectID > 0 {
-			conv.ProactiveContext = fmt.Sprintf(`{"project_id":%d}`, input.ProjectID)
-		}
-		if err := h.api.db.CreateAIConversation(ctx, conv); err != nil {
-			respondError(w, http.StatusInternalServerError, "Failed to create conversation")
-			return
-		}
+	var agentID *int64
+	if input.AgentID != 0 {
+		agentID = &input.AgentID
 	}
-
-	// Save user message
-	userMsg := &database.AIMessage{
-		ConversationID: conv.ID,
-		Role:           "user",
-		Content:        input.Message,
-		ToolCalls:      "[]",
+	ctx := platformUIContext(r)
+	preparation, err := service.PrepareChat(ctx, application.AIChatCommand{
+		ConversationID: input.ConversationID, ProjectID: input.ProjectID, AgentID: agentID,
+		Prompt: input.Message, Authorization: platformUIAuthorization(r),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
 	}
-	if err := h.api.db.CreateAIMessage(ctx, userMsg); err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to save message")
+	input.Message = preparation.Prompt
+	conv, err := h.api.db.GetAIConversation(ctx, preparation.Conversation.ID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to load conversation")
 		return
 	}
 
@@ -725,81 +756,15 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Inject proposal feedback (approved/rejected) into the user's message context.
-	// This notifies the AI about outcomes of proposals it created earlier.
-	feedbackDocs, _ := h.api.db.ListUnacknowledgedFeedback(ctx, conv.ID)
-	if len(feedbackDocs) > 0 {
-		var fb strings.Builder
-		fb.WriteString("[System notification — Proposal feedback]\n")
-		for _, doc := range feedbackDocs {
-			statusLabel := "APPROVED"
-			if doc.Status == "rejected" {
-				statusLabel = "REJECTED"
-			}
-			fb.WriteString(fmt.Sprintf("- %s: %s — %s\n", doc.Title, doc.Summary, statusLabel))
-		}
-		fb.WriteString("\n---\n")
-
-		// Prepend feedback to the last user message to avoid consecutive user messages
-		if len(messages) > 0 {
-			last := &messages[len(messages)-1]
-			if last.Role == "user" && len(last.Content) > 0 {
-				last.Content[0].Text = fb.String() + last.Content[0].Text
-			}
-		}
-
-		// Mark as acknowledged
-		var docIDs []string
-		for _, doc := range feedbackDocs {
-			docIDs = append(docIDs, doc.ID)
-		}
-		if err := h.api.db.AcknowledgeFeedback(ctx, docIDs); err != nil {
-			log.Printf("[AIFeedback] Failed to acknowledge feedback: %v", err)
-		}
-		log.Printf("[AIFeedback] Injected %d proposal feedback(s) for conv %d", len(feedbackDocs), conv.ID)
-	}
-
-	// Build system prompt with current state (inject proactive context if AI-initiated)
-	var proactiveCtx string
-	if conv.Source == "ai" && conv.ProactiveContext != "" && conv.ProactiveContext != "{}" {
-		proactiveCtx = conv.ProactiveContext
-		// Enrich with suggestion status so the AI knows if it was already handled
-		var suggestionStatus string
-		h.api.db.GetContext(ctx, &suggestionStatus,
-			"SELECT status FROM ai_suggestions WHERE conversation_id = ? LIMIT 1", conv.ID)
-		if suggestionStatus == "accepted" || suggestionStatus == "dismissed" {
-			proactiveCtx += fmt.Sprintf("\n\n**IMPORTANT: This suggestion has already been %s by the user. Do NOT repeat or re-offer it. Continue the conversation acknowledging this.**", suggestionStatus)
+	if preparation.Feedback != "" && len(messages) > 0 {
+		last := &messages[len(messages)-1]
+		if last.Role == "user" && len(last.Content) > 0 {
+			last.Content[0].Text = preparation.Feedback + last.Content[0].Text
 		}
 	}
 
 	_, isSessionProvider := p.(llm.SessionProvider)
-
-	// Load the agent for this conversation
-	var agent *database.AIAgent
-	if conv.AgentID.Valid {
-		agent, _ = h.api.db.GetAIAgent(ctx, conv.AgentID.Int64)
-	}
-	if agent == nil {
-		agent, _ = h.api.db.GetDefaultAIAgent(ctx)
-	}
-
-	systemPrompt := h.buildSystemPromptWithContext(ctx, proactiveCtx, isSessionProvider, agent)
-
-	// Append agent identity and restrictions to system prompt
-	if agent != nil && !agent.IsDefault {
-		systemPrompt += "\n\n## Agent Identity\nYou are the \"" + agent.Name + "\" agent."
-		if agent.SystemPrompt != "" {
-			systemPrompt += "\n\n### Instructions\n" + agent.SystemPrompt
-		}
-		if agent.ProjectFilter != "" {
-			systemPrompt += "\n\n### Project Access\nYou only have access to the projects listed above. Do not reference or attempt to access any other projects."
-		}
-		if agent.ToolPolicy != "" {
-			systemPrompt += "\n\n### Tool Restrictions\nYou only have access to a subset of tools. Do not attempt to perform actions outside your available tools."
-		}
-	} else if agent != nil && agent.SystemPrompt != "" {
-		systemPrompt += "\n\n## Additional Instructions\n" + agent.SystemPrompt
-	}
+	systemPrompt, agent := h.buildChatRuntime(ctx, conv, isSessionProvider)
 
 	model := h.getSlotModel(llm.SlotChat)
 
@@ -883,17 +848,12 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	var toolCalls []map[string]interface{}
 	var textMu sync.Mutex // protects assistantText and toolCalls from concurrent access
 
-	// Create assistant message in DB immediately with status='streaming'
-	assistantMsg := &database.AIMessage{
-		ConversationID: conv.ID,
-		Role:           "assistant",
-		Content:        "",
-		ToolCalls:      "[]",
-		Status:         "streaming",
+	messageID, err := service.BeginChatResponse(ctx, conv.ID, platformUIAuthorization(r))
+	if err != nil {
+		safeSendSSE("error", map[string]any{"message": err.Error()})
+		return
 	}
-	if err := h.api.db.CreateAIMessage(ctx, assistantMsg); err != nil {
-		log.Printf("[AI] Failed to create streaming message: %v", err)
-	}
+	assistantMsg := &database.AIMessage{ID: messageID, ConversationID: conv.ID, Role: "assistant", ToolCalls: "[]", Status: "streaming", CreatedAt: time.Now()}
 
 	// Register the current message ID for GoSDK tool execution
 	h.streamMessageIDsMu.Lock()
@@ -925,8 +885,17 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		"id": assistantMsg.ID,
 	})
 
-	// Start debounced flusher to persist streaming content every 2 seconds
-	sf := newStreamFlusher(h.api.db, assistantMsg.ID, func() string {
+	// Start debounced flusher to persist streaming content every 2 seconds.
+	// The timer remains a transport concern; persistence crosses the same
+	// Application Service boundary used by Automation chat.
+	chatMetadata := application.EventMetadataFromContext(ctx)
+	sf := newStreamFlusher(func(flushCtx context.Context, content, toolCallsJSON string) error {
+		flushCtx = application.WithEventMetadata(flushCtx, chatMetadata)
+		return service.UpdateChatResponse(flushCtx, application.AIChatProgress{
+			ConversationID: conv.ID, MessageID: assistantMsg.ID,
+			Content: content, ToolCallsJSON: toolCallsJSON,
+		}, platformUIAuthorization(r))
+	}, func() string {
 		textMu.Lock()
 		defer textMu.Unlock()
 		return assistantText.String()
@@ -976,13 +945,17 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 		saveCtx, saveCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer saveCancel()
-
+		saveCtx = application.WithEventMetadata(saveCtx, application.EventMetadataFromContext(ctx))
+		status := "completed"
 		if streamErr != "" {
-			h.api.db.UpdateAIMessageStatus(saveCtx, assistantMsg.ID, "error", finalContent, finalToolCalls, streamErr)
-		} else {
-			h.api.db.UpdateAIMessageStatus(saveCtx, assistantMsg.ID, "completed", finalContent, finalToolCalls, "")
+			status = "error"
 		}
-		h.api.db.TouchAIConversation(saveCtx, conv.ID)
+		if err := service.CompleteChatResponse(saveCtx, application.AIChatCompletion{
+			ConversationID: conv.ID, MessageID: assistantMsg.ID, Content: finalContent,
+			ToolCallsJSON: finalToolCalls, Status: status, Error: streamErr,
+		}, platformUIAuthorization(r)); err != nil {
+			log.Printf("[AI] Failed to finalize assistant message %d: %v", assistantMsg.ID, err)
+		}
 	}()
 
 	var streamingErr error
@@ -1033,7 +1006,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Handle tool use loop — session providers handle tools internally, skip for them
 	if resp != nil && resp.StopReason == "tool_use" && !isSessionProvider {
-		loopUsage, loopErr := h.handleToolLoop(streamCtx, safeSendSSE, p, req, resp, conv, &assistantText, &toolCalls, &textMu, 15, collector, assistantMsg.ID)
+		loopUsage, loopErr := h.handleToolLoop(streamCtx, safeSendSSE, p, req, resp, conv, &assistantText, &toolCalls, &textMu, 15, collector, assistantMsg.ID, platformUIAuthorization(r))
 		if loopErr != nil {
 			log.Printf("[AI] Tool loop error: %v", loopErr)
 			if streamCtx.Err() == context.Canceled {
@@ -1375,7 +1348,6 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		// Process custom tool execution proposals (confirm-required tools)
 		for _, ta := range toolExecActions {
 			toolName, _ := ta.Extra["tool_name"].(string)
-			command, _ := ta.Extra["command"].(string)
 			description, _ := ta.Extra["description"].(string)
 			inputParams, _ := ta.Extra["input"].(map[string]interface{})
 
@@ -1384,7 +1356,6 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			if description != "" {
 				contentBuilder.WriteString(fmt.Sprintf("**Description:** %s\n\n", description))
 			}
-			contentBuilder.WriteString(fmt.Sprintf("**Command:** `%s`\n\n", command))
 			if len(inputParams) > 0 {
 				contentBuilder.WriteString("**Parameters:**\n")
 				for k, v := range inputParams {
@@ -1537,8 +1508,7 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 // streamFlusher periodically persists streaming content to the database.
 type streamFlusher struct {
-	db           *database.DB
-	msgID        int64
+	persist      func(context.Context, string, string) error
 	getText      func() string
 	getToolCalls func() string
 	lastFlushed  int
@@ -1547,10 +1517,9 @@ type streamFlusher struct {
 	mu           sync.Mutex
 }
 
-func newStreamFlusher(db *database.DB, msgID int64, getText func() string, getToolCalls func() string) *streamFlusher {
+func newStreamFlusher(persist func(context.Context, string, string) error, getText func() string, getToolCalls func() string) *streamFlusher {
 	f := &streamFlusher{
-		db:           db,
-		msgID:        msgID,
+		persist:      persist,
 		getText:      getText,
 		getToolCalls: getToolCalls,
 		ticker:       time.NewTicker(2 * time.Second),
@@ -1581,7 +1550,11 @@ func (f *streamFlusher) flush() {
 	f.lastFlushed = len(content)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	f.db.UpdateAIMessageContent(ctx, f.msgID, content, f.getToolCalls())
+	if f.persist != nil {
+		if err := f.persist(ctx, content, f.getToolCalls()); err != nil {
+			log.Printf("[AI] Failed to persist streaming message progress: %v", err)
+		}
+	}
 }
 
 func (f *streamFlusher) stop() {
@@ -1605,6 +1578,7 @@ func (h *AIHandler) handleToolLoop(
 	maxIterations int,
 	collector *planningCollector,
 	messageID int64,
+	authorization application.ActionAuthorization,
 ) (llm.Usage, error) {
 	var accumulated llm.Usage
 
@@ -1645,7 +1619,7 @@ func (h *AIHandler) handleToolLoop(
 			})
 
 			toolCtx, toolCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			result, err := h.executeTool(toolCtx, block.Name, inputMap, conv.ID, messageID, collector, conv.ProactiveType)
+			result, err := h.executeTool(toolCtx, block.Name, inputMap, conv.ID, messageID, collector, conv.ProactiveType, authorization)
 			toolCancel()
 			if err != nil {
 				result = fmt.Sprintf("Error: %s", err.Error())
@@ -1744,6 +1718,13 @@ func (h *AIHandler) handleToolLoop(
 // ExecuteTool implements llm.ToolExecutor. It wraps the private executeTool method
 // so that SDK providers can call OpenPoet tools from their in-process MCP servers.
 func (h *AIHandler) ExecuteTool(ctx context.Context, name string, input map[string]any, conversationID int64) (string, error) {
+	// This interface is called only by the configured in-process SDK provider.
+	// It has no payload-controlled actor or approver; the local UI boundary is
+	// therefore fixed here, while Automation uses ExecuteToolAuthorized below.
+	return h.ExecuteToolAuthorized(ctx, name, input, conversationID, platformUIAuthorization(nil))
+}
+
+func (h *AIHandler) ExecuteToolAuthorized(ctx context.Context, name string, input map[string]any, conversationID int64, authorization application.ActionAuthorization) (string, error) {
 	// Look up the current streaming message ID for this conversation
 	h.streamMessageIDsMu.Lock()
 	msgID := h.streamMessageIDs[conversationID]
@@ -1759,11 +1740,11 @@ func (h *AIHandler) ExecuteTool(ctx context.Context, name string, input map[stri
 	proactiveType := h.streamProactiveTypes[conversationID]
 	h.streamProactiveTypesMu.Unlock()
 
-	return h.executeTool(ctx, name, input, conversationID, msgID, collector, proactiveType)
+	return h.executeTool(ctx, name, input, conversationID, msgID, collector, proactiveType, authorization)
 }
 
 // executeTool runs a tool and returns the result as a string.
-func (h *AIHandler) executeTool(ctx context.Context, name string, input map[string]interface{}, conversationID int64, messageID int64, collector *planningCollector, proactiveType string) (string, error) {
+func (h *AIHandler) executeTool(ctx context.Context, name string, input map[string]interface{}, conversationID int64, messageID int64, collector *planningCollector, proactiveType string, authorization application.ActionAuthorization) (string, error) {
 	// Agent project filter enforcement: block access to projects not in the agent's filter
 	if pidRaw, ok := input["project_id"]; ok && conversationID > 0 {
 		if allowed := h.getAgentAllowedProjectIDs(ctx, conversationID); allowed != nil {
@@ -2132,102 +2113,92 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if err != nil {
 			return "", err
 		}
-		m, err := h.api.db.GetMCPServer(ctx, id)
-		if err != nil {
-			return "", fmt.Errorf("MCP server not found")
+		services, ok := h.api.platformApplicationServices()
+		if !ok || services.Configuration.MCP == nil {
+			return "", errors.New("MCP application service unavailable")
 		}
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Name: %s\n", m.Name))
-		sb.WriteString(fmt.Sprintf("Command: %s\n", m.Command))
-		sb.WriteString(fmt.Sprintf("Args: %s\n", m.Args))
-		sb.WriteString(fmt.Sprintf("Env: %s\n", m.Env))
-		sb.WriteString(fmt.Sprintf("Enabled: %v\n", m.Enabled))
-		return sb.String(), nil
+		servers, err := services.Configuration.MCP.ListGlobal(ctx)
+		if err != nil {
+			return "", err
+		}
+		for _, server := range servers {
+			if server.ID == id {
+				return fmt.Sprintf("Name: %s\nEnabled: %v\nHas command: %v\nHas args: %v\nHas env: %v", server.Name, server.Enabled, server.HasCommand, server.HasArgs, server.HasEnv), nil
+			}
+		}
+		return "", fmt.Errorf("MCP server not found")
 
 	case "list_mcp_servers":
-		servers, err := h.api.db.ListMCPServers(ctx)
+		services, ok := h.api.platformApplicationServices()
+		if !ok || services.Configuration.MCP == nil {
+			return "", errors.New("MCP application service unavailable")
+		}
+		servers, err := services.Configuration.MCP.ListGlobal(ctx)
 		if err != nil {
 			return "", err
 		}
 		if len(servers) == 0 {
 			return "No MCP servers found.", nil
 		}
-		var sb strings.Builder
-		for _, m := range servers {
+		var output strings.Builder
+		for _, server := range servers {
 			status := "enabled"
-			if !m.Enabled {
+			if !server.Enabled {
 				status = "disabled"
 			}
-			sb.WriteString(fmt.Sprintf("- [%d] %s: %s (%s)\n", m.ID, m.Name, m.Command, status))
+			output.WriteString(fmt.Sprintf("- [%d] %s (%s)\n", server.ID, server.Name, status))
 		}
-		return sb.String(), nil
+		return output.String(), nil
 
 	case "create_mcp_server":
-		mcpName, _ := input["name"].(string)
+		name, _ := input["name"].(string)
 		command, _ := input["command"].(string)
 		args, _ := input["args"].(string)
 		env, _ := input["env"].(string)
-
-		if mcpName == "" || command == "" {
-			return "", fmt.Errorf("name and command are required")
-		}
 		if args == "" {
 			args = "[]"
 		}
 		if env == "" {
 			env = "{}"
 		}
-
-		mcp := &database.MCPServer{
-			Name:    mcpName,
-			Command: command,
-			Args:    args,
-			Env:     env,
-			Enabled: true,
+		services, ok := h.api.platformApplicationServices()
+		if !ok || services.Configuration.MCP == nil {
+			return "", errors.New("MCP application service unavailable")
 		}
-		if err := h.api.db.CreateMCPServer(ctx, mcp); err != nil {
+		server, err := services.Configuration.MCP.CreateGlobal(ctx, authorization, application.MCPServerInput{
+			Name: name, Command: command, Args: args, Env: env, Enabled: true,
+		})
+		if err != nil {
 			return "", err
 		}
-
-		h.api.hub.BroadcastStateUpdate("mcp", map[string]interface{}{"action": "created", "mcp": mcp})
-		return fmt.Sprintf("MCP server '%s' created (ID: %d)", mcpName, mcp.ID), nil
+		return fmt.Sprintf("MCP server '%s' created (ID: %d)", server.Name, server.ID), nil
 
 	case "create_project_mcp_server":
 		projectID, err := parseIDParam(input, "project_id")
 		if err != nil {
 			return "", err
 		}
-		mcpName, _ := input["name"].(string)
+		name, _ := input["name"].(string)
 		command, _ := input["command"].(string)
 		args, _ := input["args"].(string)
 		env, _ := input["env"].(string)
-
-		if mcpName == "" || command == "" {
-			return "", fmt.Errorf("name and command are required")
-		}
 		if args == "" {
 			args = "[]"
 		}
 		if env == "" {
 			env = "{}"
 		}
-
-		m := &database.ProjectMCPServer{
-			ProjectID: projectID,
-			Name:      mcpName,
-			Command:   command,
-			Args:      args,
-			Env:       env,
-			Enabled:   true,
+		services, ok := h.api.platformApplicationServices()
+		if !ok || services.Configuration.MCP == nil {
+			return "", errors.New("MCP application service unavailable")
 		}
-		if err := h.api.db.CreateProjectMCPServer(ctx, m); err != nil {
+		server, err := services.Configuration.MCP.CreateProject(ctx, authorization, projectID, application.MCPServerInput{
+			Name: name, Command: command, Args: args, Env: env, Enabled: true,
+		})
+		if err != nil {
 			return "", err
 		}
-
-		h.api.hub.BroadcastStateUpdate("project_mcp", map[string]interface{}{
-			"action": "created", "project_id": projectID, "mcp": m,
-		})
-		return fmt.Sprintf("Project MCP server '%s' created (ID: %d) for project %d", mcpName, m.ID, projectID), nil
+		return fmt.Sprintf("Project MCP server '%s' created (ID: %d) for project %d", server.Name, server.ID, projectID), nil
 
 	case "update_project_mcp_server":
 		projectID, err := parseIDParam(input, "project_id")
@@ -2238,39 +2209,31 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if err != nil {
 			return "", fmt.Errorf("invalid project MCP server ID")
 		}
-
-		m, err := h.api.db.GetProjectMCPServer(ctx, id)
+		command := application.UpdateMCPServerCommand{ID: id}
+		if value, exists := input["name"].(string); exists && value != "" {
+			command.Name = &value
+		}
+		if value, exists := input["command"].(string); exists && value != "" {
+			command.Command = &value
+		}
+		if value, exists := input["args"].(string); exists {
+			command.Args = &value
+		}
+		if value, exists := input["env"].(string); exists {
+			command.Env = &value
+		}
+		if value, exists := input["enabled"].(bool); exists {
+			command.Enabled = &value
+		}
+		services, ok := h.api.platformApplicationServices()
+		if !ok || services.Configuration.MCP == nil {
+			return "", errors.New("MCP application service unavailable")
+		}
+		server, err := services.Configuration.MCP.UpdateProject(ctx, authorization, projectID, command)
 		if err != nil {
-			return "", fmt.Errorf("project MCP server not found")
-		}
-		if m.ProjectID != projectID {
-			return "", fmt.Errorf("project MCP server not found in this project")
-		}
-
-		if n, ok := input["name"].(string); ok && n != "" {
-			m.Name = n
-		}
-		if c, ok := input["command"].(string); ok && c != "" {
-			m.Command = c
-		}
-		if a, ok := input["args"].(string); ok {
-			m.Args = a
-		}
-		if e, ok := input["env"].(string); ok {
-			m.Env = e
-		}
-		if enabled, ok := input["enabled"].(bool); ok {
-			m.Enabled = enabled
-		}
-
-		if err := h.api.db.UpdateProjectMCPServer(ctx, m); err != nil {
 			return "", err
 		}
-
-		h.api.hub.BroadcastStateUpdate("project_mcp", map[string]interface{}{
-			"action": "updated", "project_id": projectID, "mcp": m,
-		})
-		return fmt.Sprintf("Project MCP server '%s' updated", m.Name), nil
+		return fmt.Sprintf("Project MCP server '%s' updated", server.Name), nil
 
 	case "delete_project_mcp_server":
 		projectID, err := parseIDParam(input, "project_id")
@@ -2281,24 +2244,14 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if err != nil {
 			return "", fmt.Errorf("invalid project MCP server ID")
 		}
-
-		m, err := h.api.db.GetProjectMCPServer(ctx, id)
-		if err != nil {
-			return "", fmt.Errorf("project MCP server not found")
+		services, ok := h.api.platformApplicationServices()
+		if !ok || services.Configuration.MCP == nil {
+			return "", errors.New("MCP application service unavailable")
 		}
-		if m.ProjectID != projectID {
-			return "", fmt.Errorf("project MCP server not found in this project")
-		}
-		name := m.Name
-
-		if err := h.api.db.DeleteProjectMCPServer(ctx, id); err != nil {
+		if err := services.Configuration.MCP.DeleteProject(ctx, authorization, projectID, id); err != nil {
 			return "", err
 		}
-
-		h.api.hub.BroadcastStateUpdate("project_mcp", map[string]interface{}{
-			"action": "deleted", "project_id": projectID, "id": id,
-		})
-		return fmt.Sprintf("Project MCP server '%s' deleted", name), nil
+		return fmt.Sprintf("Project MCP server %d deleted", id), nil
 
 	case "get_project_mcp_server":
 		projectID, err := parseIDParam(input, "project_id")
@@ -2309,63 +2262,55 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if err != nil {
 			return "", err
 		}
-		m, err := h.api.db.GetProjectMCPServer(ctx, id)
+		services, ok := h.api.platformApplicationServices()
+		if !ok || services.Configuration.MCP == nil {
+			return "", errors.New("MCP application service unavailable")
+		}
+		servers, err := services.Configuration.MCP.ListProject(ctx, projectID)
 		if err != nil {
-			return "", fmt.Errorf("project MCP server not found")
+			return "", err
 		}
-		if m.ProjectID != projectID {
-			return "", fmt.Errorf("project MCP server not found")
+		for _, server := range servers {
+			if server.ID == id {
+				return fmt.Sprintf("Name: %s\nEnabled: %v\nHas command: %v\nHas args: %v\nHas env: %v", server.Name, server.Enabled, server.HasCommand, server.HasArgs, server.HasEnv), nil
+			}
 		}
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Name: %s\n", m.Name))
-		sb.WriteString(fmt.Sprintf("Command: %s\n", m.Command))
-		sb.WriteString(fmt.Sprintf("Args: %s\n", m.Args))
-		sb.WriteString(fmt.Sprintf("Env: %s\n", m.Env))
-		sb.WriteString(fmt.Sprintf("Enabled: %v\n", m.Enabled))
-		sb.WriteString(fmt.Sprintf("ProjectID: %d\n", m.ProjectID))
-		return sb.String(), nil
+		return "", fmt.Errorf("project MCP server not found")
 
 	case "list_project_mcp_servers":
 		projectID, err := parseIDParam(input, "project_id")
 		if err != nil {
 			return "", err
 		}
-
-		globalServers, err := h.api.db.ListMCPServers(ctx)
+		services, ok := h.api.platformApplicationServices()
+		if !ok || services.Configuration.MCP == nil {
+			return "", errors.New("MCP application service unavailable")
+		}
+		globalServers, err := services.Configuration.MCP.ListGlobal(ctx)
 		if err != nil {
 			return "", err
 		}
-
-		projectServers, err := h.api.db.ListProjectMCPServers(ctx, projectID)
+		projectServers, err := services.Configuration.MCP.ListProject(ctx, projectID)
 		if err != nil {
 			return "", err
 		}
-
-		var sb strings.Builder
+		var output strings.Builder
 		if len(globalServers) > 0 {
-			sb.WriteString("Global MCP servers:\n")
-			for _, m := range globalServers {
-				status := "enabled"
-				if !m.Enabled {
-					status = "disabled"
-				}
-				sb.WriteString(fmt.Sprintf("- [%d] %s: %s (%s)\n", m.ID, m.Name, m.Command, status))
+			output.WriteString("Global MCP servers:\n")
+			for _, server := range globalServers {
+				output.WriteString(fmt.Sprintf("- [%d] %s (enabled=%v)\n", server.ID, server.Name, server.Enabled))
 			}
 		}
 		if len(projectServers) > 0 {
-			sb.WriteString("\nProject-specific MCP servers:\n")
-			for _, m := range projectServers {
-				status := "enabled"
-				if !m.Enabled {
-					status = "disabled"
-				}
-				sb.WriteString(fmt.Sprintf("- [%d] %s: %s (%s)\n", m.ID, m.Name, m.Command, status))
+			output.WriteString("\nProject-specific MCP servers:\n")
+			for _, server := range projectServers {
+				output.WriteString(fmt.Sprintf("- [%d] %s (enabled=%v)\n", server.ID, server.Name, server.Enabled))
 			}
 		}
-		if sb.Len() == 0 {
+		if output.Len() == 0 {
 			return "No MCP servers found for this project.", nil
 		}
-		return sb.String(), nil
+		return output.String(), nil
 
 	case "update_setting":
 		key, _ := input["key"].(string)
@@ -2919,7 +2864,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			if args == nil {
 				args = map[string]interface{}{}
 			}
-			result, err := h.executeTool(ctx, strings.TrimPrefix(toolName, "openpoet_"), args, conversationID, messageID, collector, proactiveType)
+			result, err := h.executeTool(ctx, strings.TrimPrefix(toolName, "openpoet_"), args, conversationID, messageID, collector, proactiveType, authorization)
 			item := map[string]interface{}{"tool": toolName}
 			if err != nil {
 				item["error"] = err.Error()
@@ -3027,7 +2972,13 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if _, err := h.getAllowedSession(ctx, conversationID, sessionID); err != nil {
 			return "", err
 		}
-		updated, err := h.api.sessionMgr.SetSessionModel(ctx, sessionID, model, h.api.sessionLineSubmitDelay(ctx, sessionID))
+		services, ok := h.api.platformApplicationServices()
+		if !ok {
+			return "", errors.New("platform application services unavailable")
+		}
+		updated, err := services.Execution.Sessions.SetModel(ctx, application.SetSessionModelCommand{
+			SessionID: sessionID, Model: model, Authorization: authorization,
+		})
 		if err != nil {
 			return "", err
 		}
@@ -3042,12 +2993,17 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if _, err := h.getAllowedSession(ctx, conversationID, sessionID); err != nil {
 			return "", err
 		}
-		updated, err := h.api.sessionMgr.SetSessionEffort(ctx, sessionID, effort, h.api.sessionLineSubmitDelay(ctx, sessionID))
+		services, ok := h.api.platformApplicationServices()
+		if !ok {
+			return "", errors.New("platform application services unavailable")
+		}
+		updated, err := services.Execution.Sessions.SetEffort(ctx, application.SetSessionEffortCommand{
+			SessionID: sessionID, Effort: effort, Authorization: authorization,
+		})
 		if err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("Session %s effort changed to %s (model: %s, harness: %s)", sessionID, updated.Effort, updated.Model, updated.Harness), nil
-
 	case "read_session_history":
 		sessionID, _ := input["session_id"].(string)
 		if sessionID == "" {
@@ -3437,122 +3393,119 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 	// ---- Project custom tools CRUD ----
 
 	case "list_project_custom_tools":
-		projectID, _ := parseIDParam(input, "project_id")
-		if projectID == 0 {
-			return "", fmt.Errorf("project_id is required")
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
 		}
-		tools, err := h.api.db.ListProjectTools(ctx, projectID)
+		services, ok := h.api.platformApplicationServices()
+		if !ok || services.Configuration.CustomTools == nil {
+			return "", errors.New("custom tool application service unavailable")
+		}
+		tools, err := services.Configuration.CustomTools.List(ctx, projectID)
 		if err != nil {
 			return "", err
 		}
 		if len(tools) == 0 {
 			return "No custom tools found for this project.", nil
 		}
-		var sb strings.Builder
-		for _, t := range tools {
+		var output strings.Builder
+		for _, tool := range tools {
 			status := "enabled"
-			if !t.Enabled {
+			if !tool.Enabled {
 				status = "disabled"
 			}
-			confirm := ""
-			if t.Confirm {
-				confirm = ", requires confirmation"
+			confirmation := ""
+			if tool.Confirm {
+				confirmation = ", requires confirmation"
 			}
-			sb.WriteString(fmt.Sprintf("- [%d] %s (%s%s): %s\n  Command: %s\n", t.ID, t.Name, status, confirm, t.Description, t.Command))
+			output.WriteString(fmt.Sprintf("- [%d] %s (%s%s): %s\n", tool.ID, tool.Name, status, confirmation, tool.Description))
 		}
-		return sb.String(), nil
+		return output.String(), nil
 
 	case "create_project_custom_tool":
-		projectID, _ := parseIDParam(input, "project_id")
-		if projectID == 0 {
-			return "", fmt.Errorf("project_id is required")
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
 		}
-		toolName, _ := input["name"].(string)
-		desc, _ := input["description"].(string)
-		command, _ := input["command"].(string)
-		if toolName == "" || desc == "" || command == "" {
-			return "", fmt.Errorf("name, description, and command are required")
+		parameters, _ := input["parameters"].(string)
+		if parameters == "" {
+			parameters = "{}"
 		}
-		tool := &database.ProjectTool{
-			ProjectID:   projectID,
-			Name:        toolName,
-			Description: desc,
-			Command:     command,
-			Enabled:     true,
+		services, ok := h.api.platformApplicationServices()
+		if !ok || services.Configuration.CustomTools == nil {
+			return "", errors.New("custom tool application service unavailable")
 		}
-		if params, ok := input["parameters"].(string); ok {
-			tool.Parameters = params
-		}
-		if wd, ok := input["working_dir"].(string); ok {
-			tool.WorkingDir = wd
-		}
-		if confirm, ok := input["confirm"].(bool); ok {
-			tool.Confirm = confirm
-		}
-		if err := h.api.db.CreateProjectTool(ctx, tool); err != nil {
+		tool, err := services.Configuration.CustomTools.Create(ctx, authorization, projectID, application.CustomToolInput{
+			Name: stringInput(input, "name"), Description: stringInput(input, "description"),
+			Command: stringInput(input, "command"), Parameters: parameters,
+			Confirm: boolInput(input, "confirm"), WorkingDir: stringInput(input, "working_dir"), Enabled: true,
+		})
+		if err != nil {
 			return "", err
 		}
 		h.invalidateProjectSessions(ctx, projectID)
 		return fmt.Sprintf("Custom tool '%s' created (ID: %d)", tool.Name, tool.ID), nil
 
 	case "update_project_custom_tool":
-		projectID, _ := parseIDParam(input, "project_id")
-		if projectID == 0 {
-			return "", fmt.Errorf("project_id is required")
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
 		}
-		toolID, _ := parseIDParam(input, "id")
-		if toolID == 0 {
-			return "", fmt.Errorf("id is required")
+		toolID, err := parseIDParam(input, "id")
+		if err != nil {
+			return "", err
 		}
-		tool, err := h.api.db.GetProjectTool(ctx, toolID)
-		if err != nil || tool.ProjectID != projectID {
-			return "", fmt.Errorf("tool not found")
+		command := application.UpdateCustomToolCommand{ID: toolID}
+		if value, exists := input["name"].(string); exists && value != "" {
+			command.Name = &value
 		}
-		if v, ok := input["name"].(string); ok && v != "" {
-			tool.Name = v
+		if value, exists := input["description"].(string); exists {
+			command.Description = &value
 		}
-		if v, ok := input["description"].(string); ok && v != "" {
-			tool.Description = v
+		if value, exists := input["command"].(string); exists && value != "" {
+			command.Command = &value
 		}
-		if v, ok := input["command"].(string); ok && v != "" {
-			tool.Command = v
+		if value, exists := input["parameters"].(string); exists {
+			command.Parameters = &value
 		}
-		if v, ok := input["parameters"].(string); ok {
-			tool.Parameters = v
+		if value, exists := input["working_dir"].(string); exists {
+			command.WorkingDir = &value
 		}
-		if v, ok := input["working_dir"].(string); ok {
-			tool.WorkingDir = v
+		if value, exists := input["confirm"].(bool); exists {
+			command.Confirm = &value
 		}
-		if v, ok := input["confirm"].(bool); ok {
-			tool.Confirm = v
+		if value, exists := input["enabled"].(bool); exists {
+			command.Enabled = &value
 		}
-		if v, ok := input["enabled"].(bool); ok {
-			tool.Enabled = v
+		services, ok := h.api.platformApplicationServices()
+		if !ok || services.Configuration.CustomTools == nil {
+			return "", errors.New("custom tool application service unavailable")
 		}
-		if err := h.api.db.UpdateProjectTool(ctx, tool); err != nil {
+		tool, err := services.Configuration.CustomTools.Update(ctx, authorization, projectID, command)
+		if err != nil {
 			return "", err
 		}
 		h.invalidateProjectSessions(ctx, projectID)
 		return fmt.Sprintf("Custom tool '%s' updated", tool.Name), nil
 
 	case "delete_project_custom_tool":
-		projectID, _ := parseIDParam(input, "project_id")
-		if projectID == 0 {
-			return "", fmt.Errorf("project_id is required")
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
 		}
-		toolID, _ := parseIDParam(input, "id")
-		if toolID == 0 {
-			return "", fmt.Errorf("id is required")
+		toolID, err := parseIDParam(input, "id")
+		if err != nil {
+			return "", err
 		}
-		tool, err := h.api.db.GetProjectTool(ctx, toolID)
-		if err != nil || tool.ProjectID != projectID {
-			return "", fmt.Errorf("tool not found")
+		services, ok := h.api.platformApplicationServices()
+		if !ok || services.Configuration.CustomTools == nil {
+			return "", errors.New("custom tool application service unavailable")
 		}
-		if err := h.api.db.DeleteProjectTool(ctx, toolID); err != nil {
+		if err := services.Configuration.CustomTools.Delete(ctx, authorization, projectID, toolID); err != nil {
 			return "", err
 		}
 		h.invalidateProjectSessions(ctx, projectID)
-		return fmt.Sprintf("Custom tool '%s' deleted", tool.Name), nil
+		return fmt.Sprintf("Custom tool %d deleted", toolID), nil
 
 	default:
 		// Check if this is a custom project tool (prefixed with "custom_")
@@ -3671,13 +3624,11 @@ func (h *AIHandler) executeCustomProjectTool(ctx context.Context, name string, i
 			ProjectID: projectID,
 			Title:     tool.Name,
 			Extra: map[string]interface{}{
-				"tool_id":      tool.ID,
-				"tool_name":    tool.Name,
-				"command":      tool.Command,
-				"description":  tool.Description,
-				"input":        input,
-				"working_dir":  workDir,
-				"project_type": project.Type,
+				"tool_id":     tool.ID,
+				"project_id":  projectID,
+				"tool_name":   tool.Name,
+				"description": tool.Description,
+				"input":       input,
 			},
 		})
 		return fmt.Sprintf(
@@ -3686,32 +3637,50 @@ func (h *AIHandler) executeCustomProjectTool(ctx context.Context, name string, i
 			tool.Name), nil
 	}
 
-	// For remote projects, execute via SSH
+	return h.executeStoredCustomTool(ctx, project, tool, input, workDir)
+}
+
+func (h *AIHandler) executeCustomProjectToolByID(ctx context.Context, projectID, toolID int64, input map[string]any) (string, error) {
+	project, err := h.api.db.GetProject(ctx, projectID)
+	if err != nil {
+		return "", fmt.Errorf("project not found")
+	}
+	tool, err := h.api.db.GetProjectTool(ctx, toolID)
+	if err != nil || tool.ProjectID != projectID {
+		return "", fmt.Errorf("custom tool not found")
+	}
+	if !tool.Enabled {
+		return "", fmt.Errorf("custom tool %q is disabled", tool.Name)
+	}
+	workDir := project.Path
+	if tool.WorkingDir != "" {
+		workDir = project.Path + "/" + tool.WorkingDir
+	}
+	return h.executeStoredCustomTool(ctx, project, tool, input, workDir)
+}
+
+func (h *AIHandler) executeStoredCustomTool(ctx context.Context, project *database.Project, tool *database.ProjectTool, input map[string]any, workDir string) (string, error) {
 	if project.Type != "local" {
 		return h.executeCustomToolSSH(ctx, project, tool, input, workDir)
 	}
-
-	// Build environment variables from parameters
 	env := os.Environ()
-	for k, v := range input {
-		envKey := "TOOL_" + strings.ToUpper(k)
-		env = append(env, fmt.Sprintf("%s=%v", envKey, v))
+	for key, value := range input {
+		envKey := "TOOL_" + strings.ToUpper(key)
+		env = append(env, fmt.Sprintf("%s=%v", envKey, value))
 	}
-
-	// Execute command with a timeout
-	cmdCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	commandContext, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-
-	cmd := exec.CommandContext(cmdCtx, "sh", "-c", tool.Command)
-	cmd.Dir = workDir
-	cmd.Env = env
-
+	resolvedTool, err := h.resolveCustomToolForExecution(tool)
+	if err != nil {
+		return "", err
+	}
+	command := exec.CommandContext(commandContext, "sh", "-c", resolvedTool.Command)
+	command.Dir = workDir
+	command.Env = env
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err = cmd.Run()
-
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err = command.Run()
 	var result strings.Builder
 	if stdout.Len() > 0 {
 		result.WriteString(stdout.String())
@@ -3722,21 +3691,17 @@ func (h *AIHandler) executeCustomProjectTool(ctx context.Context, name string, i
 		}
 		result.WriteString(stderr.String())
 	}
-
 	if err != nil {
 		if result.Len() == 0 {
 			return "", fmt.Errorf("command failed: %w", err)
 		}
 		result.WriteString(fmt.Sprintf("\n[exit code: %s]", err.Error()))
 	}
-
-	// Truncate output if too large
 	output := result.String()
 	const maxOutput = 100_000
 	if len(output) > maxOutput {
 		output = output[:maxOutput] + "\n... (output truncated)"
 	}
-
 	return output, nil
 }
 
@@ -3751,7 +3716,11 @@ func (h *AIHandler) executeCustomToolSSH(ctx context.Context, project *database.
 		envKey := "TOOL_" + strings.ToUpper(k)
 		cmdBuilder.WriteString(fmt.Sprintf("export %s=%s && ", envKey, shellQuote(fmt.Sprintf("%v", v))))
 	}
-	cmdBuilder.WriteString(tool.Command)
+	resolvedTool, err := h.resolveCustomToolForExecution(tool)
+	if err != nil {
+		return "", err
+	}
+	cmdBuilder.WriteString(resolvedTool.Command)
 
 	output, err := fm.RunCommand(cmdBuilder.String())
 	if err != nil {
@@ -3775,37 +3744,32 @@ func shellQuote(s string) string {
 // OpenPoet tools. It proxies tool calls to the existing executeTool implementation.
 func (h *AIHandler) HandleExecuteTool(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Name           string                 `json:"name"`
-		Args           map[string]interface{} `json:"args"`
-		ConversationID int64                  `json:"conversation_id"`
+		Name           string         `json:"name"`
+		Args           map[string]any `json:"args"`
+		ConversationID int64          `json:"conversation_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
 		return
 	}
-	if input.Name == "" {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Tool name is required"})
-		return
-	}
 	if input.Args == nil {
-		input.Args = make(map[string]interface{})
+		input.Args = make(map[string]any)
 	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-
-	result, err := h.executeTool(ctx, input.Name, input.Args, input.ConversationID, 0, nil, "")
-	if err != nil {
-		respondJSON(w, http.StatusOK, map[string]interface{}{
-			"result": "",
-			"error":  err.Error(),
-		})
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
 		return
 	}
-	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"result": result,
-		"error":  "",
+	ctx, cancel := context.WithTimeout(platformUIContext(r), 30*time.Second)
+	defer cancel()
+	result, err := service.ExecuteTool(ctx, application.AIToolExecutionRequest{
+		Name: input.Name, Arguments: input.Args, ConversationID: input.ConversationID,
+		Authorization: platformUIAuthorization(r),
 	})
+	if err != nil {
+		respondJSON(w, http.StatusOK, map[string]any{"result": "", "error": err.Error()})
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"result": result.Output, "error": ""})
 }
 
 // HandleToolDefinitions returns the chat tool definitions as JSON.
@@ -4017,48 +3981,16 @@ func (h *AIHandler) HandleInitiateMemoryDocEdit(w http.ResponseWriter, r *http.R
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-
-	ctx := r.Context()
-	project, err := h.api.db.GetProject(ctx, input.ProjectID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
 		return
 	}
-
-	doc, err := h.api.db.GetMemoryDoc(ctx, input.ProjectID)
-	docContent := ""
-	if err == nil {
-		docContent = doc.Content
-	}
-
-	proactiveCtx, _ := json.Marshal(map[string]interface{}{
-		"project_id":   input.ProjectID,
-		"project_name": project.Name,
-		"memory_doc":   docContent,
-		"intent":       "edit_memory_doc",
-	})
-
-	var assistantMsg string
-	if docContent != "" {
-		preview := docContent
-		if len(preview) > 300 {
-			preview = preview[:300] + "..."
-		}
-		assistantMsg = fmt.Sprintf("I loaded the memory doc for project **%s**.\n\nCurrent content preview:\n> %s\n\nWhat would you like to change?", project.Name, preview)
-	} else {
-		assistantMsg = fmt.Sprintf("Project **%s** doesn't have a memory doc yet. Would you like me to create one?", project.Name)
-	}
-
-	title := fmt.Sprintf("Edit Memory Doc: %s", project.Name)
-	conv, err := h.api.db.CreateProactiveConversation(ctx, title, "standard", "memory_doc_edit", string(proactiveCtx), assistantMsg)
+	conversation, err := service.InitiateMemoryDocEdit(platformUIContext(r), input.ProjectID, platformUIAuthorization(r))
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to create conversation")
+		respondApplicationError(w, err)
 		return
 	}
-
-	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"conversation_id": conv.ID,
-	})
+	respondJSON(w, http.StatusOK, map[string]any{"conversation_id": conversation.ID})
 }
 
 // HandleInitiateTaskCreation creates a proactive AI conversation to assist with task creation.
@@ -4076,66 +4008,20 @@ func (h *AIHandler) HandleInitiateTaskCreation(w http.ResponseWriter, r *http.Re
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-
-	if input.ProjectID <= 0 {
-		respondError(w, http.StatusBadRequest, "project_id is required")
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
 		return
 	}
-
-	ctx := r.Context()
-	project, err := h.api.db.GetProject(ctx, input.ProjectID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
-		return
-	}
-
-	ctxData := map[string]interface{}{
-		"intent":       "task_creation",
-		"project_id":   input.ProjectID,
-		"project_name": project.Name,
-		"title":        input.Title,
-		"description":  input.Description,
-		"status":       input.Status,
-		"priority":     input.Priority,
-		"due_date":     input.DueDate,
-	}
-	if input.ParentID > 0 {
-		ctxData["parent_id"] = input.ParentID
-	}
-	proactiveCtx, _ := json.Marshal(ctxData)
-
-	// Build assistant message showing pre-filled data
-	var details string
-	if input.Title != "" {
-		details += fmt.Sprintf("- **Title:** %s\n", input.Title)
-	}
-	if input.Description != "" {
-		details += fmt.Sprintf("- **Description:** %s\n", input.Description)
-	}
-	if input.Priority != "" {
-		details += fmt.Sprintf("- **Priority:** %s\n", input.Priority)
-	}
-	if input.DueDate != "" {
-		details += fmt.Sprintf("- **Due date:** %s\n", input.DueDate)
-	}
-
-	assistantMsg := fmt.Sprintf(
-		"AI-assisted task creation for project **%s**.\n\n", project.Name)
-	if details != "" {
-		assistantMsg += fmt.Sprintf("Pre-filled data:\n%s\n", details)
-	}
-	assistantMsg += "Describe what you need in more detail and I'll help refine the task, break it into subtasks if needed, and create it in the project."
-
-	title := fmt.Sprintf("New Task: %s", project.Name)
-	conv, err := h.api.db.CreateProactiveConversation(ctx, title, "standard", "task_creation", string(proactiveCtx), assistantMsg)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to create conversation")
-		return
-	}
-
-	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"conversation_id": conv.ID,
+	conversation, err := service.InitiateTaskCreation(platformUIContext(r), application.AITaskCreationCommand{
+		ProjectID: input.ProjectID, ParentID: input.ParentID, Title: input.Title,
+		Description: input.Description, Status: input.Status, Priority: input.Priority,
+		DueDate: input.DueDate, Authorization: platformUIAuthorization(r),
 	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"conversation_id": conversation.ID})
 }
 
 // HandleInitiateTaskDiscussion creates a proactive AI conversation to discuss an existing task.
@@ -4148,111 +4034,18 @@ func (h *AIHandler) HandleInitiateTaskDiscussion(w http.ResponseWriter, r *http.
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-
-	if input.TaskID <= 0 || input.ProjectID <= 0 {
-		respondError(w, http.StatusBadRequest, "task_id and project_id are required")
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
 		return
 	}
-
-	ctx := r.Context()
-	project, err := h.api.db.GetProject(ctx, input.ProjectID)
+	conversation, err := service.InitiateTaskDiscussion(
+		platformUIContext(r), input.ProjectID, input.TaskID, platformUIAuthorization(r),
+	)
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
+		respondApplicationError(w, err)
 		return
 	}
-
-	task, err := h.api.db.GetTask(ctx, input.TaskID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Task not found")
-		return
-	}
-
-	if task.ProjectID != input.ProjectID {
-		respondError(w, http.StatusBadRequest, "Task does not belong to this project")
-		return
-	}
-
-	// Fetch existing subtasks
-	var subtasks []database.ProjectTask
-	_ = h.api.db.SelectContext(ctx, &subtasks, "SELECT * FROM project_tasks WHERE parent_id = ? ORDER BY sort_order, created_at", input.TaskID)
-
-	// Build proactive context
-	ctxData := map[string]interface{}{
-		"intent":           "task_discussion",
-		"project_id":       input.ProjectID,
-		"project_name":     project.Name,
-		"task_id":          task.ID,
-		"task_title":       task.Title,
-		"task_description": task.Description,
-		"task_status":      task.Status,
-		"task_priority":    task.Priority,
-	}
-	if task.DueDate.Valid {
-		ctxData["task_due_date"] = task.DueDate.Time.Format("2006-01-02 15:04")
-	}
-	if len(subtasks) > 0 {
-		subtaskList := make([]map[string]interface{}, len(subtasks))
-		for i, st := range subtasks {
-			subtaskList[i] = map[string]interface{}{
-				"id":       st.ID,
-				"title":    st.Title,
-				"status":   st.Status,
-				"priority": st.Priority,
-			}
-		}
-		ctxData["existing_subtasks"] = subtaskList
-	}
-	proactiveCtx, _ := json.Marshal(ctxData)
-
-	// Build assistant message
-	assistantMsg := fmt.Sprintf(
-		"Discussion about task **%s** of project **%s**.\n\n", task.Title, project.Name)
-	assistantMsg += fmt.Sprintf("**Status:** %s | **Priority:** %s\n\n",
-		task.Status, task.Priority)
-	if task.DueDate.Valid {
-		assistantMsg += fmt.Sprintf("**Due date:** %s\n\n",
-			task.DueDate.Time.Format("2006-01-02 15:04"))
-	}
-	if task.Description != "" {
-		desc := task.Description
-		if len(desc) > 500 {
-			desc = desc[:500] + "..."
-		}
-		assistantMsg += fmt.Sprintf("**Description:**\n%s\n\n", desc)
-	}
-	if len(subtasks) > 0 {
-		assistantMsg += fmt.Sprintf("**Existing subtasks (%d):**\n", len(subtasks))
-		for _, st := range subtasks {
-			statusEmoji := map[string]string{
-				"todo": "⬜", "in_progress": "🔄", "awaiting_approval": "⏳", "done": "✅",
-			}[st.Status]
-			if statusEmoji == "" {
-				statusEmoji = "⬜"
-			}
-			assistantMsg += fmt.Sprintf("- %s %s (%s)\n", statusEmoji, st.Title, st.Status)
-		}
-		assistantMsg += "\n"
-	}
-	assistantMsg += "How can I help? I can:\n" +
-		"- **Refine** the task title or description\n" +
-		"- **Break** into detailed subtasks\n" +
-		"- **Adjust** status, priority, or due date\n\n" +
-		"What would you like to do?"
-
-	taskTitle := task.Title
-	if len(taskTitle) > 60 {
-		taskTitle = taskTitle[:60] + "..."
-	}
-	title := fmt.Sprintf("Discussion: %s", taskTitle)
-	conv, err := h.api.db.CreateProactiveConversation(ctx, title, "standard", "task_discussion", string(proactiveCtx), assistantMsg)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to create conversation")
-		return
-	}
-
-	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"conversation_id": conv.ID,
-	})
+	respondJSON(w, http.StatusOK, map[string]any{"conversation_id": conversation.ID})
 }
 
 // invalidateProjectSessions disconnects all chat sessions linked to a project,
@@ -4343,93 +4136,18 @@ func (h *AIHandler) HandleInitiateSkillCustomization(w http.ResponseWriter, r *h
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-	if input.ProjectID <= 0 || input.SkillID <= 0 {
-		respondError(w, http.StatusBadRequest, "project_id and skill_id are required")
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
 		return
 	}
-
-	ctx := r.Context()
-	project, err := h.api.db.GetProject(ctx, input.ProjectID)
+	conversation, err := service.InitiateSkillCustomization(
+		platformUIContext(r), input.ProjectID, input.SkillID, platformUIAuthorization(r),
+	)
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
+		respondApplicationError(w, err)
 		return
 	}
-	skill, err := h.api.db.GetSkill(ctx, input.SkillID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Skill not found")
-		return
-	}
-
-	// Fetch memory doc for project context (so AI doesn't need to use tools)
-	memDoc, _ := h.api.db.GetMemoryDoc(ctx, input.ProjectID)
-	memContent := ""
-	if memDoc != nil && memDoc.Content != "" {
-		memContent = memDoc.Content
-		if len(memContent) > 3000 {
-			memContent = memContent[:3000] + "\n...(truncated)"
-		}
-	}
-
-	// Build proactive context with explicit instructions for the AI
-	instructions := `IMPORTANT INSTRUCTIONS FOR THIS CONVERSATION:
-- Your goal is to help the user customize the skill content for their specific project.
-- You already have all the context you need: the skill content and the project memory doc are provided below.
-- DO NOT use tools like openpoet_list_project_files or openpoet_read_project_file to explore the project. You already have the project context.
-- When the user asks you to adapt/customize/create the skill, use the openpoet_create_skill tool to propose the adapted skill content.
-- The skill will NOT be created immediately — it requires user approval via a review card.
-- Call openpoet_create_skill with the adapted name, content, and category.
-- Keep the same markdown structure as the original skill but adapt the content for the specific project.
-- Be concise and direct. Propose the adapted content immediately when asked.
-- Respond in the same language the user uses (Portuguese or English).`
-
-	ctxData := map[string]interface{}{
-		"intent":         "skill_customization",
-		"instructions":   instructions,
-		"project_id":     input.ProjectID,
-		"project_name":   project.Name,
-		"project_path":   project.Path,
-		"project_type":   project.Type,
-		"skill_id":       skill.ID,
-		"skill_name":     skill.Name,
-		"skill_category": skill.Category,
-		"skill_content":  skill.Content,
-	}
-	if memContent != "" {
-		ctxData["project_memory_doc"] = memContent
-	}
-	proactiveCtx, _ := json.Marshal(ctxData)
-
-	content := skill.Content
-	if len(content) > 2000 {
-		content = content[:2000] + "\n...(truncated)"
-	}
-
-	assistantMsg := fmt.Sprintf("Let's customize skill **%s** for project **%s**.\n\n", skill.Name, project.Name)
-	assistantMsg += fmt.Sprintf("**Category:** %s\n\n", skill.Category)
-	assistantMsg += fmt.Sprintf("**Current global skill content:**\n```markdown\n%s\n```\n\n", content)
-	if memContent != "" {
-		assistantMsg += "I already have the project context (memory doc) loaded. "
-	}
-	assistantMsg += "How can I help adapt this skill for this project? I can:\n" +
-		"- **Adapt** the content to the project's specific needs\n" +
-		"- **Add** specific rules or instructions\n" +
-		"- **Remove** sections that don't apply\n" +
-		"- **Rewrite** completely with focus on this project\n\n" +
-		"What would you like to modify?"
-
-	title := fmt.Sprintf("Customize: %s → %s", skill.Name, project.Name)
-	if len(title) > 80 {
-		title = title[:80]
-	}
-	conv, err := h.api.db.CreateProactiveConversation(ctx, title, "standard", "skill_customization", string(proactiveCtx), assistantMsg)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to create conversation")
-		return
-	}
-
-	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"conversation_id": conv.ID,
-	})
+	respondJSON(w, http.StatusOK, map[string]any{"conversation_id": conversation.ID})
 }
 
 // HandleListConversations lists all conversations.
@@ -4492,13 +4210,17 @@ func (h *AIHandler) HandleGetConversation(w http.ResponseWriter, r *http.Request
 // HandleDeleteConversation deletes a conversation.
 func (h *AIHandler) HandleDeleteConversation(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
+	if err != nil || id <= 0 {
 		respondError(w, http.StatusBadRequest, "Invalid conversation ID")
 		return
 	}
 
-	if err := h.api.db.DeleteAIConversation(r.Context(), id); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
+		return
+	}
+	if err := service.DeleteConversation(platformUIContext(r), id, platformUIAuthorization(r)); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -4507,8 +4229,12 @@ func (h *AIHandler) HandleDeleteConversation(w http.ResponseWriter, r *http.Requ
 
 // HandleDeleteAllConversations deletes all conversations.
 func (h *AIHandler) HandleDeleteAllConversations(w http.ResponseWriter, r *http.Request) {
-	if err := h.api.db.DeleteAllAIConversations(r.Context()); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
+		return
+	}
+	if _, err := service.DeleteAllConversations(platformUIContext(r), platformUIAuthorization(r)); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -4516,12 +4242,6 @@ func (h *AIHandler) HandleDeleteAllConversations(w http.ResponseWriter, r *http.
 
 // HandleGenerateSkill generates a skill from a description (SSE streaming).
 func (h *AIHandler) HandleGenerateSkill(w http.ResponseWriter, r *http.Request) {
-	p := h.getProviderForSlot(llm.SlotBackground)
-	if p == nil {
-		respondError(w, http.StatusServiceUnavailable, "AI not configured")
-		return
-	}
-
 	var input struct {
 		Description string `json:"description"`
 	}
@@ -4529,81 +4249,28 @@ func (h *AIHandler) HandleGenerateSkill(w http.ResponseWriter, r *http.Request) 
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-
-	if strings.TrimSpace(input.Description) == "" {
-		respondError(w, http.StatusBadRequest, "Description is required")
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
 		return
 	}
-
-	model := h.getSlotModel(llm.SlotBackground)
-
-	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		respondError(w, http.StatusInternalServerError, "Streaming not supported")
 		return
 	}
-
-	req := &llm.Request{
-		System: llm.SkillGenerationPrompt,
-		Messages: []llm.Message{
-			llm.NewTextMessage("user", input.Description),
-		},
-		MaxTokens: 4096,
-		Model:     model,
-	}
-
-	var fullText strings.Builder
-
-	log.Printf("[AI-AUDIT] CALL_START subcategory=skill_generate model=%s", model)
-	resp, err := p.StreamMessage(r.Context(), req, func(event llm.StreamEvent) error {
-		if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
-			fullText.WriteString(event.Delta.Text)
-			h.sendSSE(w, flusher, "text", map[string]interface{}{
-				"text": event.Delta.Text,
-			})
-		}
+	result, err := service.GenerateSkillStream(platformUIContext(r), input.Description, platformUIAuthorization(r), func(delta string) error {
+		h.sendSSE(w, flusher, "text", map[string]any{"text": delta})
 		return nil
 	})
-
 	if err != nil {
-		log.Printf("[AI-AUDIT] CALL_FAIL subcategory=skill_generate error=%v", err)
-		h.sendSSE(w, flusher, "error", map[string]interface{}{
-			"message": classifyAIError(err),
-		})
+		h.sendSSE(w, flusher, "error", map[string]any{"message": err.Error()})
 		return
 	}
-	log.Printf("[AI-AUDIT] CALL_OK subcategory=skill_generate text_len=%d", fullText.Len())
-
-	// Record token usage
-	if resp != nil && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
-		usageModel := model
-		if resp.Model != "" {
-			usageModel = resp.Model
-		}
-		if usageModel == "" {
-			usageModel = "unknown"
-		}
-		h.api.db.CreateTokenUsage(r.Context(), &database.TokenUsage{
-			Source:              "ai_assistant",
-			Subcategory:         "skill_generate",
-			Model:               usageModel,
-			InputTokens:         resp.Usage.InputTokens,
-			OutputTokens:        resp.Usage.OutputTokens,
-			CacheReadTokens:     resp.Usage.CacheReadTokens,
-			CacheCreationTokens: resp.Usage.CacheCreationTokens,
-			CostUSD:             llm.CalculateCost(usageModel, resp.Usage.InputTokens, resp.Usage.OutputTokens),
-		})
-	}
-
-	h.sendSSE(w, flusher, "done", map[string]interface{}{
-		"full_text": fullText.String(),
-	})
+	h.sendSSE(w, flusher, "done", map[string]any{"full_text": result.Content})
 }
 
 // filterClaudeCodeNoise removes Claude Code's internal processing lines from raw
@@ -4999,12 +4666,6 @@ Rules:
 
 // HandleValidateSkill validates a skill's format and content.
 func (h *AIHandler) HandleValidateSkill(w http.ResponseWriter, r *http.Request) {
-	p := h.getProviderForSlot(llm.SlotBackground)
-	if p == nil {
-		respondError(w, http.StatusServiceUnavailable, "AI not configured")
-		return
-	}
-
 	var input struct {
 		Content string `json:"content"`
 	}
@@ -5012,74 +4673,15 @@ func (h *AIHandler) HandleValidateSkill(w http.ResponseWriter, r *http.Request) 
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-
-	if strings.TrimSpace(input.Content) == "" {
-		respondError(w, http.StatusBadRequest, "Content is required")
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
 		return
 	}
-
-	model := h.getSlotModel(llm.SlotBackground)
-
-	req := &llm.Request{
-		System: llm.SkillValidationPrompt,
-		Messages: []llm.Message{
-			llm.NewTextMessage("user", input.Content),
-		},
-		MaxTokens: 1024,
-		Model:     model,
-	}
-
-	var fullText strings.Builder
-
-	log.Printf("[AI-AUDIT] CALL_START subcategory=skill_validate model=%s", model)
-	resp, err := p.StreamMessage(r.Context(), req, func(event llm.StreamEvent) error {
-		if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
-			fullText.WriteString(event.Delta.Text)
-		}
-		return nil
-	})
-
+	result, err := service.ValidateSkill(platformUIContext(r), input.Content, platformUIAuthorization(r))
 	if err != nil {
-		log.Printf("[AI-AUDIT] CALL_FAIL subcategory=skill_validate error=%v", err)
-		respondError(w, http.StatusInternalServerError, classifyAIError(err))
+		respondApplicationError(w, err)
 		return
 	}
-	log.Printf("[AI-AUDIT] CALL_OK subcategory=skill_validate text_len=%d", fullText.Len())
-
-	// Record token usage
-	if resp != nil && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
-		usageModel := model
-		if resp.Model != "" {
-			usageModel = resp.Model
-		}
-		if usageModel == "" {
-			usageModel = "unknown"
-		}
-		h.api.db.CreateTokenUsage(r.Context(), &database.TokenUsage{
-			Source:              "ai_assistant",
-			Subcategory:         "skill_validate",
-			Model:               usageModel,
-			InputTokens:         resp.Usage.InputTokens,
-			OutputTokens:        resp.Usage.OutputTokens,
-			CacheReadTokens:     resp.Usage.CacheReadTokens,
-			CacheCreationTokens: resp.Usage.CacheCreationTokens,
-			CostUSD:             llm.CalculateCost(usageModel, resp.Usage.InputTokens, resp.Usage.OutputTokens),
-		})
-	}
-
-	// Try to parse the response as JSON
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(fullText.String()), &result); err != nil {
-		// Return raw text if not valid JSON
-		respondJSON(w, http.StatusOK, map[string]interface{}{
-			"valid":       true,
-			"issues":      []string{},
-			"suggestions": []string{"Could not parse validation response"},
-			"raw":         fullText.String(),
-		})
-		return
-	}
-
 	respondJSON(w, http.StatusOK, result)
 }
 
@@ -5607,6 +5209,21 @@ Instructions:
 		return false
 	}
 
+	// Persist the structured summary before suggestion early exits. Reports are
+	// lifecycle records, not a side effect of whether a task suggestion exists.
+	if trigger == "session_end" && strings.TrimSpace(result.Summary) != "" {
+		if hasLinkedTask {
+			h.api.recordTaskHistory(ctx, linkedTask.ID, linkedTask.ProjectID, "session_ended", map[string]interface{}{
+				"session_id": sessionID, "summary": result.Summary,
+			}, "ai", sessionID)
+		}
+		if h.reports != nil {
+			if _, err := h.reports.EnrichSessionSummary(ctx, sessionID, result.Summary); err != nil {
+				log.Printf("[AI-Session] Failed to enrich structured report for session %s: %v", sessionID, err)
+			}
+		}
+	}
+
 	if len(result.Suggestions) == 0 {
 		log.Printf("[AI-Session] No suggestions for session %s (%s)", sessionID[:8], trigger)
 		return false
@@ -5633,13 +5250,6 @@ Instructions:
 		filtered = append(filtered, s)
 	}
 	result.Suggestions = filtered
-
-	// Record AI summary in task history (for session_end with linked task)
-	if trigger == "session_end" && hasLinkedTask && result.Summary != "" {
-		h.api.recordTaskHistory(ctx, linkedTask.ID, linkedTask.ProjectID, "session_ended", map[string]interface{}{
-			"session_id": sessionID, "summary": result.Summary,
-		}, "ai", sessionID)
-	}
 
 	if len(result.Suggestions) == 0 {
 		log.Printf("[AI-Session] All suggestions filtered out for session %s (%s)", sessionID[:8], trigger)
@@ -5801,298 +5411,38 @@ func (h *AIHandler) ListSuggestions(w http.ResponseWriter, r *http.Request) {
 
 // AcceptSuggestion accepts an AI suggestion and executes the corresponding action.
 func (h *AIHandler) AcceptSuggestion(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
 		respondError(w, http.StatusBadRequest, "Invalid suggestion ID")
 		return
 	}
-
-	suggestion, err := h.api.db.GetAISuggestion(r.Context(), id)
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
+		return
+	}
+	result, err := service.AcceptSuggestion(platformUIContext(r), id, platformUIAuthorization(r))
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Suggestion not found")
+		respondApplicationError(w, err)
 		return
 	}
-
-	if suggestion.Status != "pending" {
-		respondError(w, http.StatusConflict, "Suggestion already processed")
-		return
-	}
-
-	// Parse context
-	var ctx struct {
-		TaskID   *int64                 `json:"task_id"`
-		TaskData map[string]interface{} `json:"task_data"`
-	}
-	json.Unmarshal([]byte(suggestion.ContextJSON), &ctx)
-
-	var resultMsg string
-
-	switch suggestion.Type {
-	case "link_task":
-		if ctx.TaskID == nil || suggestion.SessionID == "" {
-			respondError(w, http.StatusBadRequest, "Missing task_id or session_id for link_task")
-			return
-		}
-		if err := h.api.db.LinkSessionToTask(r.Context(), suggestion.SessionID, *ctx.TaskID); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		// Rename session to task title
-		if linkedTask, err := h.api.db.GetTask(r.Context(), *ctx.TaskID); err == nil && linkedTask != nil {
-			newName := "Task: " + linkedTask.Title
-			if _, err := h.api.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, suggestion.SessionID); err != nil {
-				log.Printf("[AI-Session] Failed to rename session %s: %v", suggestion.SessionID, err)
-			} else {
-				h.api.hub.BroadcastStateUpdate("session", map[string]interface{}{
-					"action":     "renamed",
-					"session_id": suggestion.SessionID,
-					"name":       newName,
-				})
-			}
-		}
-		resultMsg = fmt.Sprintf("Session linked to task %d", *ctx.TaskID)
-
-	case "create_task":
-		title, _ := ctx.TaskData["title"].(string)
-		if title == "" {
-			title = suggestion.Title
-		}
-		desc, _ := ctx.TaskData["description"].(string)
-		priority, _ := ctx.TaskData["priority"].(string)
-		if priority == "" {
-			priority = "medium"
-		}
-		task := &database.ProjectTask{
-			ProjectID:   suggestion.ProjectID,
-			Title:       title,
-			Description: desc,
-			Status:      "in_progress",
-			Priority:    priority,
-		}
-		if err := h.api.db.CreateTask(r.Context(), task); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		// Link session to new task if session exists
-		if suggestion.SessionID != "" {
-			h.api.db.LinkSessionToTask(r.Context(), suggestion.SessionID, task.ID)
-			// Rename session to match new task title
-			newName := "Task: " + task.Title
-			if _, err := h.api.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, suggestion.SessionID); err != nil {
-				log.Printf("[AI-Session] Failed to rename session %s: %v", suggestion.SessionID, err)
-			} else {
-				h.api.hub.BroadcastStateUpdate("session", map[string]interface{}{
-					"action":     "renamed",
-					"session_id": suggestion.SessionID,
-					"name":       newName,
-				})
-			}
-		}
-		h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{
-			"action":     "created",
-			"project_id": suggestion.ProjectID,
-			"task":       task,
-		})
-		resultMsg = fmt.Sprintf("Task created: [%d] %s", task.ID, title)
-
-	case "update_task":
-		if ctx.TaskID == nil {
-			respondError(w, http.StatusBadRequest, "Missing task_id for update_task")
-			return
-		}
-		task, err := h.api.db.GetTask(r.Context(), *ctx.TaskID)
-		if err != nil {
-			respondError(w, http.StatusNotFound, "Task not found")
-			return
-		}
-		if status, ok := ctx.TaskData["status"].(string); ok && status != "" {
-			task.Status = status
-		}
-		if desc, ok := ctx.TaskData["description"].(string); ok {
-			task.Description = desc
-		}
-		if err := h.api.db.UpdateTask(r.Context(), task); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{
-			"action":     "updated",
-			"project_id": task.ProjectID,
-			"task":       task,
-		})
-		resultMsg = fmt.Sprintf("Task [%d] updated", *ctx.TaskID)
-
-	case "complete_task":
-		if ctx.TaskID == nil {
-			respondError(w, http.StatusBadRequest, "Missing task_id for complete_task")
-			return
-		}
-		if err := h.api.db.UpdateTaskStatus(r.Context(), *ctx.TaskID, "done"); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		task, _ := h.api.db.GetTask(r.Context(), *ctx.TaskID)
-		if task != nil {
-			h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{
-				"action":     "updated",
-				"project_id": task.ProjectID,
-				"task":       task,
-			})
-		}
-		resultMsg = fmt.Sprintf("Task [%d] marked as done", *ctx.TaskID)
-
-	case "unlink_task":
-		if suggestion.SessionID == "" {
-			respondError(w, http.StatusBadRequest, "Missing session_id for unlink_task")
-			return
-		}
-		// 1. Unlink from current task
-		oldTaskID, err := h.api.db.UnlinkSessionFromTask(r.Context(), suggestion.SessionID)
-		if err != nil {
-			respondError(w, http.StatusInternalServerError, "Failed to unlink: "+err.Error())
-			return
-		}
-
-		// 2. Record session_unlinked on old task
-		if oldTaskID > 0 {
-			sess, _ := h.api.db.GetSession(r.Context(), suggestion.SessionID)
-			sessName := ""
-			if sess != nil {
-				sessName = sess.Name
-			}
-			h.api.recordTaskHistory(r.Context(), oldTaskID, suggestion.ProjectID, "session_unlinked", map[string]interface{}{
-				"session_id": suggestion.SessionID, "session_name": sessName, "reason": "scope_drift",
-			}, "system", suggestion.SessionID)
-		}
-
-		// 3. Create new task from task_data
-		title, _ := ctx.TaskData["title"].(string)
-		if title == "" {
-			title = suggestion.Title
-		}
-		desc, _ := ctx.TaskData["description"].(string)
-		priority, _ := ctx.TaskData["priority"].(string)
-		if priority == "" {
-			priority = "medium"
-		}
-		newTask := &database.ProjectTask{
-			ProjectID:   suggestion.ProjectID,
-			Title:       title,
-			Description: desc,
-			Status:      "in_progress",
-			Priority:    priority,
-		}
-		if err := h.api.db.CreateTask(r.Context(), newTask); err != nil {
-			respondError(w, http.StatusInternalServerError, "Failed to create task: "+err.Error())
-			return
-		}
-
-		// 4. Link session to new task
-		h.api.db.LinkSessionToTask(r.Context(), suggestion.SessionID, newTask.ID)
-		newName := "Task: " + newTask.Title
-		if _, err := h.api.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, suggestion.SessionID); err != nil {
-			log.Printf("[AI-Session] Failed to rename session %s: %v", suggestion.SessionID, err)
-		}
-		h.api.hub.BroadcastStateUpdate("session", map[string]interface{}{
-			"action":     "renamed",
-			"session_id": suggestion.SessionID,
-			"name":       newName,
-		})
-
-		// 5. Record session_linked on new task
-		h.api.recordTaskHistory(r.Context(), newTask.ID, newTask.ProjectID, "session_linked", map[string]interface{}{
-			"session_id": suggestion.SessionID, "session_name": newName,
-		}, "system", suggestion.SessionID)
-
-		h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{
-			"action":     "created",
-			"project_id": suggestion.ProjectID,
-			"task":       newTask,
-		})
-
-		// Set ctx.TaskID to new task for history recording below
-		newID := newTask.ID
-		ctx.TaskID = &newID
-		resultMsg = fmt.Sprintf("Unlinked from task %d, created and linked to new task [%d] %s", oldTaskID, newTask.ID, title)
-
-	default:
-		respondError(w, http.StatusBadRequest, "Unknown suggestion type: "+suggestion.Type)
-		return
-	}
-
-	// Mark suggestion as accepted
-	h.api.db.UpdateAISuggestionStatus(r.Context(), id, "accepted")
-
-	// Record user's response in conversation history
-	if suggestion.ConversationID.Valid {
-		h.api.db.CreateAIMessage(r.Context(), &database.AIMessage{
-			ConversationID: suggestion.ConversationID.Int64,
-			Role:           "user",
-			Content:        fmt.Sprintf("Aceito. %s", resultMsg),
-			Status:         "completed",
-		})
-		h.api.db.MarkConversationRead(r.Context(), suggestion.ConversationID.Int64)
-	}
-
-	// Record suggestion_accepted in task history
-	var historyTaskID int64
-	if ctx.TaskID != nil {
-		historyTaskID = *ctx.TaskID
-	}
-	if historyTaskID > 0 {
-		h.api.recordTaskHistory(r.Context(), historyTaskID, suggestion.ProjectID, "suggestion_accepted", map[string]interface{}{
-			"suggestion_type": suggestion.Type, "title": suggestion.Title,
-		}, "user", suggestion.SessionID)
-	}
-
-	respondJSON(w, http.StatusOK, map[string]string{
-		"status":  "accepted",
-		"message": resultMsg,
-	})
+	respondJSON(w, http.StatusOK, map[string]string{"status": result.Status, "message": result.Message})
 }
 
 // DismissSuggestion dismisses an AI suggestion.
 func (h *AIHandler) DismissSuggestion(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
 		respondError(w, http.StatusBadRequest, "Invalid suggestion ID")
 		return
 	}
-
-	// Get suggestion details before dismissing for history
-	suggestion, _ := h.api.db.GetAISuggestion(r.Context(), id)
-
-	if err := h.api.db.UpdateAISuggestionStatus(r.Context(), id, "dismissed"); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
 		return
 	}
-
-	// Record user's response in conversation history
-	if suggestion != nil && suggestion.ConversationID.Valid {
-		h.api.db.CreateAIMessage(r.Context(), &database.AIMessage{
-			ConversationID: suggestion.ConversationID.Int64,
-			Role:           "user",
-			Content:        "Ignorado.",
-			Status:         "completed",
-		})
-		h.api.db.MarkConversationRead(r.Context(), suggestion.ConversationID.Int64)
+	if err := service.DismissSuggestion(platformUIContext(r), id, platformUIAuthorization(r)); err != nil {
+		respondApplicationError(w, err)
+		return
 	}
-
-	// Record suggestion_dismissed in task history if linked to a task
-	if suggestion != nil {
-		var ctx struct {
-			TaskID *int64 `json:"task_id"`
-		}
-		json.Unmarshal([]byte(suggestion.ContextJSON), &ctx)
-		if ctx.TaskID != nil && *ctx.TaskID > 0 {
-			h.api.recordTaskHistory(r.Context(), *ctx.TaskID, suggestion.ProjectID, "suggestion_dismissed", map[string]interface{}{
-				"suggestion_type": suggestion.Type, "title": suggestion.Title,
-			}, "user", suggestion.SessionID)
-		}
-	}
-
 	respondJSON(w, http.StatusOK, map[string]string{"status": "dismissed"})
 }
 
@@ -6141,86 +5491,38 @@ func (h *AIHandler) CreateProactiveNotification(ctx context.Context, level, pTyp
 
 // HandleDiscussSuggestion returns or creates a conversation for discussing a suggestion.
 func (h *AIHandler) HandleDiscussSuggestion(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
 		respondError(w, http.StatusBadRequest, "Invalid suggestion ID")
 		return
 	}
-
-	suggestion, err := h.api.db.GetAISuggestion(r.Context(), id)
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
+		return
+	}
+	conversation, err := service.DiscussSuggestion(platformUIContext(r), id, platformUIAuthorization(r))
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Suggestion not found")
+		respondApplicationError(w, err)
 		return
 	}
-
-	// If suggestion already has a conversation, return it
-	if suggestion.ConversationID.Valid {
-		respondJSON(w, http.StatusOK, map[string]interface{}{
-			"conversation_id": suggestion.ConversationID.Int64,
-		})
-		return
-	}
-
-	// Create a new proactive conversation for this suggestion
-	typeLabels := map[string]string{
-		"link_task":     "Link Task",
-		"create_task":   "New Task",
-		"update_task":   "Update Task",
-		"complete_task": "Complete Task",
-	}
-	typeLabel := typeLabels[suggestion.Type]
-	if typeLabel == "" {
-		typeLabel = suggestion.Type
-	}
-
-	assistantMsg := fmt.Sprintf("I identified an opportunity and would like to suggest an action:\n\n"+
-		"**Type:** %s\n"+
-		"**Title:** %s\n", typeLabel, suggestion.Title)
-	if suggestion.Description != "" {
-		assistantMsg += fmt.Sprintf("**Description:** %s\n", suggestion.Description)
-	}
-	assistantMsg += "\nI can help refine this suggestion. What would you like to do?"
-
-	extra := map[string]interface{}{
-		"suggestion_id": suggestion.ID,
-		"session_id":    suggestion.SessionID,
-		"project_id":    suggestion.ProjectID,
-	}
-
-	conv, err := h.CreateProactiveNotification(
-		r.Context(),
-		suggestion.Level,
-		"task_suggestion",
-		suggestion.Title,
-		assistantMsg,
-		nil, // No broadcast actions needed - this is a direct discuss
-		extra,
-	)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to create discussion")
-		return
-	}
-
-	// Link suggestion to conversation
-	h.api.db.UpdateAISuggestionConversation(r.Context(), suggestion.ID, conv.ID)
-
-	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"conversation_id": conv.ID,
-	})
+	respondJSON(w, http.StatusOK, map[string]any{"conversation_id": conversation.ID})
 }
 
 // HandleMarkRead marks an AI conversation as read.
 func (h *AIHandler) HandleMarkRead(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
+	if err != nil || id <= 0 {
 		respondError(w, http.StatusBadRequest, "Invalid conversation ID")
 		return
 	}
 
-	if err := h.api.db.MarkConversationRead(r.Context(), id); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
+		return
+	}
+	if err := service.MarkConversationRead(platformUIContext(r), id, platformUIAuthorization(r)); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -6248,49 +5550,19 @@ func (h *AIHandler) HandleTestProactive(w http.ResponseWriter, r *http.Request) 
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-
-	var title, body, pType string
-	var actions []ProactiveAction
-
-	switch input.Level {
-	case "critical":
-		pType = "alert"
-		title = "Critical error detected"
-		body = "The system detected a critical error that requires immediate attention. The last process failed with a permission error and data may be in an inconsistent state."
-		actions = []ProactiveAction{
-			{Label: "View details", Action: "discuss", Style: "primary"},
-			{Label: "Ignore", Action: "dismiss", Style: "secondary"},
-		}
-	case "subtle":
-		pType = "memory_doc_update"
-		title = "Memory Doc updated"
-		body = "The project memory doc was updated with the CLAUDE.md content."
-		actions = []ProactiveAction{
-			{Label: "View", Action: "open", Style: "outline"},
-		}
-	default:
-		input.Level = "standard"
-		pType = "task_suggestion"
-		title = "New task suggested"
-		body = "While analyzing the recent session, I identified that it would be useful to create a task to review the changes made to the deploy pipeline."
-		actions = []ProactiveAction{
-			{Label: "Accept", Action: "accept", Style: "primary"},
-			{Label: "Discuss", Action: "discuss", Style: "outline"},
-			{Label: "Ignore", Action: "dismiss", Style: "secondary"},
-		}
-	}
-
-	conv, err := h.CreateProactiveNotification(r.Context(), input.Level, pType, title, body, actions, nil)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	service, ok := h.sharedAIAssistantService(w)
+	if !ok {
 		return
 	}
-
-	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"status":          "sent",
-		"level":           input.Level,
-		"conversation_id": conv.ID,
-	})
+	conversation, err := service.TestProactive(platformUIContext(r), input.Level, platformUIAuthorization(r))
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	if input.Level != "critical" && input.Level != "subtle" {
+		input.Level = "standard"
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"status": "sent", "level": input.Level, "conversation_id": conversation.ID})
 }
 
 // GenerateVerificationDoc generates a verification document for a task transitioning to awaiting_approval.

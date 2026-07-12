@@ -8,13 +8,15 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"openpoet/internal/database"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"openpoet/internal/database"
+	"openpoet/internal/secretvalue"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -26,10 +28,21 @@ type SyncProgressReporter interface {
 }
 
 type ConfigSyncer struct {
-	db          *database.DB
-	decryptFunc func(string, string) (string, error)
-	hub         SyncProgressReporter
-	serverAddr  string
+	db              *database.DB
+	decryptFunc     func(string, string) (string, error)
+	secretEncryptor secretvalue.Encryptor
+	hub             SyncProgressReporter
+	serverAddr      string
+}
+
+// SetSecretEncryptor keeps MCP imports encrypted after the legacy cutover.
+// The runtime composition calls it once before accepting sync requests.
+func (cs *ConfigSyncer) SetSecretEncryptor(encryptor interface {
+	Encrypt(string) (string, string, error)
+}) {
+	if cs != nil {
+		cs.secretEncryptor = encryptor
+	}
 }
 
 func NewConfigSyncer(db *database.DB, decryptFunc func(string, string) (string, error), serverAddr string) *ConfigSyncer {
@@ -968,15 +981,19 @@ func (cs *ConfigSyncer) importMCPsFromDisk(ctx context.Context, projectPath stri
 		if server.Env == nil {
 			envJSON = []byte("{}")
 		}
+		storedCommand, storedArgs, storedEnv, encryptErr := cs.encryptMCPStorage(server.Command, string(argsJSON), string(envJSON))
+		if encryptErr != nil {
+			return fmt.Errorf("encrypt imported MCP server %q: %w", name, encryptErr)
+		}
 
 		if existingNames[name] {
 			// Project MCP exists — update if file is newer
 			if !mcpFileMtime.IsZero() {
 				if dbMCP, err := cs.db.GetProjectMCPServerByName(ctx, project.ID, name); err == nil {
 					if mcpFileMtime.After(dbMCP.UpdatedAt.Add(time.Second)) {
-						dbMCP.Command = server.Command
-						dbMCP.Args = string(argsJSON)
-						dbMCP.Env = string(envJSON)
+						dbMCP.Command = storedCommand
+						dbMCP.Args = storedArgs
+						dbMCP.Env = storedEnv
 						if err := cs.db.UpdateProjectMCPServer(ctx, dbMCP); err != nil {
 							log.Printf("[configsync] failed to update MCP server '%s' for project %d: %v", name, project.ID, err)
 						} else {
@@ -997,9 +1014,9 @@ func (cs *ConfigSyncer) importMCPsFromDisk(ctx context.Context, projectPath stri
 		m := &database.ProjectMCPServer{
 			ProjectID: project.ID,
 			Name:      name,
-			Command:   server.Command,
-			Args:      string(argsJSON),
-			Env:       string(envJSON),
+			Command:   storedCommand,
+			Args:      storedArgs,
+			Env:       storedEnv,
 			Enabled:   true,
 		}
 		if err := cs.db.CreateProjectMCPServer(ctx, m); err != nil {
@@ -1157,15 +1174,19 @@ func (cs *ConfigSyncer) importMCPsFromRemote(ctx context.Context, sftpClient *sf
 		if server.Env == nil {
 			envJSON = []byte("{}")
 		}
+		storedCommand, storedArgs, storedEnv, encryptErr := cs.encryptMCPStorage(server.Command, string(argsJSON), string(envJSON))
+		if encryptErr != nil {
+			return fmt.Errorf("encrypt imported remote MCP server %q: %w", name, encryptErr)
+		}
 
 		if existingNames[name] {
 			// Project MCP exists — update if file is newer
 			if !mcpFileMtime.IsZero() {
 				if dbMCP, err := cs.db.GetProjectMCPServerByName(ctx, project.ID, name); err == nil {
 					if mcpFileMtime.After(dbMCP.UpdatedAt.Add(time.Second)) {
-						dbMCP.Command = server.Command
-						dbMCP.Args = string(argsJSON)
-						dbMCP.Env = string(envJSON)
+						dbMCP.Command = storedCommand
+						dbMCP.Args = storedArgs
+						dbMCP.Env = storedEnv
 						if err := cs.db.UpdateProjectMCPServer(ctx, dbMCP); err == nil {
 							updated++
 							log.Printf("[configsync] updated MCP server '%s' from remote .mcp.json for project %d (file newer)", name, project.ID)
@@ -1184,9 +1205,9 @@ func (cs *ConfigSyncer) importMCPsFromRemote(ctx context.Context, sftpClient *sf
 		m := &database.ProjectMCPServer{
 			ProjectID: project.ID,
 			Name:      name,
-			Command:   server.Command,
-			Args:      string(argsJSON),
-			Env:       string(envJSON),
+			Command:   storedCommand,
+			Args:      storedArgs,
+			Env:       storedEnv,
 			Enabled:   true,
 		}
 		if err := cs.db.CreateProjectMCPServer(ctx, m); err != nil {
@@ -1905,7 +1926,11 @@ func (cs *ConfigSyncer) buildOpenCodeMCPConfig(ctx context.Context, project *dat
 		log.Printf("Warning: failed to list global MCP servers for OpenCode config: %v", err)
 	} else {
 		for _, server := range servers {
-			entries[server.Name] = codexMCPConfigFromParts(server.Name, server.Command, server.Args, server.Env)
+			entry, decodeErr := cs.mcpConfigFromParts(server.Name, server.Command, server.Args, server.Env)
+			if decodeErr != nil {
+				return nil, decodeErr
+			}
+			entries[server.Name] = entry
 		}
 	}
 
@@ -1914,7 +1939,11 @@ func (cs *ConfigSyncer) buildOpenCodeMCPConfig(ctx context.Context, project *dat
 		log.Printf("Warning: failed to list project MCP servers for OpenCode config: %v", err)
 	} else {
 		for _, server := range projectServers {
-			entries[server.Name] = codexMCPConfigFromParts(server.Name, server.Command, server.Args, server.Env)
+			entry, decodeErr := cs.mcpConfigFromParts(server.Name, server.Command, server.Args, server.Env)
+			if decodeErr != nil {
+				return nil, decodeErr
+			}
+			entries[server.Name] = entry
 		}
 	}
 
@@ -2152,7 +2181,11 @@ func (cs *ConfigSyncer) buildCodexConfigTOML(ctx context.Context, project *datab
 		log.Printf("Warning: failed to list global MCP servers for Codex config: %v", err)
 	}
 	for _, server := range servers {
-		entries[server.Name] = codexMCPConfigFromParts(server.Name, server.Command, server.Args, server.Env)
+		entry, decodeErr := cs.mcpConfigFromParts(server.Name, server.Command, server.Args, server.Env)
+		if decodeErr != nil {
+			return "", decodeErr
+		}
+		entries[server.Name] = entry
 	}
 
 	projectServers, err := cs.db.ListEnabledProjectMCPServers(ctx, project.ID)
@@ -2160,7 +2193,11 @@ func (cs *ConfigSyncer) buildCodexConfigTOML(ctx context.Context, project *datab
 		log.Printf("Warning: failed to list project MCP servers for Codex config: %v", err)
 	}
 	for _, server := range projectServers {
-		entries[server.Name] = codexMCPConfigFromParts(server.Name, server.Command, server.Args, server.Env)
+		entry, decodeErr := cs.mcpConfigFromParts(server.Name, server.Command, server.Args, server.Env)
+		if decodeErr != nil {
+			return "", decodeErr
+		}
+		entries[server.Name] = entry
 	}
 
 	var sb strings.Builder
@@ -2197,11 +2234,31 @@ func (cs *ConfigSyncer) buildCodexConfigTOML(ctx context.Context, project *datab
 	return sb.String(), nil
 }
 
-func codexMCPConfigFromParts(name, command, argsJSON, envJSON string) codexMCPConfigEntry {
+func (cs *ConfigSyncer) mcpConfigFromParts(name, command, argsJSON, envJSON string) (codexMCPConfigEntry, error) {
+	command, err := secretvalue.Resolve(command, cs.decryptFunc)
+	if err != nil {
+		return codexMCPConfigEntry{}, fmt.Errorf("resolve MCP server %q command: %w", name, err)
+	}
+	argsJSON, err = secretvalue.Resolve(argsJSON, cs.decryptFunc)
+	if err != nil {
+		return codexMCPConfigEntry{}, fmt.Errorf("resolve MCP server %q args: %w", name, err)
+	}
+	envJSON, err = secretvalue.Resolve(envJSON, cs.decryptFunc)
+	if err != nil {
+		return codexMCPConfigEntry{}, fmt.Errorf("resolve MCP server %q environment: %w", name, err)
+	}
 	var args []string
 	var env map[string]string
-	_ = json.Unmarshal([]byte(argsJSON), &args)
-	_ = json.Unmarshal([]byte(envJSON), &env)
+	if strings.TrimSpace(argsJSON) != "" {
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return codexMCPConfigEntry{}, fmt.Errorf("MCP server %q args are invalid", name)
+		}
+	}
+	if strings.TrimSpace(envJSON) != "" {
+		if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
+			return codexMCPConfigEntry{}, fmt.Errorf("MCP server %q environment is invalid", name)
+		}
+	}
 	if env == nil {
 		env = make(map[string]string)
 	}
@@ -2210,7 +2267,28 @@ func codexMCPConfigFromParts(name, command, argsJSON, envJSON string) codexMCPCo
 		Command: command,
 		Args:    args,
 		Env:     env,
+	}, nil
+}
+
+func (cs *ConfigSyncer) encryptMCPStorage(command, argsJSON, envJSON string) (string, string, string, error) {
+	if cs.secretEncryptor == nil {
+		// Backward compatibility for isolated tests and pre-composition callers.
+		// Production composition always injects the process encryptor.
+		return command, argsJSON, envJSON, nil
 	}
+	commandEnvelope, err := secretvalue.Encrypt(cs.secretEncryptor, command)
+	if err != nil {
+		return "", "", "", err
+	}
+	argsEnvelope, err := secretvalue.Encrypt(cs.secretEncryptor, argsJSON)
+	if err != nil {
+		return "", "", "", err
+	}
+	envEnvelope, err := secretvalue.Encrypt(cs.secretEncryptor, envJSON)
+	if err != nil {
+		return "", "", "", err
+	}
+	return commandEnvelope, argsEnvelope, envEnvelope, nil
 }
 
 func codexTomlString(v string) string {
