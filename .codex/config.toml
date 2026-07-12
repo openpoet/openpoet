@@ -3,9 +3,10 @@
 # the current OpenPoet session id.
 
 [mcp_servers.playwright]
-command = "npx"
-args = ["@playwright/mcp@latest", "--headless", "--browser", "chromium", "--isolated", "--no-sandbox"]
+command = "{\"version\":1,\"ciphertext\":\"koG1NUqaFzOn4sGFadiea0LPQw==\",\"iv\":\"EPWnPeBxBNOdilte\"}"
 
 [mcp_servers.playwright.env]
-PLAYWRIGHT_CHROMIUM_SANDBOX = "false"
+ciphertext = "MQL/DcefuHyhnYGGhf2CcZx8qKmEUM9wR9CQj2FmT7Y82dEN0dGnMhngg1e/WMJy4q/x8Hno2xM="
+iv = "qWjaeKajkqGJ9xN2"
+version = ""
 
