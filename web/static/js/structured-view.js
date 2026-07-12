@@ -207,6 +207,7 @@ class StructuredViewManager {
         wrapper.appendChild(container);
 
         const viewData = {
+            sessionId,
             container,
             messagesEl,
             tokenBarEl: tokenBar,
@@ -231,6 +232,7 @@ class StructuredViewManager {
             codexMode: false,
             codexState: null,
             codexTranscript: { order: [], items: new Map() },
+            statusLabel: null,
             userScrolled: false,
             modeRefreshTimer: null,
         };
@@ -333,7 +335,10 @@ class StructuredViewManager {
                 view.messagesEl.innerHTML = '<div class="sv-empty">No events yet. Waiting for session activity...</div>';
             } else {
                 for (const event of events) {
-                    this._appendEventToDOM(view, event);
+                    // REST responses are transcript history, not proof that the
+                    // agent is active right now. Only live WebSocket events may
+                    // change the activity indicator.
+                    this._appendEventToDOM(view, event, { updateStatus: false });
                 }
                 this._scrollToBottom(view);
             }
@@ -634,6 +639,7 @@ class StructuredViewManager {
         this._configureCodexView(view, false);
         view.container.classList.add('active');
         this.activeSessionId = sessionId;
+        this._syncStatusIndicator(view);
 
         if (!view.loaded) {
             this.loadEvents(sessionId);
@@ -662,6 +668,7 @@ class StructuredViewManager {
         this._configureCodexView(view, true);
         view.container.classList.add('active');
         this.activeSessionId = sessionId;
+        this._syncStatusIndicator(view);
         view.loaded = true;
 
         if (!view.codexTranscript.order.length && !view.messagesEl.children.length) {
@@ -1002,6 +1009,10 @@ class StructuredViewManager {
     dispose(sessionId) {
         const view = this.views.get(sessionId);
         if (view) {
+            if (view._statusIdleTimer) {
+                clearTimeout(view._statusIdleTimer);
+                view._statusIdleTimer = null;
+            }
             if (view.modeRefreshTimer) {
                 clearInterval(view.modeRefreshTimer);
                 view.modeRefreshTimer = null;
@@ -1014,7 +1025,7 @@ class StructuredViewManager {
 
     // --- Internal rendering ---
 
-    _appendEventToDOM(view, event) {
+    _appendEventToDOM(view, event, options = {}) {
         view.events.push(event);
 
         // Track UUID → type for parent-chain detection
@@ -1074,8 +1085,11 @@ class StructuredViewManager {
             }
         }
 
-        // Update input state hint
-        this._updateInputState(view, event);
+        // Update input state hint for live events only. Historical transcript
+        // replay must not make an idle session appear active.
+        if (options.updateStatus !== false) {
+            this._updateInputState(view, event);
+        }
 
         // Streaming activity → refresh mode soon (TUI may have repainted)
         if (event.type === 'assistant') {
@@ -1842,9 +1856,7 @@ class StructuredViewManager {
 
     _updateInputState(view, event) {
         const isMobile = window.innerWidth <= 768;
-        const stateEl = isMobile
-            ? document.getElementById('mobile-input-state')
-            : view.inputArea?.querySelector('.sv-input-state');
+        const stateEl = this._getStatusElement(view);
         if (!stateEl) return;
 
         const msg = event.message;
@@ -1873,15 +1885,56 @@ class StructuredViewManager {
         this._setStatusIndicator(view, stateEl, label);
     }
 
+    _getStatusElement(view) {
+        return window.innerWidth <= 768
+            ? document.getElementById('mobile-input-state')
+            : view.inputArea?.querySelector('.sv-input-state');
+    }
+
+    _canRenderStatus(view, stateEl) {
+        return stateEl?.id !== 'mobile-input-state' || this.activeSessionId === view.sessionId;
+    }
+
+    _syncStatusIndicator(view) {
+        const stateEl = this._getStatusElement(view);
+        if (!stateEl || !this._canRenderStatus(view, stateEl)) return;
+        this._renderStatusIndicator(view, stateEl, view.statusLabel);
+    }
+
     _setStatusIndicator(view, stateEl, label) {
         if (view._statusIdleTimer) {
             clearTimeout(view._statusIdleTimer);
             view._statusIdleTimer = null;
         }
 
+        view.statusLabel = label || null;
+
+        // The mobile input bar is shared by every session. Background session
+        // events must update only that session's state, never the visible DOM.
+        if (this._canRenderStatus(view, stateEl)) {
+            this._renderStatusIndicator(view, stateEl, view.statusLabel);
+        }
+
+        if (!view.statusLabel) return;
+
+        // Auto-clear if nothing new arrives for a while (e.g. session crashed).
+        // The timer owns only this view's state and clears the shared mobile
+        // element only when this is still the selected session.
+        view._statusIdleTimer = setTimeout(() => {
+            view._statusIdleTimer = null;
+            view.statusLabel = null;
+            const currentStateEl = this._getStatusElement(view);
+            if (currentStateEl && this._canRenderStatus(view, currentStateEl)) {
+                this._renderStatusIndicator(view, currentStateEl, null);
+            }
+        }, 45000);
+    }
+
+    _renderStatusIndicator(view, stateEl, label) {
         if (!label) {
             stateEl.innerHTML = '';
             stateEl.classList.remove('sv-state-active');
+            delete stateEl.dataset.label;
             return;
         }
 
@@ -1895,13 +1948,6 @@ class StructuredViewManager {
             `;
         }
         stateEl.classList.add('sv-state-active');
-
-        // Auto-clear if nothing new arrives for a while (e.g. session crashed)
-        view._statusIdleTimer = setTimeout(() => {
-            stateEl.innerHTML = '';
-            stateEl.classList.remove('sv-state-active');
-            delete stateEl.dataset.label;
-        }, 45000);
     }
 
     // --- Helpers ---
