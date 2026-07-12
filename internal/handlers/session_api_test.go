@@ -86,13 +86,11 @@ done
 	hub := websocket.NewHub()
 	mgr := session.NewManager(db, hub, "localhost:0")
 	api := NewAPI(db, hub, mgr, nil, nil, nil, nil)
+	configureSessionPlatformFixture(t, api, db, mgr, backendScript)
 
 	sess, err := api.startManagedSession(ctx, startSessionInput{
 		ProjectID: proj.ID,
 		TaskID:    &task.ID,
-		EnvVars: map[string]string{
-			"OPENPOET_BACKEND_BINARY": backendScript,
-		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -145,6 +143,26 @@ done
 		t.Fatalf("SendSessionInput second status = %d body=%s", rr.Code, rr.Body.String())
 	}
 	waitForSessionOutput(t, mgr, sess.ID, "PROMPT:segundo prompt sequencial")
+
+	req = newSessionRouteRequest(http.MethodPost, "/api/sessions/"+sess.ID+"/model", sess.ID, `{"model":"fable"}`)
+	rr = httptest.NewRecorder()
+	api.SetSessionModel(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("SetSessionModel status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	waitForSessionOutput(t, mgr, sess.ID, "PROMPT:/model fable")
+
+	req = newSessionRouteRequest(http.MethodPost, "/api/sessions/"+sess.ID+"/effort", sess.ID, `{"effort":"high"}`)
+	rr = httptest.NewRecorder()
+	api.SetSessionEffort(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("SetSessionEffort status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	waitForSessionOutput(t, mgr, sess.ID, "PROMPT:/effort high")
+	stored, err := db.GetSession(ctx, sess.ID)
+	if err != nil || stored.Model != "fable" || stored.Effort != "high" {
+		t.Fatalf("runtime settings were not persisted: session=%+v err=%v", stored, err)
+	}
 }
 
 func TestSessionLineSubmitDelayUsesProjectType(t *testing.T) {
@@ -258,14 +276,12 @@ done
 	hub := websocket.NewHub()
 	mgr := session.NewManager(db, hub, "localhost:0")
 	api := NewAPI(db, hub, mgr, nil, nil, nil, nil)
+	configureSessionPlatformFixture(t, api, db, mgr, backendScript)
 
 	sess, err := api.startManagedSession(ctx, startSessionInput{
 		ProjectID:           proj.ID,
 		TaskID:              &task.ID,
 		AutoStartTaskPrompt: true,
-		EnvVars: map[string]string{
-			"OPENPOET_BACKEND_BINARY": backendScript,
-		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -338,14 +354,12 @@ done
 	hub := websocket.NewHub()
 	mgr := session.NewManager(db, hub, "localhost:0")
 	api := NewAPI(db, hub, mgr, nil, nil, nil, nil)
+	configureSessionPlatformFixture(t, api, db, mgr, backendScript)
 
 	sess, err := api.startManagedSession(ctx, startSessionInput{
 		ProjectID:           proj.ID,
 		TaskID:              &task.ID,
 		AutoStartTaskPrompt: true,
-		EnvVars: map[string]string{
-			"OPENPOET_BACKEND_BINARY": backendScript,
-		},
 	})
 	if err != nil {
 		t.Fatal(err)

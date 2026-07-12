@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"openpoet/internal/application"
 	"openpoet/internal/notifications"
 	"openpoet/internal/session"
 	"openpoet/internal/websocket"
@@ -67,6 +69,7 @@ type HookHandler struct {
 	hub          *websocket.Hub
 	notifService *notifications.Service
 	sessionMgr   *session.Manager
+	api          *API
 
 	// OnEvaluateSession is called asynchronously when a session evaluation is triggered.
 	// Returns true if suggestions were generated, false otherwise.
@@ -136,6 +139,32 @@ func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, ses
 		evalTimers:        make(map[string]*time.Timer),
 		acpUsage:          make(map[string]*ACPUsageInfo),
 	}
+}
+
+// BindPlatformAPI gives HTTP-only hook routes access to the immutable
+// application bundle. Hook ingestion and the hook response port remain owned
+// by HookHandler; only the UI boundary traverses back through the composition
+// root. ConfigurePlatformServices calls this once during startup.
+func (h *HookHandler) BindPlatformAPI(api *API) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.api = api
+	h.mu.Unlock()
+}
+
+func (h *HookHandler) platformApplicationServices() (*PlatformApplicationServices, bool) {
+	if h == nil {
+		return nil, false
+	}
+	h.mu.Lock()
+	api := h.api
+	h.mu.Unlock()
+	if api == nil {
+		return nil, false
+	}
+	return api.platformApplicationServices()
 }
 
 // modeIdleTimeout is how long to wait without events before assuming idle.
@@ -703,31 +732,29 @@ func (h *HookHandler) HandlePermissionRespond(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	h.mu.Lock()
-	pending, ok := h.pending[sessionID]
-	h.mu.Unlock()
-
-	if !ok {
-		respondError(w, http.StatusNotFound, "No pending permission request for this session")
+	services, ready := h.platformApplicationServices()
+	if !ready || services.Execution.HookResponses == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform hook response service is unavailable")
 		return
 	}
 
-	// Send the response to the blocking handler
-	select {
-	case pending.responseCh <- resp:
-		log.Printf("Permission response sent for session %s: %s", sessionID, resp.Behavior)
-	default:
-		log.Printf("Permission response channel full for session %s", sessionID)
-	}
-
-	// Broadcast permission resolved to browser
-	h.hub.BroadcastHookEvent(sessionID, &websocket.Message{
-		Type: websocket.MsgTypeHookPermissionResolved,
-		Data: map[string]interface{}{
-			"session_id": sessionID,
-			"behavior":   resp.Behavior,
+	err := services.Execution.HookResponses.RespondPermission(platformUIContext(r), application.RespondPermissionCommand{
+		SessionID: sessionID,
+		Response: application.HookPermissionResponse{
+			Behavior: resp.Behavior, Message: resp.Message, ToolName: resp.ToolName,
+			Answers: resp.Answers, PermissionSuggestions: resp.PermissionSuggestions,
 		},
+		Authorization: platformUIAuthorization(r),
 	})
+	if errors.Is(err, ErrNoPendingPermission) {
+		respondError(w, http.StatusNotFound, "No pending permission request for this session")
+		return
+	}
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	log.Printf("Permission response sent for session %s: %s", sessionID, resp.Behavior)
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -1099,9 +1126,20 @@ func (h *HookHandler) HandleImagePromptHint(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	h.mu.Lock()
-	h.imagePromptMeta[sessionID] = input.UserPrompt
-	h.mu.Unlock()
+	services, ready := h.platformApplicationServices()
+	if !ready || services.Execution.Sessions == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform session service is unavailable")
+		return
+	}
+	if err := services.Execution.Sessions.StoreImagePromptHint(platformUIContext(r), application.StoreImagePromptHintCommand{
+		SessionID:     sessionID,
+		UserPrompt:    input.UserPrompt,
+		ImageCount:    input.ImageCount,
+		Authorization: platformUIAuthorization(r),
+	}); err != nil {
+		respondApplicationError(w, err)
+		return
+	}
 
 	shortID := sessionID
 	if len(shortID) > 8 {
@@ -1266,6 +1304,17 @@ func (h *HookHandler) HandleTaskNotificationRespond(w http.ResponseWriter, r *ht
 		return
 	}
 
-	h.ClearTaskNotification(sessionID)
+	services, ready := h.platformApplicationServices()
+	if !ready || services.Execution.HookResponses == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform hook response service is unavailable")
+		return
+	}
+	if err := services.Execution.HookResponses.RespondTaskNotification(platformUIContext(r), application.RespondTaskNotificationCommand{
+		SessionID:     sessionID,
+		Authorization: platformUIAuthorization(r),
+	}); err != nil {
+		respondApplicationError(w, err)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 }

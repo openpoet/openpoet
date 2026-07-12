@@ -1,0 +1,498 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OpenPoet Automation API",
+    "version": "1.0.0",
+    "description": "Local server-to-server API used by durable automation connectors. Browser origins and non-loopback peers are rejected."
+  },
+  "servers": [
+    {
+      "url": "/api/automation/v1"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "automationHealth",
+        "responses": {
+          "200": {
+            "description": "Authenticated automation API health",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status", "version", "client_id"],
+                  "properties": {
+                    "status": {"const": "ok"},
+                    "version": {"const": "v1"},
+                    "client_id": {"type": "string"}
+                  }
+                }
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/capabilities": {
+      "get": {
+        "operationId": "listAutomationCapabilities",
+        "responses": {
+          "200": {
+            "description": "Merged legacy and platform capabilities for the bearer actor. scope is the compatibility primary scope; scopes is the complete conjunctive requirement.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/CapabilitiesResponse"}
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/approvals": {
+      "post": {
+        "operationId": "issueAutomationApprovalGrant",
+        "description": "Approval-broker endpoint. Requires approvals:grant. Returns the one-time plaintext token once; only its SHA-256 digest is persisted. The grant is bound to target client, capability, command_id, and the canonical authorization_ref used as command correlation_id.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "#/components/schemas/ApprovalGrantRequest"}
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Short-lived one-time approval grant",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/ApprovalGrantResponse"}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"},
+          "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/commands": {
+      "post": {
+        "operationId": "executeAutomationCommand",
+        "description": "Executes a discovered legacy or platform capability. Platform policy approvals require a canonical correlation_id; explicit approvals require a matching consumed one-time grant. Dry runs validate but neither consume grants nor execute domain mutations.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required unless idempotency_key is present in the command envelope. Both values must match when supplied together.",
+            "schema": {"type": "string", "minLength": 1, "maxLength": 200}
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "./command-envelope.schema.json"}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command result, including dry-run results",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/CommandResponse"}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"},
+          "408": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"},
+          "413": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"},
+          "500": {"$ref": "#/components/responses/Error"},
+          "503": {"$ref": "#/components/responses/Error"},
+          "504": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/events": {
+      "get": {
+        "operationId": "listAutomationEvents",
+        "description": "Registers the bounded consumer for the authenticated automation client. Requires events:read.",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "string", "pattern": "^[0-9]+$"}
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}
+          },
+          {
+            "name": "consumer",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$", "default": "events"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ordered event page compatible with the myLifeOS EventPage contract",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/EventPage"}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/events/ack": {
+      "post": {
+        "operationId": "ackAutomationEvents",
+        "description": "Monotonic acknowledgement scoped to bearer client and consumer. This operation is intrinsically idempotent and does not use the command ledger.",
+        "parameters": [
+          {
+            "name": "consumer",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$", "default": "events"}
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["through"],
+                "properties": {
+                  "through": {"type": "string", "pattern": "^[0-9]+$"},
+                  "consumer": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current monotonic acknowledgement cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["acknowledged"],
+                  "properties": {"acknowledged": {"type": "string", "pattern": "^[0-9]+$"}}
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/reports/daily": {
+      "get": {
+        "operationId": "getAutomationDailyReport",
+        "description": "Materializes a deterministic structured report from durable session, task, turn-report, and evidence records. Requires reports:read.",
+        "parameters": [
+          {
+            "name": "date",
+            "in": "query",
+            "required": true,
+            "schema": {"type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Daily report compatible with the myLifeOS OpenPoetDailyReport contract",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/DailyReport"}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "500": {"$ref": "#/components/responses/Error"},
+          "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/snapshot": {
+      "get": {
+        "operationId": "getAutomationSnapshot",
+        "description": "Requires projects:read, tasks:read, sessions:read, and notifications:read.",
+        "parameters": [
+          {
+            "name": "notification_limit",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Initial read-only state for reconciliation",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/SnapshotResponse"}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "OpenPoet automation token"
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Stable automation error envelope",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Actor": {
+        "type": "object",
+        "required": ["type", "id", "name", "client_id"],
+        "properties": {
+          "type": {"const": "automation_client"},
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "client_id": {"type": "string"}
+        }
+      },
+      "Capability": {
+        "type": "object",
+        "required": ["name", "scope", "scopes", "risk", "approval", "handler", "service", "allowed", "approval_required"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^[a-z][a-z0-9_.:-]{0,199}$"},
+          "scope": {"type": "string", "pattern": "^[a-z][a-z0-9_.:-]{0,199}$", "description": "First required scope retained for connector compatibility."},
+          "scopes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9_.:-]{0,199}$"}},
+          "risk": {"enum": ["read", "write", "destructive", "unsafe"]},
+          "approval": {"enum": ["none", "policy", "explicit"]},
+          "handler": {"type": "string"},
+          "service": {"type": "string"},
+          "allowed": {"type": "boolean"},
+          "approval_required": {"type": "boolean"}
+        }
+      },
+      "CapabilitiesResponse": {
+        "type": "object",
+        "required": ["api_version", "capabilities"],
+        "properties": {
+          "api_version": {"const": "v1"},
+          "capabilities": {"type": "array", "items": {"$ref": "#/components/schemas/Capability"}}
+        }
+      },
+      "ApprovalGrantRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target_client_id", "capability", "command_id", "authorization_ref"],
+        "properties": {
+          "target_client_id": {"type": "string", "minLength": 1, "maxLength": 200},
+          "capability": {"type": "string", "minLength": 1, "maxLength": 200},
+          "command_id": {"type": "string", "minLength": 1, "maxLength": 200},
+          "authorization_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^(ain|inbound|signal|task|policy):[^\\s\\u0000-\\u001F\\u007F]+$",
+            "description": "Canonical broker evidence reference. The command correlation_id must match it exactly."
+          },
+          "expires_in_seconds": {"type": "integer", "minimum": 1, "maximum": 300, "default": 120}
+        }
+      },
+      "ApprovalGrantResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["api_version", "grant_id", "target_client_id", "capability", "command_id", "authorization_ref", "expires_at", "approval_token"],
+        "properties": {
+          "api_version": {"const": "v1"},
+          "grant_id": {"type": "string"},
+          "target_client_id": {"type": "string"},
+          "capability": {"type": "string"},
+          "command_id": {"type": "string"},
+          "authorization_ref": {
+            "type": "string",
+            "maxLength": 200,
+            "pattern": "^(ain|inbound|signal|task|policy):[^\\s\\u0000-\\u001F\\u007F]+$"
+          },
+          "expires_at": {"type": "string", "format": "date-time"},
+          "approval_token": {"type": "string", "pattern": "^opagv1_[A-Za-z0-9_-]{43}$", "readOnly": true}
+        }
+      },
+      "CommandResponse": {
+        "type": "object",
+        "required": ["api_version", "command_id", "capability", "status", "actor", "result"],
+        "properties": {
+          "api_version": {"const": "v1"},
+          "command_id": {"type": "string"},
+          "correlation_id": {"type": "string"},
+          "capability": {"type": "string"},
+          "status": {"enum": ["succeeded", "dry_run"]},
+          "actor": {"$ref": "#/components/schemas/Actor"},
+          "result": {}
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["api_version", "error"],
+        "properties": {
+          "api_version": {"const": "v1"},
+          "command_id": {"type": "string"},
+          "correlation_id": {"type": "string"},
+          "error": {
+            "type": "object",
+            "required": ["code", "message", "retryable"],
+            "properties": {
+              "code": {"type": "string"},
+              "message": {"type": "string"},
+              "retryable": {"type": "boolean"},
+              "details": {"type": "object"}
+            }
+          }
+        }
+      },
+      "AutomationEvent": {
+        "type": "object",
+        "required": ["sequence", "event_id", "event_type", "aggregate", "actor", "occurred_at", "schema_version", "payload"],
+        "properties": {
+          "sequence": {"type": "integer", "minimum": 1},
+          "event_id": {"type": "string"},
+          "event_type": {"type": "string"},
+          "aggregate": {
+            "type": "object",
+            "required": ["type", "id"],
+            "properties": {"type": {"type": "string"}, "id": {"type": "string"}}
+          },
+          "actor": {
+            "type": "object",
+            "required": ["type", "id"],
+            "properties": {"type": {"type": "string"}, "id": {"type": "string"}}
+          },
+          "occurred_at": {"type": "string", "format": "date-time"},
+          "schema_version": {"type": "integer", "minimum": 1},
+          "payload": {}
+        }
+      },
+      "EventPage": {
+        "type": "object",
+        "required": ["events", "next_cursor", "has_more"],
+        "properties": {
+          "events": {"type": "array", "items": {"$ref": "#/components/schemas/AutomationEvent"}},
+          "next_cursor": {"type": ["string", "null"], "pattern": "^[0-9]+$"},
+          "has_more": {"type": "boolean"}
+        }
+      },
+      "DailyReportEvidence": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "ref"],
+        "properties": {
+          "kind": {"enum": ["task", "session", "document", "file", "verification", "event"]},
+          "ref": {"type": "string", "minLength": 1, "maxLength": 500},
+          "label": {"type": "string", "maxLength": 1000}
+        }
+      },
+      "DailySessionReport": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["session_id", "project_id", "project_name", "title", "started_at", "status", "outcome", "decisions", "work_summary", "verification", "evidence"],
+        "properties": {
+          "session_id": {"type": "string"},
+          "project_id": {"type": "integer", "minimum": 1},
+          "project_name": {"type": "string", "minLength": 1},
+          "title": {"type": "string", "minLength": 1},
+          "task_id": {"type": "integer", "minimum": 1},
+          "started_at": {"type": "string", "format": "date-time"},
+          "ended_at": {"type": "string", "format": "date-time"},
+          "status": {"type": "string"},
+          "objective": {"type": "string"},
+          "outcome": {"type": "string", "minLength": 1},
+          "decisions": {"type": "array", "maxItems": 500, "items": {"type": "string"}},
+          "work_summary": {"type": "array", "maxItems": 500, "items": {"type": "string"}},
+          "verification": {"type": "array", "maxItems": 500, "items": {"type": "string"}},
+          "evidence": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/components/schemas/DailyReportEvidence"}},
+          "incomplete": {"type": "boolean"}
+        }
+      },
+      "DailyReport": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "report_id", "date", "generated_at", "through_cursor", "sessions", "completed_task_ids", "changed_task_ids", "decisions", "incomplete_reasons"],
+        "properties": {
+          "schema_version": {"const": 1},
+          "report_id": {"type": "string", "minLength": 1},
+          "date": {"type": "string", "format": "date"},
+          "generated_at": {"type": "string", "format": "date-time"},
+          "through_cursor": {"type": "string", "pattern": "^[0-9]+$"},
+          "sessions": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/components/schemas/DailySessionReport"}},
+          "completed_task_ids": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+          "changed_task_ids": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+          "decisions": {"type": "array", "items": {"type": "string"}},
+          "incomplete_reasons": {"type": "array", "items": {"type": "string"}}
+        }
+      },
+      "SnapshotResponse": {
+        "type": "object",
+        "required": ["api_version", "cursor", "generated_at", "projects", "tasks", "task_summary", "sessions", "notifications", "active_work_runs", "plans"],
+        "properties": {
+          "api_version": {"const": "v1"},
+          "cursor": {"type": "string", "pattern": "^[0-9]+$"},
+          "generated_at": {"type": "string", "format": "date-time"},
+          "projects": {"type": "array", "items": {"type": "object"}},
+          "tasks": {"type": "array", "items": {"type": "object"}},
+          "task_summary": {"type": "object", "additionalProperties": {"type": "integer"}},
+          "sessions": {"type": "array", "items": {"type": "object"}},
+          "notifications": {"type": "array", "items": {"type": "object"}},
+          "active_work_runs": {"type": "array", "items": {"type": "object"}},
+          "plans": {"type": "array", "items": {"type": "object"}}
+        }
+      }
+    }
+  }
+}

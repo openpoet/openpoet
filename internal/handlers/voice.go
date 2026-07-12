@@ -3,9 +3,12 @@ package handlers
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
-	"openpoet/internal/voice"
 	"strings"
+
+	"openpoet/internal/application"
+	"openpoet/internal/voice"
 )
 
 type VoiceHandler struct {
@@ -29,7 +32,16 @@ type base64TranscribeRequest struct {
 }
 
 func (h *VoiceHandler) Transcribe(w http.ResponseWriter, r *http.Request) {
-	providerType, apiKey, model := h.getProviderConfig()
+	services, ready := h.api.platformApplicationServices()
+	if !ready || services.Execution.Voice == nil {
+		respondError(w, http.StatusServiceUnavailable, "platform voice service is unavailable")
+		return
+	}
+	if h.getProviderConfig == nil {
+		respondError(w, http.StatusServiceUnavailable, "Voice provider not configured")
+		return
+	}
+	providerType, apiKey, _ := h.getProviderConfig()
 	if apiKey == "" {
 		respondError(w, http.StatusServiceUnavailable, providerType.String()+" API key not configured")
 		return
@@ -39,7 +51,7 @@ func (h *VoiceHandler) Transcribe(w http.ResponseWriter, r *http.Request) {
 
 	// JSON body with base64-encoded audio (used via relay tunnel)
 	if strings.HasPrefix(ct, "application/json") {
-		h.transcribeBase64(w, r, providerType, apiKey, model)
+		h.transcribeBase64(w, r, services.Execution.Voice)
 		return
 	}
 
@@ -56,26 +68,26 @@ func (h *VoiceHandler) Transcribe(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	provider, err := voice.NewTranscriptionProvider(providerType, apiKey, model)
+	audio, err := io.ReadAll(io.LimitReader(file, 32<<20+1))
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondError(w, http.StatusBadRequest, "Failed to read audio file")
 		return
 	}
-
-	if lang := r.FormValue("language"); lang != "" {
-		provider.SetLanguage(lang)
-	}
-
-	result, err := provider.TranscribeMultipart(r.Context(), file, header)
+	result, err := services.Execution.Voice.Transcribe(platformUIContext(r), application.TranscribeVoiceCommand{
+		Audio:         audio,
+		Filename:      header.Filename,
+		Language:      r.FormValue("language"),
+		Authorization: platformUIAuthorization(r),
+	})
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
 
 	respondJSON(w, http.StatusOK, result)
 }
 
-func (h *VoiceHandler) transcribeBase64(w http.ResponseWriter, r *http.Request, providerType voice.ProviderType, apiKey string, model string) {
+func (h *VoiceHandler) transcribeBase64(w http.ResponseWriter, r *http.Request, service *application.VoiceTranscriptionService) {
 	var req base64TranscribeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON: "+err.Error())
@@ -96,19 +108,14 @@ func (h *VoiceHandler) transcribeBase64(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	provider, err := voice.NewTranscriptionProvider(providerType, apiKey, model)
+	result, err := service.Transcribe(platformUIContext(r), application.TranscribeVoiceCommand{
+		Audio:         audioData,
+		Filename:      req.Filename,
+		Language:      req.Language,
+		Authorization: platformUIAuthorization(r),
+	})
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	if req.Language != "" {
-		provider.SetLanguage(req.Language)
-	}
-
-	result, err := provider.TranscribeBytes(r.Context(), audioData, req.Filename)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
 

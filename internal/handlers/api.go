@@ -1,16 +1,24 @@
 package handlers
 
 import (
-	"bufio"
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"openpoet/internal/application"
+	"openpoet/internal/automation"
 	"openpoet/internal/configsync"
 	"openpoet/internal/database"
 	"openpoet/internal/files"
@@ -22,24 +30,8 @@ import (
 	"openpoet/internal/tunnel"
 	"openpoet/internal/updater"
 	"openpoet/internal/websocket"
-	"os"
-	"os/exec"
-	"path"
-	"path/filepath"
-	"regexp"
-	"sort"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
-)
-
-var (
-	cryptoRandRead = rand.Read
-	hexEncode      = hex.EncodeToString
 )
 
 // pendingMemoryDoc holds a proposed memory doc edit awaiting user approval.
@@ -120,15 +112,21 @@ type pendingSkillProposal struct {
 }
 
 type API struct {
-	db           *database.DB
-	hub          *websocket.Hub
-	sessionMgr   *session.Manager
-	configSync   *configsync.ConfigSyncer
-	encryptor    *security.Encryptor
-	notifService *notifications.Service
-	hookHandler  *HookHandler
-	aiHandler    *AIHandler
-	otelHandler  *OTELHandler
+	db                   *database.DB
+	hub                  *websocket.Hub
+	sessionMgr           *session.Manager
+	configSync           *configsync.ConfigSyncer
+	encryptor            *security.Encryptor
+	notifService         *notifications.Service
+	hookHandler          *HookHandler
+	aiHandler            *AIHandler
+	otelHandler          *OTELHandler
+	taskService          *application.ProjectTaskService
+	workRunService       *application.WorkRunService
+	capabilities         *application.CapabilityRegistry
+	platformMu           sync.RWMutex
+	platformCapabilities *automation.PlatformCapabilityRegistry
+	platformServices     *PlatformApplicationServices
 
 	// ReinitAIProvider is called when legacy AI settings change (kept for backward compat).
 	ReinitAIProvider func()
@@ -282,68 +280,40 @@ func (a *API) storePendingMemoryDoc(docID string, projectID int64, content, summ
 
 // ApproveMemoryDoc applies a pending memory doc edit.
 func (a *API) ApproveMemoryDoc(w http.ResponseWriter, r *http.Request) {
-	docID := chi.URLParam(r, "docId")
-
-	a.pendingMemoryDocsMu.Lock()
-	pending, ok := a.pendingMemoryDocs[docID]
-	if ok {
-		delete(a.pendingMemoryDocs, docID)
-	}
-	a.pendingMemoryDocsMu.Unlock()
-
+	services, ok := requirePlatformApplicationServices(a, w)
 	if !ok {
-		respondError(w, http.StatusNotFound, "No pending memory doc edit found for this document")
 		return
 	}
-
-	a.db.UpdateTempDocumentStatus(r.Context(), docID, "approved")
-
-	project, err := a.db.GetProject(r.Context(), pending.ProjectID)
+	docID := chi.URLParam(r, "docId")
+	a.pendingMemoryDocsMu.Lock()
+	pending := a.pendingMemoryDocs[docID]
+	a.pendingMemoryDocsMu.Unlock()
+	result, err := services.Collaboration.Proposals.ApproveMemory(platformUIContext(r), docID, platformUIAuthorization(r))
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
+		respondApplicationError(w, err)
 		return
 	}
-
-	doc, err := a.db.UpsertMemoryDoc(r.Context(), pending.ProjectID, pending.Content, "ai", pending.Summary)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
+	response := map[string]interface{}{"status": result.Status}
+	if pending != nil {
+		response["project_id"] = pending.ProjectID
+		if doc, readErr := a.db.GetMemoryDoc(r.Context(), pending.ProjectID); readErr == nil {
+			response["version"] = doc.Version
+		}
 	}
-
-	// Write back to project's CLAUDE.md
-	a.writeClaudeMD(project, pending.Content)
-
-	a.hub.BroadcastStateUpdate("memory_doc", map[string]interface{}{
-		"action":     "updated",
-		"project_id": pending.ProjectID,
-		"version":    doc.Version,
-	})
-
-	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"status":     "approved",
-		"project_id": pending.ProjectID,
-		"version":    doc.Version,
-	})
+	respondJSON(w, http.StatusOK, response)
 }
 
 // RejectMemoryDoc discards a pending memory doc edit.
 func (a *API) RejectMemoryDoc(w http.ResponseWriter, r *http.Request) {
-	docID := chi.URLParam(r, "docId")
-
-	a.pendingMemoryDocsMu.Lock()
-	_, ok := a.pendingMemoryDocs[docID]
-	if ok {
-		delete(a.pendingMemoryDocs, docID)
-	}
-	a.pendingMemoryDocsMu.Unlock()
-
+	services, ok := requirePlatformApplicationServices(a, w)
 	if !ok {
-		respondError(w, http.StatusNotFound, "No pending memory doc edit found for this document")
 		return
 	}
-
-	a.db.UpdateTempDocumentStatus(r.Context(), docID, "rejected")
-
+	docID := chi.URLParam(r, "docId")
+	if err := services.Collaboration.Proposals.RejectMemory(platformUIContext(r), docID, platformUIAuthorization(r)); err != nil {
+		respondApplicationError(w, err)
+		return
+	}
 	respondJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
 }
 
@@ -359,135 +329,33 @@ func (a *API) storePendingTaskProposal(docID string, actions []PlanningTaskActio
 
 // ApproveTaskProposal applies all task actions from a pending task proposal.
 func (a *API) ApproveTaskProposal(w http.ResponseWriter, r *http.Request) {
-	docID := chi.URLParam(r, "docId")
-
-	a.pendingTaskProposalsMu.Lock()
-	pending, ok := a.pendingTaskProposals[docID]
-	if ok {
-		delete(a.pendingTaskProposals, docID)
-	}
-	a.pendingTaskProposalsMu.Unlock()
-
+	services, ok := requirePlatformApplicationServices(a, w)
 	if !ok {
-		respondError(w, http.StatusNotFound, "No pending task proposal found for this document")
 		return
 	}
-
-	a.db.UpdateTempDocumentStatus(r.Context(), docID, "approved")
-
-	created := 0
-	updated := 0
-	deleted := 0
-
-	// Map action index (1-based) -> created task ID, for resolving parent_ref
-	createdTaskIDs := make(map[int]int64)
-
-	for i, action := range pending.Actions {
-		switch action.Action {
-		case "create":
-			task := &database.ProjectTask{
-				ProjectID:   action.ProjectID,
-				Title:       action.Title,
-				Description: action.Description,
-				Status:      action.Status,
-				Priority:    action.Priority,
-				SortOrder:   action.SortOrder,
-			}
-			if task.Status == "" {
-				task.Status = "todo"
-			}
-			if task.Priority == "" {
-				task.Priority = "medium"
-			}
-			if action.DueDate != "" {
-				t, err := parseFlexibleTime(action.DueDate)
-				if err == nil {
-					task.DueDate = sql.NullTime{Time: t, Valid: true}
-				}
-			}
-			// Resolve parent: parent_ref (batch reference) takes priority over parent_id
-			if action.ParentRef > 0 {
-				if realID, ok := createdTaskIDs[action.ParentRef]; ok {
-					task.ParentID = sql.NullInt64{Int64: realID, Valid: true}
-				}
-			} else if action.ParentID > 0 {
-				task.ParentID = sql.NullInt64{Int64: action.ParentID, Valid: true}
-			}
-			if err := a.db.CreateTask(r.Context(), task); err != nil {
-				log.Printf("[TaskProposal] Failed to create task '%s': %v", action.Title, err)
-				continue
-			}
-			createdTaskIDs[i+1] = task.ID // Store with 1-based index
-			a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "created", "project_id": action.ProjectID, "task": task})
-			created++
-
-		case "update":
-			task, err := a.db.GetTask(r.Context(), action.TaskID)
-			if err != nil {
-				log.Printf("[TaskProposal] Task %d not found for update: %v", action.TaskID, err)
-				continue
-			}
-			if action.Title != "" {
-				task.Title = action.Title
-			}
-			if action.Description != "" {
-				task.Description = action.Description
-			}
-			if action.Status != "" {
-				task.Status = action.Status
-			}
-			if action.Priority != "" {
-				task.Priority = action.Priority
-			}
-			if action.DueDate != "" {
-				t, err := parseFlexibleTime(action.DueDate)
-				if err == nil {
-					task.DueDate = sql.NullTime{Time: t, Valid: true}
-				}
-			}
-			if err := a.db.UpdateTask(r.Context(), task); err != nil {
-				log.Printf("[TaskProposal] Failed to update task %d: %v", action.TaskID, err)
-				continue
-			}
-			a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": action.ProjectID, "task": task})
-			updated++
-
-		case "delete":
-			if err := a.db.DeleteTask(r.Context(), action.TaskID); err != nil {
-				log.Printf("[TaskProposal] Failed to delete task %d: %v", action.TaskID, err)
-				continue
-			}
-			a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "deleted", "project_id": action.ProjectID, "id": action.TaskID})
-			deleted++
-		}
+	docID := chi.URLParam(r, "docId")
+	result, err := services.Collaboration.Proposals.ApproveTask(platformUIContext(r), docID, platformUIAuthorization(r))
+	if err != nil {
+		respondApplicationError(w, err)
+		return
 	}
-
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"status":  "approved",
-		"created": created,
-		"updated": updated,
-		"deleted": deleted,
+		"status": result.Status, "created": result.CreatedCount,
+		"updated": result.UpdatedCount, "deleted": result.DeletedCount,
 	})
 }
 
 // RejectTaskProposal discards a pending task proposal.
 func (a *API) RejectTaskProposal(w http.ResponseWriter, r *http.Request) {
-	docID := chi.URLParam(r, "docId")
-
-	a.pendingTaskProposalsMu.Lock()
-	_, ok := a.pendingTaskProposals[docID]
-	if ok {
-		delete(a.pendingTaskProposals, docID)
-	}
-	a.pendingTaskProposalsMu.Unlock()
-
+	services, ok := requirePlatformApplicationServices(a, w)
 	if !ok {
-		respondError(w, http.StatusNotFound, "No pending task proposal found for this document")
 		return
 	}
-
-	a.db.UpdateTempDocumentStatus(r.Context(), docID, "rejected")
-
+	docID := chi.URLParam(r, "docId")
+	if err := services.Collaboration.Proposals.RejectTask(platformUIContext(r), docID, platformUIAuthorization(r)); err != nil {
+		respondApplicationError(w, err)
+		return
+	}
 	respondJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
 }
 
@@ -503,91 +371,48 @@ func (a *API) storePendingSkillProposal(docID string, proposal *pendingSkillProp
 
 // ApproveSkillProposal applies a pending skill proposal (create or update project skill).
 func (a *API) ApproveSkillProposal(w http.ResponseWriter, r *http.Request) {
-	docID := chi.URLParam(r, "docId")
-
-	a.pendingSkillProposalsMu.Lock()
-	pending, ok := a.pendingSkillProposals[docID]
-	if ok {
-		delete(a.pendingSkillProposals, docID)
-	}
-	a.pendingSkillProposalsMu.Unlock()
-
+	services, ok := requirePlatformApplicationServices(a, w)
 	if !ok {
-		respondError(w, http.StatusNotFound, "No pending skill proposal found for this document")
 		return
 	}
-
-	a.db.UpdateTempDocumentStatus(r.Context(), docID, "approved")
-
-	switch pending.Action {
-	case "create":
-		ps := &database.ProjectSkill{
-			ProjectID: pending.ProjectID,
-			Name:      pending.SkillName,
-			Content:   pending.Content,
-			Enabled:   true,
-			Category:  pending.Category,
-		}
-		if err := a.db.CreateProjectSkill(r.Context(), ps); err != nil {
-			respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create project skill: %v", err))
-			return
-		}
-		a.hub.BroadcastStateUpdate("project_skill", map[string]interface{}{"action": "created", "project_id": pending.ProjectID, "skill": ps})
-		respondJSON(w, http.StatusOK, map[string]interface{}{
-			"status": "approved",
-			"action": "created",
-			"skill":  ps,
-		})
-
-	case "update":
-		ps, err := a.db.GetProjectSkill(r.Context(), pending.SkillID)
-		if err != nil {
-			respondError(w, http.StatusNotFound, "Project skill not found")
-			return
-		}
-		if pending.SkillName != "" {
-			ps.Name = pending.SkillName
-		}
-		if pending.Content != "" {
-			ps.Content = pending.Content
-		}
-		if pending.Category != "" {
-			ps.Category = pending.Category
-		}
-		if err := a.db.UpdateProjectSkill(r.Context(), ps); err != nil {
-			respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update project skill: %v", err))
-			return
-		}
-		a.hub.BroadcastStateUpdate("project_skill", map[string]interface{}{"action": "updated", "project_id": pending.ProjectID, "skill": ps})
-		respondJSON(w, http.StatusOK, map[string]interface{}{
-			"status": "approved",
-			"action": "updated",
-			"skill":  ps,
-		})
-
-	default:
-		respondError(w, http.StatusBadRequest, "Unknown skill action: "+pending.Action)
+	docID := chi.URLParam(r, "docId")
+	a.pendingSkillProposalsMu.Lock()
+	pending := a.pendingSkillProposals[docID]
+	a.pendingSkillProposalsMu.Unlock()
+	result, err := services.Collaboration.Proposals.ApproveSkill(platformUIContext(r), docID, platformUIAuthorization(r))
+	if err != nil {
+		respondApplicationError(w, err)
+		return
 	}
+	response := map[string]interface{}{"status": result.Status, "action": result.Action}
+	if pending != nil {
+		if result.Action == "update" && pending.SkillID > 0 {
+			if skill, readErr := a.db.GetProjectSkill(r.Context(), pending.SkillID); readErr == nil {
+				response["skill"] = skill
+			}
+		} else if skills, readErr := a.db.ListProjectSkills(r.Context(), pending.ProjectID); readErr == nil {
+			for i := range skills {
+				if skills[i].Name == pending.SkillName {
+					response["skill"] = skills[i]
+					break
+				}
+			}
+		}
+	}
+	respondJSON(w, http.StatusOK, response)
 }
 
 // RejectSkillProposal discards a pending skill proposal.
 func (a *API) RejectSkillProposal(w http.ResponseWriter, r *http.Request) {
-	docID := chi.URLParam(r, "docId")
-
-	a.pendingSkillProposalsMu.Lock()
-	_, ok := a.pendingSkillProposals[docID]
-	if ok {
-		delete(a.pendingSkillProposals, docID)
-	}
-	a.pendingSkillProposalsMu.Unlock()
-
+	services, ok := requirePlatformApplicationServices(a, w)
 	if !ok {
-		respondError(w, http.StatusNotFound, "No pending skill proposal found for this document")
 		return
 	}
-
-	a.db.UpdateTempDocumentStatus(r.Context(), docID, "rejected")
-
+	docID := chi.URLParam(r, "docId")
+	if err := services.Collaboration.Proposals.RejectSkill(platformUIContext(r), docID, platformUIAuthorization(r)); err != nil {
+		respondApplicationError(w, err)
+		return
+	}
 	respondJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
 }
 
@@ -603,27 +428,11 @@ func (a *API) storePendingToolProposal(docID string, proposal *pendingToolPropos
 
 // ApproveToolProposal executes a pending custom tool and streams the output via SSE.
 func (a *API) ApproveToolProposal(w http.ResponseWriter, r *http.Request) {
-	docID := chi.URLParam(r, "docId")
-
-	a.pendingToolProposalsMu.Lock()
-	pending, ok := a.pendingToolProposals[docID]
-	if ok {
-		delete(a.pendingToolProposals, docID)
-	}
-	a.pendingToolProposalsMu.Unlock()
-
+	services, ok := requirePlatformApplicationServices(a, w)
 	if !ok {
-		respondError(w, http.StatusNotFound, "No pending tool proposal found for this document")
 		return
 	}
-
-	a.db.UpdateTempDocumentStatus(r.Context(), docID, "approved")
-
-	toolName, _ := pending.Action.Extra["tool_name"].(string)
-	command, _ := pending.Action.Extra["command"].(string)
-	workDir, _ := pending.Action.Extra["working_dir"].(string)
-	projectType, _ := pending.Action.Extra["project_type"].(string)
-	input, _ := pending.Action.Extra["input"].(map[string]interface{})
+	docID := chi.URLParam(r, "docId")
 
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -643,107 +452,42 @@ func (a *API) ApproveToolProposal(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	sendSSE("started", map[string]string{"tool": toolName})
-
-	// For remote projects, fall back to non-streaming execution
-	if projectType != "local" {
-		output, err := a.aiHandler.executeCustomProjectTool(
-			r.Context(), "custom_"+toolName, input, pending.ConversationID, nil)
-		if err != nil {
-			sendSSE("error", map[string]string{"message": err.Error()})
-		} else {
-			sendSSE("done", map[string]interface{}{"exit_code": 0})
-		}
-		a.updateToolDoc(docID, toolName, output)
-		return
-	}
-
-	// Local execution with streaming output
-	env := os.Environ()
-	for k, v := range input {
-		if k == "project_id" {
-			continue
-		}
-		envKey := "TOOL_" + strings.ToUpper(k)
-		env = append(env, fmt.Sprintf("%s=%v", envKey, v))
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-	cmd.Dir = workDir
-	cmd.Env = env
-
-	// Pipe stdout+stderr for line-by-line streaming
-	stdoutPipe, err := cmd.StdoutPipe()
+	sendSSE("started", map[string]string{"proposal_id": docID})
+	result, err := services.Collaboration.Proposals.ApproveTool(platformUIContext(r), docID, platformUIAuthorization(r))
 	if err != nil {
 		sendSSE("error", map[string]string{"message": err.Error()})
 		return
 	}
-	cmd.Stderr = cmd.Stdout // merge stderr into stdout pipe
-
-	if err := cmd.Start(); err != nil {
-		sendSSE("error", map[string]string{"message": err.Error()})
-		return
-	}
-
-	scanner := bufio.NewScanner(stdoutPipe)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line length
-	var fullOutput strings.Builder
-	for scanner.Scan() {
-		line := scanner.Text()
-		fullOutput.WriteString(line + "\n")
+	for _, line := range strings.Split(strings.TrimSuffix(result.Output, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
 		sendSSE("output", map[string]string{"line": line})
 	}
-
-	exitCode := 0
-	if err := cmd.Wait(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			exitCode = -1
-		}
-	}
-
-	output := fullOutput.String()
-	sendSSE("done", map[string]interface{}{"exit_code": exitCode})
-
-	a.updateToolDoc(docID, toolName, output)
-}
-
-// updateToolDoc updates the TempDocument with execution output.
-func (a *API) updateToolDoc(docID, toolName, output string) {
-	a.db.ExecContext(context.Background(),
-		"UPDATE temp_documents SET content = ? WHERE id = ?",
-		fmt.Sprintf("# Tool Executed — %s\n\n**Output:**\n```\n%s\n```", toolName, output),
-		docID)
+	sendSSE("done", map[string]interface{}{"exit_code": 0, "status": result.Status})
 }
 
 // RejectToolProposal discards a pending tool execution proposal.
 func (a *API) RejectToolProposal(w http.ResponseWriter, r *http.Request) {
-	docID := chi.URLParam(r, "docId")
-
-	a.pendingToolProposalsMu.Lock()
-	_, ok := a.pendingToolProposals[docID]
-	if ok {
-		delete(a.pendingToolProposals, docID)
-	}
-	a.pendingToolProposalsMu.Unlock()
-
+	services, ok := requirePlatformApplicationServices(a, w)
 	if !ok {
-		respondError(w, http.StatusNotFound, "No pending tool proposal found for this document")
 		return
 	}
-
-	a.db.UpdateTempDocumentStatus(r.Context(), docID, "rejected")
-
+	docID := chi.URLParam(r, "docId")
+	if err := services.Collaboration.Proposals.RejectTool(platformUIContext(r), docID, platformUIAuthorization(r)); err != nil {
+		respondApplicationError(w, err)
+		return
+	}
 	respondJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
 }
 
 // ProposeMemoryDoc creates a pending memory doc proposal for user approval.
 // Called by the MCP tool instead of saving directly.
 func (a *API) ProposeMemoryDoc(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	var input struct {
 		ProjectID      int64  `json:"project_id"`
 		Content        string `json:"content"`
@@ -759,32 +503,31 @@ func (a *API) ProposeMemoryDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	project, err := a.db.GetProject(r.Context(), input.ProjectID)
+	ctx := platformUIContext(r)
+	project, err := services.Configuration.Projects.Get(ctx, input.ProjectID)
 	if err != nil {
 		respondError(w, http.StatusNotFound, "Project not found")
 		return
 	}
 
-	docID := uuid.New().String()[:8]
 	convID, _ := strconv.ParseInt(input.ConversationID, 10, 64)
-	tempDoc := &database.TempDocument{
-		ID:             docID,
-		Title:          fmt.Sprintf("Memory Doc: %s", project.Name),
-		Content:        input.Content,
-		ConversationID: sql.NullInt64{Int64: convID, Valid: convID > 0},
-		Summary:        input.Summary,
+	var conversationID *int64
+	if convID > 0 {
+		conversationID = &convID
 	}
-	if err := a.db.CreateTempDocument(r.Context(), tempDoc); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	proposal, err := services.Collaboration.Proposals.ProposeMemory(ctx, application.MemoryProposal{
+		ProjectID: input.ProjectID, Content: input.Content, Summary: input.Summary,
+		ConversationID: conversationID, Authorization: platformUIAuthorization(r),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	a.storePendingMemoryDoc(docID, input.ProjectID, input.Content, input.Summary)
 
 	// Notify the chat panel via WebSocket to inject an inline doc card
 	// Include conversation_id so the frontend can match the correct chat session
 	a.hub.BroadcastChatDocCard(map[string]interface{}{
-		"doc_id":          docID,
+		"doc_id":          proposal.ID,
 		"type":            "proposal",
 		"title":           fmt.Sprintf("Change proposal — %s", project.Name),
 		"summary":         input.Summary,
@@ -793,7 +536,7 @@ func (a *API) ProposeMemoryDoc(w http.ResponseWriter, r *http.Request) {
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "pending_approval",
-		"doc_id":  docID,
+		"doc_id":  proposal.ID,
 		"message": fmt.Sprintf("Proposal created for project %s. The user must approve before the change is applied.", project.Name),
 	})
 }
@@ -807,7 +550,7 @@ func NewAPI(
 	notifService *notifications.Service,
 	hookHandler *HookHandler,
 ) *API {
-	return &API{
+	api := &API{
 		db:           db,
 		hub:          hub,
 		sessionMgr:   sessionMgr,
@@ -816,6 +559,34 @@ func NewAPI(
 		notifService: notifService,
 		hookHandler:  hookHandler,
 	}
+	api.taskService = application.NewProjectTaskService(db, api)
+	api.workRunService = application.NewWorkRunService(db)
+	api.capabilities, _ = application.NewProjectTaskCapabilityRegistry(api.taskService)
+	_ = application.RegisterWorkRunCapabilities(api.capabilities, api.workRunService)
+	return api
+}
+
+// ProjectTaskService exposes the shared application service to future
+// Automation, MCP and AI adapters without exposing handler internals.
+func (a *API) ProjectTaskService() *application.ProjectTaskService {
+	return a.taskService
+}
+
+func (a *API) WorkRunService() *application.WorkRunService {
+	return a.workRunService
+}
+
+func (a *API) CapabilityRegistry() *application.CapabilityRegistry {
+	return a.capabilities
+}
+
+func (a *API) PlatformCapabilityRegistry() *automation.PlatformCapabilityRegistry {
+	if a == nil {
+		return nil
+	}
+	a.platformMu.RLock()
+	defer a.platformMu.RUnlock()
+	return a.platformCapabilities
 }
 
 // SetUpdater configures the binary auto-updater for the API.
@@ -890,6 +661,15 @@ func validateProjectPath(path, projectType string) string {
 	return ""
 }
 
+type platformProjectPathValidator struct{}
+
+func (platformProjectPathValidator) ValidateProjectPath(_ context.Context, path, projectType string) error {
+	if message := validateProjectPath(path, projectType); message != "" {
+		return errors.New(message)
+	}
+	return nil
+}
+
 func validateProjectBackend(projectType, backend string) string {
 	if backend == "" {
 		backend = string(session.BackendClaudeCode)
@@ -939,70 +719,20 @@ func (a *API) ListProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) CreateProject(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	var input database.ProjectInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-
-	// Validate path
-	input.Path = strings.TrimSpace(input.Path)
-	if errMsg := validateProjectPath(input.Path, input.Type); errMsg != "" {
-		respondError(w, http.StatusBadRequest, errMsg)
+	project, err := services.Configuration.Projects.Create(platformUIContext(r), input)
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if input.Type != "remote" {
-		if abs, err := filepath.Abs(input.Path); err == nil {
-			input.Path = abs
-		}
-	}
-
-	backend := input.Backend
-	if backend == "" {
-		backend = "claude_code"
-	}
-	if errMsg := validateProjectBackend(input.Type, backend); errMsg != "" {
-		respondError(w, http.StatusBadRequest, errMsg)
-		return
-	}
-	backendConfig := input.BackendConfig
-	if backendConfig == "" {
-		backendConfig = "{}"
-	}
-
-	project := &database.Project{
-		Name:          input.Name,
-		Path:          input.Path,
-		Type:          input.Type,
-		ToolPolicy:    input.ToolPolicy,
-		Backend:       backend,
-		BackendConfig: backendConfig,
-	}
-
-	if input.Type == "remote" {
-		log.Printf("[API] CreateProject: ssh_auth_type=%q credential_len=%d", input.SSHAuthType, len(input.SSHCredential))
-		project.SSHHost = sql.NullString{String: input.SSHHost, Valid: input.SSHHost != ""}
-		project.SSHPort = sql.NullInt64{Int64: int64(input.SSHPort), Valid: input.SSHPort > 0}
-		project.SSHUser = sql.NullString{String: input.SSHUser, Valid: input.SSHUser != ""}
-		project.SSHAuthType = sql.NullString{String: input.SSHAuthType, Valid: input.SSHAuthType != ""}
-
-		if input.SSHCredential != "" {
-			encrypted, iv, err := a.encryptor.Encrypt(input.SSHCredential)
-			if err != nil {
-				respondError(w, http.StatusInternalServerError, "Failed to encrypt credentials")
-				return
-			}
-			project.SSHCredentialEncrypted = sql.NullString{String: encrypted, Valid: true}
-			project.SSHCredentialIV = sql.NullString{String: iv, Valid: true}
-		}
-	}
-
-	if err := a.db.CreateProject(r.Context(), project); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("project", map[string]interface{}{"action": "created", "project": project})
 	respondJSON(w, http.StatusCreated, project)
 }
 
@@ -1023,15 +753,13 @@ func (a *API) GetProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
-		return
-	}
-
-	project, err := a.db.GetProject(r.Context(), id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
 		return
 	}
 
@@ -1041,149 +769,35 @@ func (a *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate path
-	input.Path = strings.TrimSpace(input.Path)
-	if errMsg := validateProjectPath(input.Path, input.Type); errMsg != "" {
-		respondError(w, http.StatusBadRequest, errMsg)
+	project, err := services.Configuration.Projects.Update(platformUIContext(r), id, input)
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if input.Type != "remote" {
-		if abs, err := filepath.Abs(input.Path); err == nil {
-			input.Path = abs
-		}
-	}
-
-	project.Name = input.Name
-	project.Path = input.Path
-	project.Type = input.Type
-	project.ToolPolicy = input.ToolPolicy
-	project.DangerouslySkipPermissions = input.DangerouslySkipPermissions
-	if input.Backend != "" {
-		project.Backend = input.Backend
-	}
-	if errMsg := validateProjectBackend(project.Type, project.Backend); errMsg != "" {
-		respondError(w, http.StatusBadRequest, errMsg)
-		return
-	}
-	if input.BackendConfig != "" {
-		project.BackendConfig = input.BackendConfig
-	}
-
-	if input.Type == "remote" {
-		log.Printf("[API] UpdateProject: id=%d ssh_auth_type=%q credential_len=%d", id, input.SSHAuthType, len(input.SSHCredential))
-		project.SSHHost = sql.NullString{String: input.SSHHost, Valid: input.SSHHost != ""}
-		project.SSHPort = sql.NullInt64{Int64: int64(input.SSHPort), Valid: input.SSHPort > 0}
-		project.SSHUser = sql.NullString{String: input.SSHUser, Valid: input.SSHUser != ""}
-		project.SSHAuthType = sql.NullString{String: input.SSHAuthType, Valid: input.SSHAuthType != ""}
-
-		if input.SSHCredential != "" {
-			encrypted, iv, err := a.encryptor.Encrypt(input.SSHCredential)
-			if err != nil {
-				respondError(w, http.StatusInternalServerError, "Failed to encrypt credentials")
-				return
-			}
-			project.SSHCredentialEncrypted = sql.NullString{String: encrypted, Valid: true}
-			project.SSHCredentialIV = sql.NullString{String: iv, Valid: true}
-		}
-	}
-
-	if err := a.db.UpdateProject(r.Context(), project); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("project", map[string]interface{}{"action": "updated", "project": project})
 	respondJSON(w, http.StatusOK, project)
 }
 
 func (a *API) DuplicateProject(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
 
-	original, err := a.db.GetProject(r.Context(), id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
-		return
-	}
-
 	// Decode optional overrides from request body
 	var overrides database.ProjectInput
 	if r.Body != nil {
-		json.NewDecoder(r.Body).Decode(&overrides)
+		_ = json.NewDecoder(r.Body).Decode(&overrides)
 	}
-
-	newName := original.Name + " (Copy)"
-	if overrides.Name != "" {
-		newName = overrides.Name
-	}
-
-	clone := &database.Project{
-		Name:                   newName,
-		Path:                   original.Path,
-		Type:                   original.Type,
-		SSHHost:                original.SSHHost,
-		SSHPort:                original.SSHPort,
-		SSHUser:                original.SSHUser,
-		SSHAuthType:            original.SSHAuthType,
-		SSHCredentialEncrypted: original.SSHCredentialEncrypted,
-		SSHCredentialIV:        original.SSHCredentialIV,
-		Backend:                original.Backend,
-		BackendConfig:          original.BackendConfig,
-	}
-
-	// Apply overrides
-	if overrides.Type != "" {
-		clone.Type = overrides.Type
-	}
-	if errMsg := validateProjectBackend(clone.Type, clone.Backend); errMsg != "" {
-		respondError(w, http.StatusBadRequest, errMsg)
+	clone, err := services.Configuration.Projects.Duplicate(platformUIContext(r), application.DuplicateProjectCommand{ProjectID: id, Overrides: overrides})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if overrides.Path != "" {
-		overrides.Path = strings.TrimSpace(overrides.Path)
-		if errMsg := validateProjectPath(overrides.Path, clone.Type); errMsg != "" {
-			respondError(w, http.StatusBadRequest, errMsg)
-			return
-		}
-		if clone.Type != "remote" {
-			if abs, err := filepath.Abs(overrides.Path); err == nil {
-				overrides.Path = abs
-			}
-		}
-		clone.Path = overrides.Path
-	}
-	if overrides.SSHHost != "" {
-		clone.SSHHost = sql.NullString{String: overrides.SSHHost, Valid: true}
-	}
-	if overrides.SSHPort > 0 {
-		clone.SSHPort = sql.NullInt64{Int64: int64(overrides.SSHPort), Valid: true}
-	}
-	if overrides.SSHUser != "" {
-		clone.SSHUser = sql.NullString{String: overrides.SSHUser, Valid: true}
-	}
-	if overrides.SSHAuthType != "" {
-		clone.SSHAuthType = sql.NullString{String: overrides.SSHAuthType, Valid: true}
-	}
-	// If a new credential is provided, encrypt it; otherwise keep the original
-	if overrides.SSHCredential != "" {
-		encrypted, iv, err := a.encryptor.Encrypt(overrides.SSHCredential)
-		if err != nil {
-			respondError(w, http.StatusInternalServerError, "Failed to encrypt credentials")
-			return
-		}
-		clone.SSHCredentialEncrypted = sql.NullString{String: encrypted, Valid: true}
-		clone.SSHCredentialIV = sql.NullString{String: iv, Valid: true}
-	}
-
-	if err := a.db.CreateProject(r.Context(), clone); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("project", map[string]interface{}{"action": "created", "project": clone})
 	respondJSON(w, http.StatusCreated, clone)
 }
 
@@ -1248,6 +862,10 @@ func (a *API) BrowseDirectory(w http.ResponseWriter, r *http.Request) {
 // BrowseRemoteDirectory lists directories on a remote server via SSH/SFTP.
 // Used by the project creation form to pick a working directory on a remote host.
 func (a *API) BrowseRemoteDirectory(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	var input struct {
 		SSHHost       string `json:"ssh_host"`
 		SSHPort       int    `json:"ssh_port"`
@@ -1261,91 +879,21 @@ func (a *API) BrowseRemoteDirectory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if input.SSHHost == "" || input.SSHUser == "" {
-		respondError(w, http.StatusBadRequest, "SSH host and user are required")
-		return
-	}
-	if input.SSHPort <= 0 {
-		input.SSHPort = 22
-	}
-	// Build a temporary project struct for the remote file manager.
-	// Use "/" as base path so List() receives the absolute browse path.
-	tmpProject := &database.Project{
-		Path:        "/",
-		Type:        "remote",
-		SSHHost:     sql.NullString{String: input.SSHHost, Valid: true},
-		SSHPort:     sql.NullInt64{Int64: int64(input.SSHPort), Valid: true},
-		SSHUser:     sql.NullString{String: input.SSHUser, Valid: true},
-		SSHAuthType: sql.NullString{String: input.SSHAuthType, Valid: input.SSHAuthType != ""},
-	}
-
-	// Encrypt credential temporarily if provided
-	if input.SSHCredential != "" {
-		encrypted, iv, err := a.encryptor.Encrypt(input.SSHCredential)
-		if err != nil {
-			respondError(w, http.StatusInternalServerError, "Failed to process credentials")
-			return
-		}
-		tmpProject.SSHCredentialEncrypted = sql.NullString{String: encrypted, Valid: true}
-		tmpProject.SSHCredentialIV = sql.NullString{String: iv, Valid: true}
-	}
-
-	fm := files.NewRemoteFileManager(tmpProject, a.DecryptFunc())
-
-	// Detect Windows from a probe call to HomeDir — Windows OpenSSH SFTP returns
-	// paths like "/C:/Users/foo", so the home dir's shape tells us the host type
-	// without needing a separate banner check.
-	home, _ := fm.HomeDir()
-	hostIsWindows := looksLikeSFTPWindowsPath(home)
-
-	// Default to the remote user's home directory when no path is specified
-	if input.Path == "" {
-		if home == "" {
-			input.Path = "/"
-		} else {
-			input.Path = home
-		}
-	}
-
-	// Convert client-supplied Windows-native path back to the SFTP-style POSIX
-	// form before talking to SFTP (Windows OpenSSH SFTP returns and accepts
-	// "/C:/..." form, not "C:\..." with backslashes).
-	sftpPath := input.Path
-	if hostIsWindows {
-		sftpPath = windowsPathToSFTP(input.Path)
-	}
-
-	fileList, err := fm.List(sftpPath)
+	result, err := services.Configuration.ProjectOperations.BrowseRemote(platformUIContext(r), application.BrowseRemoteProjectCommand{
+		Connection:    application.RemoteBrowseConnection{Host: input.SSHHost, Port: input.SSHPort, User: input.SSHUser, AuthType: input.SSHAuthType, Credential: input.SSHCredential, Path: input.Path},
+		Authorization: platformUIAuthorization(r),
+	})
 	if err != nil {
-		respondError(w, http.StatusBadRequest, fmt.Sprintf("Cannot browse remote directory: %s", err.Error()))
+		respondApplicationError(w, err)
 		return
 	}
-
-	// Display the path in native form on Windows so the user (and the project
-	// record they save) gets "C:\Users\foo" instead of "/C:/Users/foo".
-	displayCurrent := input.Path
-	if hostIsWindows {
-		displayCurrent = sftpPathToWindows(sftpPath)
+	entries := make([]map[string]interface{}, len(result.Entries))
+	for i, entry := range result.Entries {
+		entries[i] = map[string]interface{}{"name": entry.Name, "path": entry.Path, "is_dir": entry.IsDir}
 	}
-
-	// Filter to directories only
-	var dirs []files.FileInfo
-	for _, f := range fileList {
-		if !f.IsDir {
-			continue
-		}
-		if hostIsWindows {
-			joined := path.Join(sftpPath, f.Name)
-			f.Path = sftpPathToWindows(joined)
-		} else {
-			f.Path = filepath.Join(input.Path, f.Name)
-		}
-		dirs = append(dirs, f)
-	}
-
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"current": displayCurrent,
-		"entries": dirs,
+		"current": result.Current,
+		"entries": entries,
 	})
 }
 
@@ -1384,66 +932,57 @@ func isASCIILetter(b byte) bool {
 }
 
 func (a *API) DeleteProject(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
 
-	if err := a.db.DeleteProject(r.Context(), id); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	if err := services.Configuration.Projects.Delete(platformUIContext(r), id); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	a.hub.BroadcastStateUpdate("project", map[string]interface{}{"action": "deleted", "id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *API) ValidateProject(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
 
-	project, err := a.db.GetProject(r.Context(), id)
+	result, err := services.Configuration.ProjectOperations.Validate(platformUIContext(r), application.ValidateProjectCommand{ProjectID: id, Authorization: platformUIAuthorization(r)})
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
+		respondApplicationError(w, err)
 		return
 	}
-
-	if project.Type == "remote" {
-		if err := session.ValidateConnection(project, a.encryptor.Decrypt); err != nil {
-			respondError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-
-	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	respondJSON(w, http.StatusOK, map[string]string{"status": result.Status})
 }
 
 func (a *API) SyncProjectConfig(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
 
-	project, err := a.db.GetProject(r.Context(), id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
+	if err := services.Configuration.Configuration.SyncProject(platformUIContext(r), platformUIAuthorization(r), id); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	if err := a.configSync.SyncToProject(r.Context(), project); err != nil {
-		a.hub.BroadcastSyncProgress(id, "sync", "error", err.Error())
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.db.UpdateProjectConfigSyncedAt(r.Context(), id)
-	a.hub.BroadcastSyncProgress(id, "sync", "done", "Configuration synced successfully")
-
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -1548,6 +1087,10 @@ func (a *API) GetActiveSessionDetails(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	var input struct {
 		ProjectID                  int64             `json:"project_id"`
 		TaskID                     *int64            `json:"task_id,omitempty"`
@@ -1560,19 +1103,16 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess, err := a.startManagedSession(r.Context(), startSessionInput{
-		ProjectID:                  input.ProjectID,
-		TaskID:                     input.TaskID,
-		EnvVars:                    input.EnvVars,
+	authorization := platformUIAuthorization(r)
+	authorization.AllowEnvironment = len(input.EnvVars) > 0
+	authorization.AllowUnsafePermissions = input.DangerouslySkipPermissions
+	sess, err := services.Execution.Sessions.Create(platformUIContext(r), application.CreateSessionCommand{
+		ProjectID: input.ProjectID, TaskID: input.TaskID, Environment: input.EnvVars,
 		DangerouslySkipPermissions: input.DangerouslySkipPermissions,
-		AutoStartTaskPrompt:        input.AutoStartTaskPrompt,
+		AutoStartTaskPrompt:        input.AutoStartTaskPrompt, Authorization: authorization,
 	})
 	if err != nil {
-		if startErr, ok := err.(*startSessionError); ok {
-			respondError(w, startErr.status, startErr.message)
-			return
-		}
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -1580,132 +1120,24 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) startManagedSession(ctx context.Context, input startSessionInput) (*database.Session, error) {
-	project, err := a.db.GetProject(ctx, input.ProjectID)
-	if err != nil {
-		return nil, newStartSessionError(http.StatusNotFound, "Project not found")
+	services, ok := a.platformApplicationServices()
+	if !ok {
+		return nil, newStartSessionError(http.StatusServiceUnavailable, "OpenPoet platform services are unavailable")
 	}
-
-	// Validate task if provided
-	var linkedTask *database.ProjectTask
-	if input.TaskID != nil && *input.TaskID > 0 {
-		linkedTask, err = a.db.GetTask(ctx, *input.TaskID)
-		if err != nil || linkedTask.ProjectID != project.ID {
-			return nil, newStartSessionError(http.StatusBadRequest, "Task not found or belongs to different project")
-		}
+	authorization := application.ActionAuthorization{
+		Actor:      application.Actor{Type: "agent", ID: "openpoet-ai"},
+		Reason:     "OpenPoet AI session request",
+		Approved:   true,
+		ApprovedBy: "user:local-ui",
 	}
-
-	// Auto-sync config (hooks, skills, mcp) to project before starting session
-	if a.configSync != nil {
-		if syncErr := a.configSync.SyncToProject(ctx, project); syncErr != nil {
-			log.Printf("Warning: config sync failed before session start: %v", syncErr)
-		}
-	}
-
-	// Inject task context into env vars
-	if input.EnvVars == nil {
-		input.EnvVars = make(map[string]string)
-	}
-
-	if linkedTask != nil {
-		input.EnvVars["OPENPOET_TASK_ID"] = fmt.Sprintf("%d", linkedTask.ID)
-		input.EnvVars["OPENPOET_TASK_TITLE"] = linkedTask.Title
-
-		// Single-line system prompt: cmd.exe on Windows OpenSSH truncates
-		// quoted args at the first `\r`/`\n`, which corrupts the rest of the
-		// `claude` command line (--mcp-config and friends) and kills the
-		// session before it can start. Keep the prompt one-line and point
-		// Claude at openpoet_get_my_task for the full description.
-		input.EnvVars["OPENPOET_APPEND_SYSTEM_PROMPT"] = fmt.Sprintf(
-			"OpenPoet has assigned you task #%d titled %q. Call the openpoet_get_my_task MCP tool now to read its full description and priority. Communicate with the user in the same language as the task; call openpoet_request_task_evaluation when you believe significant work is complete.",
-			linkedTask.ID, linkedTask.Title,
-		)
-	}
-
-	// Inject env vars based on the claude_session slot config (only for Claude Code backend)
-	if project.Backend == "claude_code" && a.aiHandler != nil && a.aiHandler.providerMgr != nil {
-		sessionConfig := a.aiHandler.providerMgr.GetSlotConfig(llm.SlotSession)
-		if sessionConfig != nil {
-			switch sessionConfig.ProviderType {
-			case "ollama", "ollama-sdk":
-				baseURL := sessionConfig.BaseURL
-				if baseURL == "" {
-					baseURL = "http://localhost:11434"
-				}
-				model := sessionConfig.Model
-				if model == "" {
-					model = "qwen3-coder"
-				}
-				log.Printf("[Session] Injecting Ollama env vars: url=%s, model=%s", baseURL, model)
-				input.EnvVars["ANTHROPIC_BASE_URL"] = baseURL
-				input.EnvVars["ANTHROPIC_API_KEY"] = ""
-				input.EnvVars["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
-				input.EnvVars["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
-				input.EnvVars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
-				input.EnvVars["CLAUDE_CODE_SUBAGENT_MODEL"] = model
-				if sessionConfig.APIKey != "" {
-					input.EnvVars["ANTHROPIC_AUTH_TOKEN"] = sessionConfig.APIKey
-				} else {
-					input.EnvVars["ANTHROPIC_AUTH_TOKEN"] = "ollama"
-				}
-			case "apikey":
-				if sessionConfig.APIKey != "" {
-					input.EnvVars["ANTHROPIC_API_KEY"] = sessionConfig.APIKey
-					log.Printf("[Session] Injecting Anthropic API key from session config")
-				}
-			}
-		}
-	}
-
-	// Inject dangerously-skip-permissions flag if both project and request allow it
-	if input.DangerouslySkipPermissions && project.DangerouslySkipPermissions {
-		input.EnvVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"] = "true"
-	}
-
-	var sess *database.Session
-	if project.Type == "local" {
-		sess, err = a.sessionMgr.StartSession(ctx, project, input.EnvVars)
-	} else {
-		sess, err = a.sessionMgr.StartRemoteSession(ctx, project, input.EnvVars, a.encryptor.Decrypt)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	// Auto-generate session name
-	if linkedTask != nil {
-		// Task-linked session: use task title
-		autoName := "Task: " + linkedTask.Title
-		a.db.ExecContext(ctx, "UPDATE sessions SET name = ? WHERE id = ?", autoName, sess.ID)
-		sess.Name = autoName
-
-		a.db.LinkSessionToTask(ctx, sess.ID, linkedTask.ID)
-
-		// Auto-set task status to in_progress if it's currently todo
-		if linkedTask.Status == "todo" {
-			a.db.UpdateTaskStatus(ctx, linkedTask.ID, "in_progress")
-			linkedTask.Status = "in_progress"
-			a.hub.BroadcastStateUpdate("task", map[string]interface{}{
-				"action":     "updated",
-				"project_id": linkedTask.ProjectID,
-				"task":       linkedTask,
-			})
-		}
-
-		if input.AutoStartTaskPrompt {
-			a.autoStartTaskSession(sess.ID)
-		} else if a.hookHandler != nil {
-			// Broadcast task-loaded notification so the frontend shows a decision dialog.
-			a.hookHandler.SetTaskNotification(sess.ID, linkedTask.ID, linkedTask.Title, linkedTask.Description)
-		}
-	} else {
-		// Regular session: use project name + timestamp
-		autoName := project.Name + " (" + time.Now().Format("15:04:05") + ")"
-		a.db.ExecContext(ctx, "UPDATE sessions SET name = ? WHERE id = ?", autoName, sess.ID)
-		sess.Name = autoName
-	}
-
-	return sess, nil
+	authorization.AllowEnvironment = len(input.EnvVars) > 0
+	authorization.AllowUnsafePermissions = input.DangerouslySkipPermissions
+	return services.Execution.Sessions.Create(ctx, application.CreateSessionCommand{
+		ProjectID: input.ProjectID, TaskID: input.TaskID, Environment: input.EnvVars,
+		DangerouslySkipPermissions: input.DangerouslySkipPermissions,
+		AutoStartTaskPrompt:        input.AutoStartTaskPrompt,
+		Authorization:              authorization,
+	})
 }
 
 const defaultTaskStartPrompt = "Start working on the assigned task."
@@ -2180,10 +1612,16 @@ func (a *API) ListSessionDocuments(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) DeleteSession(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
-
-	if err := a.stopManagedSession(r.Context(), id); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	if a.hookHandler != nil {
+		a.hookHandler.MarkUserStopped(id)
+	}
+	if _, err := services.Execution.Sessions.Stop(platformUIContext(r), application.StopSessionCommand{SessionID: id, Authorization: platformUIAuthorization(r)}); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -2191,27 +1629,28 @@ func (a *API) DeleteSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) stopManagedSession(ctx context.Context, id string) error {
-	// Mark as user-initiated stop so the Stop hook doesn't send a push notification.
+	services, ok := a.platformApplicationServices()
+	if !ok {
+		return newStartSessionError(http.StatusServiceUnavailable, "OpenPoet platform services are unavailable")
+	}
 	if a.hookHandler != nil {
 		a.hookHandler.MarkUserStopped(id)
 	}
-
-	// It may no longer be in memory, and the UI has historically treated that
-	// as okay as long as DB state is updated. Other stop errors mean the process
-	// may still be alive and must not be reported as success.
-	if err := a.sessionMgr.StopSession(ctx, id); err != nil && !errors.Is(err, session.ErrSessionNotRunning) {
-		return err
-	}
-
-	if err := a.db.EndSession(ctx, id, "stopped"); err != nil {
-		return err
-	}
-
-	a.hub.BroadcastSessionStatus(id, "stopped")
-	return nil
+	_, err := services.Execution.Sessions.Stop(ctx, application.StopSessionCommand{
+		SessionID: id,
+		Authorization: application.ActionAuthorization{
+			Actor: application.Actor{Type: "agent", ID: "openpoet-ai"}, Reason: "OpenPoet AI session stop",
+			Approved: true, ApprovedBy: "user:local-ui",
+		},
+	})
+	return err
 }
 
 func (a *API) ReopenSession(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	sessionID := chi.URLParam(r, "id")
 
 	// Parse optional request body for dangerously_skip_permissions flag
@@ -2221,62 +1660,13 @@ func (a *API) ReopenSession(w http.ResponseWriter, r *http.Request) {
 	// Body is optional — ignore decode errors (empty body is fine)
 	_ = json.NewDecoder(r.Body).Decode(&reopenInput)
 
-	sess, err := a.db.GetSession(r.Context(), sessionID)
+	authorization := platformUIAuthorization(r)
+	authorization.AllowUnsafePermissions = reopenInput.DangerouslySkipPermissions
+	sess, err := services.Execution.Sessions.Reopen(platformUIContext(r), application.ReopenSessionCommand{SessionID: sessionID, DangerouslySkipPermissions: reopenInput.DangerouslySkipPermissions, Authorization: authorization})
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Session not found")
+		respondApplicationError(w, err)
 		return
 	}
-
-	if sess.Status != "stopped" && sess.Status != "completed" {
-		respondError(w, http.StatusConflict, fmt.Sprintf("Session cannot be reopened: current status is '%s'", sess.Status))
-		return
-	}
-
-	if a.sessionMgr.IsSessionRunning(sessionID) {
-		respondError(w, http.StatusConflict, "Session is already running")
-		return
-	}
-
-	project, err := a.db.GetProject(r.Context(), sess.ProjectID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
-		return
-	}
-
-	// Auto-sync config before starting
-	if a.configSync != nil {
-		if syncErr := a.configSync.SyncToProject(r.Context(), project); syncErr != nil {
-			log.Printf("Warning: config sync failed before session reopen: %v", syncErr)
-		}
-	}
-
-	// Build env vars with task context if linked
-	envVars := make(map[string]string)
-	linkedTask, _ := a.db.GetTaskForSession(r.Context(), sessionID)
-	if linkedTask != nil {
-		envVars["OPENPOET_TASK_ID"] = fmt.Sprintf("%d", linkedTask.ID)
-		envVars["OPENPOET_TASK_TITLE"] = linkedTask.Title
-
-		// See CreateSession comment: keep system prompt single-line so
-		// Windows cmd.exe quoting doesn't corrupt the rest of the args.
-		envVars["OPENPOET_APPEND_SYSTEM_PROMPT"] = fmt.Sprintf(
-			"This is a RESUMED OpenPoet session for task #%d titled %q. Call the openpoet_get_my_task MCP tool now to read its current description and priority. Communicate with the user in the same language as the task; call openpoet_request_task_evaluation when you believe significant work is complete.",
-			linkedTask.ID, linkedTask.Title,
-		)
-	}
-
-	// Inject dangerously-skip-permissions flag if both project and request allow it
-	if reopenInput.DangerouslySkipPermissions && project.DangerouslySkipPermissions {
-		envVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"] = "true"
-	}
-
-	if err := a.sessionMgr.ReopenSession(r.Context(), sess, project, envVars, a.encryptor.Decrypt); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Refresh session from DB for updated fields
-	sess, _ = a.db.GetSession(r.Context(), sessionID)
 	respondJSON(w, http.StatusOK, sess)
 }
 
@@ -2408,34 +1798,22 @@ func (a *API) ListSkills(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) CreateSkill(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	var s database.Skill
 	if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
-	if msg := validateSkillName(s.Name); msg != "" {
-		respondError(w, http.StatusBadRequest, msg)
+	created, err := services.Configuration.Skills.Create(platformUIContext(r), application.SkillInput{Name: s.Name, Content: s.Content, Enabled: s.Enabled, Category: s.Category, SortOrder: s.SortOrder})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if strings.TrimSpace(s.Content) == "" {
-		respondError(w, http.StatusBadRequest, "Content is required")
-		return
-	}
-
-	if err := a.db.CreateSkill(r.Context(), &s); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Save initial version
-	nextVer, _ := a.db.GetNextSkillVersion(r.Context(), s.ID)
-	a.db.CreateSkillVersion(r.Context(), &database.SkillVersion{
-		SkillID: s.ID, Name: s.Name, Content: s.Content, Version: nextVer,
-	})
-
-	a.hub.BroadcastStateUpdate("skill", map[string]interface{}{"action": "created", "skill": s})
-	respondJSON(w, http.StatusCreated, s)
+	respondJSON(w, http.StatusCreated, created)
 }
 
 func (a *API) GetSkill(w http.ResponseWriter, r *http.Request) {
@@ -2455,6 +1833,10 @@ func (a *API) GetSkill(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) UpdateSkill(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid skill ID")
@@ -2467,94 +1849,48 @@ func (a *API) UpdateSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if msg := validateSkillName(s.Name); msg != "" {
-		respondError(w, http.StatusBadRequest, msg)
-		return
-	}
-	if strings.TrimSpace(s.Content) == "" {
-		respondError(w, http.StatusBadRequest, "Content is required")
-		return
-	}
-
-	// Get old skill to check if content changed
-	old, err := a.db.GetSkill(r.Context(), id)
+	updated, err := services.Configuration.Skills.Update(platformUIContext(r), application.UpdateSkillCommand{ID: id, Name: &s.Name, Content: &s.Content, Enabled: &s.Enabled, Category: &s.Category, SortOrder: &s.SortOrder})
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Skill not found")
+		respondApplicationError(w, err)
 		return
 	}
-
-	s.ID = id
-	if err := a.db.UpdateSkill(r.Context(), &s); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Save version if content or name changed
-	if old.Content != s.Content || old.Name != s.Name {
-		nextVer, _ := a.db.GetNextSkillVersion(r.Context(), s.ID)
-		a.db.CreateSkillVersion(r.Context(), &database.SkillVersion{
-			SkillID: s.ID, Name: s.Name, Content: s.Content, Version: nextVer,
-		})
-	}
-
-	a.hub.BroadcastStateUpdate("skill", map[string]interface{}{"action": "updated", "skill": s})
-	respondJSON(w, http.StatusOK, s)
+	respondJSON(w, http.StatusOK, updated)
 }
 
 func (a *API) DeleteSkill(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid skill ID")
 		return
 	}
 
-	if err := a.db.DeleteSkill(r.Context(), id); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	if err := services.Configuration.Skills.Delete(platformUIContext(r), id); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	a.hub.BroadcastStateUpdate("skill", map[string]interface{}{"action": "deleted", "id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *API) DuplicateSkill(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid skill ID")
 		return
 	}
 
-	original, err := a.db.GetSkill(r.Context(), id)
+	dup, err := services.Configuration.Skills.Duplicate(platformUIContext(r), id, "")
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Skill not found")
+		respondApplicationError(w, err)
 		return
 	}
-
-	// Find a unique name
-	newName := original.Name + " (copy)"
-	for i := 2; ; i++ {
-		var existing database.Skill
-		err := a.db.GetContext(r.Context(), &existing, "SELECT id FROM skills WHERE name = ?", newName)
-		if err != nil {
-			break // name available
-		}
-		newName = original.Name + fmt.Sprintf(" (copy %d)", i)
-	}
-
-	dup := database.Skill{
-		Name:      newName,
-		Content:   original.Content,
-		Enabled:   original.Enabled,
-		Category:  original.Category,
-		SortOrder: original.SortOrder,
-	}
-
-	if err := a.db.CreateSkill(r.Context(), &dup); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("skill", map[string]interface{}{"action": "created", "skill": dup})
 	respondJSON(w, http.StatusCreated, dup)
 }
 
@@ -2585,6 +1921,10 @@ func (a *API) ExportSkills(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) ImportSkills(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	type importSkill struct {
 		Name     string `json:"name"`
 		Content  string `json:"content"`
@@ -2598,35 +1938,18 @@ func (a *API) ImportSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	imported := 0
-	skipped := 0
-	for _, s := range skills {
-		if msg := validateSkillName(s.Name); msg != "" {
-			skipped++
-			continue
-		}
-		if strings.TrimSpace(s.Content) == "" {
-			skipped++
-			continue
-		}
-
-		skill := database.Skill{
-			Name:     s.Name,
-			Content:  s.Content,
-			Enabled:  s.Enabled,
-			Category: s.Category,
-		}
-		if err := a.db.CreateSkill(r.Context(), &skill); err != nil {
-			skipped++ // likely duplicate name
-			continue
-		}
-		imported++
+	inputs := make([]application.SkillInput, len(skills))
+	for i, s := range skills {
+		inputs[i] = application.SkillInput{Name: s.Name, Content: s.Content, Enabled: s.Enabled, Category: s.Category}
 	}
-
-	a.hub.BroadcastStateUpdate("skill", map[string]interface{}{"action": "imported"})
+	result, err := services.Configuration.Skills.Import(platformUIContext(r), inputs)
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"imported": imported,
-		"skipped":  skipped,
+		"imported": len(result.Imported),
+		"skipped":  len(result.Skipped),
 	})
 }
 
@@ -2649,6 +1972,10 @@ func (a *API) ListSkillVersions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) RestoreSkillVersion(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	skillID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid skill ID")
@@ -2660,32 +1987,11 @@ func (a *API) RestoreSkillVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ver, err := a.db.GetSkillVersion(r.Context(), versionID)
+	skill, err := services.Configuration.Skills.Restore(platformUIContext(r), skillID, versionID)
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Version not found")
+		respondApplicationError(w, err)
 		return
 	}
-
-	skill, err := a.db.GetSkill(r.Context(), skillID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Skill not found")
-		return
-	}
-
-	skill.Name = ver.Name
-	skill.Content = ver.Content
-	if err := a.db.UpdateSkill(r.Context(), skill); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Save as new version
-	nextVer, _ := a.db.GetNextSkillVersion(r.Context(), skillID)
-	a.db.CreateSkillVersion(r.Context(), &database.SkillVersion{
-		SkillID: skillID, Name: ver.Name, Content: ver.Content, Version: nextVer,
-	})
-
-	a.hub.BroadcastStateUpdate("skill", map[string]interface{}{"action": "updated", "skill": skill})
 	respondJSON(w, http.StatusOK, skill)
 }
 
@@ -2704,19 +2010,22 @@ func (a *API) ListMCPServers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) CreateMCPServer(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	var m database.MCPServer
 	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
-	if err := a.db.CreateMCPServer(r.Context(), &m); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	created, err := services.Configuration.MCP.CreateGlobal(platformUIContext(r), platformUIAuthorization(r), application.MCPServerInput{Name: m.Name, Command: m.Command, Args: m.Args, Env: m.Env, Enabled: m.Enabled})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	a.hub.BroadcastStateUpdate("mcp", map[string]interface{}{"action": "created", "mcp": m})
-	respondJSON(w, http.StatusCreated, m)
+	respondJSON(w, http.StatusCreated, created)
 }
 
 func (a *API) GetMCPServer(w http.ResponseWriter, r *http.Request) {
@@ -2736,6 +2045,10 @@ func (a *API) GetMCPServer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) UpdateMCPServer(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid MCP server ID")
@@ -2748,29 +2061,29 @@ func (a *API) UpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	m.ID = id
-	if err := a.db.UpdateMCPServer(r.Context(), &m); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	updated, err := services.Configuration.MCP.UpdateGlobal(platformUIContext(r), platformUIAuthorization(r), application.UpdateMCPServerCommand{ID: id, Name: &m.Name, Command: &m.Command, Args: &m.Args, Env: &m.Env, Enabled: &m.Enabled})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	a.hub.BroadcastStateUpdate("mcp", map[string]interface{}{"action": "updated", "mcp": m})
-	respondJSON(w, http.StatusOK, m)
+	respondJSON(w, http.StatusOK, updated)
 }
 
 func (a *API) DeleteMCPServer(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid MCP server ID")
 		return
 	}
 
-	if err := a.db.DeleteMCPServer(r.Context(), id); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	if err := services.Configuration.MCP.DeleteGlobal(platformUIContext(r), platformUIAuthorization(r), id); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	a.hub.BroadcastStateUpdate("mcp", map[string]interface{}{"action": "deleted", "id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -2789,21 +2102,20 @@ func (a *API) ListAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	var m database.AIAgent
 	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-	m.IsDefault = false // never allow creating a default agent
-	if err := a.db.CreateAIAgent(r.Context(), &m); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	created, err := services.Configuration.Agents.Create(platformUIContext(r), application.AIAgentInput{Name: m.Name, SystemPrompt: m.SystemPrompt, ToolPolicy: m.ToolPolicy, ProjectFilter: m.ProjectFilter, Enabled: m.Enabled})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	created, err := a.db.GetAIAgent(r.Context(), m.ID)
-	if err != nil {
-		created = &m
-	}
-	a.hub.BroadcastStateUpdate("agent", map[string]interface{}{"action": "created", "agent": created})
 	respondJSON(w, http.StatusCreated, created)
 }
 
@@ -2822,14 +2134,13 @@ func (a *API) GetAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid agent ID")
-		return
-	}
-	existing, err := a.db.GetAIAgent(r.Context(), id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Agent not found")
 		return
 	}
 	var m database.AIAgent
@@ -2837,43 +2148,28 @@ func (a *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-	if existing.IsDefault {
-		m.Name = existing.Name // cannot rename default agent
-	}
-	m.ID = id
-	if err := a.db.UpdateAIAgent(r.Context(), &m); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	updated, err := services.Configuration.Agents.Update(platformUIContext(r), application.UpdateAIAgentCommand{ID: id, Name: &m.Name, SystemPrompt: &m.SystemPrompt, ToolPolicy: &m.ToolPolicy, ProjectFilter: &m.ProjectFilter, Enabled: &m.Enabled})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	// Re-fetch to get accurate is_default and timestamps
-	updated, err := a.db.GetAIAgent(r.Context(), id)
-	if err != nil {
-		updated = &m
-	}
-	a.hub.BroadcastStateUpdate("agent", map[string]interface{}{"action": "updated", "agent": updated})
 	respondJSON(w, http.StatusOK, updated)
 }
 
 func (a *API) DeleteAgent(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid agent ID")
 		return
 	}
-	existing, err := a.db.GetAIAgent(r.Context(), id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Agent not found")
+	if err := services.Configuration.Agents.Delete(platformUIContext(r), id); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if existing.IsDefault {
-		respondError(w, http.StatusBadRequest, "Cannot delete the default agent")
-		return
-	}
-	if err := a.db.DeleteAIAgent(r.Context(), id); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	a.hub.BroadcastStateUpdate("agent", map[string]interface{}{"action": "deleted", "id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -2892,6 +2188,10 @@ func (a *API) ListAIConfigs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) CreateAIConfig(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	var req struct {
 		Name         string `json:"name"`
 		ProviderType string `json:"provider_type"`
@@ -2904,56 +2204,22 @@ func (a *API) CreateAIConfig(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-	if req.Name == "" || req.ProviderType == "" {
-		respondError(w, http.StatusBadRequest, "Name and provider_type are required")
+	created, err := services.Configuration.AIConfigs.Create(platformUIContext(r), platformUIAuthorization(r), application.AIConfigInput{Name: req.Name, ProviderType: req.ProviderType, APIKey: req.APIKey, Model: req.Model, BaseURL: req.BaseURL, ExtraJSON: req.ExtraJSON})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if req.ExtraJSON == "" {
-		req.ExtraJSON = "{}"
-	}
-
-	c := database.AIConfig{
-		Name:         req.Name,
-		ProviderType: req.ProviderType,
-		Model:        req.Model,
-		BaseURL:      req.BaseURL,
-		ExtraJSON:    req.ExtraJSON,
-	}
-
-	// Encrypt API key if provided
-	if req.APIKey != "" {
-		encrypted, iv, err := a.encryptor.Encrypt(req.APIKey)
-		if err != nil {
-			respondError(w, http.StatusInternalServerError, "Failed to encrypt API key")
-			return
-		}
-		c.APIKeyEncrypted = encrypted
-		c.APIKeyIV = iv
-		c.APIKeyPreview = apiKeyPreview(req.APIKey)
-	}
-
-	if err := a.db.CreateAIConfig(r.Context(), &c); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	if a.ReinitAIProviders != nil {
-		a.ReinitAIProviders()
-	}
-	a.hub.BroadcastStateUpdate("ai_config", map[string]interface{}{"action": "created", "config": c})
-	respondJSON(w, http.StatusCreated, c)
+	respondJSON(w, http.StatusCreated, created)
 }
 
 func (a *API) UpdateAIConfig(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid AI config ID")
-		return
-	}
-
-	existing, err := a.db.GetAIConfig(r.Context(), id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "AI config not found")
 		return
 	}
 
@@ -2970,58 +2236,39 @@ func (a *API) UpdateAIConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	command := application.UpdateAIConfigCommand{ID: id, APIKey: &req.APIKey, Model: &req.Model, BaseURL: &req.BaseURL}
 	if req.Name != "" {
-		existing.Name = req.Name
+		command.Name = &req.Name
 	}
 	if req.ProviderType != "" {
-		existing.ProviderType = req.ProviderType
+		command.ProviderType = &req.ProviderType
 	}
-	existing.Model = req.Model
-	existing.BaseURL = req.BaseURL
 	if req.ExtraJSON != "" {
-		existing.ExtraJSON = req.ExtraJSON
+		command.ExtraJSON = &req.ExtraJSON
 	}
-
-	// Encrypt API key if provided (empty = keep existing)
-	if req.APIKey != "" {
-		encrypted, iv, encErr := a.encryptor.Encrypt(req.APIKey)
-		if encErr != nil {
-			respondError(w, http.StatusInternalServerError, "Failed to encrypt API key")
-			return
-		}
-		existing.APIKeyEncrypted = encrypted
-		existing.APIKeyIV = iv
-		existing.APIKeyPreview = apiKeyPreview(req.APIKey)
-	}
-
-	if err := a.db.UpdateAIConfig(r.Context(), existing); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	updated, err := services.Configuration.AIConfigs.Update(platformUIContext(r), platformUIAuthorization(r), command)
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	if a.ReinitAIProviders != nil {
-		a.ReinitAIProviders()
-	}
-	a.hub.BroadcastStateUpdate("ai_config", map[string]interface{}{"action": "updated", "config": existing})
-	respondJSON(w, http.StatusOK, existing)
+	respondJSON(w, http.StatusOK, updated)
 }
 
 func (a *API) DeleteAIConfig(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid AI config ID")
 		return
 	}
 
-	if err := a.db.DeleteAIConfig(r.Context(), id); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	if err := services.Configuration.AIConfigs.Delete(platformUIContext(r), platformUIAuthorization(r), id); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	if a.ReinitAIProviders != nil {
-		a.ReinitAIProviders()
-	}
-	a.hub.BroadcastStateUpdate("ai_config", map[string]interface{}{"action": "deleted", "id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -3035,107 +2282,63 @@ func (a *API) GetAIConfigAssignments(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) UpdateAIConfigAssignments(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	var req map[string]*int64 // slot -> config_id (null = unassign)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
-	validSlots := map[string]bool{"ai_chat": true, "ai_background": true, "claude_session": true}
-	for slot, configID := range req {
-		if !validSlots[slot] {
-			respondError(w, http.StatusBadRequest, fmt.Sprintf("Invalid slot: %s", slot))
-			return
-		}
-		if err := a.db.SetAIConfigAssignment(r.Context(), slot, configID); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
+	if err := services.Configuration.AIConfigs.Assign(platformUIContext(r), platformUIAuthorization(r), req); err != nil {
+		respondApplicationError(w, err)
+		return
 	}
-
-	if a.ReinitAIProviders != nil {
-		a.ReinitAIProviders()
-	}
-	a.hub.BroadcastStateUpdate("ai_config", map[string]interface{}{"action": "assignments_updated"})
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // ============ Settings ============
 
 func (a *API) GetSettings(w http.ResponseWriter, r *http.Request) {
-	settings, err := a.db.GetAllSettings(r.Context())
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
 		return
 	}
-
-	// Remove always-hidden keys
-	delete(settings, "vapid_private_key")
-
-	// For sensitive keys: remove encrypted blob and IV, keep only preview
-	for key := range sensitiveSettingKeys {
-		delete(settings, key)
-		delete(settings, key+"_iv")
-		// _preview keys remain in the map if they exist
+	settings, err := services.Configuration.Configuration.Settings(platformUIContext(r))
+	if err != nil {
+		respondApplicationError(w, err)
+		return
 	}
-
 	respondJSON(w, http.StatusOK, settings)
 }
 
 func (a *API) UpdateSettings(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	var settings map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
-	for key, value := range settings {
-		if sensitiveSettingKeys[key] {
-			if value == "" {
-				continue // empty means unchanged
-			}
-			encrypted, iv, err := a.encryptor.Encrypt(value)
-			if err != nil {
-				respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to encrypt %s", key))
-				return
-			}
-			if err := a.db.SetSetting(r.Context(), key, encrypted); err != nil {
-				respondError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			if err := a.db.SetSetting(r.Context(), key+"_iv", iv); err != nil {
-				respondError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			if err := a.db.SetSetting(r.Context(), key+"_preview", apiKeyPreview(value)); err != nil {
-				respondError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			continue
-		}
-		if err := a.db.SetSetting(r.Context(), key, value); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
+	if err := services.Configuration.Configuration.UpdateSettings(platformUIContext(r), platformUIAuthorization(r), settings); err != nil {
+		respondApplicationError(w, err)
+		return
 	}
-
-	// Reinitialize AI provider if any AI-related setting changed
-	if a.ReinitAIProvider != nil {
-		for key := range settings {
-			if aiProviderSettingKeys[key] {
-				a.ReinitAIProvider()
-				break
-			}
-		}
-	}
-
-	a.hub.BroadcastStateUpdate("settings", map[string]interface{}{"action": "updated"})
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (a *API) SyncAllConfig(w http.ResponseWriter, r *http.Request) {
-	if err := a.configSync.SyncAllProjects(r.Context()); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	if err := services.Configuration.Configuration.SyncAll(platformUIContext(r), platformUIAuthorization(r)); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -3145,6 +2348,10 @@ func (a *API) SyncAllConfig(w http.ResponseWriter, r *http.Request) {
 // ============ Notifications ============
 
 func (a *API) GetNotifications(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	limit := 50
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if parsed, err := strconv.Atoi(l); err == nil {
@@ -3152,9 +2359,9 @@ func (a *API) GetNotifications(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	notifications, err := a.notifService.GetRecent(r.Context(), limit)
+	notifications, err := services.Collaboration.Notifications.List(platformUIContext(r), limit)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -3162,14 +2369,18 @@ func (a *API) GetNotifications(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) MarkNotificationRead(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid notification ID")
 		return
 	}
 
-	if err := a.notifService.MarkRead(r.Context(), id); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	if err := services.Collaboration.Notifications.MarkRead(platformUIContext(r), id); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -3177,26 +2388,38 @@ func (a *API) MarkNotificationRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) GetActiveNotifications(w http.ResponseWriter, r *http.Request) {
-	notifications, err := a.notifService.GetActive(r.Context())
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	notifications, err := services.Collaboration.Notifications.ListActive(platformUIContext(r))
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
 	respondJSON(w, http.StatusOK, notifications)
 }
 
 func (a *API) GetNotificationUnreadCount(w http.ResponseWriter, r *http.Request) {
-	count, err := a.notifService.GetUnreadCount(r.Context())
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	count, err := services.Collaboration.Notifications.UnreadCount(platformUIContext(r))
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]int{"unread_count": count})
 }
 
 func (a *API) MarkAllNotificationsRead(w http.ResponseWriter, r *http.Request) {
-	if err := a.notifService.MarkAllRead(r.Context()); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	if err := services.Collaboration.Notifications.MarkAllRead(platformUIContext(r)); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -3205,46 +2428,32 @@ func (a *API) MarkAllNotificationsRead(w http.ResponseWriter, r *http.Request) {
 // ============ Memory Docs ============
 
 func (a *API) GetMemoryDoc(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
 
-	doc, err := a.db.GetMemoryDoc(r.Context(), id)
+	doc, err := services.Collaboration.Documents.GetMemory(platformUIContext(r), id)
 	if err != nil {
-		// Return empty placeholder if none exists
-		respondJSON(w, http.StatusOK, map[string]interface{}{
-			"project_id": id,
-			"content":    "",
-			"version":    0,
-			"exists":     false,
-		})
+		respondApplicationError(w, err)
 		return
 	}
-
-	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"project_id":      doc.ProjectID,
-		"content":         doc.Content,
-		"version":         doc.Version,
-		"last_updated_by": doc.LastUpdatedBy,
-		"summary":         doc.Summary.String,
-		"updated_at":      doc.UpdatedAt,
-		"exists":          true,
-	})
+	respondJSON(w, http.StatusOK, doc)
 }
 
 func (a *API) UpdateMemoryDoc(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
-		return
-	}
-
-	// Verify project exists
-	project, err := a.db.GetProject(r.Context(), id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
 		return
 	}
 
@@ -3258,31 +2467,21 @@ func (a *API) UpdateMemoryDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if input.UpdatedBy == "" {
-		input.UpdatedBy = "user"
-	}
-
-	doc, err := a.db.UpsertMemoryDoc(r.Context(), id, input.Content, input.UpdatedBy, input.Summary)
+	doc, err := services.Collaboration.Documents.UpdateMemory(platformUIContext(r), application.UpdateMemoryDocumentCommand{ProjectID: id, Content: input.Content, Summary: input.Summary, Authorization: platformUIAuthorization(r)})
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
-
-	// Write back to project's CLAUDE.md
-	a.writeClaudeMD(project, input.Content)
-
-	a.hub.BroadcastStateUpdate("memory_doc", map[string]interface{}{
-		"action":     "updated",
-		"project_id": id,
-		"version":    doc.Version,
-	})
-
 	respondJSON(w, http.StatusOK, doc)
 }
 
 // ============ Temp Documents ============
 
 func (a *API) CreateTempDocument(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	var input struct {
 		Title          string `json:"title"`
 		Content        string `json:"content"`
@@ -3294,28 +2493,18 @@ func (a *API) CreateTempDocument(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-	if strings.TrimSpace(input.Content) == "" {
-		respondError(w, http.StatusBadRequest, "Content is required")
-		return
-	}
-
-	title := input.Title
-	if title == "" {
-		title = "Documento"
-	}
-
 	convID, _ := strconv.ParseInt(input.ConversationID, 10, 64)
 	taskID, _ := strconv.ParseInt(input.TaskID, 10, 64)
-	doc := &database.TempDocument{
-		ID:             uuid.New().String()[:8],
-		Title:          title,
-		Content:        input.Content,
-		ConversationID: sql.NullInt64{Int64: convID, Valid: convID > 0},
-		TaskID:         sql.NullInt64{Int64: taskID, Valid: taskID > 0},
-		SessionID:      input.SessionID,
+	var conversationID, linkedTaskID *int64
+	if convID > 0 {
+		conversationID = &convID
 	}
-	if err := a.db.CreateTempDocument(r.Context(), doc); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	if taskID > 0 {
+		linkedTaskID = &taskID
+	}
+	doc, err := services.Collaboration.Documents.CreateTemp(platformUIContext(r), application.CreateTempDocumentCommand{Title: input.Title, Content: input.Content, ConversationID: conversationID, TaskID: linkedTaskID, SessionID: input.SessionID, Authorization: platformUIAuthorization(r)})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -3323,7 +2512,7 @@ func (a *API) CreateTempDocument(w http.ResponseWriter, r *http.Request) {
 	a.hub.BroadcastChatDocCard(map[string]interface{}{
 		"doc_id":          doc.ID,
 		"type":            "document",
-		"title":           title,
+		"title":           doc.Title,
 		"conversation_id": input.ConversationID,
 		"session_id":      input.SessionID,
 	})
@@ -3335,16 +2524,73 @@ func (a *API) CreateTempDocument(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) GetTempDocument(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
-	doc, err := a.db.GetTempDocument(r.Context(), id)
+	doc, err := services.Collaboration.Documents.GetTemp(platformUIContext(r), id)
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Document not found")
+		respondApplicationError(w, err)
 		return
 	}
 	respondJSON(w, http.StatusOK, doc)
 }
 
 // ============ Project Tasks ============
+
+func (a *API) PublishTaskChange(change application.TaskChange) {
+	payload := map[string]interface{}{"action": change.Action}
+	if change.ProjectID > 0 {
+		payload["project_id"] = change.ProjectID
+	}
+	if change.Task != nil {
+		payload["task"] = change.Task
+	}
+	if change.TaskID > 0 {
+		payload["id"] = change.TaskID
+	}
+	a.hub.BroadcastStateUpdate("task", payload)
+}
+
+func (a *API) PublishTaskHistory(history *database.TaskHistory) {
+	if history == nil {
+		return
+	}
+	a.hub.BroadcastStateUpdate("task_history", map[string]interface{}{
+		"action":     "created",
+		"task_id":    history.TaskID,
+		"project_id": history.ProjectID,
+		"entry":      history,
+	})
+}
+
+func (a *API) PublishSessionRename(rename application.SessionRename) {
+	a.hub.BroadcastStateUpdate("session", map[string]interface{}{
+		"action":     "renamed",
+		"session_id": rename.SessionID,
+		"name":       rename.Name,
+	})
+}
+
+func (a *API) RequestTaskVerification(task *database.ProjectTask) {
+	if task != nil && a.aiHandler != nil {
+		go a.aiHandler.GenerateVerificationDoc(context.Background(), task)
+	}
+}
+
+func respondApplicationError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	switch {
+	case application.ErrorIsKind(err, application.ErrorValidation):
+		status = http.StatusBadRequest
+	case application.ErrorIsKind(err, application.ErrorNotFound):
+		status = http.StatusNotFound
+	case application.ErrorIsKind(err, application.ErrorConflict):
+		status = http.StatusConflict
+	}
+	respondError(w, status, err.Error())
+}
 
 func (a *API) ListAllTasks(w http.ResponseWriter, r *http.Request) {
 	f := database.TaskFilter{}
@@ -3374,39 +2620,15 @@ func (a *API) ListAllTasks(w http.ResponseWriter, r *http.Request) {
 		f.Search = s
 	}
 
-	// Preserve the original status filter, then clear it for the DB query
-	// so umbrella tasks are fetched regardless of their stored status.
-	statusFilter := f.Status
-	if statusFilter != "" {
-		f.Status = ""
-	}
-
-	tasks, err := a.db.ListAllTasks(r.Context(), f)
+	result, err := a.taskService.ListAll(r.Context(), f)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if tasks == nil {
-		tasks = []database.ProjectTask{}
-	}
-	database.ApplyUmbrellaStatus(tasks)
-
-	// Re-apply status filter after umbrella status computation
-	if statusFilter != "" {
-		filtered := tasks[:0]
-		for _, t := range tasks {
-			if t.Status == statusFilter {
-				filtered = append(filtered, t)
-			}
-		}
-		tasks = filtered
-	}
-
-	summary, _ := a.db.GetAllTasksSummary(r.Context())
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"tasks":   tasks,
-		"summary": summary,
+		"tasks":   result.Tasks,
+		"summary": result.Summary,
 	})
 }
 
@@ -3417,15 +2639,11 @@ func (a *API) ListProjectTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tasks, err := a.db.ListTasksByProject(r.Context(), projectID)
+	tasks, err := a.taskService.ListByProject(r.Context(), projectID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if tasks == nil {
-		tasks = []database.ProjectTask{}
-	}
-	database.ApplyUmbrellaStatus(tasks)
 	respondJSON(w, http.StatusOK, tasks)
 }
 
@@ -3466,12 +2684,6 @@ func (a *API) CreateProjectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify project exists
-	if _, err := a.db.GetProject(r.Context(), projectID); err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
-		return
-	}
-
 	var input struct {
 		Title       string `json:"title"`
 		Description string `json:"description"`
@@ -3486,62 +2698,15 @@ func (a *API) CreateProjectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.TrimSpace(input.Title) == "" {
-		respondError(w, http.StatusBadRequest, "Title is required")
+	task, err := a.taskService.Create(r.Context(), application.CreateProjectTaskCommand{
+		ProjectID: projectID, Title: input.Title, Description: input.Description,
+		Status: input.Status, Priority: input.Priority, DueDate: input.DueDate,
+		ParentID: input.ParentID, SortOrder: input.SortOrder, Actor: application.UserActor(),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	// Validate status
-	if input.Status == "" {
-		input.Status = "todo"
-	}
-	validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "awaiting_approval": true}
-	if !validStatuses[input.Status] {
-		respondError(w, http.StatusBadRequest, "Invalid status. Must be: todo, in_progress, awaiting_approval, done")
-		return
-	}
-
-	// Validate priority
-	if input.Priority == "" {
-		input.Priority = "medium"
-	}
-	validPriorities := map[string]bool{"low": true, "medium": true, "high": true, "urgent": true}
-	if !validPriorities[input.Priority] {
-		respondError(w, http.StatusBadRequest, "Invalid priority. Must be: low, medium, high, urgent")
-		return
-	}
-
-	task := &database.ProjectTask{
-		ProjectID:   projectID,
-		Title:       strings.TrimSpace(input.Title),
-		Description: input.Description,
-		Status:      input.Status,
-		Priority:    input.Priority,
-		SortOrder:   input.SortOrder,
-	}
-
-	if input.ParentID != nil {
-		task.ParentID = sql.NullInt64{Int64: *input.ParentID, Valid: true}
-	}
-
-	if input.DueDate != "" {
-		t, err := parseFlexibleTime(input.DueDate)
-		if err != nil {
-			respondError(w, http.StatusBadRequest, "Invalid due_date format")
-			return
-		}
-		task.DueDate = sql.NullTime{Time: t, Valid: true}
-	}
-
-	if err := a.db.CreateTask(r.Context(), task); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "created", "project_id": projectID, "task": task})
-	a.recordTaskHistory(r.Context(), task.ID, projectID, "task_created", map[string]interface{}{
-		"title": task.Title, "status": task.Status, "priority": task.Priority,
-	}, "user", "")
 	respondJSON(w, http.StatusCreated, task)
 }
 
@@ -3558,22 +2723,10 @@ func (a *API) GetProjectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := a.db.GetTask(r.Context(), taskID)
-	if err != nil || task.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Task not found")
+	task, err := a.taskService.Get(r.Context(), projectID, taskID)
+	if err != nil {
+		respondApplicationError(w, err)
 		return
-	}
-
-	// Compute umbrella status dynamically from children
-	allTasks, err := a.db.ListTasksByProject(r.Context(), projectID)
-	if err == nil {
-		database.ApplyUmbrellaStatus(allTasks)
-		for _, t := range allTasks {
-			if t.ID == taskID {
-				task.Status = t.Status
-				break
-			}
-		}
 	}
 
 	respondJSON(w, http.StatusOK, task)
@@ -3592,18 +2745,6 @@ func (a *API) UpdateProjectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := a.db.GetTask(r.Context(), taskID)
-	if err != nil || task.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Task not found")
-		return
-	}
-
-	// Capture old values for history tracking
-	oldStatus := task.Status
-	oldPriority := task.Priority
-	oldTitle := task.Title
-	oldDescription := task.Description
-
 	var input struct {
 		Title       *string `json:"title"`
 		Description *string `json:"description"`
@@ -3618,77 +2759,14 @@ func (a *API) UpdateProjectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if input.Title != nil {
-		if strings.TrimSpace(*input.Title) == "" {
-			respondError(w, http.StatusBadRequest, "Title cannot be empty")
-			return
-		}
-		task.Title = strings.TrimSpace(*input.Title)
-	}
-	if input.Description != nil {
-		task.Description = *input.Description
-	}
-	if input.Status != nil {
-		validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "awaiting_approval": true}
-		if !validStatuses[*input.Status] {
-			respondError(w, http.StatusBadRequest, "Invalid status")
-			return
-		}
-		task.Status = *input.Status
-	}
-	if input.Priority != nil {
-		validPriorities := map[string]bool{"low": true, "medium": true, "high": true, "urgent": true}
-		if !validPriorities[*input.Priority] {
-			respondError(w, http.StatusBadRequest, "Invalid priority")
-			return
-		}
-		task.Priority = *input.Priority
-	}
-	if input.DueDate != nil {
-		if *input.DueDate == "" {
-			task.DueDate = sql.NullTime{}
-		} else {
-			t, err := parseFlexibleTime(*input.DueDate)
-			if err != nil {
-				respondError(w, http.StatusBadRequest, "Invalid due_date format")
-				return
-			}
-			task.DueDate = sql.NullTime{Time: t, Valid: true}
-			task.DueNotified = false // Reset notification on date change
-		}
-	}
-	if input.ParentID != nil {
-		task.ParentID = sql.NullInt64{Int64: *input.ParentID, Valid: *input.ParentID > 0}
-	}
-	if input.SortOrder != nil {
-		task.SortOrder = *input.SortOrder
-	}
-
-	if err := a.db.UpdateTask(r.Context(), task); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	task, err := a.taskService.Update(r.Context(), application.UpdateProjectTaskCommand{
+		ProjectID: projectID, TaskID: taskID, Title: input.Title, Description: input.Description,
+		Status: input.Status, Priority: input.Priority, DueDate: input.DueDate,
+		ParentID: input.ParentID, SortOrder: input.SortOrder, Actor: application.UserActor(),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
-	}
-
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
-
-	// Record history for each changed field
-	if task.Status != oldStatus {
-		a.recordTaskHistory(r.Context(), taskID, projectID, "status_change", map[string]interface{}{
-			"old": oldStatus, "new": task.Status,
-		}, "user", "")
-	}
-	if task.Priority != oldPriority {
-		a.recordTaskHistory(r.Context(), taskID, projectID, "priority_change", map[string]interface{}{
-			"old": oldPriority, "new": task.Priority,
-		}, "user", "")
-	}
-	if task.Title != oldTitle {
-		a.recordTaskHistory(r.Context(), taskID, projectID, "title_updated", map[string]interface{}{
-			"old": oldTitle, "new": task.Title,
-		}, "user", "")
-	}
-	if task.Description != oldDescription {
-		a.recordTaskHistory(r.Context(), taskID, projectID, "description_updated", map[string]interface{}{}, "user", "")
 	}
 
 	respondJSON(w, http.StatusOK, task)
@@ -3707,13 +2785,6 @@ func (a *API) UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := a.db.GetTask(r.Context(), taskID)
-	if err != nil || task.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Task not found")
-		return
-	}
-	oldStatus := task.Status
-
 	var input struct {
 		Status string `json:"status"`
 	}
@@ -3722,33 +2793,12 @@ func (a *API) UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	validStatuses := map[string]bool{"todo": true, "in_progress": true, "done": true, "awaiting_approval": true}
-	if !validStatuses[input.Status] {
-		respondError(w, http.StatusBadRequest, "Invalid status")
-		return
-	}
-
-	if err := a.db.UpdateTaskStatus(r.Context(), taskID, input.Status); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Re-fetch to get updated sort_order
-	task, err = a.db.GetTask(r.Context(), taskID)
+	task, err := a.taskService.ChangeStatus(r.Context(), application.ChangeTaskStatusCommand{
+		ProjectID: projectID, TaskID: taskID, Status: input.Status, Actor: application.UserActor(),
+	})
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
-	}
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
-	if input.Status != oldStatus {
-		a.recordTaskHistory(r.Context(), taskID, projectID, "status_change", map[string]interface{}{
-			"old": oldStatus, "new": input.Status,
-		}, "user", "")
-	}
-
-	// Trigger async verification document generation when transitioning to awaiting_approval
-	if input.Status == "awaiting_approval" && a.aiHandler != nil {
-		go a.aiHandler.GenerateVerificationDoc(context.Background(), task)
 	}
 
 	respondJSON(w, http.StatusOK, task)
@@ -3767,32 +2817,11 @@ func (a *API) ApproveTaskVerification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := a.db.GetTask(r.Context(), taskID)
-	if err != nil || task.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Task not found")
+	task, err := a.taskService.ApproveVerification(r.Context(), projectID, taskID, application.UserActor())
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if task.Status != "awaiting_approval" {
-		respondError(w, http.StatusBadRequest, "Task is not awaiting approval")
-		return
-	}
-
-	// Update verification document status if present
-	if task.VerificationDocID != "" {
-		a.db.UpdateTempDocumentStatus(r.Context(), task.VerificationDocID, "approved")
-	}
-
-	// Transition task to done
-	if err := a.db.UpdateTaskStatus(r.Context(), taskID, "done"); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	task, _ = a.db.GetTask(r.Context(), taskID)
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
-	a.recordTaskHistory(r.Context(), taskID, projectID, "verification_approved", map[string]interface{}{
-		"old": "awaiting_approval", "new": "done",
-	}, "user", "")
 
 	respondJSON(w, http.StatusOK, task)
 }
@@ -3810,35 +2839,11 @@ func (a *API) RejectTaskVerification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := a.db.GetTask(r.Context(), taskID)
-	if err != nil || task.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Task not found")
+	task, err := a.taskService.RejectVerification(r.Context(), projectID, taskID, application.UserActor())
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if task.Status != "awaiting_approval" {
-		respondError(w, http.StatusBadRequest, "Task is not awaiting approval")
-		return
-	}
-
-	// Update verification document status if present
-	if task.VerificationDocID != "" {
-		a.db.UpdateTempDocumentStatus(r.Context(), task.VerificationDocID, "rejected")
-	}
-
-	// Clear verification doc and return to in_progress
-	task.VerificationDocID = ""
-	a.db.SetTaskVerificationDoc(r.Context(), taskID, "")
-
-	if err := a.db.UpdateTaskStatus(r.Context(), taskID, "in_progress"); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	task, _ = a.db.GetTask(r.Context(), taskID)
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": projectID, "task": task})
-	a.recordTaskHistory(r.Context(), taskID, projectID, "verification_rejected", map[string]interface{}{
-		"old": "awaiting_approval", "new": "in_progress",
-	}, "user", "")
 
 	respondJSON(w, http.StatusOK, task)
 }
@@ -3857,24 +2862,10 @@ func (a *API) ReorderProjectTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(items) == 0 {
-		respondError(w, http.StatusBadRequest, "Empty reorder list")
+	if err := a.taskService.ReorderProject(r.Context(), projectID, items); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if len(items) > 100 {
-		respondError(w, http.StatusBadRequest, "Too many items (max 100)")
-		return
-	}
-
-	if err := a.db.ReorderTasks(r.Context(), projectID, items); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{
-		"action":     "reordered",
-		"project_id": projectID,
-	})
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -3887,23 +2878,10 @@ func (a *API) ReorderAllTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(items) == 0 {
-		respondError(w, http.StatusBadRequest, "Empty reorder list")
+	if err := a.taskService.ReorderGlobal(r.Context(), items); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if len(items) > 200 {
-		respondError(w, http.StatusBadRequest, "Too many items (max 200)")
-		return
-	}
-
-	if err := a.db.ReorderTasksGlobal(r.Context(), items); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{
-		"action": "reordered",
-	})
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -3921,18 +2899,10 @@ func (a *API) DeleteProjectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := a.db.GetTask(r.Context(), taskID)
-	if err != nil || task.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Task not found")
+	if err := a.taskService.Delete(r.Context(), projectID, taskID); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	if err := a.db.DeleteTask(r.Context(), taskID); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "deleted", "project_id": projectID, "id": taskID})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -3949,19 +2919,11 @@ func (a *API) DuplicateProjectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := a.db.GetTask(r.Context(), taskID)
-	if err != nil || task.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Task not found")
-		return
-	}
-
-	clone, err := a.db.DuplicateTask(r.Context(), taskID)
+	clone, err := a.taskService.Duplicate(r.Context(), projectID, taskID, application.UserActor())
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
-
-	a.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "created", "project_id": projectID, "task": clone})
 	respondJSON(w, http.StatusCreated, clone)
 }
 
@@ -3986,9 +2948,9 @@ func parseFlexibleTime(s string) (time.Time, error) {
 func (a *API) GetSessionLinkedTask(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
 
-	task, err := a.db.GetTaskForSession(r.Context(), sessionID)
-	if err != nil || task == nil {
-		respondError(w, http.StatusNotFound, "No task linked to this session")
+	task, err := a.taskService.GetSessionTask(r.Context(), sessionID)
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -3998,24 +2960,6 @@ func (a *API) GetSessionLinkedTask(w http.ResponseWriter, r *http.Request) {
 // LinkSessionTask links an active session to an existing task or creates a new task and links it
 func (a *API) LinkSessionTask(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
-
-	sess, err := a.db.GetSession(r.Context(), sessionID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Session not found")
-		return
-	}
-
-	// If session already has a linked task, unlink it first (allows re-linking)
-	existingTask, _ := a.db.GetTaskForSession(r.Context(), sessionID)
-	if existingTask != nil {
-		if _, err := a.db.UnlinkSessionFromTask(r.Context(), sessionID); err != nil {
-			respondError(w, http.StatusInternalServerError, "Failed to unlink existing task")
-			return
-		}
-		a.recordTaskHistory(r.Context(), existingTask.ID, existingTask.ProjectID, "session_unlinked", map[string]interface{}{
-			"session_id": sessionID, "session_name": sess.Name,
-		}, "user", sessionID)
-	}
 
 	var input struct {
 		TaskID   *int64 `json:"task_id,omitempty"`
@@ -4029,132 +2973,39 @@ func (a *API) LinkSessionTask(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-
-	var linkedTask *database.ProjectTask
-
-	if input.TaskID != nil && *input.TaskID > 0 {
-		// Link to existing task
-		linkedTask, err = a.db.GetTask(r.Context(), *input.TaskID)
-		if err != nil {
-			respondError(w, http.StatusNotFound, "Task not found")
-			return
-		}
-		if linkedTask.ProjectID != sess.ProjectID {
-			respondError(w, http.StatusBadRequest, "Task belongs to a different project")
-			return
-		}
-	} else if input.TaskData != nil && strings.TrimSpace(input.TaskData.Title) != "" {
-		// Create new task and link
-		priority := input.TaskData.Priority
-		if priority == "" {
-			priority = "medium"
-		}
-		linkedTask = &database.ProjectTask{
-			ProjectID:   sess.ProjectID,
-			Title:       strings.TrimSpace(input.TaskData.Title),
-			Description: input.TaskData.Description,
-			Status:      "in_progress",
-			Priority:    priority,
-		}
-		if err := a.db.CreateTask(r.Context(), linkedTask); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		a.hub.BroadcastStateUpdate("task", map[string]interface{}{
-			"action":     "created",
-			"project_id": sess.ProjectID,
-			"task":       linkedTask,
-		})
-	} else {
-		respondError(w, http.StatusBadRequest, "Either task_id or task_data with title is required")
-		return
+	command := application.LinkSessionTaskCommand{SessionID: sessionID, Actor: application.UserActor()}
+	if input.TaskID != nil {
+		command.TaskID = input.TaskID
 	}
-
-	// Link session to task and rename
-	newName := "Task: " + linkedTask.Title
-	if err := a.db.LinkSessionToTask(r.Context(), sessionID, linkedTask.ID); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
+	if input.TaskData != nil {
+		command.Title = input.TaskData.Title
+		command.Description = input.TaskData.Description
+		command.Priority = input.TaskData.Priority
 	}
-	a.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, sessionID)
-
-	// Broadcast session rename
-	a.hub.BroadcastStateUpdate("session", map[string]interface{}{
-		"action":     "renamed",
-		"session_id": sessionID,
-		"name":       newName,
-	})
-
-	// Record session linked and task assigned history
-	a.recordTaskHistory(r.Context(), linkedTask.ID, linkedTask.ProjectID, "session_linked", map[string]interface{}{
-		"session_id": sessionID, "session_name": newName,
-	}, "user", sessionID)
-	a.recordTaskHistory(r.Context(), linkedTask.ID, linkedTask.ProjectID, "task_assigned", map[string]interface{}{
-		"session_id": sessionID, "session_name": newName,
-	}, "system", sessionID)
-
-	// Auto-set task to in_progress if currently todo
-	if linkedTask.Status == "todo" {
-		oldStatus := linkedTask.Status
-		a.db.UpdateTaskStatus(r.Context(), linkedTask.ID, "in_progress")
-		linkedTask.Status = "in_progress"
-		a.hub.BroadcastStateUpdate("task", map[string]interface{}{
-			"action":     "updated",
-			"project_id": linkedTask.ProjectID,
-			"task":       linkedTask,
-		})
-		a.recordTaskHistory(r.Context(), linkedTask.ID, linkedTask.ProjectID, "status_change", map[string]interface{}{
-			"old": oldStatus, "new": "in_progress", "reason": "auto_on_link",
-		}, "system", sessionID)
+	result, err := a.taskService.LinkSession(r.Context(), command)
+	if err != nil {
+		respondApplicationError(w, err)
+		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"task":         linkedTask,
-		"session_name": newName,
+		"task":         result.Task,
+		"session_name": result.SessionName,
 	})
 }
 
 // UnlinkSessionTask removes the task link from a session.
 func (a *API) UnlinkSessionTask(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
-
-	sess, err := a.db.GetSession(r.Context(), sessionID)
+	result, err := a.taskService.UnlinkSession(r.Context(), sessionID, application.UserActor())
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Session not found")
+		respondApplicationError(w, err)
 		return
 	}
-
-	task, _ := a.db.GetTaskForSession(r.Context(), sessionID)
-	if task == nil {
-		respondError(w, http.StatusConflict, "Session has no linked task")
-		return
-	}
-
-	if _, err := a.db.UnlinkSessionFromTask(r.Context(), sessionID); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Reset session name (remove "Task: " prefix)
-	newName := sess.Name
-	if strings.HasPrefix(newName, "Task: ") {
-		newName = "Session " + sessionID[:8]
-	}
-	a.db.ExecContext(r.Context(), "UPDATE sessions SET name = ? WHERE id = ?", newName, sessionID)
-
-	a.hub.BroadcastStateUpdate("session", map[string]interface{}{
-		"action":     "renamed",
-		"session_id": sessionID,
-		"name":       newName,
-	})
-
-	a.recordTaskHistory(r.Context(), task.ID, task.ProjectID, "session_unlinked", map[string]interface{}{
-		"session_id": sessionID, "session_name": sess.Name,
-	}, "user", sessionID)
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"unlinked_task_id": task.ID,
-		"session_name":     newName,
+		"unlinked_task_id": result.TaskID,
+		"session_name":     result.SessionName,
 	})
 }
 
@@ -4171,13 +3022,10 @@ func (a *API) ListTaskHistory(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
-	history, err := a.db.ListTaskHistory(r.Context(), taskID, limit)
+	history, err := a.taskService.ListHistory(r.Context(), taskID, limit)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
-	}
-	if history == nil {
-		history = []database.TaskHistory{}
 	}
 	respondJSON(w, http.StatusOK, history)
 }
@@ -4197,13 +3045,14 @@ func (a *API) AddTaskComment(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Comment string `json:"comment"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil || strings.TrimSpace(input.Comment) == "" {
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Comment is required")
 		return
 	}
-	a.recordTaskHistory(r.Context(), taskID, projectID, "comment_added", map[string]interface{}{
-		"comment": strings.TrimSpace(input.Comment),
-	}, "user", "")
+	if err := a.taskService.AddComment(r.Context(), projectID, taskID, input.Comment, application.UserActor()); err != nil {
+		respondApplicationError(w, err)
+		return
+	}
 	respondJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
 }
 
@@ -4269,23 +3118,15 @@ func (a *API) ListTaskDocuments(w http.ResponseWriter, r *http.Request) {
 
 // TriggerSessionEvaluation triggers an AI evaluation for the current session
 func (a *API) TriggerSessionEvaluation(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	sessionID := chi.URLParam(r, "id")
-
-	if !a.sessionMgr.IsSessionRunning(sessionID) {
-		respondError(w, http.StatusNotFound, "Session not running")
+	if _, err := services.Execution.Sessions.Evaluate(platformUIContext(r), application.EvaluateSessionCommand{SessionID: sessionID, Authorization: platformUIAuthorization(r)}); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	output, err := a.sessionMgr.GetSessionOutput(sessionID)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to read session output")
-		return
-	}
-
-	if a.aiHandler != nil {
-		go a.aiHandler.EvaluateSession(context.Background(), sessionID, "session_request", output)
-	}
-
 	respondJSON(w, http.StatusAccepted, map[string]string{
 		"status":  "accepted",
 		"message": "AI evaluation triggered",
@@ -4338,6 +3179,10 @@ func (a *API) GetAllTaskSessionSummary(w http.ResponseWriter, r *http.Request) {
 
 // SendSessionInput sends text to a running session's terminal PTY.
 func (a *API) SendSessionInput(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 
 	var input struct {
@@ -4352,8 +3197,8 @@ func (a *API) SendSessionInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.submitSessionLine(id, input.Text); err != nil {
-		respondError(w, http.StatusNotFound, err.Error())
+	if err := services.Execution.Sessions.SendInput(platformUIContext(r), application.SendSessionInputCommand{SessionID: id, Text: input.Text, Authorization: platformUIAuthorization(r)}); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -4362,6 +3207,10 @@ func (a *API) SendSessionInput(w http.ResponseWriter, r *http.Request) {
 
 // SetSessionModel changes the model used by future turns of an active session.
 func (a *API) SetSessionModel(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	var input struct {
 		Model string `json:"model"`
@@ -4371,9 +3220,11 @@ func (a *API) SetSessionModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := a.sessionMgr.SetSessionModel(r.Context(), id, input.Model, a.sessionLineSubmitDelay(r.Context(), id))
+	updated, err := services.Execution.Sessions.SetModel(platformUIContext(r), application.SetSessionModelCommand{
+		SessionID: id, Model: input.Model, Authorization: platformUIAuthorization(r),
+	})
 	if err != nil {
-		respondSessionSettingError(w, err)
+		respondApplicationError(w, err)
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]string{
@@ -4386,6 +3237,10 @@ func (a *API) SetSessionModel(w http.ResponseWriter, r *http.Request) {
 
 // SetSessionEffort changes the reasoning/thinking level used by future turns.
 func (a *API) SetSessionEffort(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	var input struct {
 		Effort string `json:"effort"`
@@ -4395,9 +3250,11 @@ func (a *API) SetSessionEffort(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := a.sessionMgr.SetSessionEffort(r.Context(), id, input.Effort, a.sessionLineSubmitDelay(r.Context(), id))
+	updated, err := services.Execution.Sessions.SetEffort(platformUIContext(r), application.SetSessionEffortCommand{
+		SessionID: id, Effort: input.Effort, Authorization: platformUIAuthorization(r),
+	})
 	if err != nil {
-		respondSessionSettingError(w, err)
+		respondApplicationError(w, err)
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]string{
@@ -4423,47 +3280,46 @@ func respondSessionSettingError(w http.ResponseWriter, err error) {
 
 // GenerateMCPAPIKey generates a new random API key for MCP HTTP access.
 func (a *API) GenerateMCPAPIKey(w http.ResponseWriter, r *http.Request) {
-	b := make([]byte, 32)
-	if _, err := cryptoRandRead(b); err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to generate key")
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
 		return
 	}
-	key := fmt.Sprintf("dm_%s", hexEncode(b))
-
-	if err := a.db.SetSetting(r.Context(), "mcp_api_key", key); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	status, err := services.Configuration.Configuration.GenerateMCPAPIKey(platformUIContext(r), platformUIAuthorization(r))
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
 	respondJSON(w, http.StatusOK, map[string]string{
-		"key":    key,
+		"key":    status.Secret,
 		"status": "generated",
 	})
 }
 
 // GetMCPAPIKeyStatus returns whether an API key exists and its prefix.
 func (a *API) GetMCPAPIKeyStatus(w http.ResponseWriter, r *http.Request) {
-	key, _ := a.db.GetSetting(r.Context(), "mcp_api_key")
-	if key == "" {
-		respondJSON(w, http.StatusOK, map[string]interface{}{
-			"exists": false,
-		})
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
 		return
 	}
-	prefix := key
-	if len(prefix) > 10 {
-		prefix = prefix[:10] + "..."
+	status, err := services.Configuration.Configuration.MCPAPIKeyStatus(platformUIContext(r))
+	if err != nil {
+		respondApplicationError(w, err)
+		return
 	}
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"exists": true,
-		"prefix": prefix,
+		"exists": status.Exists,
+		"prefix": status.Preview,
 	})
 }
 
 // RevokeMCPAPIKey removes the MCP API key.
 func (a *API) RevokeMCPAPIKey(w http.ResponseWriter, r *http.Request) {
-	if err := a.db.SetSetting(r.Context(), "mcp_api_key", ""); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	if err := services.Configuration.Configuration.RevokeMCPAPIKey(platformUIContext(r), platformUIAuthorization(r)); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
@@ -4471,40 +3327,33 @@ func (a *API) RevokeMCPAPIKey(w http.ResponseWriter, r *http.Request) {
 
 // GetToolPolicies returns the global tool policies for each context.
 func (a *API) GetToolPolicies(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	session, _ := a.db.GetSetting(ctx, "mcp_tool_policy_session")
-	chat, _ := a.db.GetSetting(ctx, "mcp_tool_policy_chat")
-	httpPolicy, _ := a.db.GetSetting(ctx, "mcp_tool_policy_http")
-
-	respondJSON(w, http.StatusOK, map[string]string{
-		"session": session,
-		"chat":    chat,
-		"http":    httpPolicy,
-	})
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	policies, err := services.Configuration.Configuration.ToolPolicies(platformUIContext(r))
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, policies)
 }
 
 // UpdateToolPolicies updates the global tool policies.
 func (a *API) UpdateToolPolicies(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	var input map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
-	ctx := r.Context()
-	validKeys := map[string]bool{
-		"session": true,
-		"chat":    true,
-		"http":    true,
-	}
-	for key, value := range input {
-		if !validKeys[key] {
-			continue
-		}
-		if err := a.db.SetSetting(ctx, "mcp_tool_policy_"+key, value); err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
+	if err := services.Configuration.Configuration.UpdateToolPolicies(platformUIContext(r), platformUIAuthorization(r), input); err != nil {
+		respondApplicationError(w, err)
+		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
@@ -4512,35 +3361,37 @@ func (a *API) UpdateToolPolicies(w http.ResponseWriter, r *http.Request) {
 
 // GetProjectToolPolicy returns the tool policy for a specific project.
 func (a *API) GetProjectToolPolicy(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
 
-	project, err := a.db.GetProject(r.Context(), id)
+	policy, err := services.Configuration.Configuration.ProjectToolPolicy(platformUIContext(r), id)
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
+		respondApplicationError(w, err)
 		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{
-		"project_id":  fmt.Sprintf("%d", project.ID),
-		"tool_policy": project.ToolPolicy,
+		"project_id":  fmt.Sprintf("%d", id),
+		"tool_policy": policy,
 	})
 }
 
 // UpdateProjectToolPolicy updates the tool policy for a specific project.
 func (a *API) UpdateProjectToolPolicy(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
-		return
-	}
-
-	project, err := a.db.GetProject(r.Context(), id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
 		return
 	}
 
@@ -4552,9 +3403,8 @@ func (a *API) UpdateProjectToolPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	project.ToolPolicy = input.ToolPolicy
-	if err := a.db.UpdateProject(r.Context(), project); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	if err := services.Configuration.Configuration.UpdateProjectToolPolicy(platformUIContext(r), platformUIAuthorization(r), id, input.ToolPolicy); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -4565,43 +3415,30 @@ func (a *API) UpdateProjectToolPolicy(w http.ResponseWriter, r *http.Request) {
 
 // GetProjectShares returns the list of projects that a given project has read access to.
 func (a *API) GetProjectShares(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
 
-	shares, err := a.db.ListProjectShares(r.Context(), id)
+	shares, err := services.Configuration.Configuration.ProjectShares(platformUIContext(r), id)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
-
-	type shareInfo struct {
-		ProjectID int64  `json:"project_id"`
-		Name      string `json:"name"`
-		Path      string `json:"path"`
-		Type      string `json:"type"`
-	}
-	result := []shareInfo{}
-	for _, s := range shares {
-		p, err := a.db.GetProject(r.Context(), s.SharedProjectID)
-		if err != nil {
-			continue
-		}
-		result = append(result, shareInfo{
-			ProjectID: p.ID,
-			Name:      p.Name,
-			Path:      p.Path,
-			Type:      p.Type,
-		})
-	}
-
-	respondJSON(w, http.StatusOK, result)
+	respondJSON(w, http.StatusOK, shares)
 }
 
 // UpdateProjectShares replaces the sharing relationships for a project.
 func (a *API) UpdateProjectShares(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
@@ -4616,8 +3453,8 @@ func (a *API) UpdateProjectShares(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.db.ReplaceProjectShares(r.Context(), id, input.SharedProjectIDs); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	if err := services.Configuration.Configuration.ReplaceProjectShares(platformUIContext(r), id, input.SharedProjectIDs); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -4635,9 +3472,13 @@ type tagInfo struct {
 // Tag CRUD
 
 func (a *API) ListAllTags(w http.ResponseWriter, r *http.Request) {
-	tags, err := a.db.ListTags(r.Context())
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	tags, err := services.Configuration.Tags.List(platformUIContext(r))
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
 	result := make([]tagInfo, len(tags))
@@ -4648,6 +3489,10 @@ func (a *API) ListAllTags(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) CreateTag(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	var input struct {
 		Name  string `json:"name"`
 		Color string `json:"color"`
@@ -4656,38 +3501,22 @@ func (a *API) CreateTag(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-	name := strings.TrimSpace(input.Name)
-	if name == "" {
-		respondError(w, http.StatusBadRequest, "Tag name is required")
-		return
-	}
-	color := strings.TrimSpace(input.Color)
-	if color == "" {
-		color = "#7aa2f7"
-	}
-
-	tag := &database.Tag{Name: name, Color: color}
-	if err := a.db.CreateTag(r.Context(), tag); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			respondError(w, http.StatusConflict, "A tag with this name already exists")
-			return
-		}
-		respondError(w, http.StatusInternalServerError, err.Error())
+	tag, err := services.Configuration.Tags.Create(platformUIContext(r), input.Name, input.Color)
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 	respondJSON(w, http.StatusCreated, tagInfo{ID: tag.ID, Name: tag.Name, Color: tag.Color})
 }
 
 func (a *API) UpdateTag(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid tag ID")
-		return
-	}
-
-	tag, err := a.db.GetTag(r.Context(), id)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Tag not found")
 		return
 	}
 
@@ -4699,37 +3528,26 @@ func (a *API) UpdateTag(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-	if input.Name != nil {
-		name := strings.TrimSpace(*input.Name)
-		if name == "" {
-			respondError(w, http.StatusBadRequest, "Tag name cannot be empty")
-			return
-		}
-		tag.Name = name
-	}
-	if input.Color != nil {
-		tag.Color = *input.Color
-	}
-
-	if err := a.db.UpdateTag(r.Context(), tag); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			respondError(w, http.StatusConflict, "A tag with this name already exists")
-			return
-		}
-		respondError(w, http.StatusInternalServerError, err.Error())
+	tag, err := services.Configuration.Tags.Update(platformUIContext(r), application.UpdateTagCommand{ID: id, Name: input.Name, Color: input.Color})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 	respondJSON(w, http.StatusOK, tagInfo{ID: tag.ID, Name: tag.Name, Color: tag.Color})
 }
 
 func (a *API) DeleteTagHandler(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid tag ID")
 		return
 	}
-	if err := a.db.DeleteTag(r.Context(), id); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	if err := services.Configuration.Tags.Delete(platformUIContext(r), id); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -4738,14 +3556,18 @@ func (a *API) DeleteTagHandler(w http.ResponseWriter, r *http.Request) {
 // Project tag assignments
 
 func (a *API) GetProjectTags(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
-	tags, err := a.db.ListProjectTagDetails(r.Context(), id)
+	tags, err := services.Configuration.Tags.ListProject(platformUIContext(r), id)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
 	result := make([]tagInfo, len(tags))
@@ -4756,6 +3578,10 @@ func (a *API) GetProjectTags(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) UpdateProjectTags(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
@@ -4770,8 +3596,8 @@ func (a *API) UpdateProjectTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.db.ReplaceProjectTagIDs(r.Context(), id, input.TagIDs); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	if err := services.Configuration.Tags.ReplaceProject(platformUIContext(r), id, input.TagIDs); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -4782,30 +3608,34 @@ func (a *API) UpdateProjectTags(w http.ResponseWriter, r *http.Request) {
 
 // GetProjectSkills returns global skills with per-project config + project-specific skills.
 func (a *API) GetProjectSkills(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
 
-	ctx := r.Context()
-	project, err := a.db.GetProject(ctx, projectID)
+	ctx := platformUIContext(r)
+	project, err := services.Configuration.Projects.Get(ctx, projectID)
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
+		respondApplicationError(w, err)
 		return
 	}
 
 	// Get all global skills
-	allSkills, err := a.db.ListSkills(ctx)
+	allSkills, err := services.Configuration.Skills.List(ctx)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
 
 	// Get per-project overrides
-	configs, err := a.db.ListProjectSkillConfigs(ctx, projectID)
+	configs, err := services.Configuration.Skills.ListProjectConfig(ctx, projectID)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
 	configMap := make(map[int64]bool) // skillID -> enabled
@@ -4835,9 +3665,9 @@ func (a *API) GetProjectSkills(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get project-specific skills
-	projectSkills, err := a.db.ListProjectSkills(ctx, projectID)
+	projectSkills, err := services.Configuration.Skills.ListProjectSkills(ctx, projectID)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -4850,16 +3680,13 @@ func (a *API) GetProjectSkills(w http.ResponseWriter, r *http.Request) {
 
 // SaveProjectSkillConfig saves per-project skill overrides (inherit or custom).
 func (a *API) SaveProjectSkillConfig(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
-		return
-	}
-
-	ctx := r.Context()
-	project, err := a.db.GetProject(ctx, projectID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
 		return
 	}
 
@@ -4875,43 +3702,27 @@ func (a *API) SaveProjectSkillConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if input.Inherit {
-		project.SkillPolicy = ""
-	} else {
-		project.SkillPolicy = "custom"
-		// Upsert all overrides
-		for _, o := range input.Overrides {
-			if err := a.db.UpsertProjectSkillConfig(ctx, projectID, o.SkillID, o.Enabled); err != nil {
-				respondError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-		}
+	configs := make(map[int64]bool, len(input.Overrides))
+	for _, override := range input.Overrides {
+		configs[override.SkillID] = override.Enabled
 	}
-
-	if err := a.db.UpdateProject(ctx, project); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+	if err := services.Configuration.Skills.SetProjectConfig(platformUIContext(r), projectID, input.Inherit, configs); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	a.hub.BroadcastStateUpdate("project", map[string]interface{}{
-		"action":  "updated",
-		"project": project,
-	})
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
 // CreateProjectSkillHandler creates a project-specific skill.
 func (a *API) CreateProjectSkillHandler(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
-		return
-	}
-
-	ctx := r.Context()
-	if _, err := a.db.GetProject(ctx, projectID); err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
 		return
 	}
 
@@ -4925,39 +3736,21 @@ func (a *API) CreateProjectSkillHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if msg := validateSkillName(input.Name); msg != "" {
-		respondError(w, http.StatusBadRequest, msg)
+	ps, err := services.Configuration.Skills.CreateProjectSkill(platformUIContext(r), projectID, application.SkillInput{Name: input.Name, Content: input.Content, Enabled: true, Category: input.Category})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	ps := &database.ProjectSkill{
-		ProjectID: projectID,
-		Name:      input.Name,
-		Content:   input.Content,
-		Enabled:   true,
-		Category:  input.Category,
-	}
-
-	if err := a.db.CreateProjectSkill(ctx, ps); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			respondError(w, http.StatusConflict, "A project skill with this name already exists")
-			return
-		}
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("project_skill", map[string]interface{}{
-		"action":     "created",
-		"project_id": projectID,
-		"skill":      ps,
-	})
 
 	respondJSON(w, http.StatusCreated, ps)
 }
 
 // UpdateProjectSkillHandler updates a project-specific skill.
 func (a *API) UpdateProjectSkillHandler(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
@@ -4967,17 +3760,6 @@ func (a *API) UpdateProjectSkillHandler(w http.ResponseWriter, r *http.Request) 
 	skillID, err := strconv.ParseInt(chi.URLParam(r, "skillId"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid skill ID")
-		return
-	}
-
-	ctx := r.Context()
-	ps, err := a.db.GetProjectSkill(ctx, skillID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project skill not found")
-		return
-	}
-	if ps.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Project skill not found")
 		return
 	}
 
@@ -4992,43 +3774,21 @@ func (a *API) UpdateProjectSkillHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if input.Name != nil {
-		if msg := validateSkillName(*input.Name); msg != "" {
-			respondError(w, http.StatusBadRequest, msg)
-			return
-		}
-		ps.Name = *input.Name
-	}
-	if input.Content != nil {
-		ps.Content = *input.Content
-	}
-	if input.Enabled != nil {
-		ps.Enabled = *input.Enabled
-	}
-	if input.Category != nil {
-		ps.Category = *input.Category
-	}
-
-	if err := a.db.UpdateProjectSkill(ctx, ps); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			respondError(w, http.StatusConflict, "A project skill with this name already exists")
-			return
-		}
-		respondError(w, http.StatusInternalServerError, err.Error())
+	ps, err := services.Configuration.Skills.UpdateProjectSkill(platformUIContext(r), projectID, application.UpdateSkillCommand{ID: skillID, Name: input.Name, Content: input.Content, Enabled: input.Enabled, Category: input.Category})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	a.hub.BroadcastStateUpdate("project_skill", map[string]interface{}{
-		"action":     "updated",
-		"project_id": projectID,
-		"skill":      ps,
-	})
 
 	respondJSON(w, http.StatusOK, ps)
 }
 
 // DeleteProjectSkillHandler deletes a project-specific skill.
 func (a *API) DeleteProjectSkillHandler(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
@@ -5041,27 +3801,10 @@ func (a *API) DeleteProjectSkillHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	ctx := r.Context()
-	ps, err := a.db.GetProjectSkill(ctx, skillID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project skill not found")
+	if err := services.Configuration.Skills.DeleteProjectSkill(platformUIContext(r), projectID, skillID); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if ps.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Project skill not found")
-		return
-	}
-
-	if err := a.db.DeleteProjectSkill(ctx, skillID); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("project_skill", map[string]interface{}{
-		"action":     "deleted",
-		"project_id": projectID,
-		"id":         skillID,
-	})
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -5070,27 +3813,26 @@ func (a *API) DeleteProjectSkillHandler(w http.ResponseWriter, r *http.Request) 
 
 // GetProjectMCPServers returns global MCP servers + project-specific MCP servers.
 func (a *API) GetProjectMCPServers(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
 
-	ctx := r.Context()
-	if _, err := a.db.GetProject(ctx, projectID); err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
+	ctx := platformUIContext(r)
+	globalServers, err := services.Configuration.MCP.ListGlobal(ctx)
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
 
-	globalServers, err := a.db.ListMCPServers(ctx)
+	projectServers, err := services.Configuration.MCP.ListProject(ctx, projectID)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	projectServers, err := a.db.ListProjectMCPServers(ctx, projectID)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -5102,15 +3844,13 @@ func (a *API) GetProjectMCPServers(w http.ResponseWriter, r *http.Request) {
 
 // CreateProjectMCPServerHandler creates a project-specific MCP server.
 func (a *API) CreateProjectMCPServerHandler(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
-		return
-	}
-
-	ctx := r.Context()
-	if _, err := a.db.GetProject(ctx, projectID); err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
 		return
 	}
 
@@ -5125,44 +3865,21 @@ func (a *API) CreateProjectMCPServerHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if input.Name == "" || input.Command == "" {
-		respondError(w, http.StatusBadRequest, "name and command are required")
+	m, err := services.Configuration.MCP.CreateProject(platformUIContext(r), platformUIAuthorization(r), projectID, application.MCPServerInput{Name: input.Name, Command: input.Command, Args: input.Args, Env: input.Env, Enabled: true})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if input.Args == "" {
-		input.Args = "[]"
-	}
-	if input.Env == "" {
-		input.Env = "{}"
-	}
-
-	m := &database.ProjectMCPServer{
-		ProjectID: projectID,
-		Name:      input.Name,
-		Command:   input.Command,
-		Args:      input.Args,
-		Env:       input.Env,
-		Enabled:   true,
-	}
-
-	if err := a.db.CreateProjectMCPServer(ctx, m); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			respondError(w, http.StatusConflict, "A project MCP server with this name already exists")
-			return
-		}
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("project_mcp", map[string]interface{}{
-		"action": "created", "project_id": projectID, "mcp": m,
-	})
 
 	respondJSON(w, http.StatusCreated, m)
 }
 
 // GetProjectMCPServerHandler returns a single project-specific MCP server.
 func (a *API) GetProjectMCPServerHandler(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
@@ -5175,21 +3892,26 @@ func (a *API) GetProjectMCPServerHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	m, err := a.db.GetProjectMCPServer(r.Context(), mcpID)
+	servers, err := services.Configuration.MCP.ListProject(platformUIContext(r), projectID)
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Project MCP server not found")
+		respondApplicationError(w, err)
 		return
 	}
-	if m.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Project MCP server not found")
-		return
+	for i := range servers {
+		if servers[i].ID == mcpID {
+			respondJSON(w, http.StatusOK, servers[i])
+			return
+		}
 	}
-
-	respondJSON(w, http.StatusOK, m)
+	respondError(w, http.StatusNotFound, "Project MCP server not found")
 }
 
 // UpdateProjectMCPServerHandler updates a project-specific MCP server.
 func (a *API) UpdateProjectMCPServerHandler(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
@@ -5199,17 +3921,6 @@ func (a *API) UpdateProjectMCPServerHandler(w http.ResponseWriter, r *http.Reque
 	mcpID, err := strconv.ParseInt(chi.URLParam(r, "mcpId"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid MCP server ID")
-		return
-	}
-
-	ctx := r.Context()
-	m, err := a.db.GetProjectMCPServer(ctx, mcpID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project MCP server not found")
-		return
-	}
-	if m.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Project MCP server not found")
 		return
 	}
 
@@ -5225,40 +3936,21 @@ func (a *API) UpdateProjectMCPServerHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if input.Name != nil {
-		m.Name = *input.Name
-	}
-	if input.Command != nil {
-		m.Command = *input.Command
-	}
-	if input.Args != nil {
-		m.Args = *input.Args
-	}
-	if input.Env != nil {
-		m.Env = *input.Env
-	}
-	if input.Enabled != nil {
-		m.Enabled = *input.Enabled
-	}
-
-	if err := a.db.UpdateProjectMCPServer(ctx, m); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			respondError(w, http.StatusConflict, "A project MCP server with this name already exists")
-			return
-		}
-		respondError(w, http.StatusInternalServerError, err.Error())
+	m, err := services.Configuration.MCP.UpdateProject(platformUIContext(r), platformUIAuthorization(r), projectID, application.UpdateMCPServerCommand{ID: mcpID, Name: input.Name, Command: input.Command, Args: input.Args, Env: input.Env, Enabled: input.Enabled})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	a.hub.BroadcastStateUpdate("project_mcp", map[string]interface{}{
-		"action": "updated", "project_id": projectID, "mcp": m,
-	})
 
 	respondJSON(w, http.StatusOK, m)
 }
 
 // DeleteProjectMCPServerHandler deletes a project-specific MCP server.
 func (a *API) DeleteProjectMCPServerHandler(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
@@ -5271,25 +3963,10 @@ func (a *API) DeleteProjectMCPServerHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	ctx := r.Context()
-	m, err := a.db.GetProjectMCPServer(ctx, mcpID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Project MCP server not found")
+	if err := services.Configuration.MCP.DeleteProject(platformUIContext(r), platformUIAuthorization(r), projectID, mcpID); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if m.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Project MCP server not found")
-		return
-	}
-
-	if err := a.db.DeleteProjectMCPServer(ctx, mcpID); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("project_mcp", map[string]interface{}{
-		"action": "deleted", "project_id": projectID, "id": mcpID,
-	})
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -5297,36 +3974,33 @@ func (a *API) DeleteProjectMCPServerHandler(w http.ResponseWriter, r *http.Reque
 // --- Project Custom Tools ---
 
 func (a *API) ListProjectTools(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
-	ctx := r.Context()
-	if _, err := a.db.GetProject(ctx, projectID); err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
-		return
-	}
-	tools, err := a.db.ListProjectTools(ctx, projectID)
+	tools, err := services.Configuration.CustomTools.List(platformUIContext(r), projectID)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
 	respondJSON(w, http.StatusOK, tools)
 }
 
 func (a *API) CreateProjectTool(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
-	ctx := r.Context()
-	if _, err := a.db.GetProject(ctx, projectID); err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
-		return
-	}
-
 	var input struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
@@ -5339,40 +4013,19 @@ func (a *API) CreateProjectTool(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-	if input.Name == "" || input.Command == "" {
-		respondError(w, http.StatusBadRequest, "name and command are required")
+	t, err := services.Configuration.CustomTools.Create(platformUIContext(r), platformUIAuthorization(r), projectID, application.CustomToolInput{Name: input.Name, Description: input.Description, Command: input.Command, Parameters: input.Parameters, Confirm: input.Confirm, WorkingDir: input.WorkingDir, Enabled: true})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if input.Parameters == "" {
-		input.Parameters = "{}"
-	}
-
-	t := &database.ProjectTool{
-		ProjectID:   projectID,
-		Name:        input.Name,
-		Description: input.Description,
-		Command:     input.Command,
-		Parameters:  input.Parameters,
-		Confirm:     input.Confirm,
-		WorkingDir:  input.WorkingDir,
-		Enabled:     true,
-	}
-	if err := a.db.CreateProjectTool(ctx, t); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			respondError(w, http.StatusConflict, "A tool with this name already exists for this project")
-			return
-		}
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("project_tools", map[string]interface{}{
-		"action": "created", "project_id": projectID, "tool": t,
-	})
 	respondJSON(w, http.StatusCreated, t)
 }
 
 func (a *API) UpdateProjectTool(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
@@ -5381,17 +4034,6 @@ func (a *API) UpdateProjectTool(w http.ResponseWriter, r *http.Request) {
 	toolID, err := strconv.ParseInt(chi.URLParam(r, "toolId"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid tool ID")
-		return
-	}
-
-	ctx := r.Context()
-	t, err := a.db.GetProjectTool(ctx, toolID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Tool not found")
-		return
-	}
-	if t.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Tool not found")
 		return
 	}
 
@@ -5401,44 +4043,41 @@ func (a *API) UpdateProjectTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if v, ok := input["name"].(string); ok {
-		t.Name = v
+	command := application.UpdateCustomToolCommand{ID: toolID}
+	if value, exists := input["name"].(string); exists {
+		command.Name = &value
 	}
-	if v, ok := input["description"].(string); ok {
-		t.Description = v
+	if value, exists := input["description"].(string); exists {
+		command.Description = &value
 	}
-	if v, ok := input["command"].(string); ok {
-		t.Command = v
+	if value, exists := input["command"].(string); exists {
+		command.Command = &value
 	}
-	if v, ok := input["parameters"].(string); ok {
-		t.Parameters = v
+	if value, exists := input["parameters"].(string); exists {
+		command.Parameters = &value
 	}
-	if v, ok := input["confirm"].(bool); ok {
-		t.Confirm = v
+	if value, exists := input["confirm"].(bool); exists {
+		command.Confirm = &value
 	}
-	if v, ok := input["working_dir"].(string); ok {
-		t.WorkingDir = v
+	if value, exists := input["working_dir"].(string); exists {
+		command.WorkingDir = &value
 	}
-	if v, ok := input["enabled"].(bool); ok {
-		t.Enabled = v
+	if value, exists := input["enabled"].(bool); exists {
+		command.Enabled = &value
 	}
-
-	if err := a.db.UpdateProjectTool(ctx, t); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			respondError(w, http.StatusConflict, "A tool with this name already exists for this project")
-			return
-		}
-		respondError(w, http.StatusInternalServerError, err.Error())
+	t, err := services.Configuration.CustomTools.Update(platformUIContext(r), platformUIAuthorization(r), projectID, command)
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	a.hub.BroadcastStateUpdate("project_tools", map[string]interface{}{
-		"action": "updated", "project_id": projectID, "tool": t,
-	})
 	respondJSON(w, http.StatusOK, t)
 }
 
 func (a *API) DeleteProjectTool(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
@@ -5450,25 +4089,10 @@ func (a *API) DeleteProjectTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
-	t, err := a.db.GetProjectTool(ctx, toolID)
-	if err != nil {
-		respondError(w, http.StatusNotFound, "Tool not found")
+	if err := services.Configuration.CustomTools.Delete(platformUIContext(r), platformUIAuthorization(r), projectID, toolID); err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-	if t.ProjectID != projectID {
-		respondError(w, http.StatusNotFound, "Tool not found")
-		return
-	}
-
-	if err := a.db.DeleteProjectTool(ctx, toolID); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	a.hub.BroadcastStateUpdate("project_tools", map[string]interface{}{
-		"action": "deleted", "project_id": projectID, "id": toolID,
-	})
 	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -5476,29 +4100,38 @@ func (a *API) DeleteProjectTool(w http.ResponseWriter, r *http.Request) {
 // For sessions: GET /api/sessions/{id}/tools
 // For projects: GET /api/projects/{id}/tools
 func (a *API) GetResolvedProjectTools(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid project ID")
 		return
 	}
 
-	ctx := r.Context()
+	ctx := platformUIContext(r)
 	allTools := mcp.AllTools()
 
 	// Global session policy (sessions default to deny_all)
 	globalPolicy := mcp.ToolPolicy{Mode: "deny_all"}
-	if policyStr, _ := a.db.GetSetting(ctx, "mcp_tool_policy_session"); policyStr != "" {
+	policies, err := services.Configuration.Configuration.ToolPolicies(ctx)
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	if policyStr := policies["session"]; policyStr != "" {
 		globalPolicy = mcp.ParsePolicy(policyStr)
 	}
 
 	// Project policy
-	project, err := a.db.GetProject(ctx, projectID)
+	projectPolicy, err := services.Configuration.Configuration.ProjectToolPolicy(ctx, projectID)
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Project not found")
+		respondApplicationError(w, err)
 		return
 	}
 
-	effectivePolicy := mcp.ResolveProjectPolicy(globalPolicy, project.ToolPolicy)
+	effectivePolicy := mcp.ResolveProjectPolicy(globalPolicy, projectPolicy)
 
 	type toolInfo struct {
 		Name        string `json:"name"`
@@ -5517,12 +4150,16 @@ func (a *API) GetResolvedProjectTools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) GetResolvedSessionTools(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	sessionID := chi.URLParam(r, "id")
 
-	ctx := r.Context()
-	sess, err := a.db.GetSession(ctx, sessionID)
+	ctx := platformUIContext(r)
+	sess, err := services.Execution.SessionQueries.GetSession(ctx, sessionID)
 	if err != nil {
-		respondError(w, http.StatusNotFound, "Session not found")
+		respondApplicationError(w, err)
 		return
 	}
 
@@ -5530,16 +4167,21 @@ func (a *API) GetResolvedSessionTools(w http.ResponseWriter, r *http.Request) {
 
 	// Global session policy (sessions default to deny_all)
 	globalPolicy := mcp.ToolPolicy{Mode: "deny_all"}
-	if policyStr, _ := a.db.GetSetting(ctx, "mcp_tool_policy_session"); policyStr != "" {
+	policies, err := services.Configuration.Configuration.ToolPolicies(ctx)
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	if policyStr := policies["session"]; policyStr != "" {
 		globalPolicy = mcp.ParsePolicy(policyStr)
 	}
 
 	// Resolve: project policy overrides global if set, otherwise inherit global
 	var projectPolicyJSON string
 	if sess.ProjectID > 0 {
-		project, err := a.db.GetProject(ctx, sess.ProjectID)
-		if err == nil {
-			projectPolicyJSON = project.ToolPolicy
+		projectPolicy, projectErr := services.Configuration.Configuration.ProjectToolPolicy(ctx, sess.ProjectID)
+		if projectErr == nil {
+			projectPolicyJSON = projectPolicy
 		}
 	}
 	effectivePolicy := mcp.ResolveProjectPolicy(globalPolicy, projectPolicyJSON)
@@ -5578,7 +4220,24 @@ func (a *API) Context() context.Context {
 // GetTokenUsageSummary handles GET /api/token-usage/summary
 // Query params: since (ISO date), project_id (optional), days (7|30|90, default 30)
 func (a *API) GetTokenUsageSummary(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	ctx := platformUIContext(r)
+	queries, ok := services.Collaboration.TokenUsageQueries.(interface {
+		GetTokenUsageSummary(context.Context, time.Time, *int64) (*database.TokenUsageSummary, error)
+		GetTokenUsageBySource(context.Context, time.Time, *int64) ([]database.TokenUsageBySource, error)
+		GetTokenUsageByModel(context.Context, time.Time, *int64) ([]database.TokenUsageByModel, error)
+		GetTokenUsageDaily(context.Context, time.Time, *int64) ([]database.TokenUsageDaily, error)
+		GetTokenUsageByProject(context.Context, time.Time) ([]database.TokenUsageByProject, error)
+		GetTokenUsageByProjectModel(context.Context, time.Time) ([]database.TokenUsageByProjectModel, error)
+		GetTokenUsageByAISubcategory(context.Context, time.Time) ([]database.TokenUsageBySubcategory, error)
+	})
+	if !ok {
+		respondError(w, http.StatusServiceUnavailable, "Application services unavailable")
+		return
+	}
 
 	// Parse time range
 	days := 30
@@ -5603,21 +4262,21 @@ func (a *API) GetTokenUsageSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch all data in parallel-ish (sequential but fast on SQLite)
-	summary, err := a.db.GetTokenUsageSummary(ctx, since, projectID)
+	summary, err := queries.GetTokenUsageSummary(ctx, since, projectID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to get token usage summary")
 		return
 	}
 
-	bySource, err := a.db.GetTokenUsageBySource(ctx, since, projectID)
+	bySource, err := queries.GetTokenUsageBySource(ctx, since, projectID)
 	if err != nil {
 		log.Printf("[API] GetTokenUsageBySource error: %v", err)
 	}
-	byModel, err := a.db.GetTokenUsageByModel(ctx, since, projectID)
+	byModel, err := queries.GetTokenUsageByModel(ctx, since, projectID)
 	if err != nil {
 		log.Printf("[API] GetTokenUsageByModel error: %v", err)
 	}
-	daily, err := a.db.GetTokenUsageDaily(ctx, since, projectID)
+	daily, err := queries.GetTokenUsageDaily(ctx, since, projectID)
 	if err != nil {
 		log.Printf("[API] GetTokenUsageDaily error: %v", err)
 	}
@@ -5627,15 +4286,15 @@ func (a *API) GetTokenUsageSummary(w http.ResponseWriter, r *http.Request) {
 	var byProjectModel []database.TokenUsageByProjectModel
 	var byAISubcategory []database.TokenUsageBySubcategory
 	if projectID == nil {
-		byProject, err = a.db.GetTokenUsageByProject(ctx, since)
+		byProject, err = queries.GetTokenUsageByProject(ctx, since)
 		if err != nil {
 			log.Printf("[API] GetTokenUsageByProject error: %v", err)
 		}
-		byProjectModel, err = a.db.GetTokenUsageByProjectModel(ctx, since)
+		byProjectModel, err = queries.GetTokenUsageByProjectModel(ctx, since)
 		if err != nil {
 			log.Printf("[API] GetTokenUsageByProjectModel error: %v", err)
 		}
-		byAISubcategory, err = a.db.GetTokenUsageByAISubcategory(ctx, since)
+		byAISubcategory, err = queries.GetTokenUsageByAISubcategory(ctx, since)
 		if err != nil {
 			log.Printf("[API] GetTokenUsageByAISubcategory error: %v", err)
 		}
@@ -5664,9 +4323,13 @@ func (a *API) GetTokenUsageSummary(w http.ResponseWriter, r *http.Request) {
 
 // ClearTokenUsage handles DELETE /api/token-usage
 func (a *API) ClearTokenUsage(w http.ResponseWriter, r *http.Request) {
-	deleted, err := a.db.ClearTokenUsage(r.Context())
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	deleted, err := services.Collaboration.TokenUsage.Clear(platformUIContext(r), platformUIAuthorization(r))
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to clear token usage data")
+		respondApplicationError(w, err)
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]interface{}{
@@ -5753,81 +4416,52 @@ func (a *API) SetPairingManager(pm *tunnel.PairingManager) {
 
 // GetTunnelStatus returns the current tunnel status.
 func (a *API) GetTunnelStatus(w http.ResponseWriter, r *http.Request) {
-	a.tunnelMu.Lock()
-	status := "disabled"
-	url := ""
-	subdomain := ""
-	if a.tunnelClient != nil {
-		status = a.tunnelClient.Status()
-		url = a.tunnelClient.PublicURL()
-		subdomain = a.tunnelClient.Subdomain()
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
 	}
-	a.tunnelMu.Unlock()
-
-	devices, _ := a.db.ListPairedDevices(r.Context())
-	deviceCount := 0
-	if devices != nil {
-		deviceCount = len(devices)
-	}
-
-	// Check if a token is stored
-	hasToken := false
-	if tok, _ := a.db.GetSetting(r.Context(), "tunnel_relay_token"); tok != "" {
-		hasToken = true
+	status, err := services.Execution.Tunnel.OperationalTunnelStatus(platformUIContext(r))
+	if err != nil {
+		respondApplicationError(w, err)
+		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"status":       status,
-		"url":          url,
-		"subdomain":    subdomain,
-		"device_count": deviceCount,
+		"status":       status.Status,
+		"url":          status.PublicURL,
+		"subdomain":    "",
+		"device_count": status.DeviceCount,
 		"relay_url":    DefaultRelayURL,
-		"has_token":    hasToken,
+		"has_token":    status.HasToken,
 	})
 }
 
 // EnableTunnel creates a tunnel client dynamically and connects it.
 func (a *API) EnableTunnel(w http.ResponseWriter, r *http.Request) {
-	a.tunnelMu.Lock()
-	defer a.tunnelMu.Unlock()
-
-	// Already connected?
-	if a.tunnelClient != nil && a.tunnelClient.Status() == "connected" {
-		respondJSON(w, http.StatusOK, map[string]string{
-			"status": "already_connected",
-			"url":    a.tunnelClient.PublicURL(),
-		})
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
 		return
 	}
-
-	// Disconnect existing if any
-	if a.tunnelClient != nil {
-		a.tunnelClient.Disconnect()
-		a.tunnelClient = nil
-	}
-
-	client, err := a.createAndConnectTunnel(r.Context())
+	result, err := services.Execution.TunnelMutations.Enable(platformUIContext(r), application.EnableTunnelCommand{Authorization: platformUIAuthorization(r)})
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
-
-	a.tunnelClient = client
-	a.db.SetSetting(r.Context(), "tunnel_enabled", "true")
-	respondJSON(w, http.StatusOK, map[string]string{"status": "connecting"})
+	respondJSON(w, http.StatusOK, map[string]string{"status": result.Status, "url": result.PublicURL})
 }
 
 // DisableTunnel stops the tunnel connection.
 func (a *API) DisableTunnel(w http.ResponseWriter, r *http.Request) {
-	a.tunnelMu.Lock()
-	defer a.tunnelMu.Unlock()
-
-	if a.tunnelClient != nil {
-		a.tunnelClient.Disconnect()
-		a.tunnelClient = nil
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
 	}
-	a.db.SetSetting(r.Context(), "tunnel_enabled", "false")
-	respondJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
+	result, err := services.Execution.TunnelMutations.Disable(platformUIContext(r), application.DisableTunnelCommand{Authorization: platformUIAuthorization(r)})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"status": result.Status})
 }
 
 // AutoConnectTunnel is called on startup if tunnel_enabled=true.
@@ -5938,9 +4572,13 @@ func (a *API) autoRegisterTunnel(ctx context.Context, relayURL string) (string, 
 
 // ListPairedDevices returns all paired devices.
 func (a *API) ListPairedDevices(w http.ResponseWriter, r *http.Request) {
-	devices, err := a.db.ListPairedDevices(r.Context())
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	devices, err := services.Execution.Tunnel.ListPairedDevices(platformUIContext(r))
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to list devices")
+		respondApplicationError(w, err)
 		return
 	}
 	respondJSON(w, http.StatusOK, devices)
@@ -5948,42 +4586,48 @@ func (a *API) ListPairedDevices(w http.ResponseWriter, r *http.Request) {
 
 // RevokePairedDevice revokes a paired device by ID.
 func (a *API) RevokePairedDevice(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	if id == "" {
 		respondError(w, http.StatusBadRequest, "Missing device ID")
 		return
 	}
 
-	if err := a.db.RevokePairedDevice(r.Context(), id); err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to revoke device")
+	result, err := services.Execution.TunnelMutations.RevokeDevice(platformUIContext(r), application.RevokeTunnelDeviceCommand{DeviceID: id, Authorization: platformUIAuthorization(r)})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	a.hub.BroadcastStateUpdate("tunnel_devices", nil)
-	respondJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+	respondJSON(w, http.StatusOK, map[string]string{"status": result.Status})
 }
 
 // DeletePairedDevice permanently deletes a paired device by ID.
 func (a *API) DeletePairedDevice(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	if id == "" {
 		respondError(w, http.StatusBadRequest, "Missing device ID")
 		return
 	}
 
-	if err := a.db.DeletePairedDevice(r.Context(), id); err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to delete device")
+	result, err := services.Execution.TunnelMutations.DeleteDevice(platformUIContext(r), application.DeleteTunnelDeviceCommand{DeviceID: id, Authorization: platformUIAuthorization(r)})
+	if err != nil {
+		respondApplicationError(w, err)
 		return
 	}
-
-	a.hub.BroadcastStateUpdate("tunnel_devices", nil)
-	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	respondJSON(w, http.StatusOK, map[string]string{"status": result.Status})
 }
 
 // ConfirmPairing validates a 6-digit code entered by the local admin to pair a remote device.
 func (a *API) ConfirmPairing(w http.ResponseWriter, r *http.Request) {
-	if a.pairingMgr == nil {
-		respondError(w, http.StatusBadRequest, "Pairing not configured")
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
 		return
 	}
 
@@ -5995,19 +4639,14 @@ func (a *API) ConfirmPairing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if body.Code == "" || len(body.Code) != 6 {
-		respondError(w, http.StatusBadRequest, "Please enter a valid 6-digit code")
-		return
-	}
-
-	deviceID, err := a.pairingMgr.ConfirmPairing(body.Code)
+	result, err := services.Execution.TunnelMutations.ConfirmPairing(platformUIContext(r), application.ConfirmTunnelPairingCommand{Code: body.Code, Authorization: platformUIAuthorization(r)})
 	if err != nil {
-		respondError(w, http.StatusBadRequest, err.Error())
+		respondApplicationError(w, err)
 		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"success":   true,
-		"device_id": deviceID,
+		"device_id": result.DeviceID,
 	})
 }
