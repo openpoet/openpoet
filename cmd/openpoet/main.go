@@ -19,6 +19,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"openpoet/internal/acpagent"
+	"openpoet/internal/application"
+	"openpoet/internal/automation"
 	"openpoet/internal/benchmark"
 	"openpoet/internal/config"
 	"openpoet/internal/configsync"
@@ -181,6 +183,10 @@ func main() {
 	// Collect active sessions for auto-restore after server is fully initialized
 	ctx := context.Background()
 	sessionsToRestore, _ := db.ListActiveSessions(ctx)
+	reportService, reportServiceErr := application.NewReportService(db)
+	if reportServiceErr != nil {
+		log.Printf("Warning: structured reports unavailable: %v", reportServiceErr)
+	}
 
 	// Clean up stale streaming AI messages (server restart means in-flight streams are lost)
 	if err := db.FixStaleStreamingMessages(ctx); err != nil {
@@ -268,6 +274,9 @@ func main() {
 	apiURL := fmt.Sprintf("http://localhost:%d", cfg.Port)
 	providerMgr := initProviderManager(db, encryptor, apiURL)
 	aiHandler := handlers.NewAIHandler(api, providerMgr)
+	if reportService != nil {
+		aiHandler.SetReportService(reportService)
+	}
 
 	// Wire AI handler into API for AI chat functionality
 	api.SetAIHandler(aiHandler)
@@ -304,6 +313,32 @@ func main() {
 		PairingMgr: pairingMgr,
 	})
 
+	// Compose the typed platform services only after every process-owned
+	// dependency exists. Failure is intentionally isolated to Automation's
+	// platform surface; the legacy UI and routes remain available.
+	if err := api.ConfigurePlatformServices(handlers.PlatformServices{
+		DB:             db,
+		Hub:            hub,
+		SessionManager: sessionMgr,
+		ConfigSync:     configSync,
+		Encryptor:      encryptor,
+		HookHandler:    hookHandler,
+		FileHandler:    fileHandler,
+		GitHandler:     gitHandler,
+		VoiceHandler:   voiceHandler,
+		StructuredView: svHandler,
+		Updater:        appUpdater,
+		AIHandler:      aiHandler,
+		Notifications:  notifService,
+		WebPush:        webpush,
+		ReinitializeAI: api.ReinitAIProviders,
+	}); err != nil {
+		log.Printf("[Automation] Platform capabilities unavailable: %v", err)
+	} else {
+		readiness := api.PlatformAutomationReadiness()
+		log.Printf("[Automation] Platform capabilities ready: total=%d mutations=%d reads=%d", readiness.Total, readiness.Mutations, readiness.Reads)
+	}
+
 	// Initialize OTEL handler for Claude Code token tracking
 	otelHandler := handlers.NewOTELHandler(db)
 
@@ -324,6 +359,11 @@ func main() {
 		// Expire all notifications for this session and clean up hook state
 		go notifService.MarkSessionRead(context.Background(), sessionID)
 		hookHandler.ClearSession(sessionID)
+		if reportService != nil {
+			if _, err := reportService.CaptureSessionLifecycle(context.Background(), sessionID); err != nil {
+				log.Printf("[Reports] Failed to persist lifecycle report for session %s: %v", sessionID, err)
+			}
+		}
 	}
 	sessionMgr.OnSessionEnd = func(sessionID string, output []byte) {
 		log.Printf("[AI-Session] >>> OnSessionEnd callback fired for session %s (outputLen=%d)", sessionID[:8], len(output))
@@ -397,7 +437,7 @@ func main() {
 	// The --mcp-http flag and mcp_http_enabled setting are kept for backward compatibility.
 	mcpHandler := mcp.NewHTTPHandler(
 		fmt.Sprintf("http://localhost:%d", cfg.Port),
-		func() string { key, _ := db.GetSetting(context.Background(), "mcp_api_key"); return key },
+		func() string { return loadMCPAPIKey(context.Background(), db, encryptor) },
 		func() mcp.ToolPolicy {
 			policyStr, _ := db.GetSetting(context.Background(), "mcp_tool_policy_http")
 			return mcp.ParsePolicy(policyStr)
@@ -413,6 +453,7 @@ func main() {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Compress(5))
+	r.Use(automation.CapturePeerAddress)
 	r.Use(middleware.RealIP)
 
 	// DEBUG: Log static file requests with Content-Type and User-Agent
@@ -440,6 +481,10 @@ func main() {
 	// CORS for development
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/api/automation/") {
+				next.ServeHTTP(w, r)
+				return
+			}
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type")
@@ -456,6 +501,18 @@ func main() {
 
 	// MCP HTTP endpoint (always registered, auth-protected)
 	r.Handle("/mcp", mcpHandler)
+
+	// Server-to-server automation API. Authentication is mandatory even for
+	// localhost and the handler rejects browser origins and non-loopback peers.
+	automationDeps := automation.Dependencies{
+		Capabilities:         api.CapabilityRegistry(),
+		PlatformCapabilities: api.PlatformCapabilityRegistry(),
+		Snapshot:             db,
+	}
+	if reportService != nil {
+		automationDeps.Reports = reportService
+	}
+	r.Mount("/api/automation/v1", automation.NewHandler(db, automationDeps))
 
 	// API routes
 	// DEBUG: Client error reporting endpoint
@@ -1000,6 +1057,34 @@ func main() {
 	}
 
 	fmt.Println("OpenPoet stopped")
+}
+
+// loadMCPAPIKey supports legacy plaintext rows while keeping encrypted rows
+// fail-closed: a missing IV or decryption failure can never turn ciphertext
+// into an accepted credential.
+func loadMCPAPIKey(ctx context.Context, db *database.DB, encryptor *security.Encryptor) string {
+	if db == nil {
+		return ""
+	}
+	key, err := db.GetSetting(ctx, "mcp_api_key")
+	if err != nil || key == "" {
+		return ""
+	}
+	iv, err := db.GetSetting(ctx, "mcp_api_key_iv")
+	if err != nil || iv == "" {
+		if strings.HasPrefix(key, "dm_") {
+			return key
+		}
+		return ""
+	}
+	if encryptor == nil {
+		return ""
+	}
+	plaintext, err := encryptor.Decrypt(key, iv)
+	if err != nil {
+		return ""
+	}
+	return plaintext
 }
 
 // initDatabase tries to open/migrate the database. On failure, it silently

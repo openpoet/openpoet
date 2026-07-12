@@ -63,6 +63,12 @@ var migrations = []Migration{
 	{Version: 45, Description: "mcp: persist HTTP transport session status and history", Up: migrateV45},
 	{Version: 46, Description: "mcp: add HTTP transport retention cleanup indexes", Up: migrateV46},
 	{Version: 47, Description: "sessions: persist runtime model, effort, and harness", Up: migrateV47},
+	{Version: 48, Description: "automation: add scoped API clients", Up: migrateV48},
+	{Version: 49, Description: "automation: add idempotency command ledger", Up: migrateV49},
+	{Version: 50, Description: "automation: add transactional event outbox and consumer cursors", Up: migrateV50},
+	{Version: 51, Description: "reports: add structured session turns and deterministic daily materializations", Up: migrateV51},
+	{Version: 52, Description: "automation: add first-class work runs and durable plans", Up: migrateV52},
+	{Version: 53, Description: "automation: add one-time explicit approval grants", Up: migrateV53},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1214,7 +1220,6 @@ func migrateV46(tx *sqlx.Tx) error {
 	}
 	return nil
 }
-
 func migrateV47(tx *sqlx.Tx) error {
 	stmts := []string{
 		`ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
@@ -1224,6 +1229,281 @@ func migrateV47(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV47 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV48(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS automation_clients (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE,
+			token_prefix TEXT NOT NULL UNIQUE,
+			token_hash BLOB NOT NULL UNIQUE,
+			scopes TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(scopes)),
+			enabled INTEGER NOT NULL DEFAULT 1,
+			last_used_at TIMESTAMP,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			rotated_at TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_automation_clients_enabled ON automation_clients(enabled)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV48 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV49(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS automation_commands (
+			id TEXT PRIMARY KEY,
+			client_id TEXT NOT NULL REFERENCES automation_clients(id) ON DELETE CASCADE,
+			idempotency_key TEXT NOT NULL,
+			request_fingerprint TEXT NOT NULL,
+			operation TEXT NOT NULL,
+			status TEXT NOT NULL CHECK(status IN ('processing', 'succeeded', 'failed', 'indeterminate')),
+			resource_type TEXT NOT NULL DEFAULT '',
+			resource_id TEXT NOT NULL DEFAULT '',
+			response_status INTEGER NOT NULL DEFAULT 0,
+			response_content_type TEXT NOT NULL DEFAULT '',
+			response_body BLOB NOT NULL DEFAULT X'',
+			error_code TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			expires_at TIMESTAMP,
+			UNIQUE(client_id, idempotency_key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_automation_commands_status_created ON automation_commands(status, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_automation_commands_expires ON automation_commands(expires_at)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV49 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV50(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS event_outbox (
+			sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_id TEXT NOT NULL UNIQUE,
+			event_type TEXT NOT NULL,
+			aggregate_type TEXT NOT NULL,
+			aggregate_id TEXT NOT NULL,
+			actor TEXT NOT NULL,
+			correlation_id TEXT NOT NULL DEFAULT '',
+			schema_version INTEGER NOT NULL DEFAULT 1 CHECK(schema_version > 0),
+			payload_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(payload_json)),
+			occurred_at TIMESTAMP NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS event_outbox_consumers (
+			automation_client_id TEXT NOT NULL REFERENCES automation_clients(id) ON DELETE CASCADE,
+			consumer TEXT NOT NULL,
+			cursor_sequence INTEGER NOT NULL DEFAULT 0 CHECK(cursor_sequence >= 0),
+			acked_at TIMESTAMP,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(automation_client_id, consumer)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_outbox_event_type_sequence ON event_outbox(event_type, sequence)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_outbox_aggregate_sequence ON event_outbox(aggregate_type, aggregate_id, sequence)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_outbox_occurred_sequence ON event_outbox(occurred_at, sequence)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_outbox_consumers_cursor ON event_outbox_consumers(cursor_sequence)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV50 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV51(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS structured_session_reports (
+			report_id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			turn_id TEXT NOT NULL,
+			report_date TEXT NOT NULL,
+			timezone TEXT NOT NULL,
+			project_id INTEGER NOT NULL,
+			project_name TEXT NOT NULL,
+			task_id INTEGER,
+			task_title TEXT NOT NULL DEFAULT '',
+			session_name TEXT NOT NULL DEFAULT '',
+			session_status TEXT NOT NULL,
+			session_started_at TIMESTAMP NOT NULL,
+			session_ended_at TIMESTAMP,
+			state TEXT NOT NULL CHECK(state IN ('updated', 'finalized')),
+			incomplete INTEGER NOT NULL DEFAULT 0,
+			objective TEXT NOT NULL DEFAULT '',
+			outcome TEXT NOT NULL DEFAULT '',
+			work_summary TEXT NOT NULL DEFAULT '',
+			decisions_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(decisions_json) AND json_type(decisions_json) = 'array'),
+			verification_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(verification_json) AND json_type(verification_json) = 'object'),
+			evidence_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(evidence_json) AND json_type(evidence_json) = 'array'),
+			completed_task_ids_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(completed_task_ids_json) AND json_type(completed_task_ids_json) = 'array'),
+			changed_task_ids_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(changed_task_ids_json) AND json_type(changed_task_ids_json) = 'array'),
+			incomplete_reasons_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(incomplete_reasons_json) AND json_type(incomplete_reasons_json) = 'array'),
+			through_cursor INTEGER NOT NULL DEFAULT 0 CHECK(through_cursor >= 0),
+			turn_started_at TIMESTAMP NOT NULL,
+			turn_ended_at TIMESTAMP,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			finalized_at TIMESTAMP,
+			UNIQUE(session_id, turn_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS structured_daily_reports (
+			report_date TEXT PRIMARY KEY,
+			timezone TEXT NOT NULL,
+			through_cursor INTEGER NOT NULL DEFAULT 0 CHECK(through_cursor >= 0),
+			report_json TEXT NOT NULL CHECK(json_valid(report_json) AND json_type(report_json) = 'object'),
+			content_sha256 TEXT NOT NULL CHECK(length(content_sha256) = 64),
+			session_count INTEGER NOT NULL DEFAULT 0 CHECK(session_count >= 0),
+			incomplete_session_count INTEGER NOT NULL DEFAULT 0 CHECK(incomplete_session_count >= 0),
+			generated_at TIMESTAMP NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_structured_session_reports_date_session ON structured_session_reports(report_date, session_id, turn_started_at, turn_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_structured_session_reports_project_date ON structured_session_reports(project_id, report_date)`,
+		`CREATE INDEX IF NOT EXISTS idx_structured_session_reports_task_date ON structured_session_reports(task_id, report_date)`,
+		`CREATE INDEX IF NOT EXISTS idx_structured_session_reports_state_updated ON structured_session_reports(state, updated_at)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV51 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV52(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS plans (
+			id TEXT PRIMARY KEY CHECK(length(id) = 36),
+			external_ref TEXT NOT NULL UNIQUE,
+			kind TEXT NOT NULL CHECK(kind IN ('daily', 'weekly')),
+			title TEXT NOT NULL,
+			period_start TEXT NOT NULL,
+			period_end TEXT NOT NULL,
+			timezone TEXT NOT NULL,
+			version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+			created_by_actor TEXT NOT NULL,
+			updated_by_actor TEXT NOT NULL,
+			correlation_id TEXT NOT NULL DEFAULT '',
+			idempotency_key TEXT,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			CHECK(period_start <= period_end)
+		)`,
+		`CREATE TABLE IF NOT EXISTS plan_items (
+			id TEXT PRIMARY KEY CHECK(length(id) = 36),
+			plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+			external_ref TEXT NOT NULL UNIQUE,
+			title TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL CHECK(status IN ('planned', 'active', 'completed', 'cancelled')),
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			project_task_id INTEGER REFERENCES project_tasks(id) ON DELETE SET NULL,
+			version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+			updated_by_actor TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS work_runs (
+			id TEXT PRIMARY KEY CHECK(length(id) = 36),
+			title TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL,
+			status TEXT NOT NULL CHECK(status IN ('running', 'paused', 'completed', 'cancelled', 'indeterminate')),
+			expected_minutes INTEGER NOT NULL CHECK(expected_minutes BETWEEN 1 AND 525600),
+			accumulated_active_seconds INTEGER NOT NULL DEFAULT 0 CHECK(accumulated_active_seconds >= 0),
+			started_at TIMESTAMP NOT NULL,
+			active_started_at TIMESTAMP,
+			paused_at TIMESTAMP,
+			completed_at TIMESTAMP,
+			cancelled_at TIMESTAMP,
+			project_task_id INTEGER REFERENCES project_tasks(id) ON DELETE SET NULL,
+			session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+			plan_item_ref TEXT REFERENCES plan_items(external_ref) ON DELETE SET NULL,
+			execution_target_type TEXT NOT NULL DEFAULT '',
+			execution_target_id TEXT NOT NULL DEFAULT '',
+			version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+			created_by_actor TEXT NOT NULL,
+			updated_by_actor TEXT NOT NULL,
+			correlation_id TEXT NOT NULL DEFAULT '',
+			idempotency_key TEXT,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			CHECK((status = 'running' AND active_started_at IS NOT NULL) OR (status != 'running' AND active_started_at IS NULL)),
+			CHECK(status != 'paused' OR paused_at IS NOT NULL),
+			CHECK(status != 'completed' OR completed_at IS NOT NULL),
+			CHECK(status != 'cancelled' OR cancelled_at IS NOT NULL),
+			CHECK((execution_target_type = '' AND execution_target_id = '') OR (execution_target_type != '' AND execution_target_id != ''))
+		)`,
+		`CREATE TABLE IF NOT EXISTS work_run_audit (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			work_run_id TEXT NOT NULL REFERENCES work_runs(id) ON DELETE CASCADE,
+			action TEXT NOT NULL CHECK(action IN ('start', 'pause', 'resume', 'complete', 'cancel')),
+			from_status TEXT NOT NULL DEFAULT '',
+			to_status TEXT NOT NULL,
+			actor TEXT NOT NULL,
+			correlation_id TEXT NOT NULL DEFAULT '',
+			idempotency_key TEXT,
+			version INTEGER NOT NULL CHECK(version > 0),
+			details_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(details_json) AND json_type(details_json) = 'object'),
+			occurred_at TIMESTAMP NOT NULL
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_work_runs_start_idempotency ON work_runs(created_by_actor, idempotency_key) WHERE idempotency_key IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_work_run_audit_idempotency ON work_run_audit(work_run_id, idempotency_key) WHERE idempotency_key IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_work_runs_status_started ON work_runs(status, started_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_work_runs_project_task ON work_runs(project_task_id, started_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_work_runs_session ON work_runs(session_id, started_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_work_runs_plan_item ON work_runs(plan_item_ref, started_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_work_run_audit_run ON work_run_audit(work_run_id, id DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_plans_period ON plans(kind, period_start, period_end)`,
+		`CREATE INDEX IF NOT EXISTS idx_plan_items_plan_order ON plan_items(plan_id, sort_order, created_at)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV52 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV53(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS automation_approval_grants (
+			id TEXT PRIMARY KEY,
+			token_hash BLOB NOT NULL UNIQUE CHECK(length(token_hash) = 32),
+			issued_by_client_id TEXT NOT NULL REFERENCES automation_clients(id) ON DELETE CASCADE,
+			target_client_id TEXT NOT NULL REFERENCES automation_clients(id) ON DELETE CASCADE,
+			capability TEXT NOT NULL CHECK(length(capability) BETWEEN 1 AND 200),
+			command_id TEXT NOT NULL CHECK(length(command_id) BETWEEN 1 AND 200),
+			authorization_ref TEXT NOT NULL CHECK(length(authorization_ref) BETWEEN 1 AND 200),
+			expires_at TIMESTAMP NOT NULL,
+			used_at TIMESTAMP,
+			created_at TIMESTAMP NOT NULL,
+			CHECK(expires_at > created_at),
+			CHECK(used_at IS NULL OR used_at >= created_at)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_automation_approval_grants_target
+			ON automation_approval_grants(target_client_id, capability, command_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_automation_approval_grants_expiry
+			ON automation_approval_grants(expires_at, used_at)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV53 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

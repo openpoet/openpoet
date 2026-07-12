@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openpoet.local/schemas/automation/v1/command-envelope.schema.json",
+  "title": "OpenPoet Automation API v1 Command Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["command_id", "capability", "target", "payload"],
+  "properties": {
+    "command_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "Alternative to the Idempotency-Key header. If both are sent, they must match."
+    },
+    "actor": {
+      "type": ["object", "null"],
+      "description": "Accepted for connector compatibility but never trusted. The effective actor always comes from the bearer token."
+    },
+    "capability": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.:-]{0,199}$",
+      "description": "Capability discovered dynamically from GET /capabilities."
+    },
+    "target": {
+      "$ref": "#/$defs/target"
+    },
+    "payload": {
+      "type": ["object", "array"]
+    },
+    "expected_version": {
+      "type": ["integer", "null"],
+      "description": "Optimistic concurrency version for work-run transitions and plan upserts. Other capabilities return expected_version_unsupported."
+    },
+    "reason": {
+      "type": "string"
+    },
+    "dry_run": {
+      "type": "boolean",
+      "default": false
+    },
+    "correlation_id": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "For platform policy approvals, a canonical audit reference is required. For explicit approvals, it must also equal the grant authorization_ref (ain:, inbound:, signal:, task:, or policy:)."
+    },
+    "approval_token": {
+      "type": "string",
+      "pattern": "^opagv1_[A-Za-z0-9_-]{43}$",
+      "description": "One-time approval grant issued by POST /approvals and bound to this bearer client, capability, command_id, and correlation_id authorization evidence."
+    }
+  },
+  "$defs": {
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.:-]{0,199}$"
+        },
+        "kind": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.:-]{0,199}$"
+        },
+        "id": {
+          "type": ["integer", "string"]
+        },
+        "project_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}
