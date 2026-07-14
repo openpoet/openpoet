@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -19,6 +20,12 @@ const (
 	maxSessionEnvironmentBytes     = 64 << 10
 	maxSessionInputBytes           = 16 << 10
 	maxEvaluationSnapshotBytes     = 64 << 10
+
+	// sessionConfigSyncWaitBudget bounds how long session start waits for the
+	// pre-session configuration sync; sessionConfigSyncTimeout bounds the sync
+	// itself once it continues in the background.
+	sessionConfigSyncWaitBudget = 20 * time.Second
+	sessionConfigSyncTimeout    = 2 * time.Minute
 )
 
 var sessionEnvironmentKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -150,6 +157,33 @@ type CreateSessionCommand struct {
 	Authorization              ActionAuthorization
 }
 
+// syncProjectConfiguration pushes OpenPoet configuration (skills, hooks,
+// backend config) to the project before a session starts. It is best-effort
+// by design: a slow or unreachable SSH host must not block or abort session
+// startup. The sync runs detached from the request context because a browser
+// abort must not cancel its in-flight SQLite queries — a canceled query
+// poisons the single shared connection until restart. If the sync outlives
+// the wait budget the session proceeds with the last synced configuration.
+func (s *SessionService) syncProjectConfiguration(ctx context.Context, project *database.Project) {
+	if s.syncer == nil {
+		return
+	}
+	done := make(chan error, 1)
+	go func() {
+		syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionConfigSyncTimeout)
+		defer cancel()
+		done <- s.syncer.SyncToProject(syncCtx, project)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			log.Printf("[Session] config sync failed for project %d (session will start anyway): %v", project.ID, err)
+		}
+	case <-time.After(sessionConfigSyncWaitBudget):
+		log.Printf("[Session] config sync for project %d exceeded %s; starting session without waiting", project.ID, sessionConfigSyncWaitBudget)
+	}
+}
+
 func (s *SessionService) Create(ctx context.Context, command CreateSessionCommand) (*database.Session, error) {
 	if err := requireActionActor(command.Authorization); err != nil {
 		return nil, err
@@ -194,11 +228,7 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 		}
 		environment["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"] = "true"
 	}
-	if s.syncer != nil {
-		if err := s.syncer.SyncToProject(ctx, project); err != nil {
-			return nil, fmt.Errorf("sync project configuration: %w", err)
-		}
-	}
+	s.syncProjectConfiguration(ctx, project)
 	if s.manager == nil {
 		return nil, validationError("session_manager_unavailable", "Session manager is unavailable")
 	}
@@ -327,11 +357,7 @@ func (s *SessionService) Reopen(ctx context.Context, command ReopenSessionComman
 		}
 		environment["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"] = "true"
 	}
-	if s.syncer != nil {
-		if err := s.syncer.SyncToProject(ctx, project); err != nil {
-			return nil, fmt.Errorf("sync project configuration: %w", err)
-		}
-	}
+	s.syncProjectConfiguration(ctx, project)
 	if project.Type == "remote" && s.decrypt == nil {
 		return nil, validationError("session_decryptor_unavailable", "Remote session decryptor is unavailable")
 	}
