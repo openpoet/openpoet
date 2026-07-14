@@ -167,17 +167,17 @@ func TestSessionServiceCreateOwnsProviderEnvironmentNamingAndTaskNotification(t 
 	}
 }
 
-func TestSessionServiceCreateTreatsConfigurationSyncFailureAsFatal(t *testing.T) {
+func TestSessionServiceCreateTreatsConfigurationSyncFailureAsBestEffort(t *testing.T) {
 	manager := &semanticSessionManager{}
 	service := NewSessionService(
 		&semanticSessionStore{project: &database.Project{ID: 7, Name: "OpenPoet", Type: "local", Backend: "claude_code"}},
 		manager, semanticSyncer{err: errors.New("sync failed")}, nil, nil, nil, nil, nil,
 	)
-	if _, err := service.Create(context.Background(), CreateSessionCommand{ProjectID: 7, Authorization: phase3Actor}); err == nil {
-		t.Fatal("configuration sync failure must abort session creation")
+	if _, err := service.Create(context.Background(), CreateSessionCommand{ProjectID: 7, Authorization: phase3Actor}); err != nil {
+		t.Fatalf("configuration sync failure must not abort session creation: %v", err)
 	}
-	if manager.starts != 0 {
-		t.Fatalf("manager started after fatal sync failure: %d", manager.starts)
+	if manager.starts != 1 {
+		t.Fatalf("manager should start despite sync failure: %d", manager.starts)
 	}
 }
 

@@ -2498,6 +2498,7 @@ func (cs *ConfigSyncer) buildSSHConfig(project *database.Project) (*ssh.ClientCo
 		User:            user,
 		Auth:            authMethods,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         15 * time.Second,
 	}, nil
 }
 
