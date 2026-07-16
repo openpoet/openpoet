@@ -164,6 +164,8 @@ type startSessionInput struct {
 	EnvVars                    map[string]string
 	DangerouslySkipPermissions bool
 	AutoStartTaskPrompt        bool
+	PlanningMode               bool
+	CustomPrompt               string
 }
 
 type startSessionError struct {
@@ -1097,6 +1099,8 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		EnvVars                    map[string]string `json:"env_vars,omitempty"`
 		DangerouslySkipPermissions bool              `json:"dangerously_skip_permissions"`
 		AutoStartTaskPrompt        bool              `json:"auto_start_task_prompt"`
+		PlanningMode               bool              `json:"planning_mode"`
+		CustomPrompt               string            `json:"custom_prompt"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
@@ -1109,7 +1113,10 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 	sess, err := services.Execution.Sessions.Create(platformUIContext(r), application.CreateSessionCommand{
 		ProjectID: input.ProjectID, TaskID: input.TaskID, Environment: input.EnvVars,
 		DangerouslySkipPermissions: input.DangerouslySkipPermissions,
-		AutoStartTaskPrompt:        input.AutoStartTaskPrompt, Authorization: authorization,
+		AutoStartTaskPrompt:        input.AutoStartTaskPrompt,
+		PlanningMode:               input.PlanningMode,
+		CustomPrompt:               input.CustomPrompt,
+		Authorization:              authorization,
 	})
 	if err != nil {
 		respondApplicationError(w, err)
@@ -1136,11 +1143,13 @@ func (a *API) startManagedSession(ctx context.Context, input startSessionInput) 
 		ProjectID: input.ProjectID, TaskID: input.TaskID, Environment: input.EnvVars,
 		DangerouslySkipPermissions: input.DangerouslySkipPermissions,
 		AutoStartTaskPrompt:        input.AutoStartTaskPrompt,
+		PlanningMode:               input.PlanningMode,
+		CustomPrompt:               input.CustomPrompt,
 		Authorization:              authorization,
 	})
 }
 
-const defaultTaskStartPrompt = "Start working on the assigned task."
+const defaultTaskStartPrompt = application.DefaultTaskStartPrompt
 
 const (
 	localSessionLineSubmitDelay   = 1500 * time.Millisecond

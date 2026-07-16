@@ -793,9 +793,10 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 			params["task_id"] = id
 		}
 		if taskID, ok := params["task_id"]; ok && fmt.Sprintf("%v", taskID) != "" {
-			if _, exists := params["auto_start_task_prompt"]; !exists {
-				params["auto_start_task_prompt"] = true
-			}
+			// MCP starts are programmatic and must never fall back to the UI
+			// task-loaded notification/modal, even if an older caller sends the
+			// legacy flag as false.
+			params["auto_start_task_prompt"] = true
 		}
 		payload, _ := json.Marshal(params)
 		body, err := client.Post("/api/sessions", string(payload))

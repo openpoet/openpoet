@@ -105,7 +105,9 @@ type sessionCreatePayload struct {
 	TaskID                     *int64            `json:"task_id,omitempty"`
 	Environment                map[string]string `json:"environment,omitempty"`
 	DangerouslySkipPermissions bool              `json:"dangerously_skip_permissions,omitempty"`
-	AutoStartTaskPrompt        bool              `json:"auto_start_task_prompt,omitempty"`
+	AutoStartTaskPrompt        *bool             `json:"auto_start_task_prompt,omitempty"`
+	PlanningMode               bool              `json:"planning_mode,omitempty"`
+	CustomPrompt               string            `json:"custom_prompt,omitempty"`
 }
 
 type sessionReopenPayload struct {
@@ -261,6 +263,13 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if payload.TaskID != nil && *payload.TaskID <= 0 || len(payload.Environment) > 64 {
 			return nil, platformFailure("platform_payload_invalid", "session task or environment is invalid", false)
 		}
+		payload.CustomPrompt = strings.TrimSpace(payload.CustomPrompt)
+		if payload.PlanningMode && payload.CustomPrompt != "" {
+			return nil, platformFailure("platform_payload_invalid", "planning_mode and custom_prompt cannot be used together", false)
+		}
+		if len([]byte(payload.CustomPrompt)) > 16<<10 || strings.IndexByte(payload.CustomPrompt, 0) >= 0 {
+			return nil, platformFailure("platform_payload_invalid", "custom_prompt must not exceed 16 KiB or contain NUL", false)
+		}
 		environmentBytes := 0
 		for key, value := range payload.Environment {
 			environmentBytes += len(key) + len(value)
@@ -268,16 +277,28 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if environmentBytes > 64<<10 {
 			return nil, platformFailure("platform_payload_invalid", "session environment exceeds 64 KiB", false)
 		}
+		startMode := "default"
+		if payload.PlanningMode {
+			startMode = "planning"
+		} else if payload.CustomPrompt != "" {
+			startMode = "custom"
+		}
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{
 			"project_id": projectID, "has_task": payload.TaskID != nil, "environment_count": len(payload.Environment),
-			"unsafe_permissions": payload.DangerouslySkipPermissions,
+			"unsafe_permissions": payload.DangerouslySkipPermissions, "start_mode": startMode,
 		}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
 			authorization.AllowEnvironment = len(payload.Environment) > 0
 			authorization.AllowUnsafePermissions = payload.DangerouslySkipPermissions
 			item, err := e.service.Create(ctx, application.CreateSessionCommand{
 				ProjectID: projectID, TaskID: payload.TaskID, Environment: payload.Environment,
-				DangerouslySkipPermissions: payload.DangerouslySkipPermissions, AutoStartTaskPrompt: payload.AutoStartTaskPrompt,
-				Authorization: authorization,
+				DangerouslySkipPermissions: payload.DangerouslySkipPermissions,
+				// Programmatic creates always start immediately. Keep accepting the
+				// legacy field for compatibility, but never turn an Automation call
+				// into a UI notification that waits for manual confirmation.
+				AutoStartTaskPrompt: true,
+				PlanningMode:        payload.PlanningMode,
+				CustomPrompt:        payload.CustomPrompt,
+				Authorization:       authorization,
 			})
 			if err != nil {
 				return nil, err

@@ -107,6 +107,25 @@ func (s platformSessionInputSubmitter) SubmitSessionLine(ctx context.Context, se
 	return s.api.sessionMgr.SubmitLineToSession(sessionID, text, delay)
 }
 
+type platformSessionInitialPromptSubmitter struct{ api *API }
+
+func (s platformSessionInitialPromptSubmitter) SubmitInitialSessionPrompt(ctx context.Context, sessionID, text string) error {
+	if s.api == nil || s.api.sessionMgr == nil {
+		return errors.New("session input submitter unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	readyCtx, cancel := context.WithTimeout(ctx, taskSessionReadyTimeout)
+	err := s.api.waitForTaskSessionReady(readyCtx, sessionID)
+	cancel()
+	if err != nil {
+		log.Printf("[Session] initial prompt readiness wait ended for %s: %v", sessionID, err)
+	}
+	delay := s.api.sessionLineSubmitDelay(ctx, sessionID)
+	return s.api.sessionMgr.SubmitLineToSession(sessionID, text, delay)
+}
+
 type platformSessionRuntimeSettings struct{ api *API }
 
 func (s platformSessionRuntimeSettings) SetSessionModel(ctx context.Context, sessionID, model string) (*database.Session, error) {
