@@ -88,11 +88,12 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		services.DB, services.SessionManager, services.ConfigSync, a.taskService,
 		services.HookHandler, services.HookHandler, a.DecryptFunc(), effects,
 		application.SessionCreationCollaborators{
-			Environment: platformSessionEnvironmentProvider{handler: services.AIHandler},
-			Names:       platformSessionNameStore{db: services.DB},
-			Tasks:       platformSessionTaskNotifier{hook: services.HookHandler},
-			Input:       platformSessionInputSubmitter{api: a},
-			Settings:    platformSessionRuntimeSettings{api: a},
+			Environment:  platformSessionEnvironmentProvider{handler: services.AIHandler},
+			Names:        platformSessionNameStore{db: services.DB},
+			Tasks:        platformSessionTaskNotifier{hook: services.HookHandler},
+			Input:        platformSessionInputSubmitter{api: a},
+			InitialInput: platformSessionInitialPromptSubmitter{api: a},
+			Settings:     platformSessionRuntimeSettings{api: a},
 		},
 	)
 	execution := automation.ExecutionPlatformServices{

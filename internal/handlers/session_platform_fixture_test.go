@@ -25,10 +25,11 @@ func configureSessionPlatformFixture(t *testing.T, api *API, db *database.DB, ma
 	service := application.NewSessionService(
 		db, manager, nil, api.taskService, nil, nil, nil, nil,
 		application.SessionCreationCollaborators{
-			Environment: sessionFixtureEnvironment{binary: binary},
-			Names:       platformSessionNameStore{db: db},
-			Input:       platformSessionInputSubmitter{api: api},
-			Settings:    platformSessionRuntimeSettings{api: api},
+			Environment:  sessionFixtureEnvironment{binary: binary},
+			Names:        platformSessionNameStore{db: db},
+			Input:        platformSessionInputSubmitter{api: api},
+			InitialInput: platformSessionInitialPromptSubmitter{api: api},
+			Settings:     platformSessionRuntimeSettings{api: api},
 		},
 	)
 	api.platformMu.Lock()

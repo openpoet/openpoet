@@ -21,6 +21,9 @@ const (
 	maxSessionInputBytes           = 16 << 10
 	maxEvaluationSnapshotBytes     = 64 << 10
 
+	DefaultTaskStartPrompt  = "Start working on the assigned task."
+	PlanningTaskStartPrompt = "Plan the implementation for the assigned task. Enter plan mode and present the plan before making any changes."
+
 	// sessionConfigSyncWaitBudget bounds how long session start waits for the
 	// pre-session configuration sync; sessionConfigSyncTimeout bounds the sync
 	// itself once it continues in the background.
@@ -85,6 +88,13 @@ type SessionInputSubmitter interface {
 	SubmitSessionLine(context.Context, string, string) error
 }
 
+// SessionInitialPromptSubmitter waits for a newly created backend to be ready
+// before submitting its first prompt. This is separate from ordinary session
+// input because Claude Code can discard Enter while its TUI is still starting.
+type SessionInitialPromptSubmitter interface {
+	SubmitInitialSessionPrompt(context.Context, string, string) error
+}
+
 // SessionRuntimeSettings applies mutable runtime metadata through the same
 // backend-specific channel used by the interactive UI.
 type SessionRuntimeSettings interface {
@@ -93,12 +103,13 @@ type SessionRuntimeSettings interface {
 }
 
 type SessionCreationCollaborators struct {
-	Environment SessionEnvironmentProvider
-	Names       SessionNameStore
-	Tasks       SessionTaskNotifier
-	Input       SessionInputSubmitter
-	Settings    SessionRuntimeSettings
-	Now         func() time.Time
+	Environment  SessionEnvironmentProvider
+	Names        SessionNameStore
+	Tasks        SessionTaskNotifier
+	Input        SessionInputSubmitter
+	InitialInput SessionInitialPromptSubmitter
+	Settings     SessionRuntimeSettings
+	Now          func() time.Time
 }
 
 type SessionChange struct {
@@ -154,6 +165,8 @@ type CreateSessionCommand struct {
 	Environment                map[string]string
 	DangerouslySkipPermissions bool
 	AutoStartTaskPrompt        bool
+	PlanningMode               bool
+	CustomPrompt               string
 	Authorization              ActionAuthorization
 }
 
@@ -210,6 +223,10 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 		}
 		injectTaskEnvironment(environment, linkedTask, false)
 	}
+	initialPrompt, err := resolveInitialSessionPrompt(command, linkedTask != nil)
+	if err != nil {
+		return nil, err
+	}
 	if s.creation.Environment != nil {
 		providerEnvironment, providerErr := s.creation.Environment.SessionEnvironment(ctx, project)
 		if providerErr != nil {
@@ -257,12 +274,7 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 			return nil, linkErr
 		}
 		created.Name = result.SessionName
-		if command.AutoStartTaskPrompt {
-			if err := s.writeLine(ctx, created.ID, "Start working on the assigned task."); err != nil {
-				s.compensateFailedCreate(ctx, created.ID)
-				return nil, err
-			}
-		} else if s.creation.Tasks != nil {
+		if initialPrompt == "" && s.creation.Tasks != nil {
 			if err := s.creation.Tasks.NotifyTaskLoaded(ctx, created.ID, linkedTask); err != nil {
 				s.compensateFailedCreate(ctx, created.ID)
 				return nil, err
@@ -277,8 +289,37 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 			}
 		}
 	}
+	if initialPrompt != "" {
+		if err := s.writeInitialPrompt(ctx, created.ID, initialPrompt); err != nil {
+			s.compensateFailedCreate(ctx, created.ID)
+			return nil, err
+		}
+	}
 	s.publish(ctx, SessionChange{Action: "created", Session: created, ID: created.ID, Actor: command.Authorization.Actor})
 	return created, nil
+}
+
+func resolveInitialSessionPrompt(command CreateSessionCommand, hasTask bool) (string, error) {
+	customPrompt := strings.TrimSpace(command.CustomPrompt)
+	if command.PlanningMode && customPrompt != "" {
+		return "", validationError("session_start_prompt_conflict", "Planning mode and custom prompt cannot be used together")
+	}
+	if len([]byte(customPrompt)) > maxSessionInputBytes {
+		return "", validationError("session_start_prompt_too_large", "Custom prompt exceeds 16 KiB")
+	}
+	if strings.IndexByte(customPrompt, 0) >= 0 {
+		return "", validationError("session_start_prompt_invalid", "Custom prompt may not contain NUL")
+	}
+	if customPrompt != "" {
+		return customPrompt, nil
+	}
+	if command.PlanningMode {
+		return PlanningTaskStartPrompt, nil
+	}
+	if hasTask && command.AutoStartTaskPrompt {
+		return DefaultTaskStartPrompt, nil
+	}
+	return "", nil
 }
 
 type StopSessionCommand struct {
@@ -563,6 +604,13 @@ func (s *SessionService) writeLine(ctx context.Context, sessionID, text string) 
 		return err
 	}
 	return s.manager.WriteToSession(sessionID, []byte("\n"))
+}
+
+func (s *SessionService) writeInitialPrompt(ctx context.Context, sessionID, text string) error {
+	if s.creation.InitialInput != nil {
+		return s.creation.InitialInput.SubmitInitialSessionPrompt(ctx, sessionID, text)
+	}
+	return s.writeLine(ctx, sessionID, text)
 }
 
 func (s *SessionService) compensateFailedCreate(ctx context.Context, sessionID string) {
