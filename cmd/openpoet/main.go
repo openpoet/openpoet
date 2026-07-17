@@ -237,8 +237,12 @@ func main() {
 
 	// Initialize structured view handler (JSONL event browser)
 	svHandler := handlers.NewStructuredViewHandler(db, hub, api.DecryptFunc())
+	svHandler.SetEffectiveModelRecorder(sessionMgr.RecordEffectiveModel)
 	api.SetStructuredView(svHandler)
 	sessionMgr.OnProviderSessionIDChange = svHandler.HandleSessionSourceChange
+	hookHandler.OnReconcileEffectiveModel = func(sessionID string) {
+		svHandler.ReconcileEffectiveModel(context.Background(), sessionID)
+	}
 
 	// Initialize other handlers
 	fileHandler := handlers.NewFileHandler(api)
@@ -645,6 +649,7 @@ func main() {
 		r.Get("/projects/{id}/tasks/{taskId}/documents", api.ListTaskDocuments)
 
 		// Global Tasks (cross-project)
+		r.Post("/tasks/approve-bulk", api.ApproveTaskVerificationBulk)
 		r.Get("/tasks/session-summary", api.GetAllTaskSessionSummary)
 		r.Get("/tasks", api.ListAllTasks)
 		r.Put("/tasks/reorder", api.ReorderAllTasks)

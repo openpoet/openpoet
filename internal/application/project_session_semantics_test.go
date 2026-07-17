@@ -42,6 +42,56 @@ func TestProjectServiceAppliesSharedPathValidationToLocalAndRemoteInputs(t *test
 	}
 }
 
+func TestProjectServiceClearsBackendConfigWhenBackendChanges(t *testing.T) {
+	service := NewProjectService(nil, nil, nil)
+	current := &database.Project{
+		ID: 7, Name: "Switched", Path: t.TempDir(), Type: "local", Backend: "codex",
+		BackendConfig: `{"model":"gpt-5.6-sol","reasoning_effort":"xhigh"}`,
+	}
+	updated, err := service.projectFromInput(context.Background(), database.ProjectInput{
+		Name: current.Name, Path: current.Path, Type: current.Type, Backend: "claude_code",
+	}, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.BackendConfig != "{}" {
+		t.Fatalf("backend config = %q, want cleared object", updated.BackendConfig)
+	}
+
+	updated, err = service.projectFromInput(context.Background(), database.ProjectInput{
+		Name: current.Name, Path: current.Path, Type: current.Type, Backend: "claude_code",
+		BackendConfig: `{"model":"gpt-5.6-sol","reasoning_effort":"xhigh"}`,
+	}, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.BackendConfig != "{}" {
+		t.Fatalf("explicit foreign backend config = %q, want cleared object", updated.BackendConfig)
+	}
+}
+
+func TestProjectServiceDuplicateClearsConfigWhenBackendChanges(t *testing.T) {
+	store := newFakeProjectStore()
+	service := NewProjectService(store, fakeEncryptor{}, nil)
+	original, err := service.Create(context.Background(), database.ProjectInput{
+		Name: "Codex", Path: t.TempDir(), Type: "local", Backend: "codex",
+		BackendConfig: `{"model":"gpt-5.6-sol","reasoning_effort":"xhigh"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate, err := service.Duplicate(context.Background(), DuplicateProjectCommand{
+		ProjectID: original.ID,
+		Overrides: database.ProjectInput{Name: "Claude", Backend: "claude_code"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.BackendConfig != "{}" {
+		t.Fatalf("duplicate backend config = %q, want cleared object", duplicate.BackendConfig)
+	}
+}
+
 type semanticSessionStore struct {
 	project *database.Project
 	task    *database.ProjectTask

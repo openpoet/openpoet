@@ -6,41 +6,43 @@ import (
 )
 
 type Project struct {
-	ID                         int64          `db:"id" json:"id"`
-	Name                       string         `db:"name" json:"name"`
-	Path                       string         `db:"path" json:"path"`
-	Type                       string         `db:"type" json:"type"` // 'local' or 'remote'
-	SSHHost                    sql.NullString `db:"ssh_host" json:"ssh_host,omitempty"`
-	SSHPort                    sql.NullInt64  `db:"ssh_port" json:"ssh_port,omitempty"`
-	SSHUser                    sql.NullString `db:"ssh_user" json:"ssh_user,omitempty"`
-	SSHAuthType                sql.NullString `db:"ssh_auth_type" json:"ssh_auth_type,omitempty"` // 'password', 'key', 'key_passphrase'
-	SSHCredentialEncrypted     sql.NullString `db:"ssh_credential_encrypted" json:"-"`
-	SSHCredentialIV            sql.NullString `db:"ssh_credential_iv" json:"-"`
-	HasCredential              bool           `db:"-" json:"has_credential"`
-	ToolPolicy                 string         `db:"tool_policy" json:"tool_policy,omitempty"`   // JSON ToolPolicy
-	SkillPolicy                string         `db:"skill_policy" json:"skill_policy,omitempty"` // '' = inherit global, 'custom' = per-project
-	DangerouslySkipPermissions bool           `db:"dangerously_skip_permissions" json:"dangerously_skip_permissions"`
-	Backend                    string         `db:"backend" json:"backend"`               // 'claude_code', 'copilot', 'acp', 'codex', or 'opencode'
-	BackendConfig              string         `db:"backend_config" json:"backend_config"` // JSON blob for backend-specific settings
-	ConfigSyncedAt             sql.NullTime   `db:"config_synced_at" json:"config_synced_at,omitempty"`
-	CreatedAt                  time.Time      `db:"created_at" json:"created_at"`
-	UpdatedAt                  time.Time      `db:"updated_at" json:"updated_at"`
+	ID                          int64          `db:"id" json:"id"`
+	Name                        string         `db:"name" json:"name"`
+	Path                        string         `db:"path" json:"path"`
+	Type                        string         `db:"type" json:"type"` // 'local' or 'remote'
+	SSHHost                     sql.NullString `db:"ssh_host" json:"ssh_host,omitempty"`
+	SSHPort                     sql.NullInt64  `db:"ssh_port" json:"ssh_port,omitempty"`
+	SSHUser                     sql.NullString `db:"ssh_user" json:"ssh_user,omitempty"`
+	SSHAuthType                 sql.NullString `db:"ssh_auth_type" json:"ssh_auth_type,omitempty"` // 'password', 'key', 'key_passphrase'
+	SSHCredentialEncrypted      sql.NullString `db:"ssh_credential_encrypted" json:"-"`
+	SSHCredentialIV             sql.NullString `db:"ssh_credential_iv" json:"-"`
+	HasCredential               bool           `db:"-" json:"has_credential"`
+	ToolPolicy                  string         `db:"tool_policy" json:"tool_policy,omitempty"`   // JSON ToolPolicy
+	SkillPolicy                 string         `db:"skill_policy" json:"skill_policy,omitempty"` // '' = inherit global, 'custom' = per-project
+	DangerouslySkipPermissions  bool           `db:"dangerously_skip_permissions" json:"dangerously_skip_permissions"`
+	TaskAutoApproveVerification string         `db:"task_auto_approve_verification" json:"task_auto_approve_verification"` // 'inherit', 'enabled', or 'disabled'
+	Backend                     string         `db:"backend" json:"backend"`                                               // 'claude_code', 'copilot', 'acp', 'codex', or 'opencode'
+	BackendConfig               string         `db:"backend_config" json:"backend_config"`                                 // JSON blob for backend-specific settings
+	ConfigSyncedAt              sql.NullTime   `db:"config_synced_at" json:"config_synced_at,omitempty"`
+	CreatedAt                   time.Time      `db:"created_at" json:"created_at"`
+	UpdatedAt                   time.Time      `db:"updated_at" json:"updated_at"`
 }
 
 type ProjectInput struct {
-	Name                       string `json:"name"`
-	Path                       string `json:"path"`
-	Type                       string `json:"type"`
-	SSHHost                    string `json:"ssh_host,omitempty"`
-	SSHPort                    int    `json:"ssh_port,omitempty"`
-	SSHUser                    string `json:"ssh_user,omitempty"`
-	SSHAuthType                string `json:"ssh_auth_type,omitempty"`
-	SSHCredential              string `json:"ssh_credential,omitempty"`
-	ToolPolicy                 string `json:"tool_policy,omitempty"`
-	SkillPolicy                string `json:"skill_policy,omitempty"`
-	DangerouslySkipPermissions bool   `json:"dangerously_skip_permissions"`
-	Backend                    string `json:"backend,omitempty"`
-	BackendConfig              string `json:"backend_config,omitempty"`
+	Name                        string `json:"name"`
+	Path                        string `json:"path"`
+	Type                        string `json:"type"`
+	SSHHost                     string `json:"ssh_host,omitempty"`
+	SSHPort                     int    `json:"ssh_port,omitempty"`
+	SSHUser                     string `json:"ssh_user,omitempty"`
+	SSHAuthType                 string `json:"ssh_auth_type,omitempty"`
+	SSHCredential               string `json:"ssh_credential,omitempty"`
+	ToolPolicy                  string `json:"tool_policy,omitempty"`
+	SkillPolicy                 string `json:"skill_policy,omitempty"`
+	DangerouslySkipPermissions  bool   `json:"dangerously_skip_permissions"`
+	TaskAutoApproveVerification string `json:"task_auto_approve_verification,omitempty"`
+	Backend                     string `json:"backend,omitempty"`
+	BackendConfig               string `json:"backend_config,omitempty"`
 }
 
 type Tag struct {
@@ -72,7 +74,8 @@ type Session struct {
 	Backend           string        `db:"backend" json:"backend"` // 'claude_code', 'copilot', 'acp', 'codex', or 'opencode'
 	ProviderSessionID string        `db:"provider_session_id" json:"provider_session_id,omitempty"`
 	SkipPermissions   bool          `db:"skip_permissions" json:"skip_permissions"`
-	Model             string        `db:"model" json:"model"`
+	Model             string        `db:"model" json:"model"` // effective model reported by the runtime; "unknown" until observed
+	RequestedModel    string        `db:"requested_model" json:"requested_model"`
 	Effort            string        `db:"effort" json:"effort"`
 	Harness           string        `db:"harness" json:"harness"`
 }

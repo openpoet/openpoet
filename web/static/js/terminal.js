@@ -117,8 +117,7 @@ class TerminalManager {
     applyCodexTranscriptSnapshot(sessionId, transcript) {
         const events = Array.isArray(transcript?.events) ? transcript.events : null;
         if (!events) return false;
-        window.structuredView?.resetCodexTranscript?.(sessionId);
-        events.forEach(event => window.structuredView?.appendCodexTranscriptEvent?.(sessionId, event));
+        window.structuredView?.loadCodexTranscriptSnapshot?.(sessionId, transcript);
         this._codexTranscriptLoaded.add(sessionId);
         return true;
     }
@@ -1918,14 +1917,14 @@ class CodexSlashPalette {
         this.searchTimer = null;
         this.boundKeydown = (event) => this.handleKeydown(event);
         this.rootCommands = [
+            { id: 'help', label: '/help', description: 'Show the slash commands supported by OpenPoet' },
             { id: 'status', label: '/status', description: 'Show Codex session, thread, model, and permission status' },
             { id: 'resume', label: '/resume', description: 'Resume a Codex thread from this project' },
             { id: 'model', label: '/model', description: 'Choose model, reasoning effort, and service tier' },
             { id: 'permissions', label: '/permissions', description: 'Choose the permission preset for future turns' },
             { id: 'compact', label: '/compact', description: 'Compact the current Codex thread' },
             { id: 'new', label: '/new', description: 'Start a fresh Codex thread in this OpenPoet session' },
-            { id: 'stop', label: '/stop', description: 'Interrupt the active Codex turn' },
-            { id: 'init', label: '/init', description: 'Unavailable: Codex app-server does not expose this TUI command yet', disabled: true }
+            { id: 'stop', label: '/stop', description: 'Interrupt the active Codex turn' }
         ];
     }
 
@@ -2109,7 +2108,9 @@ class CodexSlashPalette {
     async openCommand(commandId) {
         this.query = '';
         this.error = '';
-        if (commandId === 'model') {
+        if (commandId === 'help') {
+            await this.runHelp();
+        } else if (commandId === 'model') {
             await this.loadModels();
         } else if (commandId === 'permissions') {
             await this.loadPermissions();
@@ -2124,6 +2125,13 @@ class CodexSlashPalette {
         } else if (commandId === 'stop') {
             await this.runStop();
         }
+    }
+
+    async runHelp() {
+        this.loading = true;
+        this.render();
+        await this.manager.requestCodexCommand(this.sessionId, 'help/read', {});
+        this.finish('Help written to terminal');
     }
 
     async runStatus() {

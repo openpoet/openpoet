@@ -42,20 +42,21 @@ const (
 )
 
 const (
-	CapabilityTasksList                CapabilityName = "tasks.list"
-	CapabilityTasksGet                 CapabilityName = "tasks.get"
-	CapabilityTasksCreate              CapabilityName = "tasks.create"
-	CapabilityTasksUpdate              CapabilityName = "tasks.update"
-	CapabilityTasksChangeStatus        CapabilityName = "tasks.change_status"
-	CapabilityTasksDelete              CapabilityName = "tasks.delete"
-	CapabilityTasksDuplicate           CapabilityName = "tasks.duplicate"
-	CapabilityTasksReorderProject      CapabilityName = "tasks.reorder_project"
-	CapabilityTasksReorderGlobal       CapabilityName = "tasks.reorder_global"
-	CapabilityTasksApproveVerification CapabilityName = "tasks.approve_verification"
-	CapabilityTasksRejectVerification  CapabilityName = "tasks.reject_verification"
-	CapabilityTasksLinkSession         CapabilityName = "tasks.link_session"
-	CapabilityTasksUnlinkSession       CapabilityName = "tasks.unlink_session"
-	CapabilityTasksAddComment          CapabilityName = "tasks.add_comment"
+	CapabilityTasksList                    CapabilityName = "tasks.list"
+	CapabilityTasksGet                     CapabilityName = "tasks.get"
+	CapabilityTasksCreate                  CapabilityName = "tasks.create"
+	CapabilityTasksUpdate                  CapabilityName = "tasks.update"
+	CapabilityTasksChangeStatus            CapabilityName = "tasks.change_status"
+	CapabilityTasksDelete                  CapabilityName = "tasks.delete"
+	CapabilityTasksDuplicate               CapabilityName = "tasks.duplicate"
+	CapabilityTasksReorderProject          CapabilityName = "tasks.reorder_project"
+	CapabilityTasksReorderGlobal           CapabilityName = "tasks.reorder_global"
+	CapabilityTasksApproveVerification     CapabilityName = "tasks.approve_verification"
+	CapabilityTasksApproveVerificationBulk CapabilityName = "tasks.approve_verification_bulk"
+	CapabilityTasksRejectVerification      CapabilityName = "tasks.reject_verification"
+	CapabilityTasksLinkSession             CapabilityName = "tasks.link_session"
+	CapabilityTasksUnlinkSession           CapabilityName = "tasks.unlink_session"
+	CapabilityTasksAddComment              CapabilityName = "tasks.add_comment"
 )
 
 const (
@@ -72,20 +73,21 @@ const (
 )
 
 const (
-	CapabilityHandlerTasksList                CapabilityHandler = "project_tasks.list"
-	CapabilityHandlerTasksGet                 CapabilityHandler = "project_tasks.get"
-	CapabilityHandlerTasksCreate              CapabilityHandler = "project_tasks.create"
-	CapabilityHandlerTasksUpdate              CapabilityHandler = "project_tasks.update"
-	CapabilityHandlerTasksChangeStatus        CapabilityHandler = "project_tasks.change_status"
-	CapabilityHandlerTasksDelete              CapabilityHandler = "project_tasks.delete"
-	CapabilityHandlerTasksDuplicate           CapabilityHandler = "project_tasks.duplicate"
-	CapabilityHandlerTasksReorderProject      CapabilityHandler = "project_tasks.reorder_project"
-	CapabilityHandlerTasksReorderGlobal       CapabilityHandler = "project_tasks.reorder_global"
-	CapabilityHandlerTasksApproveVerification CapabilityHandler = "project_tasks.approve_verification"
-	CapabilityHandlerTasksRejectVerification  CapabilityHandler = "project_tasks.reject_verification"
-	CapabilityHandlerTasksLinkSession         CapabilityHandler = "project_tasks.link_session"
-	CapabilityHandlerTasksUnlinkSession       CapabilityHandler = "project_tasks.unlink_session"
-	CapabilityHandlerTasksAddComment          CapabilityHandler = "project_tasks.add_comment"
+	CapabilityHandlerTasksList                    CapabilityHandler = "project_tasks.list"
+	CapabilityHandlerTasksGet                     CapabilityHandler = "project_tasks.get"
+	CapabilityHandlerTasksCreate                  CapabilityHandler = "project_tasks.create"
+	CapabilityHandlerTasksUpdate                  CapabilityHandler = "project_tasks.update"
+	CapabilityHandlerTasksChangeStatus            CapabilityHandler = "project_tasks.change_status"
+	CapabilityHandlerTasksDelete                  CapabilityHandler = "project_tasks.delete"
+	CapabilityHandlerTasksDuplicate               CapabilityHandler = "project_tasks.duplicate"
+	CapabilityHandlerTasksReorderProject          CapabilityHandler = "project_tasks.reorder_project"
+	CapabilityHandlerTasksReorderGlobal           CapabilityHandler = "project_tasks.reorder_global"
+	CapabilityHandlerTasksApproveVerification     CapabilityHandler = "project_tasks.approve_verification"
+	CapabilityHandlerTasksApproveVerificationBulk CapabilityHandler = "project_tasks.approve_verification_bulk"
+	CapabilityHandlerTasksRejectVerification      CapabilityHandler = "project_tasks.reject_verification"
+	CapabilityHandlerTasksLinkSession             CapabilityHandler = "project_tasks.link_session"
+	CapabilityHandlerTasksUnlinkSession           CapabilityHandler = "project_tasks.unlink_session"
+	CapabilityHandlerTasksAddComment              CapabilityHandler = "project_tasks.add_comment"
 )
 
 const (
@@ -159,6 +161,7 @@ func NewProjectTaskCapabilityRegistry(service *ProjectTaskService) (*CapabilityR
 		{Name: CapabilityTasksReorderProject, Scope: CapabilityScopeTasksWrite, Risk: CapabilityRiskWrite, Approval: ApprovalByPolicy, Handler: CapabilityHandlerTasksReorderProject, Service: service},
 		{Name: CapabilityTasksReorderGlobal, Scope: CapabilityScopeTasksWrite, Risk: CapabilityRiskWrite, Approval: ApprovalByPolicy, Handler: CapabilityHandlerTasksReorderGlobal, Service: service},
 		{Name: CapabilityTasksApproveVerification, Scope: CapabilityScopeTasksWrite, Risk: CapabilityRiskWrite, Approval: ApprovalExplicit, Handler: CapabilityHandlerTasksApproveVerification, Service: service},
+		{Name: CapabilityTasksApproveVerificationBulk, Scope: CapabilityScopeTasksWrite, Risk: CapabilityRiskWrite, Approval: ApprovalExplicit, Handler: CapabilityHandlerTasksApproveVerificationBulk, Service: service},
 		{Name: CapabilityTasksRejectVerification, Scope: CapabilityScopeTasksWrite, Risk: CapabilityRiskWrite, Approval: ApprovalExplicit, Handler: CapabilityHandlerTasksRejectVerification, Service: service},
 		{Name: CapabilityTasksLinkSession, Scope: CapabilityScopeTasksWrite, Risk: CapabilityRiskWrite, Approval: ApprovalByPolicy, Handler: CapabilityHandlerTasksLinkSession, Service: service},
 		{Name: CapabilityTasksUnlinkSession, Scope: CapabilityScopeTasksWrite, Risk: CapabilityRiskWrite, Approval: ApprovalByPolicy, Handler: CapabilityHandlerTasksUnlinkSession, Service: service},

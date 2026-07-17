@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func requireCodexTranscriptStatus(t *testing.T, r *CodexRunner, title, text string) {
@@ -450,8 +452,20 @@ func TestCodexSlashCommandDetection(t *testing.T) {
 		want bool
 	}{
 		{text: "/", want: true},
+		{text: "/help", want: true},
 		{text: "/status", want: true},
 		{text: " /clear ", want: true},
+		{text: "/new", want: true},
+		{text: "/app", want: true},
+		{text: "/delete", want: true},
+		{text: "/import", want: true},
+		{text: "/logout", want: true},
+		{text: "/pets", want: true},
+		{text: "/rename", want: true},
+		{text: "/setup-default-sandbox", want: true},
+		{text: "/subagents", want: true},
+		{text: "/usage", want: true},
+		{text: "/pet", want: true},
 		{text: "/review", want: true},
 		{text: "/tmp/openpoet", want: false},
 		{text: "please run /status", want: false},
@@ -463,6 +477,22 @@ func TestCodexSlashCommandDetection(t *testing.T) {
 				t.Fatalf("isCodexSlashCommand(%q) = %v, want %v", tt.text, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCodexCommandHelpWritesSupportedCommands(t *testing.T) {
+	var out strings.Builder
+	r := &CodexRunner{outputHandler: func(b []byte) { out.Write(b) }}
+
+	result, err := r.HandleCodexCommand(context.Background(), json.RawMessage(`{"action":"help/read","params":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, ok := result.(map[string]string); !ok || status["status"] != "written" {
+		t.Fatalf("help result = %#v, want written status", result)
+	}
+	if text := out.String(); !strings.Contains(text, "Supported: /help, /status") {
+		t.Fatalf("help output did not include supported commands: %q", text)
 	}
 }
 
@@ -869,5 +899,86 @@ func TestSignalCodexCommandProcessRejectsInvalidProcessID(t *testing.T) {
 	}
 	if err := signalCodexCommandProcess("0"); err == nil {
 		t.Fatal("expected non-positive process id error")
+	}
+}
+
+func TestMergeCodexTranscriptEventsCollapsesDeltas(t *testing.T) {
+	events := []codexTranscriptEvent{
+		{ID: 1, Kind: "user", Text: "do the thing"},
+		{ID: 2, Kind: "assistant", Text: "part one "},
+		{ID: 2, Kind: "assistant", Text: "part two", Append: true},
+		{ID: 3, Kind: "command", Command: "ls", Status: "running"},
+		{ID: 3, Kind: "command", Text: "file.txt\n", Append: true},
+		{ID: 3, Kind: "command", Status: "completed", Append: true},
+	}
+
+	merged := mergeCodexTranscriptEvents(events)
+	if len(merged) != 3 {
+		t.Fatalf("expected 3 merged events, got %d: %#v", len(merged), merged)
+	}
+	if merged[1].Text != "part one part two" {
+		t.Fatalf("expected concatenated assistant text, got %q", merged[1].Text)
+	}
+	if merged[1].Append {
+		t.Fatal("merged events must not carry the append flag")
+	}
+	if merged[2].Command != "ls" || merged[2].Status != "completed" || merged[2].Text != "file.txt\n" {
+		t.Fatalf("command event merged incorrectly: %#v", merged[2])
+	}
+}
+
+func TestCapCodexTranscriptEventsKeepsNewestWithinBudget(t *testing.T) {
+	big := strings.Repeat("x", 1000)
+	events := []codexTranscriptEvent{
+		{ID: 1, Kind: "assistant", Text: big},
+		{ID: 2, Kind: "assistant", Text: big},
+		{ID: 3, Kind: "assistant", Text: big},
+	}
+
+	capped, truncated := capCodexTranscriptEvents(events, 2100, 10_000)
+	if !truncated {
+		t.Fatal("expected truncation")
+	}
+	if len(capped) != 2 || capped[0].ID != 2 || capped[1].ID != 3 {
+		t.Fatalf("expected newest two events, got %#v", capped)
+	}
+}
+
+func TestCapCodexTranscriptEventsTrimsOversizedItemWithoutSplittingRunes(t *testing.T) {
+	text := strings.Repeat("é", 600) // 1200 bytes of 2-byte runes
+	events := []codexTranscriptEvent{{ID: 1, Kind: "assistant", Text: text}}
+
+	capped, truncated := capCodexTranscriptEvents(events, 10_000, 501)
+	if !truncated {
+		t.Fatal("expected truncation for oversized item")
+	}
+	if len(capped) != 1 {
+		t.Fatalf("expected the item to survive, got %#v", capped)
+	}
+	got := capped[0].Text
+	if !strings.HasPrefix(got, "… [earlier output trimmed]\n") {
+		t.Fatalf("expected trim marker prefix, got %q", got[:40])
+	}
+	tail := strings.TrimPrefix(got, "… [earlier output trimmed]\n")
+	if !utf8.ValidString(tail) {
+		t.Fatal("trimmed text split a UTF-8 rune")
+	}
+	if len(tail) > 501 {
+		t.Fatalf("tail exceeds per-item budget: %d bytes", len(tail))
+	}
+}
+
+func TestCapCodexTranscriptEventsAlwaysKeepsNewestEvent(t *testing.T) {
+	events := []codexTranscriptEvent{
+		{ID: 1, Kind: "assistant", Text: strings.Repeat("a", 500)},
+		{ID: 2, Kind: "assistant", Text: strings.Repeat("b", 500)},
+	}
+
+	capped, truncated := capCodexTranscriptEvents(events, 100, 10_000)
+	if !truncated {
+		t.Fatal("expected truncation")
+	}
+	if len(capped) != 1 || capped[0].ID != 2 {
+		t.Fatalf("expected only the newest event, got %#v", capped)
 	}
 }

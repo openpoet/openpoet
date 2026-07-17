@@ -183,15 +183,20 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	backend := GetBackend(project.Backend)
 	sessionID := uuid.New().String()
 	meta := sessionmeta.FromProjectConfig(project.Backend, project.BackendConfig)
+	requestedModel, effectiveModel, err := initialSessionModels(backend.Type(), meta.Model, meta.Harness)
+	if err != nil {
+		return nil, err
+	}
 	session := &database.Session{
-		ID:        sessionID,
-		ProjectID: project.ID,
-		Status:    "starting",
-		StartTime: time.Now(),
-		Backend:   project.Backend,
-		Model:     meta.Model,
-		Effort:    meta.Effort,
-		Harness:   meta.Harness,
+		ID:             sessionID,
+		ProjectID:      project.ID,
+		Status:         "starting",
+		StartTime:      time.Now(),
+		Backend:        project.Backend,
+		Model:          effectiveModel,
+		RequestedModel: requestedModel,
+		Effort:         meta.Effort,
+		Harness:        meta.Harness,
 	}
 
 	if err := m.db.CreateSession(ctx, session); err != nil {
@@ -240,7 +245,7 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 
 	// Create runner based on project type
 	var runner Runner
-	var err error
+	var runnerErr error
 
 	if project.Type == "local" {
 		dumper := newPTYDumper(sessionID, "local")
@@ -251,17 +256,17 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 			m.checkForNotificationTriggers(sessionID, data)
 		}
 		if useCodexAppServer(project.Backend, project.BackendConfig) {
-			runner, err = NewCodexRunner(project.Path, envVars, outputHandler, cfg, m.db, m.hub)
+			runner, runnerErr = NewCodexRunner(project.Path, envVars, outputHandler, cfg, m.db, m.hub)
 		} else {
-			runner, err = NewLocalRunner(project.Path, envVars, outputHandler, cliArgs, backend)
+			runner, runnerErr = NewLocalRunner(project.Path, envVars, outputHandler, cliArgs, backend)
 		}
 	} else {
 		return nil, fmt.Errorf("remote sessions not yet implemented")
 	}
 
-	if err != nil {
+	if runnerErr != nil {
 		m.db.EndSession(ctx, sessionID, "error")
-		return nil, fmt.Errorf("failed to create runner: %w", err)
+		return nil, fmt.Errorf("failed to create runner: %w", runnerErr)
 	}
 
 	// Start the session
@@ -316,17 +321,32 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, project *database.Project, envVars map[string]string, decryptFunc func(string, string) (string, error)) error {
 	backend := GetBackend(session.Backend)
 	sessionID := session.ID
-	meta := sessionmeta.WithSessionValues(
-		sessionmeta.FromProjectConfig(session.Backend, project.BackendConfig),
-		session.Model,
-		session.Effort,
-		session.Harness,
-	)
-	session.Model = meta.Model
+	projectMeta := sessionmeta.FromProjectConfig(session.Backend, project.BackendConfig)
+	requestedModel := strings.TrimSpace(session.RequestedModel)
+	if requestedModel == "" {
+		requestedModel = projectMeta.Model
+	}
+	if backend.Type() == BackendClaudeCode {
+		var err error
+		requestedModel, err = validateClaudeCodeModelIDForHarness(requestedModel, projectMeta.Harness)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(session.Model) == "" {
+			session.Model = "unknown"
+		}
+	} else if strings.TrimSpace(session.Model) == "" {
+		session.Model = requestedModel
+	}
+	meta := sessionmeta.WithSessionValues(projectMeta, session.Model, session.Effort, session.Harness)
+	session.RequestedModel = requestedModel
 	session.Effort = meta.Effort
 	session.Harness = meta.Harness
 	if err := m.db.UpdateSessionRuntimeMetadata(ctx, sessionID, session.Model, session.Effort, session.Harness); err != nil {
 		return fmt.Errorf("failed to restore session runtime metadata: %w", err)
+	}
+	if err := m.db.UpdateSessionRequestedModel(ctx, sessionID, session.RequestedModel); err != nil {
+		return fmt.Errorf("failed to restore requested session model: %w", err)
 	}
 
 	// Check backend supports resume
@@ -380,6 +400,8 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	}
 	if backend.Type() == BackendCodex {
 		cfg.BackendConfig = sessionmeta.ApplyRuntimeValues(project.BackendConfig, session.Model, session.Effort)
+	} else if backend.Type() == BackendClaudeCode {
+		cfg.BackendConfig = sessionmeta.ApplyRuntimeValues(project.BackendConfig, session.RequestedModel, "")
 	}
 
 	// Extract special env vars set by API handler
@@ -877,7 +899,16 @@ func (m *Manager) SetSessionModel(ctx context.Context, sessionID, model string, 
 	}
 
 	switch BackendType(rs.session.Backend) {
-	case BackendClaudeCode, BackendCodex:
+	case BackendClaudeCode:
+		model, err = validateClaudeCodeModelIDForHarness(model, rs.session.Harness)
+		if err != nil {
+			return nil, err
+		}
+		if err := m.SubmitLineToSession(sessionID, "/model "+model, textToEnterDelay); err != nil {
+			return nil, err
+		}
+		return m.persistSessionRequestedModel(ctx, sessionID, model)
+	case BackendCodex:
 		if err := m.SubmitLineToSession(sessionID, "/model "+model, textToEnterDelay); err != nil {
 			return nil, err
 		}
@@ -953,6 +984,11 @@ func (m *Manager) persistSessionRuntimeMetadata(ctx context.Context, sessionID, 
 		if err := m.db.UpdateSessionRuntimeMetadata(ctx, sessionID, currentModel, currentEffort, harness); err != nil {
 			return nil, fmt.Errorf("failed to persist session runtime metadata: %w", err)
 		}
+		if model != "" {
+			if err := m.db.UpdateSessionRequestedModel(ctx, sessionID, currentModel); err != nil {
+				return nil, fmt.Errorf("failed to persist requested session model: %w", err)
+			}
+		}
 	}
 
 	m.mu.Lock()
@@ -962,9 +998,100 @@ func (m *Manager) persistSessionRuntimeMetadata(ctx context.Context, sessionID, 
 		return nil, fmt.Errorf("%w: %s", ErrSessionNotRunning, sessionID)
 	}
 	rs.session.Model = currentModel
+	if model != "" {
+		rs.session.RequestedModel = currentModel
+	}
 	rs.session.Effort = currentEffort
 	copy := *rs.session
 	return &copy, nil
+}
+
+func (m *Manager) persistSessionRequestedModel(ctx context.Context, sessionID, requestedModel string) (*database.Session, error) {
+	if m.db != nil {
+		if err := m.db.UpdateSessionRequestedModel(ctx, sessionID, requestedModel); err != nil {
+			return nil, fmt.Errorf("failed to persist requested session model: %w", err)
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rs, ok := m.sessions[sessionID]
+	if !ok || rs == nil || rs.session == nil {
+		return nil, fmt.Errorf("%w: %s", ErrSessionNotRunning, sessionID)
+	}
+	rs.session.RequestedModel = requestedModel
+	copy := *rs.session
+	return &copy, nil
+}
+
+// RecordEffectiveModel persists a model identifier reported by the runtime
+// itself (Claude SessionStart hook or assistant transcript), never by config.
+func (m *Manager) RecordEffectiveModel(ctx context.Context, sessionID, effectiveModel string) error {
+	effectiveModel = strings.TrimSpace(effectiveModel)
+	if effectiveModel == "" {
+		return nil
+	}
+	if m.db != nil {
+		if err := m.db.UpdateSessionEffectiveModel(ctx, sessionID, effectiveModel); err != nil {
+			return fmt.Errorf("failed to persist effective session model: %w", err)
+		}
+	}
+	m.mu.Lock()
+	if rs, ok := m.sessions[sessionID]; ok && rs != nil && rs.session != nil {
+		rs.session.Model = effectiveModel
+	}
+	m.mu.Unlock()
+	if m.hub != nil {
+		m.hub.BroadcastStateUpdate("session", map[string]interface{}{
+			"action": "runtime_metadata_changed", "session_id": sessionID, "model": effectiveModel,
+		})
+	}
+	return nil
+}
+
+func initialSessionModels(backend BackendType, configuredModel, harness string) (requestedModel, effectiveModel string, err error) {
+	configuredModel = strings.TrimSpace(configuredModel)
+	if configuredModel == "" {
+		configuredModel = "default"
+	}
+	if backend == BackendClaudeCode {
+		requestedModel, err = validateClaudeCodeModelIDForHarness(configuredModel, harness)
+		if err != nil {
+			return "", "", err
+		}
+		return requestedModel, "unknown", nil
+	}
+	return configuredModel, configuredModel, nil
+}
+
+func validateClaudeCodeModelIDForHarness(model, harness string) (string, error) {
+	if strings.EqualFold(strings.TrimSpace(harness), "claude_code/openai") {
+		validated, err := validateSessionModelID(model)
+		if err != nil {
+			return "", err
+		}
+		if strings.EqualFold(validated, "default") {
+			return "", fmt.Errorf("%w: an explicit OpenAI model is required for Claude Code with OpenAI OAuth", ErrInvalidSessionSetting)
+		}
+		return validated, nil
+	}
+	return validateClaudeCodeModelID(model)
+}
+
+func validateClaudeCodeModelID(model string) (string, error) {
+	model, err := validateSessionModelID(model)
+	if err != nil {
+		return "", err
+	}
+	lower := strings.ToLower(model)
+	base := strings.TrimSuffix(lower, "[1m]")
+	switch base {
+	case "default", "best", "opus", "sonnet", "haiku", "opusplan", "fable":
+		return model, nil
+	}
+	if strings.HasPrefix(base, "claude-") || strings.Contains(base, "anthropic.claude") {
+		return model, nil
+	}
+	return "", fmt.Errorf("%w: model %q is not compatible with claude_code; use default, best, opus, sonnet, haiku, opusplan, fable, or a claude-* model ID (optionally with [1m])", ErrInvalidSessionSetting, model)
 }
 
 func validateSessionModelID(model string) (string, error) {
@@ -1568,15 +1695,20 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	}
 	sessionID := uuid.New().String()
 	meta := sessionmeta.FromProjectConfig(project.Backend, project.BackendConfig)
+	requestedModel, effectiveModel, modelErr := initialSessionModels(backend.Type(), meta.Model, meta.Harness)
+	if modelErr != nil {
+		return nil, modelErr
+	}
 	session := &database.Session{
-		ID:        sessionID,
-		ProjectID: project.ID,
-		Status:    "starting",
-		StartTime: time.Now(),
-		Backend:   project.Backend,
-		Model:     meta.Model,
-		Effort:    meta.Effort,
-		Harness:   meta.Harness,
+		ID:             sessionID,
+		ProjectID:      project.ID,
+		Status:         "starting",
+		StartTime:      time.Now(),
+		Backend:        project.Backend,
+		Model:          effectiveModel,
+		RequestedModel: requestedModel,
+		Effort:         meta.Effort,
+		Harness:        meta.Harness,
 	}
 
 	if err := m.db.CreateSession(ctx, session); err != nil {

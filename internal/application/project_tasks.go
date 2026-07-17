@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -17,6 +18,11 @@ const (
 	TaskStatusInProgress       = "in_progress"
 	TaskStatusAwaitingApproval = "awaiting_approval"
 	TaskStatusDone             = "done"
+
+	TaskAutoApproveVerificationSetting = "task_auto_approve_verification_enabled"
+	TaskAutoApproveInherit             = "inherit"
+	TaskAutoApproveEnabled             = "enabled"
+	TaskAutoApproveDisabled            = "disabled"
 )
 
 type Actor struct {
@@ -83,6 +89,85 @@ func NewProjectTaskService(store ProjectTaskStore, effects ProjectTaskEffects, p
 
 func (s *ProjectTaskService) CapabilityServiceName() CapabilityServiceName {
 	return CapabilityServiceProjectTasks
+}
+
+type taskAutoApprovalDecision struct {
+	ConfigScope     string
+	ProjectOverride string
+	GlobalEnabled   bool
+}
+
+func (s *ProjectTaskService) resolveTaskStatus(
+	ctx context.Context,
+	tx *database.ProjectTaskTx,
+	projectID int64,
+	requestedStatus string,
+) (string, *taskAutoApprovalDecision, error) {
+	if requestedStatus != TaskStatusAwaitingApproval {
+		return requestedStatus, nil, nil
+	}
+	projectOverride, globalValue, err := tx.TaskAutoApprovalConfig(ctx, projectID, TaskAutoApproveVerificationSetting)
+	if err != nil {
+		return "", nil, err
+	}
+	globalEnabled := strings.EqualFold(strings.TrimSpace(globalValue), "true")
+	switch projectOverride {
+	case TaskAutoApproveEnabled:
+		return TaskStatusDone, &taskAutoApprovalDecision{
+			ConfigScope: "project", ProjectOverride: TaskAutoApproveEnabled, GlobalEnabled: globalEnabled,
+		}, nil
+	case TaskAutoApproveDisabled:
+		return requestedStatus, nil, nil
+	default:
+		if globalEnabled {
+			return TaskStatusDone, &taskAutoApprovalDecision{
+				ConfigScope: "global", ProjectOverride: TaskAutoApproveInherit, GlobalEnabled: true,
+			}, nil
+		}
+		return requestedStatus, nil, nil
+	}
+}
+
+func (s *ProjectTaskService) recordTaskAutoApproval(
+	ctx context.Context,
+	tx *database.ProjectTaskTx,
+	mutation *mutationEffects,
+	task *database.ProjectTask,
+	oldStatus string,
+	triggeredBy Actor,
+	decision *taskAutoApprovalDecision,
+) error {
+	if decision == nil {
+		return nil
+	}
+	if task.VerificationDocID != "" {
+		if err := tx.UpdateDocumentStatus(ctx, task.VerificationDocID, "approved"); err != nil {
+			return err
+		}
+	}
+	autoActor := Actor{Type: "system", ID: "verification-auto-approval"}
+	history, err := createHistory(ctx, tx, task.ID, task.ProjectID, "verification_auto_approved", map[string]any{
+		"old":              oldStatus,
+		"requested_status": TaskStatusAwaitingApproval,
+		"new":              TaskStatusDone,
+		"config_scope":     decision.ConfigScope,
+		"project_override": decision.ProjectOverride,
+		"global_enabled":   decision.GlobalEnabled,
+		"setting_key":      TaskAutoApproveVerificationSetting,
+		"triggered_by":     triggeredBy.historyValue(),
+	}, autoActor, "")
+	if err != nil {
+		return err
+	}
+	mutation.history = append(mutation.history, history)
+	return s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
+		EventType: ProjectTaskEventVerificationApproved, AggregateType: "project_task",
+		AggregateID: strconv.FormatInt(task.ID, 10), Actor: autoActor,
+		Payload: map[string]any{
+			"project_id": task.ProjectID, "task_id": task.ID, "status": TaskStatusDone,
+			"automatic": true, "config_scope": decision.ConfigScope,
+		},
+	})
 }
 
 type AllTasksResult struct {
@@ -198,33 +283,44 @@ func (s *ProjectTaskService) Create(ctx context.Context, command CreateProjectTa
 		if err != nil {
 			return err
 		}
+		resolvedStatus, autoApproval, err := s.resolveTaskStatus(ctx, tx, command.ProjectID, status)
+		if err != nil {
+			return err
+		}
 		task := &database.ProjectTask{
 			ProjectID: command.ProjectID, Title: title, Description: command.Description,
-			Status: status, Priority: priority, DueDate: dueDate, ParentID: parentID,
+			Status: resolvedStatus, Priority: priority, DueDate: dueDate, ParentID: parentID,
 			SortOrder: command.SortOrder,
 		}
 		if err := tx.CreateTask(ctx, task); err != nil {
 			return err
 		}
-		history, err := createHistory(ctx, tx, task.ID, task.ProjectID, "task_created", map[string]any{
+		createdDetails := map[string]any{
 			"title": task.Title, "status": task.Status, "priority": task.Priority,
-		}, command.Actor, "")
+		}
+		if autoApproval != nil {
+			createdDetails["requested_status"] = TaskStatusAwaitingApproval
+		}
+		history, err := createHistory(ctx, tx, task.ID, task.ProjectID, "task_created", createdDetails, command.Actor, "")
 		if err != nil {
 			return err
 		}
 		created = task
 		mutation.tasks = append(mutation.tasks, TaskChange{Action: "created", ProjectID: task.ProjectID, Task: task})
 		mutation.history = append(mutation.history, history)
-		if task.Status == TaskStatusAwaitingApproval {
+		if autoApproval == nil && task.Status == TaskStatusAwaitingApproval {
 			mutation.verify = task
 		}
-		return s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
+		if err := s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
 			EventType: ProjectTaskEventCreated, AggregateType: "project_task",
 			AggregateID: strconv.FormatInt(task.ID, 10), Actor: command.Actor,
 			Payload: map[string]any{
 				"project_id": task.ProjectID, "task_id": task.ID, "status": task.Status,
 			},
-		})
+		}); err != nil {
+			return err
+		}
+		return s.recordTaskAutoApproval(ctx, tx, &mutation, task, "created", command.Actor, autoApproval)
 	})
 	if err != nil {
 		return nil, err
@@ -294,11 +390,18 @@ func (s *ProjectTaskService) Update(ctx context.Context, command UpdateProjectTa
 			task.SortOrder = *command.SortOrder
 		}
 		newStatus := old.Status
+		var autoApproval *taskAutoApprovalDecision
 		if command.Status != nil {
 			if !validTaskStatus(*command.Status) {
 				return validationError("invalid_status", "Invalid status")
 			}
 			newStatus = *command.Status
+			if old.Status != TaskStatusAwaitingApproval {
+				newStatus, autoApproval, err = s.resolveTaskStatus(ctx, tx, command.ProjectID, newStatus)
+				if err != nil {
+					return err
+				}
+			}
 			task.Status = newStatus
 		}
 
@@ -317,12 +420,17 @@ func (s *ProjectTaskService) Update(ctx context.Context, command UpdateProjectTa
 		updated = fresh
 		mutation.tasks = append(mutation.tasks, TaskChange{Action: "updated", ProjectID: fresh.ProjectID, Task: fresh})
 
+		statusDetails := map[string]any{"old": old.Status, "new": fresh.Status}
+		if autoApproval != nil {
+			statusDetails["requested_status"] = TaskStatusAwaitingApproval
+			statusDetails["reason"] = "verification_auto_approved"
+		}
 		changes := []struct {
 			changed bool
 			event   string
 			details map[string]any
 		}{
-			{fresh.Status != old.Status, "status_change", map[string]any{"old": old.Status, "new": fresh.Status}},
+			{fresh.Status != old.Status, "status_change", statusDetails},
 			{fresh.Priority != old.Priority, "priority_change", map[string]any{"old": old.Priority, "new": fresh.Priority}},
 			{fresh.Title != old.Title, "title_updated", map[string]any{"old": old.Title, "new": fresh.Title}},
 			{fresh.Description != old.Description, "description_updated", map[string]any{}},
@@ -337,16 +445,19 @@ func (s *ProjectTaskService) Update(ctx context.Context, command UpdateProjectTa
 			}
 			mutation.history = append(mutation.history, history)
 		}
-		if old.Status != TaskStatusAwaitingApproval && fresh.Status == TaskStatusAwaitingApproval {
+		if autoApproval == nil && old.Status != TaskStatusAwaitingApproval && fresh.Status == TaskStatusAwaitingApproval {
 			mutation.verify = fresh
 		}
-		return s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
+		if err := s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
 			EventType: ProjectTaskEventUpdated, AggregateType: "project_task",
 			AggregateID: strconv.FormatInt(fresh.ID, 10), Actor: command.Actor,
 			Payload: map[string]any{
 				"project_id": fresh.ProjectID, "task_id": fresh.ID, "status": fresh.Status,
 			},
-		})
+		}); err != nil {
+			return err
+		}
+		return s.recordTaskAutoApproval(ctx, tx, &mutation, fresh, old.Status, command.Actor, autoApproval)
 	})
 	if err != nil {
 		return nil, err
@@ -374,7 +485,15 @@ func (s *ProjectTaskService) ChangeStatus(ctx context.Context, command ChangeTas
 			return notFoundError("task_not_found", "Task not found", err)
 		}
 		oldStatus := task.Status
-		if err := tx.ChangeTaskStatus(ctx, task.ID, command.Status); err != nil {
+		resolvedStatus := command.Status
+		var autoApproval *taskAutoApprovalDecision
+		if oldStatus != TaskStatusAwaitingApproval {
+			resolvedStatus, autoApproval, err = s.resolveTaskStatus(ctx, tx, command.ProjectID, command.Status)
+			if err != nil {
+				return err
+			}
+		}
+		if err := tx.ChangeTaskStatus(ctx, task.ID, resolvedStatus); err != nil {
 			return err
 		}
 		updated, err = tx.GetTask(ctx, task.ID)
@@ -382,25 +501,33 @@ func (s *ProjectTaskService) ChangeStatus(ctx context.Context, command ChangeTas
 			return err
 		}
 		mutation.tasks = append(mutation.tasks, TaskChange{Action: "updated", ProjectID: task.ProjectID, Task: updated})
-		if oldStatus != command.Status {
+		if oldStatus != resolvedStatus {
+			details := map[string]any{"old": oldStatus, "new": resolvedStatus}
+			if autoApproval != nil {
+				details["requested_status"] = TaskStatusAwaitingApproval
+				details["reason"] = "verification_auto_approved"
+			}
 			history, err := createHistory(ctx, tx, task.ID, task.ProjectID, "status_change",
-				map[string]any{"old": oldStatus, "new": command.Status}, command.Actor, "")
+				details, command.Actor, "")
 			if err != nil {
 				return err
 			}
 			mutation.history = append(mutation.history, history)
 		}
-		if oldStatus != TaskStatusAwaitingApproval && command.Status == TaskStatusAwaitingApproval {
+		if autoApproval == nil && oldStatus != TaskStatusAwaitingApproval && resolvedStatus == TaskStatusAwaitingApproval {
 			mutation.verify = updated
 		}
-		return s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
+		if err := s.publishProjectTaskEvent(ctx, tx, ProjectTaskEvent{
 			EventType: ProjectTaskEventStatusChanged, AggregateType: "project_task",
 			AggregateID: strconv.FormatInt(task.ID, 10), Actor: command.Actor,
 			Payload: map[string]any{
 				"project_id": task.ProjectID, "task_id": task.ID,
-				"old_status": oldStatus, "new_status": command.Status,
+				"old_status": oldStatus, "new_status": resolvedStatus,
 			},
-		})
+		}); err != nil {
+			return err
+		}
+		return s.recordTaskAutoApproval(ctx, tx, &mutation, updated, oldStatus, command.Actor, autoApproval)
 	})
 	if err != nil {
 		return nil, err
@@ -558,20 +685,151 @@ func (s *ProjectTaskService) ReorderGlobal(ctx context.Context, items []database
 }
 
 func (s *ProjectTaskService) ApproveVerification(ctx context.Context, projectID, taskID int64, actor Actor) (*database.ProjectTask, error) {
-	return s.verify(ctx, projectID, taskID, actor, true)
+	updated, _, err := s.verify(ctx, projectID, taskID, actor, true, verificationOptions{})
+	return updated, err
 }
 
 func (s *ProjectTaskService) RejectVerification(ctx context.Context, projectID, taskID int64, actor Actor) (*database.ProjectTask, error) {
-	return s.verify(ctx, projectID, taskID, actor, false)
+	updated, _, err := s.verify(ctx, projectID, taskID, actor, false, verificationOptions{})
+	return updated, err
 }
 
-func (s *ProjectTaskService) verify(ctx context.Context, projectID, taskID int64, actor Actor, approve bool) (*database.ProjectTask, error) {
+type BulkApproveVerificationCommand struct {
+	TaskIDs    []int64
+	AllPending bool
+	ProjectID  *int64
+	Actor      Actor
+	BulkID     string
+}
+
+type BulkApprovalItemResult struct {
+	TaskID    int64  `json:"task_id"`
+	ProjectID int64  `json:"project_id,omitempty"`
+	Outcome   string `json:"outcome"`
+	ErrorCode string `json:"error_code,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+type BulkApproveVerificationResult struct {
+	Requested   int                      `json:"requested"`
+	Approved    int                      `json:"approved"`
+	AlreadyDone int                      `json:"already_done"`
+	Failed      int                      `json:"failed"`
+	Results     []BulkApprovalItemResult `json:"results"`
+}
+
+type verificationOptions struct {
+	allowAlreadyDone bool
+	bulk             bool
+	bulkID           string
+}
+
+func (s *ProjectTaskService) ApproveVerificationBulk(ctx context.Context, command BulkApproveVerificationCommand) (*BulkApproveVerificationResult, error) {
+	if command.AllPending && len(command.TaskIDs) > 0 {
+		return nil, validationError("bulk_selection_ambiguous", "Use either task_ids or all_pending, not both")
+	}
+	if !command.AllPending && len(command.TaskIDs) == 0 {
+		return nil, validationError("bulk_selection_required", "Provide task_ids or set all_pending")
+	}
+	if len(command.TaskIDs) > 500 {
+		return nil, validationError("bulk_too_large", "Too many task_ids (max 500)")
+	}
+	if command.ProjectID != nil && *command.ProjectID <= 0 {
+		return nil, validationError("invalid_project_id", "Project ID must be positive")
+	}
+
+	taskIDs := append([]int64(nil), command.TaskIDs...)
+	if command.AllPending {
+		tasks, err := s.store.ListAllTasks(ctx, database.TaskFilter{
+			Status: TaskStatusAwaitingApproval, ProjectID: command.ProjectID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		taskIDs = make([]int64, 0, len(tasks))
+		for _, task := range tasks {
+			taskIDs = append(taskIDs, task.ID)
+		}
+	}
+
+	result := &BulkApproveVerificationResult{
+		Requested: len(taskIDs), Results: make([]BulkApprovalItemResult, 0, len(taskIDs)),
+	}
+	options := verificationOptions{allowAlreadyDone: true, bulk: true, bulkID: strings.TrimSpace(command.BulkID)}
+	for _, taskID := range taskIDs {
+		item := BulkApprovalItemResult{TaskID: taskID}
+		if taskID <= 0 {
+			item.Outcome, item.ErrorCode, item.Error = "failed", "invalid_task_id", "Task ID must be positive"
+			result.Failed++
+			result.Results = append(result.Results, item)
+			continue
+		}
+
+		task, err := s.store.GetTask(ctx, taskID)
+		if err != nil {
+			item.Outcome = "failed"
+			if errors.Is(err, sql.ErrNoRows) {
+				item.ErrorCode, item.Error = "task_not_found", "Task not found"
+			} else {
+				item.ErrorCode, item.Error = "task_lookup_failed", err.Error()
+			}
+			result.Failed++
+			result.Results = append(result.Results, item)
+			continue
+		}
+		if task == nil {
+			item.Outcome, item.ErrorCode, item.Error = "failed", "task_not_found", "Task not found"
+			result.Failed++
+			result.Results = append(result.Results, item)
+			continue
+		}
+		item.ProjectID = task.ProjectID
+		if command.ProjectID != nil && task.ProjectID != *command.ProjectID {
+			item.Outcome, item.ErrorCode, item.Error = "failed", "project_scope_mismatch", "Task is outside the requested project scope"
+			result.Failed++
+			result.Results = append(result.Results, item)
+			continue
+		}
+
+		updated, changed, err := s.verify(ctx, task.ProjectID, task.ID, command.Actor, true, options)
+		if err != nil {
+			item.Outcome = "failed"
+			item.ErrorCode, item.Error = bulkApprovalError(err)
+			result.Failed++
+		} else if changed {
+			item.Outcome = "approved"
+			item.ProjectID = updated.ProjectID
+			result.Approved++
+		} else {
+			item.Outcome = "already_done"
+			item.ProjectID = updated.ProjectID
+			result.AlreadyDone++
+		}
+		result.Results = append(result.Results, item)
+	}
+	return result, nil
+}
+
+func bulkApprovalError(err error) (string, string) {
+	var appErr *Error
+	if errors.As(err, &appErr) {
+		return appErr.Code, appErr.Message
+	}
+	return "approval_failed", err.Error()
+}
+
+func (s *ProjectTaskService) verify(ctx context.Context, projectID, taskID int64, actor Actor, approve bool, options verificationOptions) (*database.ProjectTask, bool, error) {
 	var updated *database.ProjectTask
+	changed := false
 	mutation := mutationEffects{}
 	err := s.store.WithProjectTaskTx(ctx, func(tx *database.ProjectTaskTx) error {
 		task, err := tx.GetTask(ctx, taskID)
 		if err != nil || task == nil || task.ProjectID != projectID {
 			return notFoundError("task_not_found", "Task not found", err)
+		}
+		if approve && options.allowAlreadyDone && task.Status == TaskStatusDone {
+			updated = task
+			return nil
 		}
 		if task.Status != TaskStatusAwaitingApproval {
 			return validationError("not_awaiting_approval", "Task is not awaiting approval")
@@ -602,11 +860,19 @@ func (s *ProjectTaskService) verify(ctx context.Context, projectID, taskID int64
 		if err != nil {
 			return err
 		}
-		history, err := createHistory(ctx, tx, task.ID, task.ProjectID, event,
-			map[string]any{"old": TaskStatusAwaitingApproval, "new": status}, actor, "")
+		details := map[string]any{"old": TaskStatusAwaitingApproval, "new": status}
+		if approve && options.bulk {
+			details["bulk"] = true
+			details["approval_mode"] = "bulk"
+			if options.bulkID != "" {
+				details["bulk_id"] = options.bulkID
+			}
+		}
+		history, err := createHistory(ctx, tx, task.ID, task.ProjectID, event, details, actor, "")
 		if err != nil {
 			return err
 		}
+		changed = true
 		mutation.tasks = append(mutation.tasks, TaskChange{Action: "updated", ProjectID: projectID, Task: updated})
 		mutation.history = append(mutation.history, history)
 		eventType := ProjectTaskEventVerificationRejected
@@ -618,14 +884,15 @@ func (s *ProjectTaskService) verify(ctx context.Context, projectID, taskID int64
 			AggregateID: strconv.FormatInt(task.ID, 10), Actor: actor,
 			Payload: map[string]any{
 				"project_id": projectID, "task_id": task.ID, "status": status,
+				"bulk": approve && options.bulk,
 			},
 		})
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	s.publish(mutation)
-	return updated, nil
+	return updated, changed, nil
 }
 
 type LinkSessionTaskCommand struct {

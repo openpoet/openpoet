@@ -731,20 +731,25 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 			return fmt.Sprintf("Session ID: %s (could not fetch details: %v)", sessionID, err), nil
 		}
 		var sess struct {
-			ID        string `json:"id"`
-			ProjectID int64  `json:"project_id"`
-			Status    string `json:"status"`
-			Name      string `json:"name"`
-			Backend   string `json:"backend"`
-			Model     string `json:"model"`
-			Effort    string `json:"effort"`
-			Harness   string `json:"harness"`
+			ID             string `json:"id"`
+			ProjectID      int64  `json:"project_id"`
+			Status         string `json:"status"`
+			Name           string `json:"name"`
+			Backend        string `json:"backend"`
+			Model          string `json:"model"`
+			RequestedModel string `json:"requested_model"`
+			Effort         string `json:"effort"`
+			Harness        string `json:"harness"`
 		}
 		if err := json.Unmarshal(body, &sess); err != nil {
 			return string(body), nil
 		}
 		meta := sessionmeta.WithSessionValues(fetchSessionMetadata(client, sess.ProjectID, sess.Backend), sess.Model, sess.Effort, sess.Harness)
-		result := fmt.Sprintf("Session: %s\nName: %s\nProject ID: %d\nStatus: %s\nModel: %s\nEffort: %s\nHarness: %s", sess.ID, sess.Name, sess.ProjectID, sess.Status, meta.Model, meta.Effort, meta.Harness)
+		requestedModel := sess.RequestedModel
+		if requestedModel == "" {
+			requestedModel = meta.Model
+		}
+		result := fmt.Sprintf("Session: %s\nName: %s\nProject ID: %d\nStatus: %s\nEffective model: %s\nRequested model: %s\nEffort: %s\nHarness: %s", sess.ID, sess.Name, sess.ProjectID, sess.Status, meta.Model, requestedModel, meta.Effort, meta.Harness)
 		// Try to get linked task
 		taskBody, taskErr := client.Get(fmt.Sprintf("/api/sessions/%s/task", sessionID))
 		if taskErr == nil {
@@ -854,12 +859,16 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 			return "", err
 		}
 		var updated struct {
-			Model   string `json:"model"`
-			Effort  string `json:"effort"`
-			Harness string `json:"harness"`
+			Model          string `json:"model"`
+			RequestedModel string `json:"requested_model"`
+			Effort         string `json:"effort"`
+			Harness        string `json:"harness"`
 		}
 		if json.Unmarshal(body, &updated) == nil && updated.Model != "" {
-			return fmt.Sprintf("Session %s model changed to %s (effort: %s, harness: %s)", shortID(sid), updated.Model, updated.Effort, updated.Harness), nil
+			if updated.RequestedModel == "" {
+				updated.RequestedModel = model
+			}
+			return fmt.Sprintf("Session %s requested model changed to %s (effective model: %s, effort: %s, harness: %s)", shortID(sid), updated.RequestedModel, updated.Model, updated.Effort, updated.Harness), nil
 		}
 		return string(body), nil
 
@@ -1244,15 +1253,16 @@ func executeBatch(client *APIClient, args json.RawMessage, sessionID, conversati
 // formatSessionsList formats and optionally filters the sessions list.
 func formatSessionsList(client *APIClient, body []byte, params map[string]interface{}) (string, error) {
 	var sessions []struct {
-		ID        string `json:"id"`
-		ProjectID int64  `json:"project_id"`
-		Status    string `json:"status"`
-		Name      string `json:"name"`
-		Backend   string `json:"backend"`
-		Model     string `json:"model"`
-		Effort    string `json:"effort"`
-		Harness   string `json:"harness"`
-		TaskID    *struct {
+		ID             string `json:"id"`
+		ProjectID      int64  `json:"project_id"`
+		Status         string `json:"status"`
+		Name           string `json:"name"`
+		Backend        string `json:"backend"`
+		Model          string `json:"model"`
+		RequestedModel string `json:"requested_model"`
+		Effort         string `json:"effort"`
+		Harness        string `json:"harness"`
+		TaskID         *struct {
 			Int64 int64 `json:"Int64"`
 			Valid bool  `json:"Valid"`
 		} `json:"task_id"`
@@ -1290,8 +1300,12 @@ func formatSessionsList(client *APIClient, body []byte, params map[string]interf
 			task = fmt.Sprintf("%d", s.TaskID.Int64)
 		}
 		meta := sessionmeta.WithSessionValues(fetchSessionMetadata(client, s.ProjectID, s.Backend), s.Model, s.Effort, s.Harness)
-		result += fmt.Sprintf("- %s | %s | project: %d | status: %s | task: %s | model: %s | effort: %s | harness: %s\n",
-			s.ID, name, s.ProjectID, s.Status, task, meta.Model, meta.Effort, meta.Harness)
+		requestedModel := s.RequestedModel
+		if requestedModel == "" {
+			requestedModel = meta.Model
+		}
+		result += fmt.Sprintf("- %s | %s | project: %d | status: %s | task: %s | model: %s | requested_model: %s | effort: %s | harness: %s\n",
+			s.ID, name, s.ProjectID, s.Status, task, meta.Model, requestedModel, meta.Effort, meta.Harness)
 	}
 	if result == "" {
 		return "No sessions matching filter.", nil
@@ -1309,10 +1323,11 @@ func formatSessionDetail(client *APIClient, body []byte) (string, error) {
 			Int64 int64 `json:"Int64"`
 			Valid bool  `json:"Valid"`
 		} `json:"task_id"`
-		Backend string `json:"backend"`
-		Model   string `json:"model"`
-		Effort  string `json:"effort"`
-		Harness string `json:"harness"`
+		Backend        string `json:"backend"`
+		Model          string `json:"model"`
+		RequestedModel string `json:"requested_model"`
+		Effort         string `json:"effort"`
+		Harness        string `json:"harness"`
 	}
 	if err := json.Unmarshal(body, &sess); err != nil {
 		return string(body), nil
@@ -1321,7 +1336,11 @@ func formatSessionDetail(client *APIClient, body []byte) (string, error) {
 	sb.WriteString(fmt.Sprintf("Session: %s\n", sess.ID))
 	sb.WriteString(fmt.Sprintf("Name: %s\nProject ID: %d\nStatus: %s\nBackend: %s\n", sess.Name, sess.ProjectID, sess.Status, sess.Backend))
 	meta := sessionmeta.WithSessionValues(fetchSessionMetadata(client, sess.ProjectID, sess.Backend), sess.Model, sess.Effort, sess.Harness)
-	sb.WriteString(fmt.Sprintf("Model: %s\nEffort: %s\nHarness: %s\n", meta.Model, meta.Effort, meta.Harness))
+	requestedModel := sess.RequestedModel
+	if requestedModel == "" {
+		requestedModel = meta.Model
+	}
+	sb.WriteString(fmt.Sprintf("Effective model: %s\nRequested model: %s\nEffort: %s\nHarness: %s\n", meta.Model, requestedModel, meta.Effort, meta.Harness))
 	if meta.HarnessDetails != "" {
 		sb.WriteString(fmt.Sprintf("Harness details: %s\n", meta.HarnessDetails))
 	}

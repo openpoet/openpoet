@@ -69,6 +69,9 @@ var migrations = []Migration{
 	{Version: 51, Description: "reports: add structured session turns and deterministic daily materializations", Up: migrateV51},
 	{Version: 52, Description: "automation: add first-class work runs and durable plans", Up: migrateV52},
 	{Version: 53, Description: "automation: add one-time explicit approval grants", Up: migrateV53},
+	{Version: 54, Description: "sessions: distinguish requested and effective runtime models", Up: migrateV54},
+	{Version: 55, Description: "projects: remove foreign backend settings from Claude Code", Up: migrateV55},
+	{Version: 56, Description: "tasks: add per-project verification auto-approval override", Up: migrateV56},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1505,6 +1508,42 @@ func migrateV53(tx *sqlx.Tx) error {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV53 failed: %w\nSQL: %s", err, s)
 		}
+	}
+	return nil
+}
+
+func migrateV54(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE sessions ADD COLUMN requested_model TEXT NOT NULL DEFAULT ''`,
+		`UPDATE sessions SET requested_model = model, model = CASE WHEN backend = 'claude_code' THEN 'unknown' ELSE model END`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV54 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV55(tx *sqlx.Tx) error {
+	stmts := []string{
+		`UPDATE projects SET backend_config = '{}' WHERE backend = 'claude_code' AND trim(backend_config) <> '{}'`,
+		`UPDATE sessions SET requested_model = 'default', effort = 'default'
+			WHERE backend = 'claude_code' AND lower(trim(requested_model)) LIKE 'gpt-%'`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("migrateV55 failed: %w", err)
+		}
+	}
+	return nil
+}
+
+func migrateV56(tx *sqlx.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE projects ADD COLUMN task_auto_approve_verification TEXT NOT NULL DEFAULT 'inherit'
+		CHECK(task_auto_approve_verification IN ('inherit', 'enabled', 'disabled'))`)
+	if err != nil {
+		return fmt.Errorf("migrateV56 failed: %w", err)
 	}
 	return nil
 }

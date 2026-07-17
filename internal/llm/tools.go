@@ -841,12 +841,12 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:        "set_session_model",
-			Description: "Change the model used by future turns of an active OpenPoet session. Codex app-server model IDs are validated against its live model catalog; Claude Code model IDs are validated for safe syntax and then applied through /model.",
+			Description: "Request a model for future turns of an active OpenPoet session. Codex app-server IDs are validated against its live catalog. Claude Code accepts only Anthropic aliases/IDs; the effective model is reconciled from the runtime hook/transcript.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
 					"session_id": {Type: "string", Description: "Active OpenPoet session ID"},
-					"model":      {Type: "string", Description: "Model ID or alias, for example fable, claude-opus-4-5, gpt-5.4, or default"},
+					"model":      {Type: "string", Description: "Harness-compatible model ID or alias; Claude Code examples: fable, claude-opus-4-5, or default"},
 				},
 				Required: []string{"session_id", "model"},
 			},

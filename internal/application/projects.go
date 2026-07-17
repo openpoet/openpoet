@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 
@@ -140,7 +141,13 @@ func (s *ProjectService) Duplicate(ctx context.Context, command DuplicateProject
 	}
 	if value := strings.TrimSpace(command.Overrides.BackendConfig); value != "" {
 		clone.BackendConfig = value
+	} else if clone.Backend != original.Backend {
+		clone.BackendConfig = "{}"
 	}
+	if value := strings.TrimSpace(command.Overrides.TaskAutoApproveVerification); value != "" {
+		clone.TaskAutoApproveVerification = value
+	}
+	clone.BackendConfig = normalizeProjectBackendConfig(clone.Backend, clone.BackendConfig)
 	if command.Overrides.SSHCredential != "" {
 		if err := s.encryptCredential(&clone, command.Overrides.SSHCredential); err != nil {
 			return nil, err
@@ -170,6 +177,12 @@ func (s *ProjectService) projectFromInput(ctx context.Context, input database.Pr
 	project.ToolPolicy = input.ToolPolicy
 	project.SkillPolicy = input.SkillPolicy
 	project.DangerouslySkipPermissions = input.DangerouslySkipPermissions
+	if input.TaskAutoApproveVerification != "" || current == nil {
+		project.TaskAutoApproveVerification = strings.TrimSpace(input.TaskAutoApproveVerification)
+	}
+	if project.TaskAutoApproveVerification == "" {
+		project.TaskAutoApproveVerification = "inherit"
+	}
 	if input.Backend != "" || current == nil {
 		project.Backend = strings.TrimSpace(input.Backend)
 	}
@@ -178,10 +191,13 @@ func (s *ProjectService) projectFromInput(ctx context.Context, input database.Pr
 	}
 	if input.BackendConfig != "" || current == nil {
 		project.BackendConfig = input.BackendConfig
-	}
-	if project.BackendConfig == "" {
+	} else if current != nil && project.Backend != current.Backend {
+		// Backend settings are not portable. In particular, retaining a Codex
+		// model while switching to Claude Code makes the session metadata claim a
+		// GPT model even though Claude silently starts its account default.
 		project.BackendConfig = "{}"
 	}
+	project.BackendConfig = normalizeProjectBackendConfig(project.Backend, project.BackendConfig)
 	if project.Type != "remote" && project.Path != "" {
 		if absolute, err := filepath.Abs(project.Path); err == nil {
 			project.Path = absolute
@@ -205,6 +221,47 @@ func (s *ProjectService) projectFromInput(ctx context.Context, input database.Pr
 		return nil, err
 	}
 	return project, nil
+}
+
+// normalizeProjectBackendConfig enforces the persisted project boundary between
+// harnesses. Claude Code settings are accepted only when an explicit supported
+// provider is present, so a stale Codex backend config cannot leak into it.
+func normalizeProjectBackendConfig(backend, raw string) string {
+	if strings.TrimSpace(backend) == "claude_code" {
+		var input struct {
+			Provider         string `json:"provider"`
+			ProviderConfigID int64  `json:"provider_config_id,omitempty"`
+			Model            string `json:"model,omitempty"`
+			SmallModel       string `json:"small_model,omitempty"`
+		}
+		if json.Unmarshal([]byte(raw), &input) != nil {
+			return "{}"
+		}
+		input.Provider = strings.ToLower(strings.TrimSpace(input.Provider))
+		input.Model = strings.TrimSpace(input.Model)
+		input.SmallModel = strings.TrimSpace(input.SmallModel)
+		switch input.Provider {
+		case "anthropic":
+			input.ProviderConfigID = 0
+			input.SmallModel = ""
+		case "openai", "openai_oauth":
+			input.Provider = "openai_oauth"
+			if input.ProviderConfigID <= 0 || input.Model == "" {
+				return "{}"
+			}
+		default:
+			return "{}"
+		}
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			return "{}"
+		}
+		return string(encoded)
+	}
+	if strings.TrimSpace(raw) == "" {
+		return "{}"
+	}
+	return raw
 }
 
 func (s *ProjectService) validatePath(ctx context.Context, path, projectType string) error {
@@ -244,6 +301,11 @@ func validateProject(project *database.Project) error {
 	case "claude_code", "copilot", "acp", "codex", "opencode":
 	default:
 		return validationError("invalid_project_backend", "Unsupported project backend")
+	}
+	switch project.TaskAutoApproveVerification {
+	case "inherit", "enabled", "disabled":
+	default:
+		return validationError("invalid_task_auto_approve_verification", "Task verification auto-approval must be inherit, enabled, or disabled")
 	}
 	return nil
 }

@@ -59,6 +59,24 @@ func TestFormatSessionsListPrefersPersistedRuntimeMetadata(t *testing.T) {
 	}
 }
 
+func TestFormatSessionsListDistinguishesRequestedAndEffectiveModels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"backend":"claude_code","backend_config":"{}"}`)
+	}))
+	t.Cleanup(server.Close)
+
+	body := []byte(`[{"id":"session-12345678","project_id":1,"status":"running","name":"Work","backend":"claude_code","model":"claude-fable-5","requested_model":"fable","effort":"xhigh","harness":"claude_code","task_id":null}]`)
+	got, err := formatSessionsList(NewAPIClient(server.URL), body, map[string]interface{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"model: claude-fable-5", "requested_model: fable", "harness: claude_code"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatted sessions missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestFormatSessionDetailIncludesHarnessDetails(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -77,7 +95,8 @@ func TestFormatSessionDetailIncludesHarnessDetails(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"Model: gpt-5.1",
+		"Effective model: gpt-5.1",
+		"Requested model: gpt-5.1",
 		"Effort: medium",
 		"Harness: codex/tui",
 		"Harness details: runtime: tui | approval: never | sandbox: danger-full-access",

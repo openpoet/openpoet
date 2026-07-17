@@ -15,14 +15,17 @@ class DocViewer {
         this.footerEl = document.getElementById('doc-review-footer');
         this.closeBtn = document.getElementById('doc-review-close');
         this.downloadBtn = document.getElementById('doc-review-download');
+        this.downloadPDFBtn = document.getElementById('doc-review-download-pdf');
 
         if (!this.overlay) return;
         this._history = [];
         this._currentContent = null;
         this._currentTitle = null;
+        this._currentURLState = null;
 
         this.closeBtn?.addEventListener('click', () => this.close());
         this.downloadBtn?.addEventListener('click', () => this._downloadDocument());
+        this.downloadPDFBtn?.addEventListener('click', () => this._downloadPDF());
         this.overlay.addEventListener('click', (e) => {
             if (e.target === this.overlay) this.close();
         });
@@ -56,7 +59,7 @@ class DocViewer {
 
     }
 
-    async open(docId) {
+    async open(docId, opts = {}) {
         try {
             const resp = await fetch(`/api/documents/${docId}`);
             if (!resp.ok) throw new Error('Document not found');
@@ -68,9 +71,14 @@ class DocViewer {
             const isTaskProposal = isTaskDelete || isTaskUpdate ||
                 (doc.title && doc.title.startsWith('Task:'));
             const isSkillProposal = doc.title && doc.title.startsWith('Skill:');
+            const openDocument = (extra = {}) => this.openWithContent(doc.title || 'Document', doc.content, {
+                ...opts,
+                ...extra,
+                urlState: opts.urlState || { kind: 'document', id: docId, projectId: doc.project_id || null }
+            });
 
             if (isPendingMemoryDoc) {
-                this.openWithContent(doc.title, doc.content, {
+                openDocument({
                     actions: [
                         {
                             label: 'Reject',
@@ -113,7 +121,7 @@ class DocViewer {
                                      'Approve Task';
                 const approveClass = isTaskDelete ? 'btn btn-danger' : 'btn btn-primary';
 
-                this.openWithContent(doc.title, doc.content, {
+                openDocument({
                     actions: [
                         {
                             label: 'Cancel',
@@ -159,7 +167,7 @@ class DocViewer {
                     ]
                 });
             } else if (doc.title && doc.title.startsWith('Tool:') && doc.status !== 'approved' && doc.status !== 'rejected') {
-                this.openWithContent(doc.title, doc.content, {
+                openDocument({
                     actions: [
                         {
                             label: 'Cancel',
@@ -224,7 +232,7 @@ class DocViewer {
                     ]
                 });
             } else if (isSkillProposal) {
-                this.openWithContent(doc.title, doc.content, {
+                openDocument({
                     actions: [
                         {
                             label: 'Cancel',
@@ -262,7 +270,7 @@ class DocViewer {
                     ]
                 });
             } else {
-                this.openWithContent(doc.title || 'Document', doc.content);
+                openDocument();
             }
         } catch (e) {
             console.error('DocViewer: failed to open document', e);
@@ -273,7 +281,7 @@ class DocViewer {
         if (!this.overlay) return;
 
         // If overlay is already visible, push current state to history stack
-        if (!this.overlay.classList.contains('hidden')) {
+        if (!this.overlay.classList.contains('hidden') && opts.recordHistory !== false) {
             // Move footer children to a fragment to preserve event listeners
             const footerFragment = document.createDocumentFragment();
             while (this.footerEl.firstChild) {
@@ -287,13 +295,15 @@ class DocViewer {
                 footerFragment,
                 footerHidden: this.footerEl.classList.contains('hidden'),
                 footerVersion: this.footerEl.dataset.version || '',
-                onClose: this._onClose || null
+                onClose: this._onClose || null,
+                urlState: this._currentURLState
             });
         }
 
         this._onClose = opts.onClose || null;
         this._currentContent = content || '';
         this._currentTitle = title || 'Document';
+        this._currentURLState = opts.urlState || null;
         this.nameEl.textContent = this._currentTitle;
         this.contentEl.innerHTML = this._renderMarkdown(this._currentContent);
         // Defer mermaid rendering to ensure DOM is stable
@@ -359,9 +369,12 @@ class DocViewer {
         }
 
         this.overlay.classList.remove('hidden');
+        if (opts.updateURL !== false) {
+            this._notifyURLStateChanged({ replace: !!opts.replaceURL });
+        }
     }
 
-    close() {
+    close(options = {}) {
         if (!this.overlay) return;
 
         // If there's a previous state, restore it instead of closing
@@ -384,8 +397,16 @@ class DocViewer {
                 this.footerEl.classList.remove('hidden');
             }
             this._onClose = prev.onClose;
+            this._currentURLState = prev.urlState || null;
+            if (options.updateURL !== false) this._notifyURLStateChanged();
             return;
         }
+
+        this.dismiss(options);
+    }
+
+    dismiss(options = {}) {
+        if (!this.overlay) return;
 
         if (this._onClose) {
             this._onClose();
@@ -393,8 +414,19 @@ class DocViewer {
         }
         this._currentContent = null;
         this._currentTitle = null;
+        this._currentURLState = null;
         this.overlay.classList.add('hidden');
         this._history = [];
+        if (options.updateURL !== false) this._notifyURLStateChanged();
+    }
+
+    getURLState() {
+        if (!this.overlay || this.overlay.classList.contains('hidden')) return null;
+        return this._currentURLState;
+    }
+
+    _notifyURLStateChanged(options = {}) {
+        window.app?._onDocumentURLStateChanged?.(options);
     }
 
     _renderMarkdown(text) {
@@ -413,11 +445,7 @@ class DocViewer {
 
     _downloadDocument() {
         if (!this._currentContent) return;
-        const safeName = (this._currentTitle || 'document')
-            .replace(/[^a-zA-Z0-9\s-]/g, '')
-            .replace(/\s+/g, '-')
-            .toLowerCase()
-            .substring(0, 60) || 'document';
+        const safeName = this._documentFileStem();
         const blob = new Blob([this._currentContent], { type: 'text/markdown;charset=utf-8' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -427,6 +455,106 @@ class DocViewer {
         a.click();
         document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    _documentFileStem() {
+        return (this._currentTitle || 'document')
+            .replace(/[^a-zA-Z0-9\s-]/g, '')
+            .replace(/\s+/g, '-')
+            .toLowerCase()
+            .substring(0, 60) || 'document';
+    }
+
+    async _downloadPDF() {
+        if (!this._currentContent || !this.contentEl) return;
+
+        const iframe = document.createElement('iframe');
+        iframe.title = `PDF preview: ${this._currentTitle || 'Document'}`;
+        iframe.style.position = 'fixed';
+        iframe.style.width = '1px';
+        iframe.style.height = '1px';
+        iframe.style.right = '0';
+        iframe.style.bottom = '0';
+        iframe.style.opacity = '0';
+        iframe.style.pointerEvents = 'none';
+        document.body.appendChild(iframe);
+
+        const printWindow = iframe.contentWindow;
+        const printDoc = iframe.contentDocument;
+        if (!printWindow || !printDoc) {
+            iframe.remove();
+            window.app?.showToast?.('Error', 'Unable to prepare PDF', 'error');
+            return;
+        }
+
+        printDoc.open();
+        printDoc.write('<!doctype html><html><head></head><body></body></html>');
+        printDoc.close();
+        printDoc.title = `${this._documentFileStem()}.pdf`;
+
+        const base = printDoc.createElement('base');
+        base.href = `${window.location.origin}/`;
+        printDoc.head.appendChild(base);
+
+        const style = printDoc.createElement('style');
+        style.textContent = `
+            @page { size: A4; margin: 18mm 16mm; }
+            * { box-sizing: border-box; }
+            html, body { color: #171717; background: #fff; }
+            body { margin: 0; font: 11pt/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+            h1 { margin: 0 0 18pt; font-size: 22pt; line-height: 1.2; }
+            h2, h3, h4 { break-after: avoid; margin: 18pt 0 8pt; line-height: 1.3; }
+            p, blockquote, pre, table, ul, ol { margin: 0 0 10pt; }
+            img, svg { max-width: 100%; height: auto; break-inside: avoid; }
+            pre, code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+            pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10pt; background: #f5f5f5; border-radius: 4pt; }
+            code { background: #f3f3f3; padding: 1pt 3pt; border-radius: 2pt; }
+            pre code { background: transparent; padding: 0; }
+            blockquote { padding-left: 10pt; border-left: 3pt solid #bbb; color: #444; }
+            table { width: 100%; border-collapse: collapse; break-inside: auto; }
+            tr { break-inside: avoid; }
+            th, td { padding: 5pt 6pt; border: 0.5pt solid #bbb; text-align: left; vertical-align: top; }
+            a { color: #1558a6; text-decoration: underline; overflow-wrap: anywhere; }
+            button, input, textarea, select, .task-verification-spinner { display: none !important; }
+        `;
+        printDoc.head.appendChild(style);
+
+        const heading = printDoc.createElement('h1');
+        heading.textContent = this._currentTitle || 'Document';
+        printDoc.body.appendChild(heading);
+
+        const main = printDoc.createElement('main');
+        main.innerHTML = this.contentEl.innerHTML;
+        main.querySelectorAll('script').forEach(el => el.remove());
+        printDoc.body.appendChild(main);
+
+        const imageLoads = Array.from(main.querySelectorAll('img')).map(img => {
+            if (img.complete) return Promise.resolve();
+            return new Promise(resolve => {
+                img.addEventListener('load', resolve, { once: true });
+                img.addEventListener('error', resolve, { once: true });
+                setTimeout(resolve, 1500);
+            });
+        });
+        await Promise.all(imageLoads);
+        if (printDoc.fonts?.ready) await printDoc.fonts.ready.catch(() => {});
+
+        let cleaned = false;
+        const cleanup = () => {
+            if (cleaned) return;
+            cleaned = true;
+            iframe.remove();
+        };
+        printWindow.addEventListener('afterprint', cleanup, { once: true });
+        setTimeout(cleanup, 60000);
+
+        try {
+            printWindow.focus();
+            printWindow.print();
+        } catch (error) {
+            cleanup();
+            window.app?.showToast?.('Error', 'Unable to open PDF save dialog', 'error');
+        }
     }
 
     _escapeHtml(str) {

@@ -70,20 +70,16 @@ func FromProjectConfig(backend, rawConfig string) Metadata {
 		_ = json.Unmarshal([]byte(rawConfig), &cfg)
 	}
 
-	meta := Metadata{
-		Model:   firstString(cfg, "model"),
-		Effort:  firstString(cfg, "reasoning_effort", "effort"),
-		Harness: backend,
-	}
-	if meta.Model == "" {
-		meta.Model = "default"
-	}
-	if meta.Effort == "" {
-		meta.Effort = "default"
-	}
+	meta := Metadata{Model: "default", Effort: "default", Harness: backend}
 
 	switch backend {
 	case "codex":
+		if model := firstString(cfg, "model"); model != "" {
+			meta.Model = model
+		}
+		if effort := firstString(cfg, "reasoning_effort", "effort"); effort != "" {
+			meta.Effort = effort
+		}
 		runtime := normalizeCodexRuntime(firstString(cfg, "runtime"))
 		approval := normalizeCodexApprovalPolicy(firstString(cfg, "approval_policy"))
 		sandbox := normalizeCodexSandboxMode(firstString(cfg, "sandbox_mode"))
@@ -94,6 +90,9 @@ func FromProjectConfig(backend, rawConfig string) Metadata {
 			"sandbox: "+sandbox,
 		)
 	case "opencode":
+		if model := firstString(cfg, "model"); model != "" {
+			meta.Model = model
+		}
 		agent := firstString(cfg, "agent")
 		permissionMode := firstString(cfg, "permission_mode")
 		meta.Harness = "opencode"

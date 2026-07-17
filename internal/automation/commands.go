@@ -477,6 +477,29 @@ func dispatchProjectTaskCommand(r *http.Request, capability application.Capabili
 		}
 		return service.RejectVerification(commandContext, projectID, taskID, applicationActor)
 
+	case application.CapabilityHandlerTasksApproveVerificationBulk:
+		var payload bulkApproveVerificationPayload
+		if err := decodePayload(command.Payload, &payload); err != nil {
+			return nil, err
+		}
+		projectID := command.Target.resolveProjectID(payload.ProjectID)
+		if (payload.ProjectID < 0 || command.Target.targetKind() == "project") && projectID <= 0 {
+			return nil, invalidTarget("project_id must be positive")
+		}
+		var projectScope *int64
+		if projectID > 0 {
+			projectScope = &projectID
+		}
+		if command.DryRun {
+			return dryRunResult(capability, map[string]any{
+				"task_ids": payload.TaskIDs, "all_pending": payload.AllPending, "project_id": projectScope,
+			}), nil
+		}
+		return service.ApproveVerificationBulk(commandContext, application.BulkApproveVerificationCommand{
+			TaskIDs: payload.TaskIDs, AllPending: payload.AllPending, ProjectID: projectScope,
+			Actor: applicationActor, BulkID: "command:" + command.CommandID,
+		})
+
 	case application.CapabilityHandlerTasksLinkSession:
 		var payload linkSessionPayload
 		if err := decodePayload(command.Payload, &payload); err != nil {
@@ -554,6 +577,12 @@ type taskListPayload struct {
 type taskReferencePayload struct {
 	ProjectID int64 `json:"project_id,omitempty"`
 	TaskID    int64 `json:"task_id,omitempty"`
+}
+
+type bulkApproveVerificationPayload struct {
+	TaskIDs    []int64 `json:"task_ids,omitempty"`
+	AllPending bool    `json:"all_pending,omitempty"`
+	ProjectID  int64   `json:"project_id,omitempty"`
 }
 
 type createTaskPayload struct {
