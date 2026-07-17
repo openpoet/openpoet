@@ -976,8 +976,8 @@ func validateSessionModelID(model string) (string, error) {
 		return "", fmt.Errorf("%w: model id must be at most 128 characters", ErrInvalidSessionSetting)
 	}
 	for i, ch := range model {
-		allowed := ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || strings.ContainsRune("-._:/@+", ch)
-		if !allowed || i == 0 && strings.ContainsRune("-._:/@+", ch) {
+		allowed := ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || strings.ContainsRune("-._:/@+[]", ch)
+		if !allowed || i == 0 && strings.ContainsRune("-._:/@+[]", ch) {
 			return "", fmt.Errorf("%w: model id %q contains unsupported characters", ErrInvalidSessionSetting, model)
 		}
 	}

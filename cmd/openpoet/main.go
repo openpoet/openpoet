@@ -29,6 +29,7 @@ import (
 	"openpoet/internal/llm"
 	"openpoet/internal/mcp"
 	"openpoet/internal/notifications"
+	"openpoet/internal/providerbridge"
 	"openpoet/internal/security"
 	"openpoet/internal/session"
 	"openpoet/internal/tunnel"
@@ -224,6 +225,11 @@ func main() {
 
 	// Initialize API handlers
 	api := handlers.NewAPI(db, hub, sessionMgr, configSync, encryptor, notifService, hookHandler)
+	openAIProviderBridge := providerbridge.NewManager(
+		providerbridge.NewEncryptedAIConfigStore(db, encryptor),
+		os.Getenv("OPENPOET_CLAUDE_CODE_PROXY_BIN"),
+	)
+	api.SetProviderBridge(openAIProviderBridge)
 
 	// Initialize binary auto-updater
 	appUpdater := updater.New(BuildVersion)
@@ -725,6 +731,11 @@ func main() {
 		r.Post("/config/ai-configs", api.CreateAIConfig)
 		r.Put("/config/ai-configs/{id}", api.UpdateAIConfig)
 		r.Delete("/config/ai-configs/{id}", api.DeleteAIConfig)
+		r.Get("/config/ai-configs/{id}/openai-oauth", api.GetOpenAIOAuthStatus)
+		r.Post("/config/ai-configs/{id}/openai-oauth/start", api.StartOpenAIOAuth)
+		r.Delete("/config/ai-configs/{id}/openai-oauth", api.DisconnectOpenAIOAuth)
+		r.Get("/config/openai-oauth-logins/{loginID}", api.GetOpenAIOAuthLogin)
+		r.Post("/config/openai-oauth-logins/{loginID}/cancel", api.CancelOpenAIOAuthLogin)
 		r.Get("/config/ai-config-assignments", api.GetAIConfigAssignments)
 		r.Put("/config/ai-config-assignments", api.UpdateAIConfigAssignments)
 
@@ -1045,6 +1056,10 @@ func main() {
 	// Stop all sessions (preserve DB state for auto-restore on next startup)
 	sessionMgr.StopAllForRestart()
 
+	// Provider proxies are stopped after their Claude Code sessions so refreshed
+	// OAuth credentials can be encrypted one final time before shutdown.
+	openAIProviderBridge.Close()
+
 	// Stop WebSocket hub
 	hub.Stop()
 
@@ -1251,6 +1266,7 @@ func initProviderManager(db *database.DB, enc *security.Encryptor, apiURL string
 		}
 
 		pm.SetSlotConfig(slot, &llm.ProviderConfig{
+			ID:           cfg.ID,
 			ProviderType: cfg.ProviderType,
 			APIKey:       apiKey,
 			Model:        cfg.Model,
