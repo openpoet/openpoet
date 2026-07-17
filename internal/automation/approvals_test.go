@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -218,6 +219,89 @@ func TestExplicitApprovalBindingConsumptionAndCompletedReplay(t *testing.T) {
 	}
 	if _, err := db.GetTask(context.Background(), task.ID); err == nil {
 		t.Fatal("approved delete did not execute")
+	}
+}
+
+func TestBulkVerificationApprovalUsesOneExplicitGrantForWholeBatch(t *testing.T) {
+	ctx := context.Background()
+	db := automationTestDB(t)
+	now := time.Date(2026, 7, 16, 15, 0, 0, 0, time.UTC)
+	project := automationContractProject(t, db, "bulk-approval-gate")
+	first := &database.ProjectTask{ProjectID: project.ID, Title: "First pending", Status: "awaiting_approval", Priority: "medium"}
+	second := &database.ProjectTask{ProjectID: project.ID, Title: "Second pending", Status: "awaiting_approval", Priority: "medium"}
+	for _, task := range []*database.ProjectTask{first, second} {
+		if err := db.CreateTask(ctx, task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := provisionApprovalTestClient(t, db, "bulk-approval-target", ScopeTasksWrite)
+	broker := provisionApprovalTestClient(t, db, "bulk-approval-broker", ScopeApprovalsGrant)
+	handler := approvalTestHandler(t, db, &now)
+
+	commandID := "approve-bulk-1"
+	authorizationRef := "task:approval:bulk-1"
+	baseBody := map[string]any{
+		"command_id": commandID, "capability": application.CapabilityTasksApproveVerificationBulk,
+		"target":         map[string]any{"type": "project", "id": project.ID},
+		"payload":        map[string]any{"task_ids": []int64{first.ID, second.ID}},
+		"correlation_id": authorizationRef,
+	}
+	missingApproval := automationRequest(t, handler, target.Token, http.MethodPost, "/commands", "bulk-missing-approval", baseBody)
+	if missingApproval.Code != http.StatusConflict || decodeAutomationErrorCode(t, missingApproval) != "approval_required" {
+		t.Fatalf("bulk command bypassed explicit gate: status=%d body=%s", missingApproval.Code, missingApproval.Body.String())
+	}
+	for _, taskID := range []int64{first.ID, second.ID} {
+		stored, _ := db.GetTask(ctx, taskID)
+		if stored.Status != "awaiting_approval" {
+			t.Fatalf("task %d mutated without approval: %+v", taskID, stored)
+		}
+	}
+
+	grant := issueApprovalGrantForTest(t, handler, broker.Token, target.Client.ID,
+		application.CapabilityTasksApproveVerificationBulk, commandID, authorizationRef, 0)
+	approvedBody := map[string]any{
+		"command_id": commandID, "capability": application.CapabilityTasksApproveVerificationBulk,
+		"target":         map[string]any{"type": "project", "id": project.ID},
+		"payload":        map[string]any{"task_ids": []int64{first.ID, second.ID}},
+		"correlation_id": authorizationRef, "approval_token": grant.ApprovalToken,
+	}
+	response := automationRequest(t, handler, target.Token, http.MethodPost, "/commands", "bulk-approved", approvedBody)
+	if response.Code != http.StatusOK {
+		t.Fatalf("approved bulk command status=%d body=%s", response.Code, response.Body.String())
+	}
+	var decoded struct {
+		Result struct {
+			Approved int `json:"approved"`
+			Failed   int `json:"failed"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Result.Approved != 2 || decoded.Result.Failed != 0 {
+		t.Fatalf("unexpected command result: %+v body=%s", decoded.Result, response.Body.String())
+	}
+	for _, taskID := range []int64{first.ID, second.ID} {
+		stored, _ := db.GetTask(ctx, taskID)
+		if stored.Status != "done" {
+			t.Fatalf("task %d not approved: %+v", taskID, stored)
+		}
+		history, err := db.ListTaskHistory(ctx, taskID, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, entry := range history {
+			if entry.EventType == "verification_approved" {
+				found = true
+				if entry.Actor != "automation_client:"+target.Client.ID || !strings.Contains(entry.Details, `"bulk":true`) {
+					t.Fatalf("task %d audit=%+v", taskID, entry)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("task %d missing per-item bulk audit: %+v", taskID, history)
+		}
 	}
 }
 

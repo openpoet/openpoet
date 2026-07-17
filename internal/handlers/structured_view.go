@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"io"
 	"log"
 	"net/http"
 	"openpoet/internal/database"
@@ -17,13 +18,18 @@ import (
 
 // StructuredViewHandler manages JSONL file watchers for the structured view.
 type StructuredViewHandler struct {
-	db          *database.DB
-	hub         *websocket.Hub
-	decryptFunc func(string, string) (string, error)
+	db                   *database.DB
+	hub                  *websocket.Hub
+	decryptFunc          func(string, string) (string, error)
+	recordEffectiveModel func(context.Context, string, string) error
 
 	mu                    sync.Mutex
 	watchers              map[string]*watcherEntry // sessionID → watcher
 	nextWatcherGeneration uint64
+}
+
+func (h *StructuredViewHandler) SetEffectiveModelRecorder(recorder func(context.Context, string, string) error) {
+	h.recordEffectiveModel = recorder
 }
 
 type watcherEntry struct {
@@ -78,8 +84,97 @@ func (h *StructuredViewHandler) GetSessionEvents(w http.ResponseWriter, r *http.
 	if events == nil {
 		events = []*jsonlview.SessionEvent{}
 	}
+	h.recordLatestEffectiveModel(r.Context(), sessionID, events)
 
 	respondJSON(w, http.StatusOK, events)
+}
+
+// ReconcileEffectiveModel reads the trusted transcript source for a session and
+// records the latest main-agent assistant model. It is invoked after Stop hooks
+// so /model changes are reflected even when Structured View is closed.
+func (h *StructuredViewHandler) ReconcileEffectiveModel(ctx context.Context, sessionID string) {
+	if h.recordEffectiveModel == nil {
+		return
+	}
+	source, reason := h.resolveJSONLSourceContext(ctx, sessionID)
+	if reason != "" {
+		return
+	}
+	events, err := h.readRecentSessionEvents(source)
+	if err != nil {
+		log.Printf("[StructuredView] Failed to reconcile model for session %s: %v", sessionID, err)
+		return
+	}
+	h.recordLatestEffectiveModel(ctx, sessionID, events)
+}
+
+const effectiveModelTranscriptTailBytes int64 = 4 * 1024 * 1024
+
+func (h *StructuredViewHandler) readRecentSessionEvents(source *jsonlSource) ([]*jsonlview.SessionEvent, error) {
+	if !source.isRemote {
+		file, err := os.Open(source.localPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			return nil, err
+		}
+		return parseRecentSessionEvents(file, info.Size())
+	}
+
+	fm := files.NewRemoteFileManager(source.project, h.decryptFunc)
+	connector := fm.NewSFTPConnector()
+	sshClient, sftpClient, err := connector.Connect()
+	if err != nil {
+		return nil, err
+	}
+	defer sftpClient.Close()
+	defer sshClient.Close()
+	homeDir, err := sftpClient.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	remotePath := jsonlview.ResolveRemoteJSONLPath(source.project.Path, source.sessionID, homeDir)
+	file, err := sftpClient.Open(remotePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	return parseRecentSessionEvents(file, info.Size())
+}
+
+func parseRecentSessionEvents(reader io.ReadSeeker, size int64) ([]*jsonlview.SessionEvent, error) {
+	offset := size - effectiveModelTranscriptTailBytes
+	if offset < 0 {
+		offset = 0
+	}
+	events, _, err := jsonlview.ParseReaderFromOffset(reader, size, offset)
+	return events, err
+}
+
+func (h *StructuredViewHandler) recordLatestEffectiveModel(ctx context.Context, sessionID string, events []*jsonlview.SessionEvent) {
+	if h.recordEffectiveModel == nil {
+		return
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
+		if event == nil || event.IsSidechain || event.Type != "assistant" || event.Message == nil || strings.TrimSpace(event.Message.Model) == "" {
+			continue
+		}
+		if err := h.recordEffectiveModel(ctx, sessionID, event.Message.Model); err != nil {
+			log.Printf("[StructuredView] Failed to persist effective model for session %s: %v", sessionID, err)
+		}
+		return
+	}
 }
 
 // StartWatching begins streaming new JSONL events for a session via WebSocket.
@@ -352,6 +447,7 @@ func (h *StructuredViewHandler) forwardEvents(sessionID string, generation uint6
 				if !h.isCurrentWatcher(sessionID, generation) {
 					return
 				}
+				h.recordLatestEffectiveModel(context.Background(), sessionID, []*jsonlview.SessionEvent{event})
 				h.hub.BroadcastToChannel("session:"+sessionID, &websocket.Message{
 					Type: websocket.MsgTypeSessionEvent,
 					Data: event,

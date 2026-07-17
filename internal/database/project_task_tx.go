@@ -35,6 +35,18 @@ func (t *ProjectTaskTx) ProjectExists(ctx context.Context, projectID int64) (boo
 	return exists, err
 }
 
+func (t *ProjectTaskTx) TaskAutoApprovalConfig(ctx context.Context, projectID int64, globalSettingKey string) (projectOverride, globalValue string, err error) {
+	var config struct {
+		ProjectOverride string `db:"project_override"`
+		GlobalValue     string `db:"global_value"`
+	}
+	err = t.tx.GetContext(ctx, &config, `
+		SELECT task_auto_approve_verification AS project_override,
+			COALESCE((SELECT value FROM settings WHERE key = ?), '') AS global_value
+		FROM projects WHERE id = ?`, globalSettingKey, projectID)
+	return config.ProjectOverride, config.GlobalValue, err
+}
+
 func (t *ProjectTaskTx) AppendEventOutbox(ctx context.Context, input EventOutboxAppend) (*EventOutboxEvent, error) {
 	return AppendEventOutbox(ctx, t.tx, input)
 }

@@ -802,6 +802,44 @@ class StructuredViewManager {
         this._updateTokenBar(view);
     }
 
+    /**
+     * Render a full transcript snapshot in one batch. Merges all delta chunks
+     * into complete items BEFORE touching the DOM, then renders each card
+     * exactly once and scrolls once at the end. Feeding snapshot events through
+     * appendCodexTranscriptEvent instead re-renders a card's entire markdown
+     * for every chunk it ever streamed (quadratic), freezing the tab on long
+     * sessions.
+     */
+    loadCodexTranscriptSnapshot(sessionId, transcript) {
+        const events = Array.isArray(transcript?.events) ? transcript.events : null;
+        if (!events) return false;
+
+        const view = this.views.get(sessionId) || this.createView(sessionId);
+        if (!view) return false;
+
+        this.resetCodexTranscript(sessionId);
+
+        for (const event of events) {
+            if (event && event.id) this._upsertCodexTranscriptItem(view, event);
+        }
+        if (!view.codexTranscript.order.length) return true;
+
+        view.messagesEl.innerHTML = '';
+        if (transcript.truncated) {
+            const notice = document.createElement('div');
+            notice.className = 'sv-transcript-notice';
+            notice.textContent = 'Older activity trimmed — showing the most recent transcript.';
+            view.messagesEl.appendChild(notice);
+        }
+        for (const id of view.codexTranscript.order) {
+            const item = view.codexTranscript.items.get(id);
+            const normalized = this._codexTranscriptItemToEvent(item);
+            if (normalized) this._appendEventToDOM(view, normalized, { updateStatus: false });
+        }
+        this._scrollToBottom(view);
+        return true;
+    }
+
     appendCodexTranscriptEvent(sessionId, event) {
         const view = this.views.get(sessionId) || this.createView(sessionId);
         if (!view || !event || !event.id) return;

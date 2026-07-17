@@ -839,49 +839,60 @@ func (r *CodexRunner) turnStartParams(threadID, text string) map[string]interfac
 }
 
 var codexSlashCommandNames = map[string]bool{
-	"agent":                true,
-	"apps":                 true,
-	"approve":              true,
-	"archive":              true,
-	"btw":                  true,
-	"clear":                true,
-	"compact":              true,
-	"copy":                 true,
-	"debug-config":         true,
-	"diff":                 true,
-	"exit":                 true,
-	"experimental":         true,
-	"fast":                 true,
-	"feedback":             true,
-	"fork":                 true,
-	"goal":                 true,
-	"help":                 true,
-	"hooks":                true,
-	"ide":                  true,
-	"init":                 true,
-	"keymap":               true,
-	"mcp":                  true,
-	"memories":             true,
-	"mention":              true,
-	"model":                true,
-	"permissions":          true,
-	"personality":          true,
-	"plan":                 true,
-	"plugins":              true,
-	"ps":                   true,
-	"quit":                 true,
-	"raw":                  true,
-	"resume":               true,
-	"review":               true,
-	"sandbox-add-read-dir": true,
-	"side":                 true,
-	"skills":               true,
-	"status":               true,
-	"statusline":           true,
-	"stop":                 true,
-	"theme":                true,
-	"title":                true,
-	"vim":                  true,
+	"agent":                 true,
+	"app":                   true,
+	"apps":                  true,
+	"approve":               true,
+	"archive":               true,
+	"btw":                   true,
+	"clear":                 true,
+	"compact":               true,
+	"copy":                  true,
+	"debug-config":          true,
+	"delete":                true,
+	"diff":                  true,
+	"exit":                  true,
+	"experimental":          true,
+	"fast":                  true,
+	"feedback":              true,
+	"fork":                  true,
+	"goal":                  true,
+	"help":                  true,
+	"hooks":                 true,
+	"ide":                   true,
+	"import":                true,
+	"init":                  true,
+	"keymap":                true,
+	"logout":                true,
+	"mcp":                   true,
+	"memories":              true,
+	"mention":               true,
+	"model":                 true,
+	"new":                   true,
+	"pet":                   true,
+	"pets":                  true,
+	"permissions":           true,
+	"personality":           true,
+	"plan":                  true,
+	"plugins":               true,
+	"ps":                    true,
+	"quit":                  true,
+	"raw":                   true,
+	"rename":                true,
+	"resume":                true,
+	"review":                true,
+	"sandbox-add-read-dir":  true,
+	"setup-default-sandbox": true,
+	"side":                  true,
+	"skills":                true,
+	"status":                true,
+	"statusline":            true,
+	"stop":                  true,
+	"subagents":             true,
+	"theme":                 true,
+	"title":                 true,
+	"usage":                 true,
+	"vim":                   true,
 }
 
 func isCodexSlashCommand(text string) bool {
@@ -2389,12 +2400,102 @@ func (r *CodexRunner) codexStateSnapshot() map[string]interface{} {
 	}
 }
 
+const (
+	// codexTranscriptSnapshotMaxBytes bounds the total transcript text sent to
+	// a client when it opens a session. Long-running sessions accumulate tens
+	// of MB of streamed deltas; replaying all of it freezes the browser tab.
+	codexTranscriptSnapshotMaxBytes = 1_500_000
+	// codexTranscriptSnapshotMaxItemBytes bounds a single merged item so one
+	// giant command output cannot consume the whole snapshot budget.
+	codexTranscriptSnapshotMaxItemBytes = 256_000
+)
+
 func (r *CodexRunner) codexTranscriptSnapshot() map[string]interface{} {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	events := make([]codexTranscriptEvent, len(r.transcript))
 	copy(events, r.transcript)
-	return map[string]interface{}{"events": events}
+	r.mu.Unlock()
+
+	merged := mergeCodexTranscriptEvents(events)
+	merged, truncated := capCodexTranscriptEvents(merged,
+		codexTranscriptSnapshotMaxBytes, codexTranscriptSnapshotMaxItemBytes)
+	return map[string]interface{}{"events": merged, "truncated": truncated}
+}
+
+// mergeCodexTranscriptEvents collapses streamed delta chunks (same ID with
+// Append set) into one complete event per ID, mirroring the client-side merge
+// in structured-view.js. Sending merged events lets the client render each
+// card exactly once instead of re-rendering per chunk.
+func mergeCodexTranscriptEvents(events []codexTranscriptEvent) []codexTranscriptEvent {
+	merged := make([]codexTranscriptEvent, 0, len(events))
+	index := make(map[int]int, len(events))
+	for _, event := range events {
+		i, ok := index[event.ID]
+		if !ok {
+			event.Append = false
+			index[event.ID] = len(merged)
+			merged = append(merged, event)
+			continue
+		}
+		item := &merged[i]
+		if event.Kind != "" {
+			item.Kind = event.Kind
+		}
+		if event.Title != "" {
+			item.Title = event.Title
+		}
+		if event.Command != "" {
+			item.Command = event.Command
+		}
+		if event.Status != "" {
+			item.Status = event.Status
+		}
+		if !event.CreatedAt.IsZero() {
+			item.CreatedAt = event.CreatedAt
+		}
+		if event.Append {
+			item.Text += event.Text
+		} else if event.Text != "" {
+			item.Text = event.Text
+		}
+	}
+	return merged
+}
+
+// capCodexTranscriptEvents keeps the newest events whose combined text fits
+// maxTotalBytes, truncating any single item to maxItemBytes. Returns the
+// capped slice and whether anything was dropped or trimmed.
+func capCodexTranscriptEvents(events []codexTranscriptEvent, maxTotalBytes, maxItemBytes int) ([]codexTranscriptEvent, bool) {
+	truncated := false
+	total := 0
+	start := 0
+	for i := len(events) - 1; i >= 0; i-- {
+		if len(events[i].Text) > maxItemBytes {
+			events[i].Text = "… [earlier output trimmed]\n" + tailBytesUTF8(events[i].Text, maxItemBytes)
+			truncated = true
+		}
+		size := len(events[i].Text) + len(events[i].Command) + len(events[i].Title)
+		if total+size > maxTotalBytes && i < len(events)-1 {
+			start = i + 1
+			truncated = true
+			break
+		}
+		total += size
+	}
+	return events[start:], truncated
+}
+
+// tailBytesUTF8 returns the last n bytes of s, extended forward as needed so
+// the cut does not split a UTF-8 rune.
+func tailBytesUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	i := len(s) - n
+	for i < len(s) && !utf8.RuneStart(s[i]) {
+		i++
+	}
+	return s[i:]
 }
 
 func (r *CodexRunner) replaceCodexTranscriptFromThreadResponse(raw json.RawMessage) bool {

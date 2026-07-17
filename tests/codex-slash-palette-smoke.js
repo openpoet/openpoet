@@ -76,6 +76,10 @@ async function main() {
       const opened = tm.codexSlashPalette.handleData(sessionId, '/');
       const rootLabels = [...document.querySelectorAll('.codex-slash-label')].map(el => el.textContent);
 
+      await tm.codexSlashPalette.openCommand('help');
+      const helpRequested = calls.some(call => call.action === 'help/read');
+      tm.codexSlashPalette.openRoot(sessionId);
+
       await tm.codexSlashPalette.openCommand('model');
       const modelLabels = [...document.querySelectorAll('.codex-slash-label')].map(el => el.textContent);
 
@@ -91,14 +95,16 @@ async function main() {
       tm._knownInput.delete(sessionId);
       tm.requestCodexCommand = originalRequest;
 
-      return { ok: true, opened, rootLabels, modelLabels, permissionLabels, disabledProfiles, resumeLabels, calls };
+      return { ok: true, opened, rootLabels, helpRequested, modelLabels, permissionLabels, disabledProfiles, resumeLabels, calls };
     });
 
     assert.equal(desktop.ok, true, desktop.error || 'desktop smoke failed');
     assert.equal(desktop.opened, true);
-    for (const label of ['/status', '/resume', '/model', '/permissions', '/compact', '/new', '/stop', '/init']) {
+    for (const label of ['/help', '/status', '/resume', '/model', '/permissions', '/compact', '/new', '/stop']) {
       assert.ok(desktop.rootLabels.includes(label), `missing root command ${label}`);
     }
+    assert.ok(!desktop.rootLabels.includes('/init'), 'unavailable /init command should not be displayed');
+    assert.equal(desktop.helpRequested, true, '/help did not dispatch help/read');
     assert.ok(desktop.modelLabels.includes('GPT E2E'), 'model follow-up did not render');
     assert.ok(desktop.permissionLabels.includes('Default'), 'permissions preset did not render');
     assert.ok(desktop.permissionLabels.includes('custom-profile'), 'custom permission profile did not render');

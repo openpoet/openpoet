@@ -2645,16 +2645,14 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		// Status-only change: execute immediately, no confirmation needed
 		isStatusOnly := hasStatus && !hasTitle && !hasDescription && !hasPriority && !hasDueDate
 		if isStatusOnly {
-			if err := h.api.db.UpdateTaskStatus(ctx, taskID, task.Status); err != nil {
+			updatedTask, err := h.api.taskService.ChangeStatus(ctx, application.ChangeTaskStatusCommand{
+				ProjectID: projectID, TaskID: taskID, Status: task.Status,
+				Actor: application.Actor{Type: "ai", ID: "assistant"},
+			})
+			if err != nil {
 				return "", err
 			}
-			updatedTask, _ := h.api.db.GetTask(ctx, taskID)
-			if updatedTask != nil {
-				h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{
-					"action": "updated", "project_id": projectID, "task": updatedTask,
-				})
-			}
-			return fmt.Sprintf("Task '%s' status updated to '%s'.", task.Title, task.Status), nil
+			return fmt.Sprintf("Task '%s' status updated to '%s'.", task.Title, updatedTask.Status), nil
 		}
 
 		// Content change: collect with ALL fields (merged current + new) for full card display
@@ -2982,7 +2980,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Session %s model changed to %s (effort: %s, harness: %s)", sessionID, updated.Model, updated.Effort, updated.Harness), nil
+		return fmt.Sprintf("Session %s requested model changed to %s (effective model: %s, effort: %s, harness: %s)", sessionID, updated.RequestedModel, updated.Model, updated.Effort, updated.Harness), nil
 
 	case "set_session_effort":
 		sessionID, _ := input["session_id"].(string)
@@ -4850,64 +4848,44 @@ func (h *AIHandler) linkSessionTaskForTool(ctx context.Context, sess *database.S
 }
 
 func (h *AIHandler) updateTaskFromSessionTool(ctx context.Context, task *database.ProjectTask, input map[string]interface{}, sessionID string) (bool, error) {
-	oldStatus, oldPriority, oldTitle, oldDescription := task.Status, task.Priority, task.Title, task.Description
 	changed := false
+	command := application.UpdateProjectTaskCommand{
+		ProjectID: task.ProjectID, TaskID: task.ID,
+		Actor: application.Actor{Type: "ai", ID: sessionID},
+	}
 	if v, ok := input["title"].(string); ok && strings.TrimSpace(v) != "" {
-		task.Title = strings.TrimSpace(v)
+		value := strings.TrimSpace(v)
+		command.Title = &value
 		changed = true
 	}
 	if v, ok := input["description"].(string); ok {
-		task.Description = v
+		value := v
+		command.Description = &value
 		changed = true
 	}
 	if v, ok := input["status"].(string); ok && v != "" {
-		valid := map[string]bool{"todo": true, "in_progress": true, "awaiting_approval": true, "done": true}
-		if !valid[v] {
-			return false, fmt.Errorf("invalid status")
-		}
-		task.Status = v
+		value := v
+		command.Status = &value
 		changed = true
 	}
 	if v, ok := input["priority"].(string); ok && v != "" {
-		valid := map[string]bool{"low": true, "medium": true, "high": true, "urgent": true}
-		if !valid[v] {
-			return false, fmt.Errorf("invalid priority")
-		}
-		task.Priority = v
+		value := v
+		command.Priority = &value
 		changed = true
 	}
 	if v, ok := input["due_date"].(string); ok {
-		if v == "" {
-			task.DueDate = sql.NullTime{}
-		} else {
-			t, err := parseFlexibleTime(v)
-			if err != nil {
-				return false, fmt.Errorf("invalid due_date")
-			}
-			task.DueDate = sql.NullTime{Time: t, Valid: true}
-			task.DueNotified = false
-		}
+		value := v
+		command.DueDate = &value
 		changed = true
 	}
 	if !changed {
 		return false, nil
 	}
-	if err := h.api.db.UpdateTask(ctx, task); err != nil {
+	updated, err := h.api.taskService.Update(ctx, command)
+	if err != nil {
 		return false, err
 	}
-	h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": task.ProjectID, "task": task})
-	if task.Status != oldStatus {
-		h.api.recordTaskHistory(ctx, task.ID, task.ProjectID, "status_change", map[string]interface{}{"old": oldStatus, "new": task.Status}, "user", sessionID)
-	}
-	if task.Priority != oldPriority {
-		h.api.recordTaskHistory(ctx, task.ID, task.ProjectID, "priority_change", map[string]interface{}{"old": oldPriority, "new": task.Priority}, "user", sessionID)
-	}
-	if task.Title != oldTitle {
-		h.api.recordTaskHistory(ctx, task.ID, task.ProjectID, "title_updated", map[string]interface{}{"old": oldTitle, "new": task.Title}, "user", sessionID)
-	}
-	if task.Description != oldDescription {
-		h.api.recordTaskHistory(ctx, task.ID, task.ProjectID, "description_updated", map[string]interface{}{}, "user", sessionID)
-	}
+	*task = *updated
 	return true, nil
 }
 
@@ -5268,41 +5246,37 @@ Instructions:
 				if s.TaskID != nil {
 					taskID = *s.TaskID
 				}
-				oldStatus := linkedTask.Status
-				// Transition to awaiting_approval instead of done, triggering verification doc
-				if err := h.api.db.UpdateTaskStatus(ctx, taskID, "awaiting_approval"); err == nil {
-					t, _ := h.api.db.GetTask(ctx, taskID)
-					if t != nil {
-						h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": t.ProjectID, "task": t})
-						go h.GenerateVerificationDoc(context.Background(), t)
+				if task, err := h.api.db.GetTask(ctx, taskID); err == nil && task != nil {
+					updated, err := h.api.taskService.ChangeStatus(ctx, application.ChangeTaskStatusCommand{
+						ProjectID: task.ProjectID, TaskID: taskID, Status: application.TaskStatusAwaitingApproval,
+						Actor: application.Actor{Type: "ai", ID: sessionID},
+					})
+					if err == nil {
+						log.Printf("[AI-Session] Auto-moved task %d to %s for session %s", taskID, updated.Status, sessionID[:8])
 					}
-					h.api.recordTaskHistory(ctx, taskID, linkedTask.ProjectID, "status_change", map[string]interface{}{
-						"old": oldStatus, "new": "awaiting_approval", "reason": "auto_update",
-					}, "ai", sessionID)
-					log.Printf("[AI-Session] Auto-moved task %d to awaiting_approval for session %s", taskID, sessionID[:8])
 				}
 			case "update_task":
 				if s.TaskID != nil {
 					if t, err := h.api.db.GetTask(ctx, *s.TaskID); err == nil && t != nil {
-						oldStatus := t.Status
 						changed := false
+						command := application.UpdateProjectTaskCommand{
+							ProjectID: t.ProjectID, TaskID: t.ID,
+							Actor: application.Actor{Type: "ai", ID: sessionID},
+						}
 						if status, ok := s.TaskData["status"].(string); ok && status != "" && status != t.Status {
-							t.Status = status
+							value := status
+							command.Status = &value
 							changed = true
 						}
 						if desc, ok := s.TaskData["description"].(string); ok && desc != "" {
-							t.Description = desc
+							value := desc
+							command.Description = &value
 							changed = true
 						}
 						if changed {
-							h.api.db.UpdateTask(ctx, t)
-							h.api.hub.BroadcastStateUpdate("task", map[string]interface{}{"action": "updated", "project_id": t.ProjectID, "task": t})
-							if t.Status != oldStatus {
-								h.api.recordTaskHistory(ctx, t.ID, t.ProjectID, "status_change", map[string]interface{}{
-									"old": oldStatus, "new": t.Status, "reason": "auto_update",
-								}, "ai", sessionID)
+							if updated, err := h.api.taskService.Update(ctx, command); err == nil {
+								log.Printf("[AI-Session] Auto-updated task %d to %s for session %s", updated.ID, updated.Status, sessionID[:8])
 							}
-							log.Printf("[AI-Session] Auto-updated task %d for session %s", t.ID, sessionID[:8])
 						}
 					}
 				}

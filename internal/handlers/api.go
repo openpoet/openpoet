@@ -2909,6 +2909,32 @@ func (a *API) ApproveTaskVerification(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, task)
 }
 
+// ApproveTaskVerificationBulk approves an explicit task list or every pending
+// task in an optional project scope. Per-item failures do not roll back the
+// approvals that succeeded.
+func (a *API) ApproveTaskVerificationBulk(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		TaskIDs    []int64 `json:"task_ids"`
+		AllPending bool    `json:"all_pending"`
+		ProjectID  *int64  `json:"project_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	result, err := a.taskService.ApproveVerificationBulk(r.Context(), application.BulkApproveVerificationCommand{
+		TaskIDs: input.TaskIDs, AllPending: input.AllPending, ProjectID: input.ProjectID,
+		Actor: application.UserActor(), BulkID: fmt.Sprintf("ui:%x", time.Now().UTC().UnixNano()),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+
+	respondJSON(w, http.StatusOK, result)
+}
+
 // RejectTaskVerification rejects an awaiting_approval task, returning it to in_progress.
 func (a *API) RejectTaskVerification(w http.ResponseWriter, r *http.Request) {
 	projectID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
@@ -3311,10 +3337,11 @@ func (a *API) SetSessionModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]string{
-		"session_id": updated.ID,
-		"model":      updated.Model,
-		"effort":     updated.Effort,
-		"harness":    updated.Harness,
+		"session_id":      updated.ID,
+		"model":           updated.Model,
+		"requested_model": updated.RequestedModel,
+		"effort":          updated.Effort,
+		"harness":         updated.Harness,
 	})
 }
 
@@ -3341,10 +3368,11 @@ func (a *API) SetSessionEffort(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]string{
-		"session_id": updated.ID,
-		"model":      updated.Model,
-		"effort":     updated.Effort,
-		"harness":    updated.Harness,
+		"session_id":      updated.ID,
+		"model":           updated.Model,
+		"requested_model": updated.RequestedModel,
+		"effort":          updated.Effort,
+		"harness":         updated.Harness,
 	})
 }
 

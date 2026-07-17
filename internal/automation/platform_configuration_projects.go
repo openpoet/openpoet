@@ -8,20 +8,21 @@ import (
 )
 
 type ProjectAutomationView struct {
-	ID                         int64  `json:"id"`
-	Name                       string `json:"name"`
-	Path                       string `json:"path"`
-	Type                       string `json:"type"`
-	SSHHost                    string `json:"ssh_host,omitempty"`
-	SSHPort                    int64  `json:"ssh_port,omitempty"`
-	SSHUser                    string `json:"ssh_user,omitempty"`
-	SSHAuthType                string `json:"ssh_auth_type,omitempty"`
-	HasCredential              bool   `json:"has_credential"`
-	ToolPolicy                 string `json:"tool_policy,omitempty"`
-	SkillPolicy                string `json:"skill_policy,omitempty"`
-	DangerouslySkipPermissions bool   `json:"dangerously_skip_permissions"`
-	Backend                    string `json:"backend"`
-	HasBackendConfig           bool   `json:"has_backend_config"`
+	ID                          int64  `json:"id"`
+	Name                        string `json:"name"`
+	Path                        string `json:"path"`
+	Type                        string `json:"type"`
+	SSHHost                     string `json:"ssh_host,omitempty"`
+	SSHPort                     int64  `json:"ssh_port,omitempty"`
+	SSHUser                     string `json:"ssh_user,omitempty"`
+	SSHAuthType                 string `json:"ssh_auth_type,omitempty"`
+	HasCredential               bool   `json:"has_credential"`
+	ToolPolicy                  string `json:"tool_policy,omitempty"`
+	SkillPolicy                 string `json:"skill_policy,omitempty"`
+	DangerouslySkipPermissions  bool   `json:"dangerously_skip_permissions"`
+	TaskAutoApproveVerification string `json:"task_auto_approve_verification"`
+	Backend                     string `json:"backend"`
+	HasBackendConfig            bool   `json:"has_backend_config"`
 }
 
 func projectAutomationView(project database.Project) ProjectAutomationView {
@@ -31,8 +32,9 @@ func projectAutomationView(project database.Project) ProjectAutomationView {
 		SSHUser: project.SSHUser.String, SSHAuthType: project.SSHAuthType.String,
 		HasCredential: project.HasCredential || project.SSHCredentialEncrypted.Valid,
 		ToolPolicy:    project.ToolPolicy, SkillPolicy: project.SkillPolicy,
-		DangerouslySkipPermissions: project.DangerouslySkipPermissions,
-		Backend:                    project.Backend, HasBackendConfig: project.BackendConfig != "" && project.BackendConfig != "{}",
+		DangerouslySkipPermissions:  project.DangerouslySkipPermissions,
+		TaskAutoApproveVerification: project.TaskAutoApproveVerification,
+		Backend:                     project.Backend, HasBackendConfig: project.BackendConfig != "" && project.BackendConfig != "{}",
 	}
 }
 

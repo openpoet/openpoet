@@ -307,8 +307,8 @@ func TestManagerSetClaudeSessionSettingsUsesSlashCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetSessionEffort returned error: %v", err)
 	}
-	if updated.Model != "fable" || updated.Effort != "max" {
-		t.Fatalf("updated metadata = model %q effort %q", updated.Model, updated.Effort)
+	if updated.Model != "default" || updated.RequestedModel != "fable" || updated.Effort != "max" {
+		t.Fatalf("updated metadata = effective model %q requested model %q effort %q", updated.Model, updated.RequestedModel, updated.Effort)
 	}
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
@@ -319,6 +319,49 @@ func TestManagerSetClaudeSessionSettingsUsesSlashCommands(t *testing.T) {
 	wantWrites := []string{"/model fable", "\r", "/effort max", "\r"}
 	if strings.Join(gotWrites, "|") != strings.Join(wantWrites, "|") {
 		t.Fatalf("writes = %#v, want %#v", gotWrites, wantWrites)
+	}
+}
+
+func TestManagerSetClaudeSessionModelRejectsIncompatibleHarnessModel(t *testing.T) {
+	runner := &fakeRunner{}
+	m := &Manager{sessions: map[string]*runningSession{
+		"sess-1": {
+			session: &database.Session{ID: "sess-1", Backend: string(BackendClaudeCode), Model: "claude-fable-5", RequestedModel: "fable"},
+			runner:  runner,
+		},
+	}}
+
+	_, err := m.SetSessionModel(context.Background(), "sess-1", "gpt-5.6-sol", 0)
+	if !errors.Is(err, ErrInvalidSessionSetting) || !strings.Contains(err.Error(), "not compatible with claude_code") {
+		t.Fatalf("SetSessionModel error = %v, want actionable incompatibility error", err)
+	}
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if len(runner.writes) != 0 {
+		t.Fatalf("incompatible model was written to Claude: %#v", runner.writes)
+	}
+}
+
+func TestValidateClaudeCodeModelIDAcceptsOfficialAliasesAndExtendedContext(t *testing.T) {
+	for _, model := range []string{"default", "best", "opus", "sonnet", "haiku", "opusplan", "sonnet[1m]", "claude-opus-4-7[1m]", "fable"} {
+		if got, err := validateClaudeCodeModelID(model); err != nil || got != model {
+			t.Errorf("validateClaudeCodeModelID(%q) = %q, %v", model, got, err)
+		}
+	}
+}
+
+func TestValidateClaudeCodeOpenAIModelForHarness(t *testing.T) {
+	for _, model := range []string{"gpt-5.6-sol[1m]", "gpt-5.4", "custom-openai/model"} {
+		got, err := validateClaudeCodeModelIDForHarness(model, "claude_code/openai")
+		if err != nil || got != model {
+			t.Errorf("validateClaudeCodeModelIDForHarness(%q) = %q, %v", model, got, err)
+		}
+	}
+	if _, err := validateClaudeCodeModelIDForHarness("default", "claude_code/openai"); err == nil {
+		t.Fatal("OpenAI-backed Claude Code should require an explicit model")
+	}
+	if _, err := validateClaudeCodeModelIDForHarness("gpt-5.6-sol", "claude_code"); err == nil {
+		t.Fatal("native Claude Code should still reject OpenAI models")
 	}
 }
 

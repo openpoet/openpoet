@@ -79,8 +79,8 @@ func TestPlatformPipelineDiscoveryMergesWithoutDuplicatesAndRequiresAllScopes(t 
 	if err := decodePlatformPipelineJSON(response.Body.Bytes(), &discovered); err != nil {
 		t.Fatal(err)
 	}
-	if len(discovered.Capabilities) != 25 {
-		t.Fatalf("merged capabilities=%d, want 25", len(discovered.Capabilities))
+	if len(discovered.Capabilities) != 26 {
+		t.Fatalf("merged capabilities=%d, want 26", len(discovered.Capabilities))
 	}
 	descriptor := findCapabilityDescriptor(t, discovered, definition.Name)
 	if descriptor.Scope != "projects:read" || len(descriptor.Scopes) != 2 ||

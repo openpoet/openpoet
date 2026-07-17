@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -94,6 +95,54 @@ func TestUpdateProjectTaskStatusUsesApplicationServiceOrdering(t *testing.T) {
 	}
 	if statusChanges != 1 {
 		t.Fatalf("status history entries = %d, want 1", statusChanges)
+	}
+}
+
+func TestApproveTaskVerificationBulkEndpointReturnsPerItemResults(t *testing.T) {
+	ctx := context.Background()
+	db := projectTaskHandlerTestDB(t)
+	project := projectTaskHandlerTestProject(t, db, "handler-bulk-approval")
+	pending := &database.ProjectTask{ProjectID: project.ID, Title: "Pending", Status: "awaiting_approval", Priority: "medium"}
+	done := &database.ProjectTask{ProjectID: project.ID, Title: "Done", Status: "done", Priority: "medium"}
+	active := &database.ProjectTask{ProjectID: project.ID, Title: "Active", Status: "todo", Priority: "medium"}
+	for _, task := range []*database.ProjectTask{pending, done, active} {
+		if err := db.CreateTask(ctx, task); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	api := NewAPI(db, websocket.NewHub(), nil, nil, nil, nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/approve-bulk", strings.NewReader(
+		`{"task_ids":[`+strconv.FormatInt(pending.ID, 10)+`,`+strconv.FormatInt(done.ID, 10)+`,`+strconv.FormatInt(active.ID, 10)+`,999999]}`,
+	))
+	rr := httptest.NewRecorder()
+	api.ApproveTaskVerificationBulk(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("ApproveTaskVerificationBulk status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var result struct {
+		Requested   int `json:"requested"`
+		Approved    int `json:"approved"`
+		AlreadyDone int `json:"already_done"`
+		Failed      int `json:"failed"`
+		Results     []struct {
+			TaskID    int64  `json:"task_id"`
+			Outcome   string `json:"outcome"`
+			ErrorCode string `json:"error_code"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Requested != 4 || result.Approved != 1 || result.AlreadyDone != 1 || result.Failed != 2 || len(result.Results) != 4 {
+		t.Fatalf("unexpected endpoint result: %+v", result)
+	}
+	stored, err := db.GetTask(ctx, pending.ID)
+	if err != nil || stored.Status != "done" {
+		t.Fatalf("pending task was not approved: task=%+v err=%v", stored, err)
+	}
+	if result.Results[2].ErrorCode != "not_awaiting_approval" || result.Results[3].ErrorCode != "task_not_found" {
+		t.Fatalf("per-item errors missing: %+v", result.Results)
 	}
 }
 
