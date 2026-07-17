@@ -104,8 +104,8 @@ done
 	if sess.Status != "running" {
 		t.Fatalf("session status = %q, want running", sess.Status)
 	}
-	if sess.Model != "default" || sess.Effort != "default" || sess.Harness != "claude_code" {
-		t.Fatalf("session runtime metadata = model %q effort %q harness %q", sess.Model, sess.Effort, sess.Harness)
+	if sess.Model != "unknown" || sess.RequestedModel != "default" || sess.Effort != "default" || sess.Harness != "claude_code" {
+		t.Fatalf("session runtime metadata = effective model %q requested model %q effort %q harness %q", sess.Model, sess.RequestedModel, sess.Effort, sess.Harness)
 	}
 	linked, err := db.GetTaskForSession(ctx, sess.ID)
 	if err != nil {
@@ -152,6 +152,13 @@ done
 	}
 	waitForSessionOutput(t, mgr, sess.ID, "PROMPT:/model fable")
 
+	req = newSessionRouteRequest(http.MethodPost, "/api/sessions/"+sess.ID+"/model", sess.ID, `{"model":"gpt-5.6-sol"}`)
+	rr = httptest.NewRecorder()
+	api.SetSessionModel(rr, req)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "not compatible with claude_code") {
+		t.Fatalf("SetSessionModel incompatible status = %d body=%s", rr.Code, rr.Body.String())
+	}
+
 	req = newSessionRouteRequest(http.MethodPost, "/api/sessions/"+sess.ID+"/effort", sess.ID, `{"effort":"high"}`)
 	rr = httptest.NewRecorder()
 	api.SetSessionEffort(rr, req)
@@ -160,7 +167,7 @@ done
 	}
 	waitForSessionOutput(t, mgr, sess.ID, "PROMPT:/effort high")
 	stored, err := db.GetSession(ctx, sess.ID)
-	if err != nil || stored.Model != "fable" || stored.Effort != "high" {
+	if err != nil || stored.Model != "unknown" || stored.RequestedModel != "fable" || stored.Effort != "high" {
 		t.Fatalf("runtime settings were not persisted: session=%+v err=%v", stored, err)
 	}
 }

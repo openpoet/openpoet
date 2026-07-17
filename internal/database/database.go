@@ -69,9 +69,10 @@ func (d *DB) migrate() error {
 
 // Project operations
 func (d *DB) CreateProject(ctx context.Context, p *Project) error {
-	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv, tool_policy, skill_policy, backend, backend_config)
-			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.Backend, p.BackendConfig)
+	p.TaskAutoApproveVerification = normalizeTaskAutoApproveVerification(p.TaskAutoApproveVerification)
+	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv, tool_policy, skill_policy, backend, backend_config, task_auto_approve_verification)
+			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification)
 	if err != nil {
 		return err
 	}
@@ -110,9 +111,19 @@ func (d *DB) ListProjects(ctx context.Context) ([]Project, error) {
 }
 
 func (d *DB) UpdateProject(ctx context.Context, p *Project) error {
-	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, tool_policy=?, skill_policy=?, dangerously_skip_permissions=?, backend=?, backend_config=?, updated_at=? WHERE id=?`
-	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.DangerouslySkipPermissions, p.Backend, p.BackendConfig, time.Now(), p.ID)
+	p.TaskAutoApproveVerification = normalizeTaskAutoApproveVerification(p.TaskAutoApproveVerification)
+	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, tool_policy=?, skill_policy=?, dangerously_skip_permissions=?, backend=?, backend_config=?, task_auto_approve_verification=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.DangerouslySkipPermissions, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification, time.Now(), p.ID)
 	return err
+}
+
+func normalizeTaskAutoApproveVerification(value string) string {
+	switch strings.TrimSpace(value) {
+	case "enabled", "disabled":
+		return strings.TrimSpace(value)
+	default:
+		return "inherit"
+	}
 }
 
 func (d *DB) UpdateProjectConfigSyncedAt(ctx context.Context, id int64) error {
@@ -261,13 +272,23 @@ func (d *DB) ReplaceProjectTagIDs(ctx context.Context, projectID int64, tagIDs [
 
 // Session operations
 func (d *DB) CreateSession(ctx context.Context, s *Session) error {
-	query := `INSERT INTO sessions (id, project_id, status, pid, name, task_id, start_time, backend, skip_permissions, model, effort, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.ExecContext(ctx, query, s.ID, s.ProjectID, s.Status, s.PID, s.Name, s.TaskID, s.StartTime, s.Backend, s.SkipPermissions, s.Model, s.Effort, s.Harness)
+	query := `INSERT INTO sessions (id, project_id, status, pid, name, task_id, start_time, backend, skip_permissions, model, requested_model, effort, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.ExecContext(ctx, query, s.ID, s.ProjectID, s.Status, s.PID, s.Name, s.TaskID, s.StartTime, s.Backend, s.SkipPermissions, s.Model, s.RequestedModel, s.Effort, s.Harness)
 	return err
 }
 
 func (d *DB) UpdateSessionRuntimeMetadata(ctx context.Context, id, model, effort, harness string) error {
 	_, err := d.ExecContext(ctx, "UPDATE sessions SET model=?, effort=?, harness=? WHERE id=?", model, effort, harness, id)
+	return err
+}
+
+func (d *DB) UpdateSessionRequestedModel(ctx context.Context, id, requestedModel string) error {
+	_, err := d.ExecContext(ctx, "UPDATE sessions SET requested_model=? WHERE id=?", requestedModel, id)
+	return err
+}
+
+func (d *DB) UpdateSessionEffectiveModel(ctx context.Context, id, effectiveModel string) error {
+	_, err := d.ExecContext(ctx, "UPDATE sessions SET model=? WHERE id=?", effectiveModel, id)
 	return err
 }
 

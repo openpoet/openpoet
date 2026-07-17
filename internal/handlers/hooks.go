@@ -82,6 +82,10 @@ type HookHandler struct {
 	// OnPlanUpdated is called when ExitPlanMode is intercepted with plan content.
 	OnPlanUpdated func(sessionID string, planContent string)
 
+	// OnReconcileEffectiveModel reads the runtime transcript after a completed
+	// Claude turn so mid-session /model changes are reflected in session metadata.
+	OnReconcileEffectiveModel func(sessionID string)
+
 	// HasLinkedTask checks if a session has a linked task. Set by main.go.
 	HasLinkedTask func(sessionID string) bool
 
@@ -781,6 +785,15 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	h.trackClaudeProviderSessionID(sessionID, hookEvent, backend)
 
 	eventName, _ := hookEvent["hook_event_name"].(string)
+	if eventName == "SessionStart" && h.sessionMgr != nil {
+		if model, ok := hookEvent["model"].(string); ok && strings.TrimSpace(model) != "" {
+			go func() {
+				if err := h.sessionMgr.RecordEffectiveModel(context.Background(), sessionID, model); err != nil {
+					log.Printf("[hooks] Failed to persist effective model for session %s: %v", sessionID, err)
+				}
+			}()
+		}
+	}
 
 	// Normalize Copilot/ACP event names to Claude Code equivalents
 	if r.Header.Get("X-Backend") == "copilot" || r.Header.Get("X-Backend") == "acp" {
@@ -841,6 +854,9 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	case "Stop":
 		h.cancelIdleTimer(sessionID)
 		h.setSessionMode(sessionID, "idle", "event=Stop")
+		if h.OnReconcileEffectiveModel != nil {
+			go h.OnReconcileEffectiveModel(sessionID)
+		}
 	case "opencode_session_info":
 		if h.sessionMgr != nil {
 			if providerID, ok := hookEvent["provider_session_id"].(string); ok && strings.TrimSpace(providerID) != "" {

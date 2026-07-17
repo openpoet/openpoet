@@ -9,8 +9,8 @@ func TestProjectTaskCapabilityRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	capabilities := registry.List()
-	if len(capabilities) != 14 {
-		t.Fatalf("capability count = %d, want 14", len(capabilities))
+	if len(capabilities) != 15 {
+		t.Fatalf("capability count = %d, want 15", len(capabilities))
 	}
 	deletion, ok := registry.Lookup(CapabilityTasksDelete)
 	if !ok {
@@ -24,6 +24,16 @@ func TestProjectTaskCapabilityRegistry(t *testing.T) {
 	}
 	if deletion.Service != service || deletion.Service.CapabilityServiceName() != CapabilityServiceProjectTasks {
 		t.Fatal("capability is not bound to the project-task service")
+	}
+	bulkApproval, ok := registry.Lookup(CapabilityTasksApproveVerificationBulk)
+	if !ok {
+		t.Fatal("bulk verification approval capability not registered")
+	}
+	if bulkApproval.Scope != CapabilityScopeTasksWrite || bulkApproval.Risk != CapabilityRiskWrite || bulkApproval.Approval != ApprovalExplicit {
+		t.Fatalf("bulk approval must preserve individual approval authorization: %+v", bulkApproval)
+	}
+	if bulkApproval.Handler != CapabilityHandlerTasksApproveVerificationBulk {
+		t.Fatalf("unexpected bulk approval handler: %q", bulkApproval.Handler)
 	}
 	if err := registry.Register(deletion); err == nil {
 		t.Fatal("expected duplicate capability error")

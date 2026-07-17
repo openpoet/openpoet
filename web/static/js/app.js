@@ -60,6 +60,11 @@ class OpenPoet {
         // View state preservation (scroll, filters, tabs)
         this._viewState = {};
 
+        // URL state is the shareable source of truth for navigation. This guard
+        // prevents browser back/forward restoration from creating new entries.
+        this._restoringURLState = false;
+        this._initialURLRestored = false;
+
         // All-tasks view mode: 'grouped' (default) or 'flat'
         this._allTasksViewMode = localStorage.getItem('openpoet-tasks-view-mode') || 'grouped';
         this._collapsedProjectGroups = new Set();
@@ -112,14 +117,12 @@ class OpenPoet {
         // Setup mobile terminal input
         this.setupMobileTerminalInput();
 
-        // Restore tabs from previous session (after a delay to ensure sessions are loaded)
-        setTimeout(() => this.restoreTabsFromStorage(), 1000);
-
         // Load any pending AI suggestions
         setTimeout(() => this._loadPendingSuggestions(), 2000);
 
         // Listen for hash changes (from notification clicks via service worker)
         window.addEventListener('hashchange', () => this._handleHashNavigation());
+        window.addEventListener('popstate', () => this._restoreURLState());
 
         // Listen for service worker messages
         if ('serviceWorker' in navigator) {
@@ -170,7 +173,7 @@ class OpenPoet {
         });
     }
 
-    showView(viewName) {
+    showView(viewName, options = {}) {
         // Capture state of current view before leaving
         if (this.currentView) {
             this._captureViewState(this.currentView);
@@ -208,6 +211,10 @@ class OpenPoet {
 
         // Refresh view data
         this.refreshViewData(viewName);
+
+        if (options.updateURL !== false) {
+            this._syncURLState();
+        }
     }
 
     async _goToMostRecentSession() {
@@ -242,7 +249,7 @@ class OpenPoet {
         }
     }
 
-    _showSessionsEmptyState() {
+    _showSessionsEmptyState(options = {}) {
         // Show the sessions view with empty state
         document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
         document.getElementById('view-sessions').classList.add('active');
@@ -267,6 +274,10 @@ class OpenPoet {
                 </div>
             `;
         }
+
+        if (options.updateURL !== false) {
+            this._syncURLState();
+        }
     }
 
     _updateNavForTerminal() {
@@ -276,7 +287,7 @@ class OpenPoet {
     }
 
     // Ensure the terminal view is visible (switch from any other view)
-    showTerminalView() {
+    showTerminalView(options = {}) {
         if (!document.querySelector('.terminal-view.active')) {
             document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
             document.getElementById('view-terminal').classList.add('active');
@@ -284,6 +295,259 @@ class OpenPoet {
         }
         this._updateNavForTerminal();
         window.terminalManager?.resumeActiveResize?.();
+        if (options.updateURL !== false) {
+            this._syncURLState();
+        }
+    }
+
+    _normalizedURLView() {
+        return this.currentView === 'sessions-empty' ? 'sessions' : (this.currentView || 'projects');
+    }
+
+    _documentURLToken(route) {
+        if (!route) return '';
+        if (route.kind === 'document' && route.id) return String(route.id);
+        if (route.kind === 'plan' && route.sessionId) return `plan:${route.sessionId}`;
+        if (route.kind === 'task' && route.projectId && route.taskId) {
+            return `task:${route.projectId}:${route.taskId}`;
+        }
+        return '';
+    }
+
+    _currentURLState() {
+        const view = this._normalizedURLView();
+        const state = { view };
+
+        if (view === 'project-detail' && this._detailProject?.id) {
+            state.project = String(this._detailProject.id);
+        }
+
+        if (view === 'terminal' && this.currentSession) {
+            state.session = String(this.currentSession);
+            const session = this.sessions.find(s => s.id === this.currentSession);
+            if (session?.project_id) state.project = String(session.project_id);
+        }
+
+        const docRoute = window.docViewer?.getURLState?.();
+        const doc = this._documentURLToken(docRoute);
+        if (doc) state.doc = doc;
+        if (!state.project && docRoute?.projectId) state.project = String(docRoute.projectId);
+        if (!state.project && docRoute?.kind === 'plan' && docRoute.sessionId) {
+            const planSession = this.sessions.find(s => s.id === docRoute.sessionId);
+            if (planSession?.project_id) state.project = String(planSession.project_id);
+        }
+
+        if (view === 'tasks') {
+            state.taskStatus = document.getElementById('filter-status')?.value || '';
+            state.taskPriority = document.getElementById('filter-priority')?.value || '';
+            state.taskProject = document.getElementById('filter-project')?.value || '';
+            state.taskSearch = document.getElementById('filter-search')?.value || '';
+            state.taskMode = this._allTasksViewMode || 'grouped';
+        }
+
+        if (view === 'config') {
+            state.configTab = document.querySelector('.tab-btn.active')?.dataset.tab || 'skills';
+            state.skillSearch = this._skillSearch || '';
+            state.skillCategory = this._skillFilterCategory || '';
+            state.skillStatus = this._skillFilterStatus || '';
+        }
+
+        return state;
+    }
+
+    _urlForState(state) {
+        const url = new URL(window.location.href);
+        const ownedParams = [
+            'view', 'project', 'session', 'doc',
+            'task_status', 'task_priority', 'task_project', 'task_q', 'task_mode',
+            'config_tab', 'skill_q', 'skill_category', 'skill_status'
+        ];
+        ownedParams.forEach(name => url.searchParams.delete(name));
+
+        url.searchParams.set('view', state.view || 'projects');
+        if (state.project) url.searchParams.set('project', state.project);
+        if (state.session) url.searchParams.set('session', state.session);
+        if (state.doc) url.searchParams.set('doc', state.doc);
+
+        if (state.view === 'tasks') {
+            if (state.taskStatus) url.searchParams.set('task_status', state.taskStatus);
+            if (state.taskPriority) url.searchParams.set('task_priority', state.taskPriority);
+            if (state.taskProject) url.searchParams.set('task_project', state.taskProject);
+            if (state.taskSearch) url.searchParams.set('task_q', state.taskSearch);
+            if (state.taskMode && state.taskMode !== 'grouped') url.searchParams.set('task_mode', state.taskMode);
+        }
+
+        if (state.view === 'config') {
+            if (state.configTab && state.configTab !== 'skills') url.searchParams.set('config_tab', state.configTab);
+            if (state.skillSearch) url.searchParams.set('skill_q', state.skillSearch);
+            if (state.skillCategory) url.searchParams.set('skill_category', state.skillCategory);
+            if (state.skillStatus) url.searchParams.set('skill_status', state.skillStatus);
+        }
+
+        url.hash = '';
+        return `${url.pathname}${url.search}`;
+    }
+
+    _syncURLState(options = {}) {
+        if (this._restoringURLState || !this._initialURLRestored) return;
+        const nextURL = this._urlForState(this._currentURLState());
+        const currentURL = `${window.location.pathname}${window.location.search}`;
+        if (nextURL === currentURL && !window.location.hash) return;
+        const method = options.replace ? 'replaceState' : 'pushState';
+        window.history[method]({ openpoet: true }, '', nextURL);
+    }
+
+    _readURLState() {
+        const params = new URLSearchParams(window.location.search);
+        const allowedViews = new Set(['projects', 'project-detail', 'sessions', 'tasks', 'terminal', 'config']);
+        const doc = params.get('doc') || '';
+        let view = params.get('view') || '';
+        if (!view && params.get('session')) view = 'terminal';
+        if (!view && params.get('project')) view = 'project-detail';
+        if (!view && doc.startsWith('task:')) view = 'tasks';
+        if (!allowedViews.has(view)) view = 'projects';
+
+        return {
+            view,
+            project: params.get('project') || '',
+            session: params.get('session') || '',
+            doc,
+            taskStatus: params.get('task_status') || '',
+            taskPriority: params.get('task_priority') || '',
+            taskProject: params.get('task_project') || '',
+            taskSearch: params.get('task_q') || '',
+            taskMode: params.get('task_mode') === 'flat' ? 'flat' : 'grouped',
+            configTab: params.get('config_tab') || 'skills',
+            skillSearch: params.get('skill_q') || '',
+            skillCategory: params.get('skill_category') || '',
+            skillStatus: params.get('skill_status') || ''
+        };
+    }
+
+    _hasExplicitURLState() {
+        const params = new URLSearchParams(window.location.search);
+        return [
+            'view', 'project', 'session', 'doc',
+            'task_status', 'task_priority', 'task_project', 'task_q', 'task_mode',
+            'config_tab', 'skill_q', 'skill_category', 'skill_status'
+        ].some(name => params.has(name));
+    }
+
+    _applyTaskURLState(state) {
+        const statusEl = document.getElementById('filter-status');
+        const priorityEl = document.getElementById('filter-priority');
+        const projectEl = document.getElementById('filter-project');
+        const searchEl = document.getElementById('filter-search');
+        if (statusEl) statusEl.value = state.taskStatus;
+        if (priorityEl) priorityEl.value = state.taskPriority;
+        if (projectEl) projectEl.value = state.taskProject;
+        if (searchEl) searchEl.value = state.taskSearch;
+        this._pendingFilterProject = state.taskProject;
+        this._allTasksViewMode = state.taskMode;
+        this._viewState.tasks = {
+            ...(this._viewState.tasks || {}),
+            filterStatus: state.taskStatus,
+            filterPriority: state.taskPriority,
+            filterProject: state.taskProject,
+            filterSearch: state.taskSearch,
+            viewMode: state.taskMode
+        };
+        document.querySelectorAll('#view-mode-toggle .view-mode-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.mode === state.taskMode);
+        });
+    }
+
+    _applyConfigURLState(state) {
+        const validTabs = new Set(['skills', 'mcps', 'ai-providers', 'agents', 'settings', 'tokens']);
+        const activeTab = validTabs.has(state.configTab) ? state.configTab : 'skills';
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.tab === activeTab);
+        });
+        this._skillSearch = state.skillSearch;
+        this._skillFilterCategory = state.skillCategory;
+        this._skillFilterStatus = state.skillStatus;
+        this._viewState.config = {
+            ...(this._viewState.config || {}),
+            activeTab,
+            skillSearch: state.skillSearch,
+            skillFilterCategory: state.skillCategory,
+            skillFilterStatus: state.skillStatus
+        };
+    }
+
+    async _waitForDocViewer() {
+        if (window.docViewer) return window.docViewer;
+        await new Promise(resolve => {
+            const finish = () => setTimeout(resolve, 0);
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', finish, { once: true });
+            } else {
+                finish();
+            }
+            setTimeout(resolve, 1500);
+        });
+        return window.docViewer;
+    }
+
+    async _restoreDocumentFromURL(token) {
+        if (!token) return;
+        const viewer = await this._waitForDocViewer();
+        if (!viewer) return;
+
+        const taskMatch = token.match(/^task:(\d+):(\d+)$/);
+        if (taskMatch) {
+            await this.viewTaskDetail(Number(taskMatch[1]), Number(taskMatch[2]), { recordHistory: false });
+            return;
+        }
+
+        if (token.startsWith('plan:')) {
+            await this.openTaskDoc(token, 'plan', { recordHistory: false });
+            return;
+        }
+
+        await viewer.open(token, { recordHistory: false });
+    }
+
+    async _restoreURLState() {
+        const state = this._readURLState();
+        this._restoringURLState = true;
+        try {
+            window.docViewer?.dismiss?.({ updateURL: false });
+            this._viewingTaskDetail = null;
+
+            if (state.view === 'tasks') this._applyTaskURLState(state);
+            if (state.view === 'config') this._applyConfigURLState(state);
+
+            if (state.view === 'project-detail') {
+                const projectId = Number(state.project);
+                if (projectId && this.projects.some(p => p.id === projectId)) {
+                    this.showProjectDetail(projectId, { updateURL: false });
+                } else {
+                    this.showView('projects', { updateURL: false });
+                }
+            } else if (state.view === 'terminal') {
+                const session = this.sessions.find(s => s.id === state.session);
+                if (session) {
+                    await this.openTerminal(session.id, session, null, { updateURL: false });
+                } else {
+                    this.showView('sessions', { updateURL: false });
+                }
+            } else {
+                this.showView(state.view, { updateURL: false });
+            }
+
+            await this._restoreDocumentFromURL(state.doc);
+        } finally {
+            this._restoringURLState = false;
+            this._initialURLRestored = true;
+        }
+
+        // Canonicalize invalid/missing values without adding another history item.
+        this._syncURLState({ replace: true });
+    }
+
+    _onDocumentURLStateChanged(options = {}) {
+        this._syncURLState(options);
     }
 
     refreshViewData(viewName) {
@@ -743,49 +1007,74 @@ class OpenPoet {
             window.hookManager._autoReopenDismissed();
         }
 
-        // Handle hash-based navigation from push notification clicks
-        this._handleHashNavigation();
+        // Restore background terminal connections first, then let the URL win.
+        // The old delayed restore could replace a copied project/session route.
+        await this.restoreTabsFromStorage();
+
+        // Handle legacy hash links from push notifications. All new navigation
+        // is then written back as the canonical query-string URL.
+        if (location.hash) {
+            this._initialURLRestored = true;
+            if (this._handleHashNavigation()) return;
+        }
+
+        if (this._hasExplicitURLState()) {
+            await this._restoreURLState();
+        } else {
+            // Preserve the existing local tab-restoration behavior on a bare URL,
+            // then make that resolved state shareable.
+            this._initialURLRestored = true;
+            this._syncURLState({ replace: true });
+        }
     }
 
     // Handle hash-based navigation (from push notification clicks via service worker)
     _handleHashNavigation() {
         const hash = location.hash;
-        if (!hash) return;
+        if (!hash) return false;
 
         // #session={id} — open terminal for session
         const sessionMatch = hash.match(/^#session=(.+)$/);
         if (sessionMatch) {
             const sessionId = sessionMatch[1];
-            history.replaceState(null, '', location.pathname);
+            history.replaceState(null, '', `${location.pathname}${location.search}`);
             if (window.hookManager) {
                 window.hookManager.openSessionWithPendingDialog(sessionId);
             } else {
                 this.openTerminal(sessionId);
             }
-            return;
+            return true;
         }
 
         // #link={encoded_link} — navigate to link (session, project, or doc)
         const linkMatch = hash.match(/^#link=(.+)$/);
         if (linkMatch) {
             const link = decodeURIComponent(linkMatch[1]);
-            history.replaceState(null, '', location.pathname);
+            history.replaceState(null, '', `${location.pathname}${location.search}`);
             // Try notifBadge navigator, fallback to direct session open
             if (window.notifBadge) {
                 window.notifBadge._navigateToLink(link);
             } else {
                 // Direct fallback for session links
                 const sessMatch = link.match(/^\/app\/session\/(.+)$/);
+                const projectMatch = link.match(/^\/app\/project\/(\d+)$/);
+                const docMatch = link.match(/^\/app\/doc\/(.+)$/);
                 if (sessMatch) {
                     if (window.hookManager) {
                         window.hookManager.openSessionWithPendingDialog(sessMatch[1]);
                     } else {
                         this.openTerminal(sessMatch[1]);
                     }
+                } else if (projectMatch) {
+                    this.showProjectDetail(Number(projectMatch[1]));
+                } else if (docMatch) {
+                    window.docViewer?.open(decodeURIComponent(docMatch[1]));
                 }
             }
-            return;
+            return true;
         }
+
+        return false;
     }
 
     // Projects
@@ -1639,7 +1928,7 @@ class OpenPoet {
     }
 
     // Project Detail
-    showProjectDetail(projectId) {
+    showProjectDetail(projectId, options = {}) {
         const project = this.projects.find(p => p.id === projectId);
         if (!project) return;
 
@@ -1901,7 +2190,10 @@ class OpenPoet {
             `;
         }
         if (this.currentView !== 'project-detail') {
-            this.showView('project-detail');
+            this.showView('project-detail', { updateURL: false });
+        }
+        if (options.updateURL !== false) {
+            this._syncURLState();
         }
     }
 
@@ -2660,6 +2952,8 @@ class OpenPoet {
                     <button class="btn btn-sm btn-secondary" onclick="app.showSharesModal(${projectId})" title="Configure shared file access">Configure</button>
                 `;
             }
+
+            this._pruneVisibleTaskApprovalSelection(tasks);
         } catch (e) {
             container.innerHTML = '<div class="meta-empty">Failed to load shared projects.</div>';
         }
@@ -3266,7 +3560,7 @@ class OpenPoet {
         `;
     }
 
-    async openTerminal(sessionId, sessionData = null, customName = null) {
+    async openTerminal(sessionId, sessionData = null, customName = null, options = {}) {
         console.log('openTerminal called with:', sessionId);
 
         // Set pending session flag to prevent race conditions with restoreTabsFromStorage
@@ -3290,7 +3584,7 @@ class OpenPoet {
         }
 
         // Show terminal view if not already visible
-        this.showTerminalView();
+        this.showTerminalView({ updateURL: false });
 
         // Refresh sessions to sync tabs (this will create tab if needed)
         await this.loadSessions();
@@ -3328,7 +3622,7 @@ class OpenPoet {
         }
 
         // Update active tab UI
-        this.updateTabActiveState(sessionId);
+        this.updateTabActiveState(sessionId, { updateURL: false });
         this.currentSession = sessionId;
 
         // Update tools badge for this session
@@ -3361,7 +3655,11 @@ class OpenPoet {
             console.warn(`[openTerminal] Active session mismatch! Requested: ${sessionId}, Active: ${window.terminalManager.activeSessionId}. Forcing switch...`);
             window.terminalManager.switchToSession(sessionId);
             this.currentSession = sessionId;
-            this.updateTabActiveState(sessionId);
+            this.updateTabActiveState(sessionId, { updateURL: false });
+        }
+
+        if (options.updateURL !== false) {
+            this._syncURLState();
         }
     }
 
@@ -3792,7 +4090,8 @@ class OpenPoet {
         }
     }
 
-    updateTabActiveState(activeSessionId) {
+    updateTabActiveState(activeSessionId, options = {}) {
+        this.currentSession = activeSessionId;
         document.querySelectorAll('.terminal-tab').forEach(tab => {
             if (tab.dataset.sessionId === activeSessionId) {
                 tab.classList.add('active');
@@ -3812,6 +4111,10 @@ class OpenPoet {
                 item.classList.remove('active');
             }
         });
+
+        if (options.updateURL !== false && this.currentView === 'terminal') {
+            this._syncURLState();
+        }
     }
 
     updateTabStatus(sessionId, status) {
@@ -4945,14 +5248,14 @@ class OpenPoet {
                 <div class="skills-toolbar-right">
                     <input type="text" class="form-input skills-search" placeholder="Search skills..."
                         value="${this.escapeHtml(this._skillSearch || '')}"
-                        oninput="app._skillSearch = this.value; app.renderConfig()">
+                        oninput="app._skillSearch = this.value; app.renderConfig(); app._syncURLState({replace:true})">
                     ${categories.length > 0 ? `
-                        <select class="form-select skills-filter" onchange="app._skillFilterCategory = this.value; app.renderConfig()">
+                        <select class="form-select skills-filter" onchange="app._skillFilterCategory = this.value; app.renderConfig(); app._syncURLState({replace:true})">
                             <option value="">All categories</option>
                             ${categories.map(c => `<option value="${this.escapeHtml(c)}" ${filterCategory === c ? 'selected' : ''}>${this.escapeHtml(c)}</option>`).join('')}
                         </select>
                     ` : ''}
-                    <select class="form-select skills-filter" onchange="app._skillFilterStatus = this.value; app.renderConfig()">
+                    <select class="form-select skills-filter" onchange="app._skillFilterStatus = this.value; app.renderConfig(); app._syncURLState({replace:true})">
                         <option value="" ${!filterStatus ? 'selected' : ''}>All status</option>
                         <option value="enabled" ${filterStatus === 'enabled' ? 'selected' : ''}>Enabled</option>
                         <option value="disabled" ${filterStatus === 'disabled' ? 'selected' : ''}>Disabled</option>
@@ -5355,6 +5658,23 @@ class OpenPoet {
                     </label>
                 </div>
             </div>
+            <div class="card" style="margin-bottom: 16px;">
+                <div class="card-header">
+                    <div class="card-title">Task Verification Auto-Approval</div>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: 12px; color: var(--text-secondary, #999); font-size: 13px;">
+                        When enabled, tasks skip the manual verification queue and go directly to Done when they would enter Awaiting Approval. Project settings can override this default.
+                    </p>
+                    <p style="margin-bottom: 12px; color: var(--text-secondary, #999); font-size: 12px;">
+                        This only affects future transitions. Tasks already awaiting approval remain unchanged.
+                    </p>
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" id="task-auto-approve-verification" onchange="app.saveTaskAutoApproveVerification(this.checked)">
+                        <span style="font-size: 13px;">Automatically approve task verification</span>
+                    </label>
+                </div>
+            </div>
             <div class="card">
                 <div class="card-header">
                     <div class="card-title">Voice Transcription</div>
@@ -5446,6 +5766,10 @@ class OpenPoet {
                 const autoUpdateCheckbox = document.getElementById('task-auto-update');
                 if (autoUpdateCheckbox) {
                     autoUpdateCheckbox.checked = this.settings.task_auto_update_enabled === 'true';
+                }
+                const autoApproveVerificationCheckbox = document.getElementById('task-auto-approve-verification');
+                if (autoApproveVerificationCheckbox) {
+                    autoApproveVerificationCheckbox.checked = this.settings.task_auto_approve_verification_enabled === 'true';
                 }
                 const providerSelect = document.getElementById('whisper-provider');
                 if (providerSelect && this.settings.whisper_provider) {
@@ -5814,6 +6138,17 @@ class OpenPoet {
                     <input type="hidden" name="tool_policy" id="project-tool-policy-value" value="${project?.tool_policy || ''}">
                 </div>
                 <div class="form-group">
+                    <label class="form-label">Task Verification Auto-Approval</label>
+                    <p style="margin-bottom: 8px; color: var(--text-secondary, #999); font-size: 12px;">
+                        Override the global default for future transitions to Awaiting Approval. Existing pending tasks are not changed.
+                    </p>
+                    <select class="form-select" name="task_auto_approve_verification">
+                        <option value="inherit" ${(project?.task_auto_approve_verification || 'inherit') === 'inherit' ? 'selected' : ''}>Inherit global setting</option>
+                        <option value="enabled" ${project?.task_auto_approve_verification === 'enabled' ? 'selected' : ''}>Enabled for this project</option>
+                        <option value="disabled" ${project?.task_auto_approve_verification === 'disabled' ? 'selected' : ''}>Disabled for this project</option>
+                    </select>
+                </div>
+                <div class="form-group">
                     <label class="form-label" style="color: var(--color-warning, #d29922);">&#9888; Dangerously Skip Permissions</label>
                     <p style="margin-bottom: 8px; color: var(--text-secondary, #999); font-size: 12px;">
                         When enabled, you will be prompted each time a session starts to optionally
@@ -6078,7 +6413,10 @@ class OpenPoet {
             return JSON.stringify(config);
         }
 
-        return null;
+        // Explicitly clear settings owned by a previous backend. Omitting this
+        // field on update would preserve (for example) a Codex model on a project
+        // that was switched to Claude Code.
+        return '{}';
     }
 
     async saveProject(projectId) {
@@ -6130,12 +6468,11 @@ class OpenPoet {
             ssh_auth_type: formData.get('ssh_auth_type'),
             ssh_credential,
             tool_policy: formData.get('tool_policy') || '',
+            task_auto_approve_verification: formData.get('task_auto_approve_verification') || 'inherit',
             dangerously_skip_permissions: form.querySelector('[name="dangerously_skip_permissions"]')?.checked || false
         };
         const backendConfig = this._buildProjectBackendConfig(formData);
-        if (backendConfig !== null) {
-            data.backend_config = backendConfig;
-        }
+        data.backend_config = backendConfig;
 
         try {
             let savedProject;
@@ -7060,6 +7397,7 @@ class OpenPoet {
                 document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
                 this.renderConfig();
+                this._syncURLState();
             });
         });
 
@@ -7941,6 +8279,20 @@ class OpenPoet {
         }
     }
 
+    async saveTaskAutoApproveVerification(enabled) {
+        try {
+            await this.api('PUT', '/config/settings', {
+                task_auto_approve_verification_enabled: enabled ? 'true' : 'false'
+            });
+            if (this.settings) {
+                this.settings.task_auto_approve_verification_enabled = enabled ? 'true' : 'false';
+            }
+            this.showToast('Success', `Task verification auto-approval ${enabled ? 'enabled' : 'disabled'}`, 'success');
+        } catch (error) {
+            this._showApiError(error);
+        }
+    }
+
     async toggleMCP(mcpId, enabled) {
         const mcp = this.mcpServers.find(m => m.id === mcpId);
         if (mcp) {
@@ -8661,14 +9013,14 @@ class OpenPoet {
                     </div>`;
             }
 
-            container.innerHTML = html;
+            container.innerHTML = this._buildTaskBulkToolbar('project', tasks, projectId) + html;
             this.setupTaskDragAndDrop(projectId);
         } catch (e) {
             container.innerHTML = '<div class="task-empty">Failed to load tasks.</div>';
         }
     }
 
-    renderTaskCard(task, projectId, hasChildren = false, subIndex = 0, parentOrder = 0, childrenList = []) {
+    renderTaskCard(task, projectId, hasChildren = false, subIndex = 0, parentOrder = 0, childrenList = [], approvalScope = 'project') {
         const now = new Date();
         const isOverdue = task.due_date?.Valid && new Date(task.due_date.Time) < now && task.status !== 'done';
         const isDone = task.status === 'done';
@@ -8744,10 +9096,17 @@ class OpenPoet {
             </div>`;
 
         const umbrellaClass = hasChildren ? ' task-umbrella' : '';
+        const approvalCheckbox = task.status === 'awaiting_approval' ? `
+            <label class="task-bulk-checkbox-wrap" title="Select task for bulk approval" onclick="event.stopPropagation()">
+                <input class="task-bulk-checkbox" type="checkbox" data-scope="${approvalScope}" data-task-id="${task.id}"
+                    ${this._selectedTaskApprovals?.has(task.id) ? 'checked' : ''}
+                    onchange="app.toggleTaskApprovalSelection('${approvalScope}', ${task.id}, this.checked)">
+            </label>` : '';
 
         return `
             <div class="task-card${overdueClass}${doneClass}${umbrellaClass}" data-task-id="${task.id}" data-sort-order="${task.sort_order || 0}" data-project-id="${projectId}">
                 ${dragHandle}
+                ${approvalCheckbox}
                 <div class="task-priority-indicator ${priorityClass}"></div>
                 <div class="task-card-body">
                     <div class="task-card-top">
@@ -8879,6 +9238,120 @@ class OpenPoet {
             this.showToast('Success', 'Task duplicated', 'success');
         } catch (e) {
             this.showToast('Error', e.message, 'error');
+        }
+    }
+
+    _getTaskApprovalSelection() {
+        if (!(this._selectedTaskApprovals instanceof Set)) {
+            this._selectedTaskApprovals = new Set();
+        }
+        return this._selectedTaskApprovals;
+    }
+
+    _pruneVisibleTaskApprovalSelection(tasks) {
+        const selection = this._getTaskApprovalSelection();
+        for (const task of tasks || []) {
+            if (task.status !== 'awaiting_approval') selection.delete(task.id);
+        }
+    }
+
+    _buildTaskBulkToolbar(scope, tasks, projectId = null, pendingAvailable = null) {
+        const pending = (tasks || []).filter(task => task.status === 'awaiting_approval');
+        const selection = this._getTaskApprovalSelection();
+        const selectedCount = pending.filter(task => selection.has(task.id)).length;
+        const hasPending = pendingAvailable === null ? pending.length > 0 : pendingAvailable;
+        if (!hasPending && selectedCount === 0) return '';
+        const projectArg = projectId ? projectId : 'null';
+        const idPrefix = scope === 'project' ? 'project' : 'all';
+        return `
+            <div class="task-bulk-actions" data-bulk-scope="${scope}">
+                <span class="task-bulk-selection-count"><strong id="${idPrefix}-bulk-selected-count">${selectedCount}</strong> selecionada(s)</span>
+                <button id="${idPrefix}-bulk-approve-selected" class="btn btn-success btn-sm" type="button"
+                    onclick="app.approveSelectedTaskVerifications('${scope}', ${projectArg})" ${selectedCount === 0 ? 'disabled' : ''}>
+                    Aprovar selecionadas
+                </button>
+                <button class="btn btn-secondary btn-sm" type="button"
+                    onclick="app.approveAllPendingTaskVerifications(${projectArg})">
+                    Aprovar todas as pendentes
+                </button>
+            </div>`;
+    }
+
+    toggleTaskApprovalSelection(scope, taskId, checked) {
+        const selection = this._getTaskApprovalSelection();
+        if (checked) selection.add(taskId);
+        else selection.delete(taskId);
+        document.querySelectorAll(`.task-bulk-checkbox[data-task-id="${taskId}"]`).forEach(input => {
+            input.checked = checked;
+        });
+        this._updateTaskBulkSelectionUI(scope);
+    }
+
+    _updateTaskBulkSelectionUI(scope) {
+        const containerId = scope === 'project' ? 'project-tasks-list' : 'all-tasks-list';
+        const idPrefix = scope === 'project' ? 'project' : 'all';
+        const count = document.querySelectorAll(`#${containerId} .task-bulk-checkbox:checked`).length;
+        const countEl = document.getElementById(`${idPrefix}-bulk-selected-count`);
+        const button = document.getElementById(`${idPrefix}-bulk-approve-selected`);
+        if (countEl) countEl.textContent = count;
+        if (button) button.disabled = count === 0;
+    }
+
+    approveSelectedTaskVerifications(scope, projectId = null) {
+        const containerId = scope === 'project' ? 'project-tasks-list' : 'all-tasks-list';
+        const ids = Array.from(document.querySelectorAll(`#${containerId} .task-bulk-checkbox:checked`))
+            .map(input => Number(input.dataset.taskId))
+            .filter((id, index, values) => id > 0 && values.indexOf(id) === index);
+        if (ids.length === 0) return;
+        showConfirmModal(
+            'Aprovar tarefas selecionadas?',
+            `A verificação de <strong>${ids.length}</strong> tarefa(s) será aprovada e elas serão marcadas como concluídas.`,
+            () => this._executeBulkTaskApproval({ task_ids: ids, ...(projectId ? { project_id: projectId } : {}) }, projectId),
+            'Aprovar selecionadas'
+        );
+    }
+
+    approveAllPendingTaskVerifications(projectId = null) {
+        const project = projectId ? this.projects?.find(item => item.id === projectId) : null;
+        const scopeLabel = project
+            ? `no projeto <strong>${this.escapeHtml(project.name)}</strong>`
+            : 'em todos os projetos';
+        showConfirmModal(
+            'Aprovar todas as pendentes?',
+            `Todas as tarefas em Awaiting Approval ${scopeLabel} serão marcadas como concluídas.`,
+            () => this._executeBulkTaskApproval({ all_pending: true, ...(projectId ? { project_id: projectId } : {}) }, projectId),
+            'Aprovar todas'
+        );
+    }
+
+    async _executeBulkTaskApproval(payload, projectId = null) {
+        try {
+            const result = await this.api('POST', '/tasks/approve-bulk', payload);
+            this._getTaskApprovalSelection().clear();
+            const parts = [
+                `${result.approved || 0} aprovada(s)`,
+                `${result.already_done || 0} já concluída(s)`,
+                `${result.failed || 0} falha(s)`
+            ];
+            const failures = (result.results || []).filter(item => item.outcome === 'failed');
+            if (failures.length > 0) {
+                const failurePreview = failures.slice(0, 3)
+                    .map(item => `#${item.task_id}: ${item.error || item.error_code || 'falha'}`)
+                    .join('; ');
+                parts.push(failurePreview + (failures.length > 3 ? `; +${failures.length - 3}` : ''));
+            }
+            this.showToast(
+                result.failed ? 'Aprovação em massa concluída parcialmente' : 'Aprovação em massa concluída',
+                parts.join(' · '),
+                result.failed ? 'warning' : 'success'
+            );
+            if (this.currentView === 'project-detail' && this._detailProject?.id) {
+                await this.loadProjectTasks(this._detailProject.id);
+            } else {
+                await this.loadAllTasks();
+            }
+        } catch (error) {
+            this.showToast('Erro', error.message, 'error');
         }
     }
 
@@ -9382,7 +9855,7 @@ class OpenPoet {
         loadAndShow();
     }
 
-    async viewTaskDetail(projectId, taskId) {
+    async viewTaskDetail(projectId, taskId, options = {}) {
         // Detect if this is a refresh of the same task (e.g. from WebSocket update)
         const isRefresh = this._viewingTaskDetail?.projectId === projectId && this._viewingTaskDetail?.taskId === taskId;
         const prevHadDoc = this._viewingTaskDetail?.hasVerificationDoc;
@@ -9405,7 +9878,10 @@ class OpenPoet {
             const md = this._buildTaskDetailMarkdown(ctx);
 
             // Build actions and open
-            this._openTaskDetail(ctx, md);
+            this._openTaskDetail(ctx, md, {
+                ...options,
+                recordHistory: options.recordHistory ?? !isRefresh
+            });
 
             // On refresh, clear docViewer history to prevent stale states from accumulating.
             // openWithContent pushes old content to history when overlay is already open,
@@ -9626,10 +10102,7 @@ class OpenPoet {
     }
     async _autoOpenVerificationDoc(projectId, taskId, docId) {
         try {
-            const resp = await fetch(`/api/documents/${docId}`);
-            if (!resp.ok) return;
-            const doc = await resp.json();
-            window.docViewer.openWithContent(doc.title || 'Verification', doc.content);
+            await window.docViewer.open(docId);
         } catch (e) {
             console.error('Failed to auto-open verification doc:', e);
         }
@@ -9736,7 +10209,7 @@ class OpenPoet {
         };
     }
 
-    _openTaskDetail(ctx, md) {
+    _openTaskDetail(ctx, md, options = {}) {
         const { task, sessions, history, projectId, taskId } = ctx;
         const isAwaitingApproval = task.status === 'awaiting_approval';
         const isDone = task.status === 'done';
@@ -9777,7 +10250,10 @@ class OpenPoet {
             actions,
             footerMode: 'split',
             prependElement,
-            onClose: () => { this._viewingTaskDetail = null; }
+            onClose: () => { this._viewingTaskDetail = null; },
+            urlState: { kind: 'task', projectId, taskId },
+            recordHistory: options.recordHistory,
+            updateURL: options.updateURL
         });
     }
 
@@ -9816,6 +10292,7 @@ class OpenPoet {
             verification_doc_created: '**[V]**',
             verification_doc_failed: '**[!]**',
             verification_approved: '**[OK]**',
+            verification_auto_approved: '**[AUTO]**',
             verification_rejected: '**[X]**',
             plan_updated: '**[P]**',
             session_unlinked: '**[U]**',
@@ -9849,7 +10326,8 @@ class OpenPoet {
             parent_changed: () => `Parent task changed`,
             verification_doc_created: () => `Verification document generated`,
             verification_doc_failed: () => `Verification document failed: ${details.error || 'unknown error'}`,
-            verification_approved: () => `Verification approved — task completed`,
+            verification_approved: () => details.bulk ? `Verification approved in bulk — task completed` : `Verification approved — task completed`,
+            verification_auto_approved: () => `Verification auto-approved by ${details.config_scope || 'resolved'} setting — task completed`,
             verification_rejected: () => `Verification rejected — returned to in_progress`,
             plan_updated: () => details.is_rewrite ? 'Plan rewritten' : 'Plan created',
             session_unlinked: () => `Session unlinked: ${details.session_name || ''}`,
@@ -9873,13 +10351,17 @@ class OpenPoet {
         return '';
     }
 
-    async openTaskDoc(docId, type) {
+    async openTaskDoc(docId, type, options = {}) {
         if (type === 'plan') {
             const sessionId = docId.replace('plan:', '');
             try {
                 const data = await this.api('GET', `/sessions/${sessionId}/plan`);
                 if (data?.plan_content) {
-                    window.docViewer.openWithContent('Session Plan', data.plan_content);
+                    window.docViewer.openWithContent('Session Plan', data.plan_content, {
+                        urlState: { kind: 'plan', sessionId },
+                        recordHistory: options.recordHistory,
+                        updateURL: options.updateURL
+                    });
                 } else {
                     this.showToast('Info', 'Empty plan', 'info');
                 }
@@ -9887,7 +10369,7 @@ class OpenPoet {
                 this.showToast('Error', 'Failed to load plan', 'error');
             }
         } else {
-            window.docViewer.open(docId);
+            await window.docViewer.open(docId, options);
         }
     }
 
@@ -10091,6 +10573,7 @@ class OpenPoet {
     async loadAllTasks() {
         const container = document.getElementById('all-tasks-list');
         const statsEl = document.getElementById('all-tasks-stats');
+        const bulkActionsEl = document.getElementById('all-tasks-bulk-actions');
         if (!container) return;
 
         const params = new URLSearchParams();
@@ -10113,6 +10596,7 @@ class OpenPoet {
             ]);
             const tasks = data.tasks || [];
             const summary = data.summary || {};
+            this._pruneVisibleTaskApprovalSelection(tasks);
             this._taskSessionSummary = {};
             (sessionSummaryRaw || []).forEach(s => { this._taskSessionSummary[s.task_id] = s; });
 
@@ -10131,6 +10615,12 @@ class OpenPoet {
             }
 
             this._populateProjectFilter();
+            if (bulkActionsEl) {
+                const selectedProjectId = Number(document.getElementById('filter-project')?.value) || null;
+                bulkActionsEl.innerHTML = this._buildTaskBulkToolbar(
+                    'all', tasks, selectedProjectId, (summary.awaiting_approval || 0) > 0
+                );
+            }
 
             if (tasks.length === 0) {
                 container.innerHTML = '<div class="empty-state">No tasks match your filters.</div>';
@@ -10168,6 +10658,7 @@ class OpenPoet {
 
             this._restoreScrollTop('all-tasks-list', this._viewState['tasks']?.scrollTop);
         } catch (e) {
+            if (bulkActionsEl) bulkActionsEl.innerHTML = '';
             container.innerHTML = '<div class="empty-state">Failed to load tasks.</div>';
         }
     }
@@ -10330,14 +10821,14 @@ class OpenPoet {
             for (const task of activeTasks) {
                 const kids = children[task.id] || [];
                 const hasKids = kids.length > 0;
-                html += this.renderTaskCard(task, projectId, hasKids, 0, 0, kids);
+                html += this.renderTaskCard(task, projectId, hasKids, 0, 0, kids, 'all');
                 if (hasKids) {
                     const collapsed = this._collapsedTasks?.has(task.id) ? ' collapsed' : '';
                     html += `<div class="task-subtasks${collapsed}" data-parent-id="${task.id}">`;
                     let subOrder = 1;
                     for (const sub of children[task.id]) {
                         const subIdx = sub.status === 'done' ? 0 : subOrder++;
-                        html += this.renderTaskCard(sub, projectId, false, subIdx, task.sort_order);
+                        html += this.renderTaskCard(sub, projectId, false, subIdx, task.sort_order, [], 'all');
                     }
                     html += '</div>';
                 }
@@ -10356,13 +10847,13 @@ class OpenPoet {
                 for (const task of doneTasks) {
                     const kids = children[task.id] || [];
                     const hasKids = kids.length > 0;
-                    html += this.renderTaskCard(task, projectId, hasKids, 0, 0, kids);
+                    html += this.renderTaskCard(task, projectId, hasKids, 0, 0, kids, 'all');
                     if (hasKids) {
                         const collapsed = this._collapsedTasks?.has(task.id) ? ' collapsed' : '';
                         html += `<div class="task-subtasks${collapsed}" data-parent-id="${task.id}">`;
                         let subOrder = 1;
                         for (const sub of children[task.id]) {
-                            html += this.renderTaskCard(sub, projectId, false, subOrder++);
+                            html += this.renderTaskCard(sub, projectId, false, subOrder++, 0, [], 'all');
                         }
                         html += '</div>';
                     }
@@ -10510,10 +11001,17 @@ class OpenPoet {
             </div>`;
 
         const umbrellaClass = hasChildren ? ' task-umbrella' : '';
+        const approvalCheckbox = task.status === 'awaiting_approval' ? `
+            <label class="task-bulk-checkbox-wrap" title="Select task for bulk approval" onclick="event.stopPropagation()">
+                <input class="task-bulk-checkbox" type="checkbox" data-scope="all" data-task-id="${task.id}"
+                    ${this._selectedTaskApprovals?.has(task.id) ? 'checked' : ''}
+                    onchange="app.toggleTaskApprovalSelection('all', ${task.id}, this.checked)">
+            </label>` : '';
 
         return `
             <div class="task-card${overdueClass}${doneClass}${umbrellaClass}" data-task-id="${task.id}" data-project-id="${task.project_id}">
                 ${dragHandle}
+                ${approvalCheckbox}
                 <div class="task-priority-indicator ${priorityClass}"></div>
                 <div class="task-card-body">
                     <div class="task-card-top">
@@ -10610,12 +11108,18 @@ class OpenPoet {
         if (searchInput) {
             searchInput.addEventListener('input', () => {
                 clearTimeout(searchTimeout);
-                searchTimeout = setTimeout(() => this.loadAllTasks(), 300);
+                searchTimeout = setTimeout(() => {
+                    this.loadAllTasks();
+                    this._syncURLState({ replace: true });
+                }, 300);
             });
         }
         ['filter-status', 'filter-priority', 'filter-project'].forEach(id => {
             const el = document.getElementById(id);
-            if (el) el.addEventListener('change', () => this.loadAllTasks());
+            if (el) el.addEventListener('change', () => {
+                this.loadAllTasks();
+                this._syncURLState({ replace: true });
+            });
         });
 
         // View mode toggle (grouped vs flat)
@@ -10630,6 +11134,7 @@ class OpenPoet {
                         b.classList.toggle('active', b.dataset.mode === this._allTasksViewMode)
                     );
                     this.loadAllTasks();
+                    this._syncURLState({ replace: true });
                 });
             });
         }
@@ -10642,6 +11147,7 @@ class OpenPoet {
             select.value = (current === status) ? '' : status;
         }
         this.loadAllTasks();
+        this._syncURLState({ replace: true });
     }
 
     // ============ AI Proactive Suggestions ============

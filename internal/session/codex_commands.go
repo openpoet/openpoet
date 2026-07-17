@@ -30,6 +30,9 @@ func (r *CodexRunner) HandleCodexCommand(ctx context.Context, data json.RawMessa
 		return r.codexStateSnapshot(), nil
 	case "ui/transcript":
 		return r.codexTranscriptSnapshot(), nil
+	case "help/read":
+		r.writeSlashHelp()
+		return map[string]string{"status": "written"}, nil
 	case "input/send":
 		return r.codexCommandInputSend(ctx, req.Params)
 	case "status/read":

@@ -210,8 +210,8 @@ func TestWorkRunAndPlanAutomationContracts(t *testing.T) {
 		"command_id": "plan-upsert-1", "capability": application.CapabilityPlansUpsert,
 		"target": map[string]any{},
 		"payload": map[string]any{
-			"external_ref": "helena:daily:2026-07-09", "kind": "daily", "title": "Plano Helena",
-			"period_start": "2026-07-09", "period_end": "2026-07-09", "timezone": "America/Sao_Paulo",
+			"external_ref": "helena:daily:" + time.Now().Format("2006-01-02"), "kind": "daily", "title": "Plano Helena",
+			"period_start": time.Now().Format("2006-01-02"), "period_end": time.Now().Format("2006-01-02"), "timezone": "America/Sao_Paulo",
 			"items": []map[string]any{{"external_ref": "helena:item:1", "title": "Integrar WorkRun", "sort_order": 10}},
 		},
 	}
@@ -417,7 +417,7 @@ func TestCapabilitiesAndSnapshotContracts(t *testing.T) {
 	if err := json.Unmarshal(capabilities.Body.Bytes(), &listed); err != nil {
 		t.Fatal(err)
 	}
-	if listed.APIVersion != APIVersion || len(listed.Capabilities) != 24 {
+	if listed.APIVersion != APIVersion || len(listed.Capabilities) != 25 {
 		t.Fatalf("capabilities response=%+v", listed)
 	}
 	foundCreate := false

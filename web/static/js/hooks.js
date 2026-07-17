@@ -811,8 +811,10 @@ class HookManager {
                 viewFilename.textContent = 'View Plan';
                 viewBtn.classList.remove('hidden');
                 viewBtn.onclick = () => {
-                    if (window.fileViewer) {
-                        window.fileViewer.showPlanContent(planContent, 'Plan');
+                    if (window.docViewer) {
+                        window.docViewer.openWithContent('Plan', planContent, {
+                            urlState: { kind: 'plan', sessionId: data.session_id }
+                        });
                     }
                 };
             }
@@ -1621,8 +1623,10 @@ class HookManager {
         if (docs.length === 0) {
             // Fallback: if only plan is cached but docs not fetched yet, show plan directly
             const plan = this.sessionPlans[sessionId];
-            if (plan?.content && window.fileViewer) {
-                window.fileViewer.showPlanContent(plan.content, 'Plan');
+            if (plan?.content && window.docViewer) {
+                window.docViewer.openWithContent('Plan', plan.content, {
+                    urlState: { kind: 'plan', sessionId }
+                });
             }
             return;
         }
@@ -1638,15 +1642,19 @@ class HookManager {
         if (doc.type === 'plan') {
             const sessionId = doc.id.replace('plan:', '');
             const cached = this.sessionPlans[sessionId];
-            if (cached?.content && window.fileViewer) {
-                window.fileViewer.showPlanContent(cached.content, doc.title);
+            if (cached?.content && window.docViewer) {
+                window.docViewer.openWithContent(doc.title, cached.content, {
+                    urlState: { kind: 'plan', sessionId }
+                });
             } else {
                 // Fetch and show
                 fetch(`/api/sessions/${sessionId}/plan`)
                     .then(r => r.json())
                     .then(data => {
                         if (data.plan_content && window.docViewer) {
-                            window.docViewer.openWithContent(doc.title, data.plan_content);
+                            window.docViewer.openWithContent(doc.title, data.plan_content, {
+                                urlState: { kind: 'plan', sessionId }
+                            });
                         }
                     });
             }
