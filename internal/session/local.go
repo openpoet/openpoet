@@ -113,8 +113,8 @@ func (r *LocalRunner) Start(ctx context.Context) error {
 		r.cmd.Env = append(r.cmd.Env, fmt.Sprintf("%s=%s", k, v))
 		// Log ANTHROPIC vars for debugging
 		if strings.HasPrefix(k, "ANTHROPIC_") {
-			if k == "ANTHROPIC_API_KEY" && len(v) > 10 {
-				log.Printf("[Session] Env: %s=%s... (len=%d)", k, v[:10]+"...", len(v))
+			if strings.Contains(k, "KEY") || strings.Contains(k, "TOKEN") || strings.Contains(k, "SECRET") {
+				log.Printf("[Session] Env: %s=<redacted> (set=%t)", k, v != "")
 			} else {
 				log.Printf("[Session] Env: %s=%s", k, v)
 			}

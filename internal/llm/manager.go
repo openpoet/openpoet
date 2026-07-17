@@ -17,6 +17,7 @@ const (
 
 // ProviderConfig holds the decoded configuration needed to create a provider.
 type ProviderConfig struct {
+	ID           int64  `json:"id"`
 	ProviderType string `json:"provider_type"`
 	APIKey       string `json:"api_key"` // decrypted plaintext (never stored)
 	Model        string `json:"model"`

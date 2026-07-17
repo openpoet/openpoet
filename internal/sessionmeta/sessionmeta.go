@@ -2,6 +2,7 @@ package sessionmeta
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 )
 
@@ -101,7 +102,24 @@ func FromProjectConfig(backend, rawConfig string) Metadata {
 			detailIfSet("permission", permissionMode),
 		)
 	case "claude_code":
-		meta.Harness = "claude_code"
+		switch strings.ToLower(firstString(cfg, "provider")) {
+		case "openai", "openai_oauth":
+			if model := firstString(cfg, "model"); model != "" {
+				meta.Model = model
+			}
+			meta.Harness = "claude_code/openai"
+			meta.HarnessDetails = joinDetails(
+				"provider: OpenAI OAuth",
+				detailIfSet("profile", firstNumberString(cfg, "provider_config_id")),
+			)
+		case "anthropic":
+			if model := firstString(cfg, "model"); model != "" {
+				meta.Model = model
+			}
+			meta.Harness = "claude_code/anthropic"
+		default:
+			meta.Harness = "claude_code"
+		}
 	case "copilot":
 		meta.Harness = "copilot"
 	case "acp":
@@ -109,6 +127,21 @@ func FromProjectConfig(backend, rawConfig string) Metadata {
 	}
 
 	return meta
+}
+
+func firstNumberString(cfg map[string]interface{}, key string) string {
+	if cfg == nil {
+		return ""
+	}
+	switch value := cfg[key].(type) {
+	case float64:
+		if value > 0 {
+			return strconv.FormatInt(int64(value), 10)
+		}
+	case json.Number:
+		return value.String()
+	}
+	return ""
 }
 
 func firstString(cfg map[string]interface{}, keys ...string) string {

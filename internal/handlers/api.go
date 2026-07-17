@@ -22,9 +22,9 @@ import (
 	"openpoet/internal/configsync"
 	"openpoet/internal/database"
 	"openpoet/internal/files"
-	"openpoet/internal/llm"
 	"openpoet/internal/mcp"
 	"openpoet/internal/notifications"
+	"openpoet/internal/providerbridge"
 	"openpoet/internal/security"
 	"openpoet/internal/session"
 	"openpoet/internal/tunnel"
@@ -127,6 +127,7 @@ type API struct {
 	platformMu           sync.RWMutex
 	platformCapabilities *automation.PlatformCapabilityRegistry
 	platformServices     *PlatformApplicationServices
+	providerBridge       *providerbridge.Manager
 
 	// ReinitAIProvider is called when legacy AI settings change (kept for backward compat).
 	ReinitAIProvider func()
@@ -221,6 +222,12 @@ type TunnelDeps struct {
 // SetAIHandler sets the AI handler for AI chat functionality.
 func (a *API) SetAIHandler(h *AIHandler) {
 	a.aiHandler = h
+}
+
+// SetProviderBridge installs the process-owned OpenAI-to-Anthropic bridge.
+// The bridge uses its own encrypted provider profiles and never reads Codex CLI auth.
+func (a *API) SetProviderBridge(bridge *providerbridge.Manager) {
+	a.providerBridge = bridge
 }
 
 // GetDecryptedSetting reads an encrypted setting and returns the plaintext.
@@ -1721,36 +1728,14 @@ func (a *API) AutoRestoreSession(ctx context.Context, sess *database.Session) er
 		)
 	}
 
-	// Inject provider env vars (same logic as CreateSession)
-	if project.Backend == "claude_code" && a.aiHandler != nil && a.aiHandler.providerMgr != nil {
-		sessionConfig := a.aiHandler.providerMgr.GetSlotConfig(llm.SlotSession)
-		if sessionConfig != nil {
-			switch sessionConfig.ProviderType {
-			case "ollama", "ollama-sdk":
-				baseURL := sessionConfig.BaseURL
-				if baseURL == "" {
-					baseURL = "http://localhost:11434"
-				}
-				model := sessionConfig.Model
-				if model == "" {
-					model = "qwen3-coder"
-				}
-				envVars["ANTHROPIC_BASE_URL"] = baseURL
-				envVars["ANTHROPIC_API_KEY"] = ""
-				envVars["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
-				envVars["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
-				envVars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
-				envVars["CLAUDE_CODE_SUBAGENT_MODEL"] = model
-				if sessionConfig.APIKey != "" {
-					envVars["ANTHROPIC_AUTH_TOKEN"] = sessionConfig.APIKey
-				} else {
-					envVars["ANTHROPIC_AUTH_TOKEN"] = "ollama"
-				}
-			case "apikey":
-				if sessionConfig.APIKey != "" {
-					envVars["ANTHROPIC_API_KEY"] = sessionConfig.APIKey
-				}
-			}
+	// Resolve the same trusted provider environment used for newly-created sessions.
+	if project.Backend == "claude_code" && a.aiHandler != nil {
+		providerEnv, providerErr := (platformSessionEnvironmentProvider{handler: a.aiHandler}).SessionEnvironment(ctx, project)
+		if providerErr != nil {
+			return fmt.Errorf("resolve session provider environment: %w", providerErr)
+		}
+		for key, value := range providerEnv {
+			envVars[key] = value
 		}
 	}
 
@@ -2274,11 +2259,100 @@ func (a *API) DeleteAIConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if a.providerBridge != nil {
+		a.providerBridge.StopProxy(id)
+	}
 	if err := services.Configuration.AIConfigs.Delete(platformUIContext(r), platformUIAuthorization(r), id); err != nil {
 		respondApplicationError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) GetOpenAIOAuthStatus(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		respondError(w, http.StatusBadRequest, "Invalid AI config ID")
+		return
+	}
+	if a.providerBridge == nil {
+		respondError(w, http.StatusServiceUnavailable, "OpenAI provider bridge is unavailable")
+		return
+	}
+	connected, err := a.providerBridge.Connected(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	_, helperErr := a.providerBridge.BinaryPath()
+	result := map[string]interface{}{
+		"connected":        connected,
+		"helper_available": helperErr == nil,
+	}
+	if helperErr != nil {
+		result["helper_error"] = helperErr.Error()
+	}
+	respondJSON(w, http.StatusOK, result)
+}
+
+func (a *API) StartOpenAIOAuth(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		respondError(w, http.StatusBadRequest, "Invalid AI config ID")
+		return
+	}
+	if a.providerBridge == nil {
+		respondError(w, http.StatusServiceUnavailable, "OpenAI provider bridge is unavailable")
+		return
+	}
+	login, err := a.providerBridge.StartDeviceLogin(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusAccepted, login)
+}
+
+func (a *API) GetOpenAIOAuthLogin(w http.ResponseWriter, r *http.Request) {
+	if a.providerBridge == nil {
+		respondError(w, http.StatusServiceUnavailable, "OpenAI provider bridge is unavailable")
+		return
+	}
+	login, err := a.providerBridge.DeviceLoginStatus(chi.URLParam(r, "loginID"))
+	if err != nil {
+		respondError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, login)
+}
+
+func (a *API) CancelOpenAIOAuthLogin(w http.ResponseWriter, r *http.Request) {
+	if a.providerBridge == nil {
+		respondError(w, http.StatusServiceUnavailable, "OpenAI provider bridge is unavailable")
+		return
+	}
+	if err := a.providerBridge.CancelDeviceLogin(chi.URLParam(r, "loginID")); err != nil {
+		respondError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"status": "canceled"})
+}
+
+func (a *API) DisconnectOpenAIOAuth(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		respondError(w, http.StatusBadRequest, "Invalid AI config ID")
+		return
+	}
+	if a.providerBridge == nil {
+		respondError(w, http.StatusServiceUnavailable, "OpenAI provider bridge is unavailable")
+		return
+	}
+	if err := a.providerBridge.Disconnect(r.Context(), id); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
 func (a *API) GetAIConfigAssignments(w http.ResponseWriter, r *http.Request) {
