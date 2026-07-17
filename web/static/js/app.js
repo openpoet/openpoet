@@ -5528,6 +5528,10 @@ class OpenPoet {
     }
 
     hideModal() {
+		if (this._openAIOAuthPoll) {
+			clearInterval(this._openAIOAuthPoll);
+			this._openAIOAuthPoll = null;
+		}
         document.getElementById('modal-overlay').classList.add('hidden');
     }
 
@@ -5544,6 +5548,68 @@ class OpenPoet {
 
     _codexOption(value, current, label) {
         return `<option value="${value}" ${current === value ? 'selected' : ''}>${label}</option>`;
+    }
+
+    _renderClaudeBackendConfig(config = {}, visible = false) {
+        const provider = ['openai', 'openai_oauth'].includes(config.provider) ? 'openai_oauth' : 'anthropic';
+        const profileId = Number(config.provider_config_id) || 0;
+        const profiles = (this.aiConfigs || []).filter(item => item.provider_type === 'openai_oauth');
+        const profileOptions = profiles.map(item => `
+            <option value="${item.id}" ${item.id === profileId ? 'selected' : ''}>
+                ${this.escapeHtml(item.name)}${item.api_key_preview ? ' — connected' : ' — authentication required'}
+            </option>`).join('');
+        return `
+            <div id="claude-backend-config" class="backend-config-panel ${visible ? '' : 'hidden'}">
+                <div class="backend-config-header">
+                    <div>
+                        <div class="backend-config-title">Claude Code Provider</div>
+                        <div class="backend-config-subtitle">Keep the Claude Code harness and choose which model provider serves it.</div>
+                    </div>
+                </div>
+                <div class="backend-config-grid">
+                    <div class="form-group">
+                        <label class="form-label">Provider</label>
+                        <select class="form-select" name="claude_provider" onchange="app.onClaudeProviderChange()">
+                            ${this._codexOption('anthropic', provider, 'Anthropic (Claude account)')}
+                            ${this._codexOption('openai_oauth', provider, 'OpenAI ChatGPT OAuth')}
+                        </select>
+                    </div>
+                    <div class="form-group" id="claude-anthropic-model-group">
+                        <label class="form-label">Model</label>
+                        <input type="text" class="form-input" name="claude_anthropic_model"
+                            value="${provider === 'anthropic' ? this.escapeHtml(config.model || '') : ''}"
+                            placeholder="Claude Code default">
+                    </div>
+                    <div class="form-group hidden" id="claude-openai-profile-group">
+                        <label class="form-label">OpenAI OAuth Profile</label>
+                        <select class="form-select" name="claude_openai_profile_id">
+                            <option value="">Select a profile</option>
+                            ${profileOptions}
+                        </select>
+                        ${profiles.length === 0 ? '<small style="color:var(--color-warning)">Create and connect an OpenAI OAuth profile under Settings → AI Providers first.</small>' : ''}
+                    </div>
+                    <div class="form-group hidden" id="claude-openai-model-group">
+                        <label class="form-label">OpenAI Model</label>
+                        <input type="text" class="form-input" name="claude_openai_model"
+                            value="${provider === 'openai_oauth' ? this.escapeHtml(config.model || '') : ''}"
+                            placeholder="e.g. gpt-5.6-sol[1m]" list="claude-openai-model-suggestions">
+                        <datalist id="claude-openai-model-suggestions">
+                            <option value="gpt-5.6-sol[1m]">
+                            <option value="gpt-5.6-luna[1m]">
+                            <option value="gpt-5.4[1m]">
+                        </datalist>
+                    </div>
+                    <div class="form-group hidden" id="claude-openai-small-model-group">
+                        <label class="form-label">Small/Fast Model</label>
+                        <input type="text" class="form-input" name="claude_openai_small_model"
+                            value="${this.escapeHtml(config.small_model || '')}"
+                            placeholder="Defaults to the main model">
+                    </div>
+                    <div class="form-group hidden" id="claude-openai-local-note">
+                        <small style="color:var(--color-text-secondary)">OpenAI OAuth is isolated from Codex and currently available for local projects only.</small>
+                    </div>
+                </div>
+            </div>`;
     }
 
     _renderCodexBackendConfig(config = {}, visible = false) {
@@ -5700,6 +5766,7 @@ class OpenPoet {
                         <option value="opencode" ${selectedBackend === 'opencode' ? 'selected' : ''}>OpenCode</option>
                     </select>
                 </div>
+				${this._renderClaudeBackendConfig(backendConfig, selectedBackend === 'claude_code')}
                 ${this._renderCodexBackendConfig(backendConfig, selectedBackend === 'codex')}
                 ${this._renderOpenCodeBackendConfig(backendConfig, selectedBackend === 'opencode')}
                 <div class="form-group">
@@ -5896,6 +5963,7 @@ class OpenPoet {
     onProjectTypeChange(type) {
         this.toggleSSHFields(type);
         this.updateProjectBackendAvailability();
+		this.onClaudeProviderChange();
     }
 
     toggleSSHFields(type) {
@@ -5904,6 +5972,10 @@ class OpenPoet {
 
     onProjectBackendChange() {
         const backend = document.querySelector('#project-form [name="backend"]')?.value || 'claude_code';
+		const claudeConfig = document.getElementById('claude-backend-config');
+		if (claudeConfig) {
+			claudeConfig.classList.toggle('hidden', backend !== 'claude_code');
+		}
         const codexConfig = document.getElementById('codex-backend-config');
         if (codexConfig) {
             codexConfig.classList.toggle('hidden', backend !== 'codex');
@@ -5912,8 +5984,25 @@ class OpenPoet {
         if (openCodeConfig) {
             openCodeConfig.classList.toggle('hidden', backend !== 'opencode');
         }
+		this.onClaudeProviderChange();
         this.updateProjectBackendAvailability();
     }
+
+	onClaudeProviderChange() {
+		const form = document.getElementById('project-form');
+		if (!form) return;
+		const isClaude = form.querySelector('[name="backend"]')?.value === 'claude_code';
+		const remote = form.querySelector('[name="type"]')?.value === 'remote';
+		const providerSelect = form.querySelector('[name="claude_provider"]');
+		const openAIOption = providerSelect?.querySelector('option[value="openai_oauth"]');
+		if (openAIOption) openAIOption.disabled = remote;
+		if (remote && providerSelect?.value === 'openai_oauth') providerSelect.value = 'anthropic';
+		const isOpenAI = isClaude && providerSelect?.value === 'openai_oauth';
+		for (const id of ['claude-openai-profile-group', 'claude-openai-model-group', 'claude-openai-small-model-group', 'claude-openai-local-note']) {
+			document.getElementById(id)?.classList.toggle('hidden', !isOpenAI);
+		}
+		document.getElementById('claude-anthropic-model-group')?.classList.toggle('hidden', !isClaude || isOpenAI);
+	}
 
     updateProjectBackendAvailability() {
         const form = document.getElementById('project-form');
@@ -5934,6 +6023,23 @@ class OpenPoet {
 
     _buildProjectBackendConfig(formData) {
         const backend = formData.get('backend') || 'claude_code';
+		if (backend === 'claude_code') {
+			const provider = this._trimFormValue(formData, 'claude_provider') || 'anthropic';
+			if (provider === 'openai_oauth') {
+				const config = {
+					provider: 'openai_oauth',
+					provider_config_id: parseInt(formData.get('claude_openai_profile_id'), 10) || 0,
+					model: this._trimFormValue(formData, 'claude_openai_model')
+				};
+				const smallModel = this._trimFormValue(formData, 'claude_openai_small_model');
+				if (smallModel) config.small_model = smallModel;
+				return JSON.stringify(config);
+			}
+			const config = { provider: 'anthropic' };
+			const model = this._trimFormValue(formData, 'claude_anthropic_model');
+			if (model) config.model = model;
+			return JSON.stringify(config);
+		}
         if (backend === 'codex') {
             const config = {
                 runtime: this._trimFormValue(formData, 'codex_runtime') || 'app-server',
@@ -5998,6 +6104,20 @@ class OpenPoet {
 
         const projectType = formData.get('type') || 'local';
         const backend = formData.get('backend') || 'claude_code';
+		if (backend === 'claude_code' && formData.get('claude_provider') === 'openai_oauth') {
+			if ((formData.get('type') || 'local') !== 'local') {
+				this._showFieldError('claude_provider', 'OpenAI OAuth currently supports local projects only');
+				return;
+			}
+			if (!parseInt(formData.get('claude_openai_profile_id'), 10)) {
+				this._showFieldError('claude_openai_profile_id', 'Select an OpenAI OAuth profile');
+				return;
+			}
+			if (!this._trimFormValue(formData, 'claude_openai_model')) {
+				this._showFieldError('claude_openai_model', 'OpenAI model is required');
+				return;
+			}
+		}
 
         const data = {
             name,
@@ -7416,6 +7536,7 @@ class OpenPoet {
             'apikey': 'Anthropic API Key',
             'ollama': 'Ollama (Direct)',
             'ollama-sdk': 'Ollama (via CLI)',
+			'openai_oauth': 'OpenAI ChatGPT OAuth',
         };
 
         const slotLabels = {
@@ -7457,9 +7578,15 @@ class OpenPoet {
                     <div class="card-body" style="font-size:13px;color:var(--color-text-secondary)">
                         ${c.model ? `<div><strong>Model:</strong> ${this.escapeHtml(c.model)}</div>` : ''}
                         ${c.base_url && (c.provider_type === 'ollama' || c.provider_type === 'ollama-sdk') ? `<div><strong>URL:</strong> ${this.escapeHtml(c.base_url)}</div>` : ''}
-                        ${c.api_key_preview && c.provider_type !== 'gosdk' ? `<div><strong>Key:</strong> ${this.escapeHtml(c.api_key_preview)}</div>` : ''}
+						${c.provider_type === 'openai_oauth'
+							? `<div><strong>OAuth:</strong> ${c.api_key_preview ? '<span style="color:var(--color-success)">Connected</span>' : '<span style="color:var(--color-warning)">Authentication required</span>'}</div>`
+							: (c.api_key_preview && c.provider_type !== 'gosdk' ? `<div><strong>Key:</strong> ${this.escapeHtml(c.api_key_preview)}</div>` : '')}
                     </div>
                     <div class="card-actions">
+						${c.provider_type === 'openai_oauth' ? `
+							<button class="btn btn-primary btn-sm" onclick="app.connectOpenAIOAuth(${c.id})">${c.api_key_preview ? 'Reconnect' : 'Connect'}</button>
+							${c.api_key_preview ? `<button class="btn btn-secondary btn-sm" onclick="app.disconnectOpenAIOAuth(${c.id})">Disconnect</button>` : ''}
+						` : ''}
                         <button class="btn btn-secondary btn-sm" onclick="app.showAIConfigModal(${c.id})">Edit</button>
                         <button class="btn btn-danger-outline btn-sm" onclick="app.deleteAIConfig(${c.id})">Delete</button>
                     </div>
@@ -7539,6 +7666,7 @@ class OpenPoet {
                         <option value="apikey">Anthropic API Key</option>
                         <option value="ollama">Ollama (Direct API)</option>
                         <option value="ollama-sdk">Ollama (via Claude CLI)</option>
+						<option value="openai_oauth">OpenAI ChatGPT OAuth (Claude Code)</option>
                     </select>
                 </div>
                 <div class="form-group" id="ai-config-apikey-group">
@@ -7592,6 +7720,8 @@ class OpenPoet {
 
         const apiKeyGroup = document.getElementById('ai-config-apikey-group');
         const baseUrlGroup = document.getElementById('ai-config-baseurl-group');
+		const testButton = document.getElementById('ai-config-test-btn');
+		const modelInput = form.querySelector('[name="model"]');
 
         // Show/hide fields based on provider type
         if (type === 'apikey') {
@@ -7604,6 +7734,10 @@ class OpenPoet {
             apiKeyGroup.style.display = 'none';
             baseUrlGroup.style.display = 'none';
         }
+		if (testButton) testButton.style.display = type === 'openai_oauth' ? 'none' : '';
+		if (modelInput) {
+			modelInput.placeholder = type === 'openai_oauth' ? 'e.g. gpt-5.6-sol[1m]' : 'e.g. claude-sonnet-4-5-20250929';
+		}
     }
 
     async testAIConfig() {
@@ -7658,17 +7792,107 @@ class OpenPoet {
         const data = { name, provider_type, api_key, model, base_url };
 
         try {
+			let saved;
             if (configId) {
-                await this.api('PUT', `/config/ai-configs/${configId}`, data);
+				saved = await this.api('PUT', `/config/ai-configs/${configId}`, data);
             } else {
-                await this.api('POST', '/config/ai-configs', data);
+				saved = await this.api('POST', '/config/ai-configs', data);
             }
             this.hideModal();
-            this.loadConfig();
+			await this.loadConfig();
+			if (provider_type === 'openai_oauth' && !configId && saved?.id) {
+				await this.connectOpenAIOAuth(saved.id);
+			}
         } catch (error) {
             this._showApiError(error);
         }
     }
+
+	async connectOpenAIOAuth(configId) {
+		try {
+			const status = await this.api('GET', `/config/ai-configs/${configId}/openai-oauth`);
+			if (!status.helper_available) {
+				this.showToast('OAuth helper unavailable', status.helper_error || 'claude-code-proxy was not found', 'error');
+				return;
+			}
+			const login = await this.api('POST', `/config/ai-configs/${configId}/openai-oauth/start`, {});
+			this._showOpenAIOAuthModal(login);
+		} catch (error) {
+			this._showApiError(error);
+		}
+	}
+
+	_showOpenAIOAuthModal(login) {
+		const content = `
+			<div id="openai-oauth-content">
+				<p>Open the OpenAI verification page and enter this one-time code. OpenPoet will never read your existing Codex login.</p>
+				<div style="display:flex;gap:8px;align-items:center;margin:16px 0;">
+					<code id="openai-oauth-code" style="font-size:1.4rem;padding:10px 14px;background:var(--color-surface-hover);border-radius:6px;letter-spacing:1px;">${this.escapeHtml(login.user_code || 'Loading…')}</code>
+					<button class="btn btn-secondary btn-sm" onclick="app.copyOpenAIOAuthCode()">Copy code</button>
+				</div>
+				<a id="openai-oauth-link" class="btn btn-primary" href="${this.escapeHtml(login.verification_url || '#')}" target="_blank" rel="noopener noreferrer">Open OpenAI authentication</a>
+				<div id="openai-oauth-result" style="margin-top:16px;color:var(--color-text-secondary)">Waiting for manual authorization…</div>
+			</div>`;
+		const actions = `
+			<button class="btn btn-secondary" onclick="app.cancelOpenAIOAuth('${login.id}')">Cancel</button>
+			<button class="btn btn-secondary" onclick="app.hideModal()">Close</button>`;
+		this.showModal('Connect OpenAI ChatGPT', content, actions);
+		if (this._openAIOAuthPoll) clearInterval(this._openAIOAuthPoll);
+		this._openAIOAuthPoll = setInterval(() => this._pollOpenAIOAuth(login.id), 1500);
+		this._pollOpenAIOAuth(login.id);
+	}
+
+	async _pollOpenAIOAuth(loginId) {
+		try {
+			const login = await this.api('GET', `/config/openai-oauth-logins/${loginId}`);
+			const code = document.getElementById('openai-oauth-code');
+			const link = document.getElementById('openai-oauth-link');
+			const result = document.getElementById('openai-oauth-result');
+			if (code && login.user_code) code.textContent = login.user_code;
+			if (link && login.verification_url) link.href = login.verification_url;
+			if (!result) return;
+			if (login.status === 'succeeded') {
+				clearInterval(this._openAIOAuthPoll);
+				this._openAIOAuthPoll = null;
+				result.innerHTML = '<span style="color:var(--color-success)">Connected. The OAuth credential is encrypted in OpenPoet.</span>';
+				await this.loadConfig();
+			} else if (login.status === 'failed' || login.status === 'canceled') {
+				clearInterval(this._openAIOAuthPoll);
+				this._openAIOAuthPoll = null;
+				result.innerHTML = `<span style="color:var(--color-danger)">${this.escapeHtml(login.error || login.status)}</span>`;
+			}
+		} catch (error) {
+			if (this._openAIOAuthPoll) clearInterval(this._openAIOAuthPoll);
+			this._openAIOAuthPoll = null;
+		}
+	}
+
+	copyOpenAIOAuthCode() {
+		const code = document.getElementById('openai-oauth-code')?.textContent || '';
+		if (code && navigator.clipboard) navigator.clipboard.writeText(code);
+	}
+
+	async cancelOpenAIOAuth(loginId) {
+		try { await this.api('POST', `/config/openai-oauth-logins/${loginId}/cancel`, {}); } catch (_) {}
+		this.hideModal();
+	}
+
+	disconnectOpenAIOAuth(configId) {
+		showConfirmModal(
+			'Disconnect OpenAI OAuth?',
+			'The OpenPoet-owned OAuth credential will be removed. Your Codex login is not affected.',
+			async () => {
+				try {
+					await this.api('DELETE', `/config/ai-configs/${configId}/openai-oauth`);
+					await this.loadConfig();
+					this.showToast('Disconnected', 'OpenAI OAuth credential removed from OpenPoet', 'success');
+				} catch (error) {
+					this._showApiError(error);
+				}
+			},
+			'Disconnect'
+		);
+	}
 
     deleteAIConfig(configId) {
         showConfirmModal(

@@ -1,4 +1,4 @@
-.PHONY: all build run clean test deps vendor-js setup format
+.PHONY: all build run clean test deps vendor-js provider-helper setup format
 
 # Variables
 BINARY_NAME=openpoet
@@ -14,6 +14,11 @@ build:
 	@mkdir -p $(BUILD_DIR)
 	go build -ldflags "-X main.BuildVersion=$$(git rev-parse --short HEAD)-$$(date +%s) -X main.DefaultRelayURL=$(RELAY_URL) -X main.DebugDefault=true" -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
 	@echo "Built: $(BUILD_DIR)/$(BINARY_NAME)"
+
+# Install the audited, version-pinned OpenAI-to-Claude Code bridge.
+# This is intentionally explicit: normal builds never download third-party binaries.
+provider-helper:
+	@./ops/provider-helper/install.sh
 
 # Build for multiple platforms
 build-all: deps vendor-js
@@ -132,6 +137,7 @@ help:
 	@echo "  dev          Run in development mode"
 	@echo "  deps         Download Go dependencies"
 	@echo "  vendor-js    Download vendor JavaScript libraries"
+	@echo "  provider-helper Install the pinned OpenAI OAuth provider bridge"
 	@echo "  test         Run tests"
 	@echo "  test-coverage Run tests with coverage"
 	@echo "  clean        Remove build artifacts"

@@ -1,12 +1,31 @@
 package session
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
 
 // ClaudeCodeBackend implements BackendStrategy for Claude Code CLI.
 type ClaudeCodeBackend struct{}
+
+type claudeCodeConfig struct {
+	Provider         string `json:"provider"`
+	ProviderConfigID int64  `json:"provider_config_id"`
+	Model            string `json:"model"`
+	SmallModel       string `json:"small_model"`
+}
+
+func parseClaudeCodeConfig(raw string) claudeCodeConfig {
+	var cfg claudeCodeConfig
+	if strings.TrimSpace(raw) != "" {
+		_ = json.Unmarshal([]byte(raw), &cfg)
+	}
+	cfg.Model = strings.TrimSpace(cfg.Model)
+	cfg.Provider = strings.ToLower(strings.TrimSpace(cfg.Provider))
+	cfg.SmallModel = strings.TrimSpace(cfg.SmallModel)
+	return cfg
+}
 
 func (b *ClaudeCodeBackend) Type() BackendType          { return BackendClaudeCode }
 func (b *ClaudeCodeBackend) BinaryName() string         { return "claude" }
@@ -19,6 +38,7 @@ func (b *ClaudeCodeBackend) HookFormat() string         { return "claude" }
 
 func (b *ClaudeCodeBackend) BuildCLIArgs(cfg *SessionConfig) []string {
 	var args []string
+	cc := parseClaudeCodeConfig(cfg.BackendConfig)
 
 	if cfg.IsReopen {
 		resumeID := strings.TrimSpace(cfg.ProviderSessionID)
@@ -40,6 +60,10 @@ func (b *ClaudeCodeBackend) BuildCLIArgs(cfg *SessionConfig) []string {
 
 	if cfg.DangerouslySkipPermissions {
 		args = append(args, b.PermissionSkipFlag())
+	}
+
+	if cc.Model != "" && !strings.EqualFold(cc.Model, "default") {
+		args = append(args, "--model", cc.Model)
 	}
 
 	return args

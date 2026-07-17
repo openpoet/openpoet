@@ -31,11 +31,61 @@ func (p platformSessionEnvironmentProvider) SessionEnvironment(_ context.Context
 	if project == nil || project.Backend != "claude_code" || p.handler == nil || p.handler.providerMgr == nil {
 		return result, nil
 	}
+	var projectConfig struct {
+		Provider         string `json:"provider"`
+		ProviderConfigID int64  `json:"provider_config_id"`
+		Model            string `json:"model"`
+		SmallModel       string `json:"small_model"`
+	}
+	_ = json.Unmarshal([]byte(project.BackendConfig), &projectConfig)
+	projectConfig.Provider = strings.ToLower(strings.TrimSpace(projectConfig.Provider))
+	if projectConfig.Provider == "openai" || projectConfig.Provider == "openai_oauth" {
+		if project.Type != "local" {
+			return nil, errors.New("OpenAI OAuth for Claude Code currently supports local projects only; remote projects require a separate remote credential")
+		}
+		if projectConfig.ProviderConfigID <= 0 {
+			return nil, errors.New("OpenAI OAuth profile is required for this Claude Code project")
+		}
+		if p.handler.api == nil || p.handler.api.providerBridge == nil {
+			return nil, errors.New("OpenAI provider bridge is unavailable")
+		}
+		profile, err := p.handler.api.db.GetAIConfig(context.Background(), projectConfig.ProviderConfigID)
+		if err != nil || profile == nil || profile.ProviderType != "openai_oauth" {
+			return nil, errors.New("configured OpenAI OAuth profile was not found")
+		}
+		model := strings.TrimSpace(projectConfig.Model)
+		if model == "" {
+			model = strings.TrimSpace(profile.Model)
+		}
+		if model == "" {
+			return nil, errors.New("an OpenAI model is required for this Claude Code project")
+		}
+		baseURL, err := p.handler.api.providerBridge.EnsureProxy(context.Background(), projectConfig.ProviderConfigID)
+		if err != nil {
+			return nil, err
+		}
+		return openAIClaudeEnvironment(baseURL, model, projectConfig.SmallModel), nil
+	}
+	if projectConfig.Provider == "anthropic" {
+		return result, nil
+	}
 	config := p.handler.providerMgr.GetSlotConfig(llm.SlotSession)
 	if config == nil {
 		return result, nil
 	}
 	switch config.ProviderType {
+	case "openai_oauth":
+		if config.ID <= 0 || p.handler.api == nil || p.handler.api.providerBridge == nil {
+			return nil, errors.New("OpenAI OAuth session profile is unavailable")
+		}
+		baseURL, err := p.handler.api.providerBridge.EnsureProxy(context.Background(), config.ID)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(config.Model) == "" {
+			return nil, errors.New("an OpenAI model is required for the Claude Code session profile")
+		}
+		return openAIClaudeEnvironment(baseURL, config.Model, ""), nil
 	case "ollama", "ollama-sdk":
 		baseURL := strings.TrimSpace(config.BaseURL)
 		if baseURL == "" {
@@ -61,6 +111,32 @@ func (p platformSessionEnvironmentProvider) SessionEnvironment(_ context.Context
 		}
 	}
 	return result, nil
+}
+
+func openAIClaudeEnvironment(baseURL, model, smallModel string) map[string]string {
+	model = strings.TrimSpace(model)
+	smallModel = strings.TrimSpace(smallModel)
+	if smallModel == "" {
+		smallModel = model
+	}
+	return map[string]string{
+		"ANTHROPIC_BASE_URL":                        strings.TrimRight(baseURL, "/"),
+		"ANTHROPIC_API_KEY":                         "",
+		"ANTHROPIC_AUTH_TOKEN":                      "unused",
+		"CLAUDE_CODE_OAUTH_TOKEN":                   "",
+		"OPENAI_API_KEY":                            "",
+		"OPENAI_ACCESS_TOKEN":                       "",
+		"CODEX_API_KEY":                             "",
+		"ANTHROPIC_MODEL":                           model,
+		"ANTHROPIC_SMALL_FAST_MODEL":                smallModel,
+		"ANTHROPIC_DEFAULT_OPUS_MODEL":              model,
+		"ANTHROPIC_DEFAULT_SONNET_MODEL":            model,
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL":             smallModel,
+		"CLAUDE_CODE_SUBAGENT_MODEL":                smallModel,
+		"CLAUDE_CODE_AUTO_COMPACT_WINDOW":           "272000",
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":  "1",
+		"CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
+	}
 }
 
 type platformSessionNameStore struct{ db *database.DB }
