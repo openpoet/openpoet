@@ -75,8 +75,7 @@ type CodexRunner struct {
 	lastOutputTokens    float64
 	transcriptSeq       int
 	transcript          []codexTranscriptEvent
-	transcriptStreamID  int
-	transcriptStreamKey string
+	transcriptStreams   map[string]int
 	modelDefaults       codexModelDefaults
 	modelDefaultsByID   map[string]codexModelDefaults
 }
@@ -2099,7 +2098,7 @@ func (r *CodexRunner) handleNotification(method string, params json.RawMessage) 
 		}
 		delta := extractString(params, "delta")
 		if delta != "" {
-			r.addCodexTranscriptDelta("plan", delta)
+			r.addCodexTranscriptDelta("plan", codexItemID(params), delta)
 			r.write(codexTerminalTextBytes(delta))
 		}
 	case "item/started":
@@ -2161,8 +2160,16 @@ func (r *CodexRunner) writeContentDelta(params json.RawMessage, kind string) {
 		r.lastReasoningChunk = false
 	}
 	r.mu.Unlock()
-	r.addCodexTranscriptDelta(kind, delta)
+	r.addCodexTranscriptDelta(kind, codexItemID(params), delta)
 	r.write(append([]byte(prefix), codexTerminalTextBytes(delta)...))
+}
+
+func codexItemID(params json.RawMessage) string {
+	itemID := extractString(params, "itemId")
+	if itemID == "" {
+		itemID = extractString(params, "item.id")
+	}
+	return itemID
 }
 
 func (r *CodexRunner) shouldSuppressTurnOutput(params json.RawMessage) bool {
@@ -2710,8 +2717,7 @@ func (r *CodexRunner) replaceCodexTranscript(events []codexTranscriptEvent) {
 	r.mu.Lock()
 	r.transcript = r.transcript[:0]
 	r.transcriptSeq = len(events)
-	r.transcriptStreamID = 0
-	r.transcriptStreamKey = ""
+	r.transcriptStreams = nil
 	for _, event := range events {
 		r.appendCodexTranscriptLocked(event)
 	}
@@ -2746,15 +2752,18 @@ func (r *CodexRunner) addCodexTranscriptBlock(kind, text, title, command, status
 	r.mu.Lock()
 	r.transcriptSeq++
 	event.ID = r.transcriptSeq
-	r.transcriptStreamID = 0
-	r.transcriptStreamKey = ""
 	r.appendCodexTranscriptLocked(event)
 	r.mu.Unlock()
 	r.persistCodexTranscriptEvent(event)
 	r.publishCodexTranscript(event)
 }
 
-func (r *CodexRunner) addCodexTranscriptDelta(kind, text string) {
+// addCodexTranscriptDelta appends streamed text to the transcript event that
+// accumulates the given item's content. Streams are keyed by kind+itemID so a
+// message keeps growing in one event even when tool-call blocks land between
+// its deltas (the app-server interleaves parallel item streams). An empty
+// itemID falls back to a per-kind stream scoped to the current turn.
+func (r *CodexRunner) addCodexTranscriptDelta(kind, itemID, text string) {
 	if text == "" {
 		return
 	}
@@ -2762,20 +2771,23 @@ func (r *CodexRunner) addCodexTranscriptDelta(kind, text string) {
 	if kind == "" {
 		kind = "assistant"
 	}
+	streamKey := kind + ":" + itemID
 	event := codexTranscriptEvent{
 		Kind:      kind,
 		Text:      text,
 		CreatedAt: time.Now(),
 	}
 	r.mu.Lock()
-	if r.transcriptStreamKey != kind || r.transcriptStreamID == 0 {
-		r.transcriptSeq++
-		r.transcriptStreamID = r.transcriptSeq
-		r.transcriptStreamKey = kind
-		event.ID = r.transcriptStreamID
-	} else {
-		event.ID = r.transcriptStreamID
+	if r.transcriptStreams == nil {
+		r.transcriptStreams = make(map[string]int)
+	}
+	if id, ok := r.transcriptStreams[streamKey]; ok {
+		event.ID = id
 		event.Append = true
+	} else {
+		r.transcriptSeq++
+		r.transcriptStreams[streamKey] = r.transcriptSeq
+		event.ID = r.transcriptSeq
 	}
 	r.appendCodexTranscriptLocked(event)
 	r.mu.Unlock()
@@ -2785,8 +2797,7 @@ func (r *CodexRunner) addCodexTranscriptDelta(kind, text string) {
 
 func (r *CodexRunner) resetCodexTranscriptStream() {
 	r.mu.Lock()
-	r.transcriptStreamID = 0
-	r.transcriptStreamKey = ""
+	r.transcriptStreams = nil
 	r.mu.Unlock()
 }
 
@@ -2844,8 +2855,7 @@ func (r *CodexRunner) loadPersistedCodexTranscript(ctx context.Context) {
 	if maxEventID > r.transcriptSeq {
 		r.transcriptSeq = maxEventID
 	}
-	r.transcriptStreamID = 0
-	r.transcriptStreamKey = ""
+	r.transcriptStreams = nil
 }
 
 func (r *CodexRunner) persistCodexTranscriptEvent(event codexTranscriptEvent) {
