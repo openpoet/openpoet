@@ -749,6 +749,83 @@ func TestCodexCommandStopWithoutActiveTurnWritesPrompt(t *testing.T) {
 	requireCodexTranscriptStatus(t, r, "Stop", "No active Codex turn to stop.")
 }
 
+func TestCodexAgentMessageDeltasSurviveInterleavedToolBlocks(t *testing.T) {
+	r := &CodexRunner{
+		outputHandler:    func([]byte) {},
+		commandProcesses: make(map[string]map[string]codexCommandProcess),
+	}
+
+	r.handleNotification("item/agentMessage/delta", json.RawMessage(`{"turnId":"turn-1","itemId":"item-1","delta":"A bateria consolidada "}`))
+	r.handleNotification("item/started", json.RawMessage(`{"turnId":"turn-1","item":{"type":"commandExecution","command":"searchConversationDocuments","processId":"proc-1"}}`))
+	r.handleNotification("item/agentMessage/delta", json.RawMessage(`{"turnId":"turn-1","itemId":"item-1","delta":"está saudável nos componentes "}`))
+	r.handleNotification("item/started", json.RawMessage(`{"turnId":"turn-1","item":{"type":"commandExecution","command":"searchConversationDocuments","processId":"proc-2"}}`))
+	r.handleNotification("item/agentMessage/delta", json.RawMessage(`{"turnId":"turn-1","itemId":"item-1","delta":"principais."}`))
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	assistantIDs := make(map[int]bool)
+	var merged strings.Builder
+	appends := 0
+	for _, event := range r.transcript {
+		if event.Kind != "assistant" {
+			continue
+		}
+		assistantIDs[event.ID] = true
+		merged.WriteString(event.Text)
+		if event.Append {
+			appends++
+		}
+	}
+	if len(assistantIDs) != 1 {
+		t.Fatalf("assistant deltas spread across %d event IDs, want 1: %#v", len(assistantIDs), r.transcript)
+	}
+	if appends != 2 {
+		t.Fatalf("append count = %d, want 2", appends)
+	}
+	if got, want := merged.String(), "A bateria consolidada está saudável nos componentes principais."; got != want {
+		t.Fatalf("merged assistant text = %q, want %q", got, want)
+	}
+
+	commandBlocks := 0
+	for _, event := range r.transcript {
+		if event.Kind == "command" {
+			commandBlocks++
+			if assistantIDs[event.ID] {
+				t.Fatalf("command block reused assistant event ID %d", event.ID)
+			}
+		}
+	}
+	if commandBlocks != 2 {
+		t.Fatalf("command blocks = %d, want 2", commandBlocks)
+	}
+}
+
+func TestCodexTranscriptStreamsResetOnTurnBoundary(t *testing.T) {
+	r := &CodexRunner{
+		outputHandler:    func([]byte) {},
+		commandProcesses: make(map[string]map[string]codexCommandProcess),
+	}
+
+	r.addCodexTranscriptDelta("assistant", "", "first turn ")
+	r.addCodexTranscriptDelta("assistant", "", "message")
+	r.resetCodexTranscriptStream()
+	r.addCodexTranscriptDelta("assistant", "", "second turn message")
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	assistantIDs := make(map[int]bool)
+	for _, event := range r.transcript {
+		if event.Kind == "assistant" {
+			assistantIDs[event.ID] = true
+		}
+	}
+	if len(assistantIDs) != 2 {
+		t.Fatalf("assistant event IDs = %d, want 2 (one per turn): %#v", len(assistantIDs), r.transcript)
+	}
+}
+
 func TestCodexInterruptedTurnSuppressesLateOutput(t *testing.T) {
 	r := &CodexRunner{
 		interruptedTurns: map[string]bool{"turn-1": true},
