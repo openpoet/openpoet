@@ -552,7 +552,8 @@ func (r *RemoteRunner) rewriteMCPConfigForRemote() {
 			return
 		}
 
-		if _, hasOpenPoet := servers["openpoet"]; !hasOpenPoet {
+		openpoetEntry, hasOpenPoet := servers["openpoet"]
+		if !hasOpenPoet {
 			return
 		}
 
@@ -565,16 +566,27 @@ func (r *RemoteRunner) rewriteMCPConfigForRemote() {
 			}
 		}
 
+		// Extract the per-session bearer from the subprocess args so the HTTP
+		// transport carries verified identity over the tunnel instead of the
+		// spoofable ?session_id= query param alone.
+		sessionToken := extractMCPServeArg(openpoetEntry, "--session-token")
+
 		// Replace subprocess with HTTP transport through the tunnel.
 		// Claude Code requires "type":"http" alongside "url".
 		mcpURL := fmt.Sprintf("http://%s/mcp", tunnelAddr)
 		if sessionID != "" {
 			mcpURL += "?session_id=" + sessionID
 		}
-		servers["openpoet"] = map[string]interface{}{
+		httpEntry := map[string]interface{}{
 			"type": "http",
 			"url":  mcpURL,
 		}
+		if sessionToken != "" {
+			httpEntry["headers"] = map[string]interface{}{
+				"Authorization": "Bearer " + sessionToken,
+			}
+		}
+		servers["openpoet"] = httpEntry
 
 		newJSON, err := json.Marshal(config)
 		if err != nil {
@@ -586,6 +598,28 @@ func (r *RemoteRunner) rewriteMCPConfigForRemote() {
 		log.Printf("[remote] MCP rewrite: openpoet -> HTTP %s", mcpURL)
 		return
 	}
+}
+
+// extractMCPServeArg pulls the value following flagName from an mcp server
+// config entry's args array (e.g. the "--session-token" value of the injected
+// openpoet mcp-serve subprocess). Returns "" when absent.
+func extractMCPServeArg(entry interface{}, flagName string) string {
+	m, ok := entry.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	args, ok := m["args"].([]interface{})
+	if !ok {
+		return ""
+	}
+	for j, a := range args {
+		if s, _ := a.(string); s == flagName && j+1 < len(args) {
+			if v, _ := args[j+1].(string); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 func (r *RemoteRunner) injectCodexOpenPoetMCPForRemote() {

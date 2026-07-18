@@ -1964,6 +1964,9 @@ func (r *CodexRunner) postHook(kind string, event map[string]interface{}) (json.
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Session-ID", r.cfg.SessionID)
+	if r.cfg.HookToken != "" {
+		req.Header.Set("X-Hook-Token", r.cfg.HookToken)
+	}
 	req.Header.Set("X-Backend", "codex")
 
 	client := &http.Client{Timeout: 10 * time.Minute}

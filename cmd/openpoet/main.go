@@ -106,6 +106,11 @@ func main() {
 					os.Setenv("OPENPOET_API_URL", os.Args[i+1])
 					i++
 				}
+			case "--session-token":
+				if i+1 < len(os.Args) {
+					os.Setenv("OPENPOET_SESSION_TOKEN", os.Args[i+1])
+					i++
+				}
 			}
 		}
 		apiURL := os.Getenv("OPENPOET_API_URL")
@@ -509,6 +514,13 @@ func main() {
 	// Tunnel auth middleware (only activates for tunnel-originated requests)
 	r.Use(tunnel.AuthMiddleware(db, []byte(jwtSecret)))
 
+	// Per-install UI credential: planted on page/asset loads, required (along
+	// with the opst1_/opav1_ bearers and paired-device cookie) to authorize a
+	// REST mutation. This closes the "unauthenticated localhost /api" hole.
+	uiCookieSecret := loadOrGenerateUICookieSecret(db)
+	r.Use(handlers.EnsureUICookieMiddleware(uiCookieSecret))
+	r.Use(handlers.ResolveActorMiddleware(db, []byte(jwtSecret), uiCookieSecret))
+
 	// MCP HTTP endpoint (always registered, auth-protected)
 	r.Handle("/mcp", mcpHandler)
 
@@ -905,6 +917,8 @@ func main() {
 	if os.Getenv("OPENPOET_TEST_MODE") == "1" {
 		log.Printf("[TEST] Test mode enabled — test endpoints available")
 		r.Post("/api/test/seed-token-usage", api.SeedTokenUsage)
+		r.Post("/api/test/sessions", testCreateSession(db))
+		r.Post("/api/test/tunnel-jwt", testMintTunnelJWT(db, jwtSecret))
 	}
 
 	// OTLP endpoints (standard paths for OpenTelemetry HTTP/JSON)
@@ -977,6 +991,13 @@ func main() {
 	codexCleanupCtx, stopCodexCleanup := context.WithCancel(context.Background())
 	go runCodexTranscriptCleanupLoop(codexCleanupCtx, db)
 
+	// Event-outbox janitor: evict stale consumer cursors and prune retained
+	// events. Runs once at boot then hourly. Evicting dead consumers is what
+	// keeps a single abandoned cursor from pinning the prune floor at zero.
+	outboxJanitorCtx, stopOutboxJanitor := context.WithCancel(context.Background())
+	runOutboxJanitor(outboxJanitorCtx, db)
+	go runOutboxJanitorLoop(outboxJanitorCtx, db)
+
 	// Create server
 	// WriteTimeout is 600s to support long-polling hook permission requests (up to 590s)
 	// ReadTimeout is 180s so large uploads (e.g. ~1MB voice recordings via the
@@ -1048,6 +1069,7 @@ func main() {
 
 	log.Println("Shutting down...")
 	stopCodexCleanup()
+	stopOutboxJanitor()
 
 	// Disconnect tunnel
 	api.DisconnectTunnel()
@@ -1208,6 +1230,23 @@ func loadOrGenerateJWTSecret(db *database.DB) string {
 		db.SetSetting(context.Background(), "tunnel_jwt_secret", jwtSecret)
 	}
 	return jwtSecret
+}
+
+// loadOrGenerateUICookieSecret loads the per-install UI cookie secret from DB
+// or generates a new one. Presenting this secret as the openpoet_ui cookie is
+// what authorizes a browser (same-origin) to perform REST mutations.
+func loadOrGenerateUICookieSecret(db *database.DB) string {
+	secret, _ := db.GetSetting(context.Background(), "ui_cookie_secret")
+	if secret == "" {
+		generatedKey, err := security.GenerateKey()
+		if err != nil {
+			log.Printf("[UI] Failed to generate UI cookie secret: %v", err)
+			return ""
+		}
+		secret = generatedKey
+		db.SetSetting(context.Background(), "ui_cookie_secret", secret)
+	}
+	return secret
 }
 
 // decryptSetting reads an encrypted setting, auto-migrating plaintext values.
@@ -1430,6 +1469,40 @@ func runCodexTranscriptCleanup(ctx context.Context, db *database.DB) {
 	}
 	if stats.ExpiredDeleted > 0 || stats.OverflowDeleted > 0 {
 		log.Printf("[Codex] transcript cleanup removed %d expired and %d overflow event(s)", stats.ExpiredDeleted, stats.OverflowDeleted)
+	}
+}
+
+// outboxRetention is how long an acknowledged outbox event is kept before the
+// janitor may prune it. Only events at or below the (post-eviction) minimum
+// consumer cursor are ever removed, so this never drops unseen events.
+const outboxRetention = 14 * 24 * time.Hour
+
+func runOutboxJanitorLoop(ctx context.Context, db *database.DB) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runOutboxJanitor(ctx, db)
+		}
+	}
+}
+
+func runOutboxJanitor(ctx context.Context, db *database.DB) {
+	// Evict dead consumer cursors first so they stop pinning the prune floor.
+	evicted, err := db.EvictStaleEventOutboxConsumers(ctx, time.Now().Add(-database.DefaultEventOutboxConsumerStaleAfter))
+	if err != nil {
+		log.Printf("[Outbox] stale consumer eviction failed: %v", err)
+	} else if evicted > 0 {
+		log.Printf("[Outbox] evicted %d stale consumer cursor(s)", evicted)
+	}
+	pruned, err := db.PruneEventOutbox(ctx, time.Now().Add(-outboxRetention), 10000)
+	if err != nil {
+		log.Printf("[Outbox] prune failed: %v", err)
+	} else if pruned > 0 {
+		log.Printf("[Outbox] pruned %d retained event(s)", pruned)
 	}
 }
 
