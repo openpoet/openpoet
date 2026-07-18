@@ -666,7 +666,7 @@ func mergeTrustedSessionEnvironment(destination, source map[string]string) error
 	}
 	for key, value := range source {
 		key = strings.TrimSpace(key)
-		if !sessionEnvironmentKeyPattern.MatchString(key) || strings.HasPrefix(key, "OPENPOET_") && key != "OPENPOET_BACKEND_BINARY" {
+		if !sessionEnvironmentKeyPattern.MatchString(key) || !trustedProviderEnvironmentKey(key) {
 			return validationError("session_environment_key_invalid", "Provider environment key is invalid")
 		}
 		if strings.IndexByte(value, 0) >= 0 {
@@ -682,6 +682,18 @@ func mergeTrustedSessionEnvironment(destination, source map[string]string) error
 		destination[key] = value
 	}
 	return nil
+}
+
+func trustedProviderEnvironmentKey(key string) bool {
+	if !strings.HasPrefix(key, "OPENPOET_") {
+		return true
+	}
+	switch key {
+	case "OPENPOET_BACKEND_BINARY", "OPENPOET_REMOTE_PROVIDER_TUNNEL":
+		return true
+	default:
+		return false
+	}
 }
 
 func injectTaskEnvironment(environment map[string]string, task *database.ProjectTask, resumed bool) {
