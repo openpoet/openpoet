@@ -134,6 +134,10 @@ type runningSession struct {
 	output       chan []byte
 	outputBuffer *OutputBuffer
 	userStopped  bool // set when user explicitly stops the session
+	// inputMu serializes writes into this session's PTY so concurrent writers
+	// (WS client, hook automation, platform send_input) never interleave bytes
+	// mid-line. Only the input path takes it; runner internals are untouched.
+	inputMu sync.Mutex
 }
 
 func NewManager(db *database.DB, hub *websocket.Hub, serverAddr string) *Manager {
@@ -850,6 +854,14 @@ func (m *Manager) WriteToSession(sessionID string, data []byte) error {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
+	rs.inputMu.Lock()
+	defer rs.inputMu.Unlock()
+	return m.writeToRunnerLocked(sessionID, rs, data)
+}
+
+// writeToRunnerLocked writes to the session's PTY. The caller MUST hold
+// rs.inputMu so concurrent writers cannot interleave bytes.
+func (m *Manager) writeToRunnerLocked(sessionID string, rs *runningSession, data []byte) error {
 	_, err := rs.runner.Write(data)
 	if err == nil && m.isCodexTerminalSubmit(rs, data) {
 		m.notifyUserPromptSubmitted(sessionID)
@@ -863,13 +875,23 @@ func (m *Manager) SubmitLineToSession(sessionID string, text string, textToEnter
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
-	if err := m.WriteToSession(sessionID, []byte(text)); err != nil {
+	m.mu.RLock()
+	rs, ok := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	// Hold the input lock across BOTH writes so no other writer can slip bytes
+	// into the text→Enter window (the time.Sleep below is exactly that gap).
+	rs.inputMu.Lock()
+	defer rs.inputMu.Unlock()
+	if err := m.writeToRunnerLocked(sessionID, rs, []byte(text)); err != nil {
 		return err
 	}
 	if textToEnterDelay > 0 {
 		time.Sleep(textToEnterDelay)
 	}
-	return m.WriteToSession(sessionID, []byte("\r"))
+	return m.writeToRunnerLocked(sessionID, rs, []byte("\r"))
 }
 
 // SetSessionModel changes the model used by future turns of an active session.

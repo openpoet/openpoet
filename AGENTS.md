@@ -37,7 +37,6 @@ OpenPoet is a web application that orchestrates Claude Code sessions across mult
 ### Deployment
 
 - Production runs on port 8081 (`.run/openpoet -port 8081`)
-- Development runs on port 8080 (`./build/openpoet`)
 - Build command: `make build`
 - Service Worker provides offline capability and PWA features
 
@@ -69,8 +68,6 @@ OpenPoet is a web application that orchestrates Claude Code sessions across mult
 ## Guidelines & Constraints
 
 - **Port 8081 is PRODUCTION** — never use for testing or debugging
-- Always test on port 8080 (development)
-- Always start the dev server with `-bind 0.0.0.0`: `./build/openpoet -port 8080 -bind 0.0.0.0`
 - **NEVER deploy without explicit user approval** — The deploy action (killing production process on port 8081, rebuilding, and restarting) must ONLY be executed when the user has given direct, express approval to deploy. Claude Code sessions must NEVER autonomously decide to deploy. If a task description mentions "deploy", the session must still ask the user for confirmation before executing. This applies to all contexts: task completion, commit workflows, and any other scenario.
 - Database migrations must be additive (never alter existing migrations)
 - All dependencies must use MIT-compatible licenses
