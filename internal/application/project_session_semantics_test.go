@@ -217,6 +217,27 @@ func TestSessionServiceCreateOwnsProviderEnvironmentNamingAndTaskNotification(t 
 	}
 }
 
+func TestMergeTrustedSessionEnvironmentAllowsRemoteProviderTunnelMarker(t *testing.T) {
+	destination := map[string]string{}
+	if err := mergeTrustedSessionEnvironment(destination, map[string]string{
+		"OPENPOET_REMOTE_PROVIDER_TUNNEL": "1",
+	}); err != nil {
+		t.Fatalf("trusted tunnel marker must be accepted: %v", err)
+	}
+	if destination["OPENPOET_REMOTE_PROVIDER_TUNNEL"] != "1" {
+		t.Fatalf("tunnel marker not merged: %v", destination)
+	}
+}
+
+func TestMergeTrustedSessionEnvironmentRejectsUnknownOpenPoetKey(t *testing.T) {
+	err := mergeTrustedSessionEnvironment(map[string]string{}, map[string]string{
+		"OPENPOET_UNTRUSTED": "1",
+	})
+	if !ErrorIsKind(err, ErrorValidation) {
+		t.Fatalf("unknown OPENPOET_ key must be rejected, got %v", err)
+	}
+}
+
 func TestSessionServiceCreateTreatsConfigurationSyncFailureAsBestEffort(t *testing.T) {
 	manager := &semanticSessionManager{}
 	service := NewSessionService(
