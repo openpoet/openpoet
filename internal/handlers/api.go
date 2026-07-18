@@ -2672,6 +2672,10 @@ func respondApplicationError(w http.ResponseWriter, err error) {
 	case application.ErrorIsKind(err, application.ErrorConflict):
 		status = http.StatusConflict
 	}
+	if code := application.ErrorCode(err); code != "" {
+		respondJSON(w, status, map[string]string{"error": err.Error(), "code": code})
+		return
+	}
 	respondError(w, status, err.Error())
 }
 
