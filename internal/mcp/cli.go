@@ -40,8 +40,9 @@ func RunCLI(args []string) {
 		apiURL = "http://localhost:8080"
 	}
 	sessionID := os.Getenv("OPENPOET_SESSION_ID")
+	sessionToken := os.Getenv("OPENPOET_SESSION_TOKEN")
 
-	client := NewAPIClient(apiURL)
+	client := NewAPIClientWithToken(apiURL, sessionToken)
 	handler := NewRequestHandler(client, sessionID, "session", "", ToolPolicy{Mode: "deny_all"})
 
 	switch args[0] {

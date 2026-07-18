@@ -18,6 +18,7 @@ import (
 	"openpoet/internal/application"
 	"openpoet/internal/notifications"
 	"openpoet/internal/session"
+	"openpoet/internal/sessiontoken"
 	"openpoet/internal/websocket"
 )
 
@@ -303,6 +304,10 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.Header.Get("X-Session-ID")
 	if sessionID == "" {
 		respondError(w, http.StatusBadRequest, "Missing X-Session-ID header")
+		return
+	}
+	if !h.hookTokenAllowed(r.Context(), sessionID, r.Header.Get("X-Hook-Token")) {
+		respondError(w, http.StatusUnauthorized, "invalid or missing hook token")
 		return
 	}
 
@@ -763,12 +768,35 @@ func (h *HookHandler) HandlePermissionRespond(w http.ResponseWriter, r *http.Req
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// hookTokenAllowed verifies the X-Hook-Token against the session's stored hook
+// token hash. Enforcement is keyed on token presence: a session with no stored
+// hash (legacy/pre-Phase-0) fails open so running sessions never go dark; an
+// unknown session id is rejected. This closes the spoofable-X-Session-ID hole
+// without a bespoke auth path.
+func (h *HookHandler) hookTokenAllowed(ctx context.Context, sessionID, token string) bool {
+	if h.sessionMgr == nil {
+		return true // no session store wired (isolated handler tests)
+	}
+	_, hookHash, err := h.sessionMgr.SessionTokenHashes(ctx, sessionID)
+	if err != nil {
+		return false // unknown session id — reject spoofed identities
+	}
+	if hookHash == "" {
+		return true // legacy session without a minted token: fail open
+	}
+	return sessiontoken.EqualHash(token, hookHash)
+}
+
 // HandleEvent handles POST /api/hooks/event
 // Non-blocking: broadcasts hook events to the browser
 func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.Header.Get("X-Session-ID")
 	if sessionID == "" {
 		respondError(w, http.StatusBadRequest, "Missing X-Session-ID header")
+		return
+	}
+	if !h.hookTokenAllowed(r.Context(), sessionID, r.Header.Get("X-Hook-Token")) {
+		respondError(w, http.StatusUnauthorized, "invalid or missing hook token")
 		return
 	}
 

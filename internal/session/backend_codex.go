@@ -134,6 +134,7 @@ func (b *CodexBackend) BuildEnvVars(cfg *SessionConfig) map[string]string {
 	if cc.BinaryPath != "" {
 		env["OPENPOET_BACKEND_BINARY"] = expandCodexHome(cc.BinaryPath)
 	}
+	applySessionTokenEnv(env, cfg)
 	return env
 }
 

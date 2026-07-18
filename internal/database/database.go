@@ -351,6 +351,21 @@ func (d *DB) UpdateSessionTokenHashes(ctx context.Context, id, mcpTokenHash, hoo
 	return err
 }
 
+// GetSessionTokenHashes returns the stored MCP/REST and hook token hex digests
+// for a session. Empty strings mean the credential is unset (legacy session);
+// sql.ErrNoRows means the session id is unknown.
+func (d *DB) GetSessionTokenHashes(ctx context.Context, id string) (mcpTokenHash, hookTokenHash string, err error) {
+	var row struct {
+		Mcp  sql.NullString `db:"mcp_token_hash"`
+		Hook sql.NullString `db:"hook_token_hash"`
+	}
+	err = d.GetContext(ctx, &row, "SELECT mcp_token_hash, hook_token_hash FROM sessions WHERE id = ?", id)
+	if err != nil {
+		return "", "", err
+	}
+	return row.Mcp.String, row.Hook.String, nil
+}
+
 func (d *DB) TouchSessionActivity(ctx context.Context, id string) error {
 	_, err := d.ExecContext(ctx, "UPDATE sessions SET last_activity_at=? WHERE id=?", time.Now(), id)
 	return err
