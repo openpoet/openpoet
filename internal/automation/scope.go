@@ -26,6 +26,7 @@ const (
 	ScopePlansRead          Scope = "plans:read"
 	ScopePlansWrite         Scope = "plans:write"
 	ScopeApprovalsGrant     Scope = "approvals:grant"
+	ScopeApprovalsSelf      Scope = "approvals:self"
 	ScopeAgentsRead         Scope = "agents:read"
 	ScopeAgentsWrite        Scope = "agents:write"
 	ScopeAIUse              Scope = "ai:use"
@@ -84,6 +85,7 @@ var knownScopes = map[Scope]struct{}{
 	ScopePlansRead:          {},
 	ScopePlansWrite:         {},
 	ScopeApprovalsGrant:     {},
+	ScopeApprovalsSelf:      {},
 	ScopeAgentsRead:         {},
 	ScopeAgentsWrite:        {},
 	ScopeAIUse:              {},
