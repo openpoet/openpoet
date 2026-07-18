@@ -1,9 +1,13 @@
 package handlers
 
-import "testing"
+import (
+	"testing"
+
+	"openpoet/internal/session"
+)
 
 func TestOpenAIClaudeEnvironmentUsesLoopbackBridgeModels(t *testing.T) {
-	env := openAIClaudeEnvironment("http://127.0.0.1:18765/", "gpt-main", "gpt-fast")
+	env := openAIClaudeEnvironment("http://127.0.0.1:18765/", "gpt-main", "gpt-fast", false)
 	if env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:18765" {
 		t.Fatalf("base URL = %q", env["ANTHROPIC_BASE_URL"])
 	}
@@ -21,8 +25,15 @@ func TestOpenAIClaudeEnvironmentUsesLoopbackBridgeModels(t *testing.T) {
 }
 
 func TestOpenAIClaudeEnvironmentDefaultsSmallModel(t *testing.T) {
-	env := openAIClaudeEnvironment("http://127.0.0.1:1", "gpt-main", "")
+	env := openAIClaudeEnvironment("http://127.0.0.1:1", "gpt-main", "", false)
 	if env["ANTHROPIC_SMALL_FAST_MODEL"] != "gpt-main" || env["CLAUDE_CODE_SUBAGENT_MODEL"] != "gpt-main" {
 		t.Fatalf("small model fallback = %#v", env)
+	}
+}
+
+func TestOpenAIClaudeEnvironmentRequestsTunnelForRemoteProject(t *testing.T) {
+	env := openAIClaudeEnvironment("http://127.0.0.1:18765", "gpt-main", "", true)
+	if env[session.RemoteProviderTunnelEnv] != "1" {
+		t.Fatalf("remote provider marker = %q", env[session.RemoteProviderTunnelEnv])
 	}
 }
