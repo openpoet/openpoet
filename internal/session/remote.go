@@ -2,11 +2,17 @@ package session
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/url"
 	"openpoet/internal/database"
 	"strconv"
 	"strings"
@@ -24,18 +30,24 @@ type RemoteRunner struct {
 	cliArgs       []string
 	backend       BackendStrategy
 
-	mu             sync.Mutex
-	client         *ssh.Client
-	session        *ssh.Session
-	stdin          io.WriteCloser
-	tunnelListener net.Listener
-	ctx            context.Context
-	cancel         context.CancelFunc
-	done           chan struct{}
-	waitErr        error
-	isWindows      bool
-	launcherPath   string // remote path of uploaded launcher, deleted on Stop
+	mu                     sync.Mutex
+	client                 *ssh.Client
+	session                *ssh.Session
+	stdin                  io.WriteCloser
+	tunnelListener         net.Listener
+	providerTunnelListener net.Listener
+	providerTunnelServer   *http.Server
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	done                   chan struct{}
+	waitErr                error
+	isWindows              bool
+	launcherPath           string // remote path of uploaded launcher, deleted on Stop
 }
+
+// RemoteProviderTunnelEnv is an internal launch marker. It is consumed by the
+// remote runner and is never exported to the remote process.
+const RemoteProviderTunnelEnv = "OPENPOET_REMOTE_PROVIDER_TUNNEL"
 
 func NewRemoteRunner(
 	project *database.Project,
@@ -82,6 +94,13 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 	log.Printf("[remote] Setting up reverse tunnel, envVars before: OPENPOET_HOOK_URL=%s", r.envVars["OPENPOET_HOOK_URL"])
 	r.setupReverseTunnel(client)
 	log.Printf("[remote] After tunnel setup, envVars: OPENPOET_HOOK_URL=%s", r.envVars["OPENPOET_HOOK_URL"])
+	if err := r.setupProviderTunnel(client); err != nil {
+		if r.tunnelListener != nil {
+			_ = r.tunnelListener.Close()
+		}
+		_ = client.Close()
+		return fmt.Errorf("failed to set up remote provider tunnel: %w", err)
+	}
 
 	// Rewrite OpenPoet MCP from subprocess to URL-based transport via tunnel
 	r.rewriteMCPConfigForRemote()
@@ -168,7 +187,9 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 			cmd += " " + shellQuote(arg)
 		}
 	}
-	log.Printf("[remote] Starting command: %s", cmd)
+	// The command contains environment values. Never log it: remote provider
+	// tunnel credentials and legacy provider API keys must remain out of logs.
+	log.Printf("[remote] Starting backend=%s for project=%d path=%q", r.project.Backend, r.project.ID, r.project.Path)
 
 	// Start command
 	if err := session.Start(cmd); err != nil {
@@ -323,6 +344,174 @@ func (r *RemoteRunner) setupReverseTunnel(client *ssh.Client) {
 			}(remoteConn, connID)
 		}
 	}()
+}
+
+type remoteListenerClient interface {
+	Listen(network, address string) (net.Listener, error)
+}
+
+func (r *RemoteRunner) setupProviderTunnel(client remoteListenerClient) error {
+	required := strings.TrimSpace(r.envVars[RemoteProviderTunnelEnv]) == "1"
+	delete(r.envVars, RemoteProviderTunnelEnv)
+	if !required {
+		return nil
+	}
+
+	target, err := parseProviderTunnelTarget(r.envVars["ANTHROPIC_BASE_URL"])
+	if err != nil {
+		return err
+	}
+	listener, err := client.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("request remote loopback listener: %w", err)
+	}
+	token, err := newProviderTunnelToken()
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
+
+	server := &http.Server{
+		Handler:           newProviderTunnelHandler(target, token),
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       90 * time.Second,
+	}
+	r.providerTunnelListener = listener
+	r.providerTunnelServer = server
+	r.envVars["ANTHROPIC_BASE_URL"] = "http://" + listener.Addr().String()
+	r.envVars["ANTHROPIC_AUTH_TOKEN"] = token
+	r.envVars["ANTHROPIC_API_KEY"] = ""
+
+	log.Printf("[remote] Provider tunnel active — remote %s -> local loopback %s", listener.Addr(), target.Host)
+	go func() {
+		if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) && !errors.Is(serveErr, net.ErrClosed) {
+			log.Printf("[remote] Provider tunnel stopped with error: %v", serveErr)
+		}
+	}()
+	return nil
+}
+
+func parseProviderTunnelTarget(raw string) (*url.URL, error) {
+	target, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return nil, fmt.Errorf("parse provider bridge URL: %w", err)
+	}
+	if target.Scheme != "http" || target.Host == "" || target.Port() == "" || target.User != nil {
+		return nil, errors.New("provider bridge must be an HTTP loopback URL with an explicit port")
+	}
+	host := target.Hostname()
+	ip := net.ParseIP(host)
+	if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+		return nil, errors.New("provider bridge tunnel target must be loopback-only")
+	}
+	if target.RawQuery != "" || target.Fragment != "" {
+		return nil, errors.New("provider bridge URL must not contain a query or fragment")
+	}
+	return target, nil
+}
+
+func newProviderTunnelToken() (string, error) {
+	buffer := make([]byte, 32)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", fmt.Errorf("generate provider tunnel credential: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buffer), nil
+}
+
+func newProviderTunnelHandler(target *url.URL, token string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if !providerTunnelAuthorized(request.Header, token) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		forwarded := request.Clone(request.Context())
+		forwarded.URL = cloneProviderTunnelURL(target, request.URL)
+		forwarded.RequestURI = ""
+		forwarded.Host = target.Host
+		forwarded.Header = request.Header.Clone()
+		removeProviderTunnelHopHeaders(forwarded.Header)
+		forwarded.Header.Del("X-Api-Key")
+		forwarded.Header.Set("Authorization", "Bearer unused")
+
+		response, err := http.DefaultTransport.RoundTrip(forwarded)
+		if err != nil {
+			log.Printf("[remote] Provider tunnel upstream error: %v", err)
+			http.Error(w, "provider bridge unavailable", http.StatusBadGateway)
+			return
+		}
+		defer response.Body.Close()
+		removeProviderTunnelHopHeaders(response.Header)
+		for key, values := range response.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(response.StatusCode)
+		_, _ = io.Copy(providerTunnelResponseWriter{ResponseWriter: w}, response.Body)
+	})
+}
+
+type providerTunnelResponseWriter struct {
+	http.ResponseWriter
+}
+
+func (w providerTunnelResponseWriter) Write(data []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(data)
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return n, err
+}
+
+func cloneProviderTunnelURL(target, request *url.URL) *url.URL {
+	result := *target
+	if strings.HasSuffix(target.Path, "/") && strings.HasPrefix(request.Path, "/") {
+		result.Path = target.Path + strings.TrimPrefix(request.Path, "/")
+	} else if target.Path == "" || strings.HasSuffix(target.Path, "/") || strings.HasPrefix(request.Path, "/") {
+		result.Path = target.Path + request.Path
+	} else {
+		result.Path = target.Path + "/" + request.Path
+	}
+	result.RawPath = ""
+	result.RawQuery = request.RawQuery
+	return &result
+}
+
+func removeProviderTunnelHopHeaders(header http.Header) {
+	for _, value := range header.Values("Connection") {
+		for _, key := range strings.Split(value, ",") {
+			header.Del(strings.TrimSpace(key))
+		}
+	}
+	for _, key := range []string{
+		"Connection",
+		"Proxy-Connection",
+		"Keep-Alive",
+		"Proxy-Authenticate",
+		"Proxy-Authorization",
+		"Te",
+		"Trailer",
+		"Transfer-Encoding",
+		"Upgrade",
+	} {
+		header.Del(key)
+	}
+}
+
+func providerTunnelAuthorized(header http.Header, token string) bool {
+	if secureProviderTokenEqual(strings.TrimSpace(header.Get("X-Api-Key")), token) {
+		return true
+	}
+	parts := strings.Fields(header.Get("Authorization"))
+	return len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") && secureProviderTokenEqual(parts[1], token)
+}
+
+func secureProviderTokenEqual(actual, expected string) bool {
+	if actual == "" || expected == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) == 1
 }
 
 // rewriteMCPConfigForRemote replaces the openpoet subprocess MCP entry with an
@@ -514,12 +703,17 @@ func (r *RemoteRunner) Stop() error {
 	if r.tunnelListener != nil {
 		r.tunnelListener.Close()
 	}
-
 	if r.session != nil {
 		// Send Ctrl+C first
 		r.stdin.Write([]byte{0x03})
 		time.Sleep(100 * time.Millisecond)
 		r.session.Close()
+	}
+
+	if r.providerTunnelServer != nil {
+		_ = r.providerTunnelServer.Close()
+	} else if r.providerTunnelListener != nil {
+		_ = r.providerTunnelListener.Close()
 	}
 
 	if r.launcherPath != "" {
