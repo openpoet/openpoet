@@ -11,6 +11,7 @@ import (
 	"openpoet/internal/mcp"
 	"openpoet/internal/secretvalue"
 	"openpoet/internal/sessionmeta"
+	"openpoet/internal/sessiontoken"
 	"openpoet/internal/websocket"
 	"os"
 	"path/filepath"
@@ -233,8 +234,12 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
 
+	// Mint per-session credentials (opst1_ bearer + opht1_ hook token) and
+	// persist their digests before wiring them into the MCP config and env.
+	m.mintSessionCredentials(ctx, sessionID, cfg)
+
 	// Build MCP config
-	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID)
+	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID, cfg.MCPToken)
 	if configErr != nil {
 		_ = m.db.EndSession(ctx, sessionID, "error")
 		return nil, fmt.Errorf("build MCP configuration: %w", configErr)
@@ -419,8 +424,12 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
 
+	// Mint fresh per-session credentials on reopen (the old ones were nulled
+	// at EndSession) and persist their digests before wiring them in.
+	m.mintSessionCredentials(ctx, sessionID, cfg)
+
 	// Build MCP config
-	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID)
+	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID, cfg.MCPToken)
 	if configErr != nil {
 		return fmt.Errorf("build MCP configuration: %w", configErr)
 	}
@@ -857,6 +866,43 @@ func (m *Manager) WriteToSession(sessionID string, data []byte) error {
 	rs.inputMu.Lock()
 	defer rs.inputMu.Unlock()
 	return m.writeToRunnerLocked(sessionID, rs, data)
+}
+
+// mintSessionCredentials generates the per-session opst1_ bearer and opht1_
+// hook token, persists only their SHA-256 digests, and stores the plaintext on
+// cfg for injection into the backend. Best-effort: on failure the session runs
+// without minted credentials (legacy behavior — enforcement is token-presence
+// keyed, so a session with no stored hash fails open).
+func (m *Manager) mintSessionCredentials(ctx context.Context, sessionID string, cfg *SessionConfig) {
+	if m.db == nil || cfg == nil {
+		return
+	}
+	mcpToken, mcpHash, err := sessiontoken.NewMCPToken(sessionID)
+	if err != nil {
+		log.Printf("[session] mint MCP token failed for %s: %v", sessionID, err)
+		return
+	}
+	hookToken, hookHash, err := sessiontoken.NewHookToken()
+	if err != nil {
+		log.Printf("[session] mint hook token failed for %s: %v", sessionID, err)
+		return
+	}
+	if err := m.db.UpdateSessionTokenHashes(ctx, sessionID, mcpHash, hookHash); err != nil {
+		log.Printf("[session] persist token hashes failed for %s: %v", sessionID, err)
+		return
+	}
+	cfg.MCPToken = mcpToken
+	cfg.HookToken = hookToken
+}
+
+// SessionTokenHashes returns the stored MCP and hook token hex digests for a
+// session (empty when unset). It is the read side of per-session credential
+// verification used by the hook ingestion path.
+func (m *Manager) SessionTokenHashes(ctx context.Context, sessionID string) (mcpTokenHash, hookTokenHash string, err error) {
+	if m.db == nil {
+		return "", "", fmt.Errorf("session store unavailable")
+	}
+	return m.db.GetSessionTokenHashes(ctx, sessionID)
 }
 
 // writeToRunnerLocked writes to the session's PTY. The caller MUST hold
@@ -1543,7 +1589,9 @@ func (m *Manager) checkForNotificationTriggers(sessionID string, data []byte) {
 // buildMCPConfigJSON builds a JSON string for the --mcp-config CLI flag.
 // It includes user-configured MCP servers from the DB plus OpenPoet's own MCP server.
 // OpenPoet's MCP server is only included if the effective tool policy allows at least one tool.
-func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Project, sessionID string) (string, error) {
+// mcpToken, when non-empty, is passed to the injected mcp-serve subprocess so
+// its API calls carry verified session identity.
+func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Project, sessionID, mcpToken string) (string, error) {
 	mcpServers := make(map[string]interface{})
 	m.mu.RLock()
 	decrypt := m.secretDecrypt
@@ -1617,9 +1665,13 @@ func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Proj
 	}
 
 	if shouldInjectOpenPoet && m.execPath != "" {
+		args := []string{"mcp-serve", "--session-id", sessionID, "--api-url", "http://" + m.serverAddr}
+		if mcpToken != "" {
+			args = append(args, "--session-token", mcpToken)
+		}
 		mcpServers["openpoet"] = map[string]interface{}{
 			"command": m.execPath,
-			"args":    []string{"mcp-serve", "--session-id", sessionID, "--api-url", "http://" + m.serverAddr},
+			"args":    args,
 		}
 	}
 
@@ -1759,8 +1811,11 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
 
+	// Mint per-session credentials and persist their digests before wiring in.
+	m.mintSessionCredentials(ctx, sessionID, cfg)
+
 	// Build MCP config
-	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID)
+	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID, cfg.MCPToken)
 	if configErr != nil {
 		_ = m.db.EndSession(ctx, sessionID, "error")
 		return nil, fmt.Errorf("build MCP configuration: %w", configErr)

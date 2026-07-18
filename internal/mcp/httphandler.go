@@ -12,10 +12,28 @@ import (
 	"net"
 	"net/http"
 	"openpoet/internal/database"
+	"openpoet/internal/sessiontoken"
 	"strings"
 	"sync"
 	"time"
 )
+
+// clientForRequest builds the downstream API client for an /mcp request. When
+// the caller presents an opst1_ session bearer, the client carries it (so REST
+// calls are attributed to the verified session) and the embedded session id
+// becomes the authoritative identity — no longer the spoofable query param.
+func (h *HTTPHandler) clientForRequest(r *http.Request) (client *APIClient, sessionID string) {
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		bearer := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		if sessiontoken.IsMCPToken(bearer) {
+			if sid, ok := sessiontoken.SessionIDFromMCPToken(bearer); ok {
+				return NewAPIClientWithToken(h.apiURL, bearer), sid
+			}
+		}
+	}
+	return NewAPIClient(h.apiURL), ""
+}
 
 // HTTPHandler serves the MCP Streamable HTTP transport at /mcp.
 type HTTPHandler struct {
@@ -100,12 +118,16 @@ func (h *HTTPHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 		// Create new session
 		sessID := generateSessionID()
 		policy := h.getPolicy()
-		client := NewAPIClient(h.apiURL)
+		client, tokenSessionID := h.clientForRequest(r)
 
 		// If session_id is provided via query param, this is a remote Claude Code
 		// session connecting through the reverse tunnel. Use "session" context so
-		// the correct tool policy (mcp_tool_policy_session) is applied.
+		// the correct tool policy (mcp_tool_policy_session) is applied. A verified
+		// opst1_ bearer supersedes the query param as the identity source.
 		openpoetSessionID := r.URL.Query().Get("session_id")
+		if tokenSessionID != "" {
+			openpoetSessionID = tokenSessionID
+		}
 		mcpContext := "http"
 		if openpoetSessionID != "" {
 			mcpContext = "session"
@@ -135,7 +157,11 @@ func (h *HTTPHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 
 	// For other methods, look up existing session or create ad-hoc handler
 	sessID := r.Header.Get("Mcp-Session-Id")
+	adHocClient, tokenSessionID := h.clientForRequest(r)
 	openpoetSessionID := r.URL.Query().Get("session_id")
+	if tokenSessionID != "" {
+		openpoetSessionID = tokenSessionID
+	}
 	mcpContext := "http"
 	if openpoetSessionID != "" {
 		mcpContext = "session"
@@ -161,11 +187,11 @@ func (h *HTTPHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if handler == nil {
-		// Session expired or unknown — recover session_id from query parameter
-		// (always present in the URL for remote Claude Code sessions via tunnel).
+		// Session expired or unknown — recover session_id from the verified
+		// bearer or the query parameter (present in the tunnel URL for remote
+		// Claude Code sessions).
 		policy := h.getPolicy()
-		client := NewAPIClient(h.apiURL)
-		handler = NewRequestHandler(client, openpoetSessionID, mcpContext, "", policy)
+		handler = NewRequestHandler(adHocClient, openpoetSessionID, mcpContext, "", policy)
 		if sessID != "" {
 			now := time.Now()
 			h.mu.Lock()

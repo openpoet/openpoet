@@ -1316,6 +1316,7 @@ func (cs *ConfigSyncer) syncCopilotBridgeScriptLocal(hooksDir string) error {
 
 HOOK_URL="${OPENPOET_HOOK_URL:-http://localhost:8080}"
 SESSION_ID="${OPENPOET_SESSION_ID}"
+HOOK_TOKEN="${OPENPOET_HOOK_TOKEN}"
 INPUT=$(cat)
 
 EVENT=""
@@ -1347,6 +1348,7 @@ case "$EVENT" in
             "${HOOK_URL}/api/hooks/permission" \
             -H "Content-Type: application/json" \
             -H "X-Session-ID: ${SESSION_ID}" \
+            -H "X-Hook-Token: ${HOOK_TOKEN}" \
             -H "X-Backend: copilot" \
             -d "$INPUT" 2>/dev/null)
         if [ $? -eq 0 ] && [ -n "$RESPONSE" ]; then
@@ -1357,6 +1359,7 @@ case "$EVENT" in
         curl -s -X POST "${HOOK_URL}/api/hooks/event" \
             -H "Content-Type: application/json" \
             -H "X-Session-ID: ${SESSION_ID}" \
+            -H "X-Hook-Token: ${HOOK_TOKEN}" \
             -H "X-Backend: copilot" \
             -d "$INPUT" > /dev/null 2>&1 &
         ;;
@@ -2022,6 +2025,7 @@ function post(path, body) {
     headers: {
       "Content-Type": "application/json",
       "X-Session-ID": sessionID,
+      "X-Hook-Token": process.env.OPENPOET_HOOK_TOKEN || "",
       "X-Backend": "opencode",
     },
     body: JSON.stringify(body || {}),
@@ -2342,6 +2346,7 @@ func (cs *ConfigSyncer) syncBridgeScriptLocal(hooksDir string) error {
 
 HOOK_URL="${OPENPOET_HOOK_URL:-http://localhost:8080}"
 SESSION_ID="${OPENPOET_SESSION_ID}"
+HOOK_TOKEN="${OPENPOET_HOOK_TOKEN}"
 INPUT=$(cat)
 
 EVENT=""
@@ -2362,6 +2367,7 @@ case "$EVENT" in
             "${HOOK_URL}/api/hooks/permission" \
             -H "Content-Type: application/json" \
             -H "X-Session-ID: ${SESSION_ID}" \
+            -H "X-Hook-Token: ${HOOK_TOKEN}" \
             -d "$INPUT" 2>/dev/null)
         if [ $? -eq 0 ] && [ -n "$RESPONSE" ]; then
             echo "$RESPONSE"
@@ -2371,6 +2377,7 @@ case "$EVENT" in
         curl -s -X POST "${HOOK_URL}/api/hooks/event" \
             -H "Content-Type: application/json" \
             -H "X-Session-ID: ${SESSION_ID}" \
+            -H "X-Hook-Token: ${HOOK_TOKEN}" \
             -d "$INPUT" > /dev/null 2>&1 &
         ;;
 esac
@@ -2389,6 +2396,7 @@ func (cs *ConfigSyncer) syncBridgeScriptRemote(sshClient *ssh.Client, sftpClient
 	bridgeScript := `#!/bin/bash
 HOOK_URL="${OPENPOET_HOOK_URL:-http://localhost:8080}"
 SESSION_ID="${OPENPOET_SESSION_ID}"
+HOOK_TOKEN="${OPENPOET_HOOK_TOKEN}"
 INPUT=$(cat)
 
 EVENT=""
@@ -2409,6 +2417,7 @@ case "$EVENT" in
             "${HOOK_URL}/api/hooks/permission" \
             -H "Content-Type: application/json" \
             -H "X-Session-ID: ${SESSION_ID}" \
+            -H "X-Hook-Token: ${HOOK_TOKEN}" \
             -d "$INPUT" 2>/dev/null)
         if [ $? -eq 0 ] && [ -n "$RESPONSE" ]; then
             echo "$RESPONSE"
@@ -2418,6 +2427,7 @@ case "$EVENT" in
         curl -s -X POST "${HOOK_URL}/api/hooks/event" \
             -H "Content-Type: application/json" \
             -H "X-Session-ID: ${SESSION_ID}" \
+            -H "X-Hook-Token: ${HOOK_TOKEN}" \
             -d "$INPUT" > /dev/null 2>&1 &
         ;;
 esac
