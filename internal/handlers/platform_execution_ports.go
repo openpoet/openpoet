@@ -17,6 +17,7 @@ import (
 	"openpoet/internal/database"
 	"openpoet/internal/files"
 	"openpoet/internal/llm"
+	"openpoet/internal/session"
 )
 
 var (
@@ -40,9 +41,6 @@ func (p platformSessionEnvironmentProvider) SessionEnvironment(_ context.Context
 	_ = json.Unmarshal([]byte(project.BackendConfig), &projectConfig)
 	projectConfig.Provider = strings.ToLower(strings.TrimSpace(projectConfig.Provider))
 	if projectConfig.Provider == "openai" || projectConfig.Provider == "openai_oauth" {
-		if project.Type != "local" {
-			return nil, errors.New("OpenAI OAuth for Claude Code currently supports local projects only; remote projects require a separate remote credential")
-		}
 		if projectConfig.ProviderConfigID <= 0 {
 			return nil, errors.New("OpenAI OAuth profile is required for this Claude Code project")
 		}
@@ -64,7 +62,7 @@ func (p platformSessionEnvironmentProvider) SessionEnvironment(_ context.Context
 		if err != nil {
 			return nil, err
 		}
-		return openAIClaudeEnvironment(baseURL, model, projectConfig.SmallModel), nil
+		return openAIClaudeEnvironment(baseURL, model, projectConfig.SmallModel, project.Type == "remote"), nil
 	}
 	if projectConfig.Provider == "anthropic" {
 		return result, nil
@@ -85,7 +83,7 @@ func (p platformSessionEnvironmentProvider) SessionEnvironment(_ context.Context
 		if strings.TrimSpace(config.Model) == "" {
 			return nil, errors.New("an OpenAI model is required for the Claude Code session profile")
 		}
-		return openAIClaudeEnvironment(baseURL, config.Model, ""), nil
+		return openAIClaudeEnvironment(baseURL, config.Model, "", project.Type == "remote"), nil
 	case "ollama", "ollama-sdk":
 		baseURL := strings.TrimSpace(config.BaseURL)
 		if baseURL == "" {
@@ -113,13 +111,13 @@ func (p platformSessionEnvironmentProvider) SessionEnvironment(_ context.Context
 	return result, nil
 }
 
-func openAIClaudeEnvironment(baseURL, model, smallModel string) map[string]string {
+func openAIClaudeEnvironment(baseURL, model, smallModel string, remote bool) map[string]string {
 	model = strings.TrimSpace(model)
 	smallModel = strings.TrimSpace(smallModel)
 	if smallModel == "" {
 		smallModel = model
 	}
-	return map[string]string{
+	env := map[string]string{
 		"ANTHROPIC_BASE_URL":                        strings.TrimRight(baseURL, "/"),
 		"ANTHROPIC_API_KEY":                         "",
 		"ANTHROPIC_AUTH_TOKEN":                      "unused",
@@ -137,6 +135,10 @@ func openAIClaudeEnvironment(baseURL, model, smallModel string) map[string]strin
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":  "1",
 		"CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
 	}
+	if remote {
+		env[session.RemoteProviderTunnelEnv] = "1"
+	}
+	return env
 }
 
 type platformSessionNameStore struct{ db *database.DB }

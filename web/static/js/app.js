@@ -5930,7 +5930,7 @@ class OpenPoet {
                             placeholder="Defaults to the main model">
                     </div>
                     <div class="form-group hidden" id="claude-openai-local-note">
-                        <small style="color:var(--color-text-secondary)">OpenAI OAuth is isolated from Codex and currently available for local projects only.</small>
+                        <small style="color:var(--color-text-secondary)">For remote projects, OpenPoet uses a session-scoped SSH tunnel; the OAuth credential stays on the OpenPoet host.</small>
                     </div>
                 </div>
             </div>`;
@@ -6327,11 +6327,7 @@ class OpenPoet {
 		const form = document.getElementById('project-form');
 		if (!form) return;
 		const isClaude = form.querySelector('[name="backend"]')?.value === 'claude_code';
-		const remote = form.querySelector('[name="type"]')?.value === 'remote';
 		const providerSelect = form.querySelector('[name="claude_provider"]');
-		const openAIOption = providerSelect?.querySelector('option[value="openai_oauth"]');
-		if (openAIOption) openAIOption.disabled = remote;
-		if (remote && providerSelect?.value === 'openai_oauth') providerSelect.value = 'anthropic';
 		const isOpenAI = isClaude && providerSelect?.value === 'openai_oauth';
 		for (const id of ['claude-openai-profile-group', 'claude-openai-model-group', 'claude-openai-small-model-group', 'claude-openai-local-note']) {
 			document.getElementById(id)?.classList.toggle('hidden', !isOpenAI);
@@ -6443,10 +6439,6 @@ class OpenPoet {
         const projectType = formData.get('type') || 'local';
         const backend = formData.get('backend') || 'claude_code';
 		if (backend === 'claude_code' && formData.get('claude_provider') === 'openai_oauth') {
-			if ((formData.get('type') || 'local') !== 'local') {
-				this._showFieldError('claude_provider', 'OpenAI OAuth currently supports local projects only');
-				return;
-			}
 			if (!parseInt(formData.get('claude_openai_profile_id'), 10)) {
 				this._showFieldError('claude_openai_profile_id', 'Select an OpenAI OAuth profile');
 				return;
