@@ -78,6 +78,10 @@ type Session struct {
 	RequestedModel    string        `db:"requested_model" json:"requested_model"`
 	Effort            string        `db:"effort" json:"effort"`
 	Harness           string        `db:"harness" json:"harness"`
+	// SHA-256 hex digests of the per-session credentials (opst1_ MCP/REST
+	// bearer and hook bridge token). Never serialized; cleared on EndSession.
+	McpTokenHash  sql.NullString `db:"mcp_token_hash" json:"-"`
+	HookTokenHash sql.NullString `db:"hook_token_hash" json:"-"`
 }
 
 type CodexTranscriptEvent struct {

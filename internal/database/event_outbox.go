@@ -241,3 +241,23 @@ func (d *DB) PruneEventOutbox(ctx context.Context, occurredBefore time.Time, lim
 	}
 	return result.RowsAffected()
 }
+
+// DefaultEventOutboxConsumerStaleAfter is how long a consumer cursor may go
+// without an ack (updated_at) before eviction removes it from the prune floor.
+const DefaultEventOutboxConsumerStaleAfter = 7 * 24 * time.Hour
+
+// EvictStaleEventOutboxConsumers deletes consumer cursors whose updated_at is
+// older than the cutoff. A dead consumer must not pin the prune floor forever;
+// an evicted consumer that returns simply re-registers at cursor zero.
+func (d *DB) EvictStaleEventOutboxConsumers(ctx context.Context, staleBefore time.Time) (int64, error) {
+	if staleBefore.IsZero() {
+		return 0, errors.New("event outbox consumer staleness cutoff is required")
+	}
+	result, err := d.ExecContext(ctx, `
+		DELETE FROM event_outbox_consumers
+		WHERE updated_at < ?`, staleBefore.UTC())
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
