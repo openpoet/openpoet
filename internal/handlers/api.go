@@ -2781,10 +2781,10 @@ func (a *API) CreateProjectTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := a.taskService.Create(r.Context(), application.CreateProjectTaskCommand{
+	task, err := a.taskService.Create(platformUIContext(r), application.CreateProjectTaskCommand{
 		ProjectID: projectID, Title: input.Title, Description: input.Description,
 		Status: input.Status, Priority: input.Priority, DueDate: input.DueDate,
-		ParentID: input.ParentID, SortOrder: input.SortOrder, Actor: application.UserActor(),
+		ParentID: input.ParentID, SortOrder: input.SortOrder, Actor: requestActor(r),
 	})
 	if err != nil {
 		respondApplicationError(w, err)
