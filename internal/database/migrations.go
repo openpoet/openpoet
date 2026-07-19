@@ -79,6 +79,9 @@ var migrations = []Migration{
 	{Version: 61, Description: "sessions: add work_dir and workspace_id columns", Up: migrateV61},
 	{Version: 62, Description: "sessions: add parent_session_id and spawned_by lineage columns", Up: migrateV62},
 	{Version: 63, Description: "brain v1: coordinator_mode dial, ai_coordinator slot, Coordinator persona, coordinator_consults ledger", Up: migrateV63},
+	{Version: 64, Description: "conflict gate: per-project conflict_policy dial (observe|warn|gate|enforce)", Up: migrateV64},
+	{Version: 65, Description: "reach: tags coordination flag + settings_json; automation_clients project_filter scoping", Up: migrateV65},
+	{Version: 66, Description: "blackboard: shared CAS/TTL/fence key-value store (blackboard_entries)", Up: migrateV66},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1712,6 +1715,78 @@ func migrateV63(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV63 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV64 — the conflict-enforcement dial, SEPARATE from coordinator_mode
+// (V63, the brain autonomy dial). This governs the synchronous PreToolUse gate:
+// observe/warn never block; gate denies contested write-class tool calls;
+// enforce additionally pauses the deterministic loser. Default 'observe' so the
+// gate is strictly opt-in per project — it can never block a project that did
+// not choose it.
+func migrateV64(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE projects ADD COLUMN conflict_policy TEXT NOT NULL DEFAULT 'observe'
+			CHECK(conflict_policy IN ('observe', 'warn', 'gate', 'enforce'))`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV64 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV65 — cross-project reach. A coordination GROUP is just a tag with
+// coordination=1 (membership stays project_tags), matching the ai_agents
+// project_filter {project_ids, tag_ids} convention — no second grouping
+// vocabulary. Automation clients gain an optional project_filter (same JSON
+// shape) so "coordinator for group X" is a provisioning decision enforced
+// centrally in DispatchPlatformCapability, not application logic.
+func migrateV65(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE tags ADD COLUMN coordination INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE tags ADD COLUMN settings_json TEXT
+			CHECK(settings_json IS NULL OR json_valid(settings_json))`,
+		`ALTER TABLE automation_clients ADD COLUMN project_filter TEXT
+			CHECK(project_filter IS NULL OR json_valid(project_filter))`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV65 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV66 — the blackboard: shared keyed memory + a lease/fence primitive in
+// one table. Optimistic CAS on `version` (work_runs precedent), optional TTL via
+// `expires_at`, and fencing = CAS on a lease key's version (a stale holder's
+// fenced mutation fails closed). Scope is (scope_type, scope_id) so a global,
+// per-group, or per-project board share one table. Written only through the
+// blackboard.put capability under the single SQLite conn.
+func migrateV66(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS blackboard_entries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			scope_type TEXT NOT NULL CHECK(scope_type IN ('global','group','project')),
+			scope_id INTEGER NOT NULL DEFAULT 0,
+			key TEXT NOT NULL,
+			value_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(value_json)),
+			version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+			updated_by_actor TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			expires_at TIMESTAMP NULL,
+			UNIQUE(scope_type, scope_id, key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_blackboard_scope ON blackboard_entries(scope_type, scope_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV66 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil
