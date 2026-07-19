@@ -200,3 +200,91 @@ func (d *DB) SumTokensForSessions(ctx context.Context, sessionIDs []string) (int
 	err = d.Reader().GetContext(ctx, &total, d.Rebind(query), args...)
 	return total, err
 }
+
+// Mission grants (Phase 7.5) — see migrateV73.
+
+type MissionGrant struct {
+	ID            int64     `db:"id" json:"id"`
+	MissionID     int64     `db:"mission_id" json:"mission_id"`
+	Capability    string    `db:"capability" json:"capability"`
+	UsesRemaining int       `db:"uses_remaining" json:"uses_remaining"`
+	ExpiresAt     time.Time `db:"expires_at" json:"expires_at"`
+	GrantedBy     string    `db:"granted_by" json:"granted_by"`
+	CreatedAt     time.Time `db:"created_at" json:"created_at"`
+}
+
+var (
+	// ErrMissionGrantRequired: no live grant exists at all for the capability.
+	ErrMissionGrantRequired = errors.New("no mission grant for this capability — ask the user to pre-grant it for the mission")
+	// ErrMissionGrantExhausted: a grant exists but its uses are spent.
+	ErrMissionGrantExhausted = errors.New("the mission grant's uses are exhausted — ask the user for more")
+)
+
+// CreateMissionGrant issues a multi-use grant.
+func (d *DB) CreateMissionGrant(ctx context.Context, grant *MissionGrant) error {
+	res, err := d.ExecContext(ctx, `
+		INSERT INTO mission_grants (mission_id, capability, uses_remaining, expires_at, granted_by)
+		VALUES (?, ?, ?, ?, ?)`,
+		grant.MissionID, grant.Capability, grant.UsesRemaining, grant.ExpiresAt.UTC(), grant.GrantedBy)
+	if err != nil {
+		return err
+	}
+	grant.ID, _ = res.LastInsertId()
+	return nil
+}
+
+// PeekMissionGrant reports whether a live (unexpired) grant exists and whether
+// it still has uses — WITHOUT consuming. Distinguishes "never granted" from
+// "granted but spent" so the coordinator can ask the right question.
+func (d *DB) PeekMissionGrant(ctx context.Context, missionID int64, capability string) error {
+	var total, live int
+	if err := d.Reader().GetContext(ctx, &total, `
+		SELECT COUNT(*) FROM mission_grants
+		WHERE mission_id = ? AND capability = ? AND expires_at > CURRENT_TIMESTAMP`,
+		missionID, capability); err != nil {
+		return err
+	}
+	if total == 0 {
+		return ErrMissionGrantRequired
+	}
+	if err := d.Reader().GetContext(ctx, &live, `
+		SELECT COUNT(*) FROM mission_grants
+		WHERE mission_id = ? AND capability = ? AND expires_at > CURRENT_TIMESTAMP AND uses_remaining > 0`,
+		missionID, capability); err != nil {
+		return err
+	}
+	if live == 0 {
+		return ErrMissionGrantExhausted
+	}
+	return nil
+}
+
+// ConsumeMissionGrantUse atomically spends one use of the oldest live grant
+// and returns its id so a non-effect (conflict/failed dispatch) can refund.
+func (d *DB) ConsumeMissionGrantUse(ctx context.Context, missionID int64, capability string) (int64, error) {
+	var grantID int64
+	err := d.GetContext(ctx, &grantID, `
+		UPDATE mission_grants SET uses_remaining = uses_remaining - 1
+		WHERE id = (
+			SELECT id FROM mission_grants
+			WHERE mission_id = ? AND capability = ? AND expires_at > CURRENT_TIMESTAMP AND uses_remaining > 0
+			ORDER BY id LIMIT 1
+		)
+		RETURNING id`, missionID, capability)
+	if errors.Is(err, sql.ErrNoRows) {
+		peekErr := d.PeekMissionGrant(ctx, missionID, capability)
+		if peekErr == nil {
+			peekErr = ErrMissionGrantExhausted
+		}
+		return 0, peekErr
+	}
+	return grantID, err
+}
+
+// RefundMissionGrantUse returns a use spent on an action that had no effect
+// (merge conflict, dispatch failure) — a conflict must cost nothing.
+func (d *DB) RefundMissionGrantUse(ctx context.Context, grantID int64) error {
+	_, err := d.ExecContext(ctx, `
+		UPDATE mission_grants SET uses_remaining = uses_remaining + 1 WHERE id = ?`, grantID)
+	return err
+}

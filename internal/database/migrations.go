@@ -88,6 +88,7 @@ var migrations = []Migration{
 	{Version: 70, Description: "maestro: milestone report fields on structured_session_reports (next_step, needs_from_coordinator_json)", Up: migrateV70},
 	{Version: 71, Description: "maestro: missions + mission_workers (goal-driven orchestration registry; one active mission per coordination group)", Up: migrateV71},
 	{Version: 72, Description: "ssh hardening: ssh_known_hosts TOFU ledger (first contact records, later contacts verify, mismatch fails closed)", Up: migrateV72},
+	{Version: 73, Description: "maestro integration: mission_grants (multi-use, mission-scoped human authority for destructive capabilities like workspaces.merge)", Up: migrateV73},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1969,6 +1970,33 @@ func migrateV72(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV72 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV73 — Phase 7.5 (Maestro integration): mission-scoped multi-use
+// grants. The human pre-authorizes a capability (e.g. workspaces.merge) for a
+// mission with a bounded use count and TTL; the coordinator spends the uses
+// through the conversational merge gate instead of a per-command approval
+// token. "Pré-grant por missão" is the locked-in default; per-step negotiation
+// happens by granting fewer uses.
+func migrateV73(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS mission_grants (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			mission_id INTEGER NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+			capability TEXT NOT NULL CHECK(length(capability) BETWEEN 1 AND 200),
+			uses_remaining INTEGER NOT NULL CHECK(uses_remaining >= 0),
+			expires_at TIMESTAMP NOT NULL,
+			granted_by TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_mission_grants_mission ON mission_grants(mission_id, capability)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV73 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil
