@@ -1643,7 +1643,7 @@ func migrateV60(tx *sqlx.Tx) error {
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_project_name_active ON workspaces(project_id, name) WHERE status != 'removed'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_project_name_active ON workspaces(project_id, name) WHERE status NOT IN ('removed', 'failed')`,
 		`CREATE INDEX IF NOT EXISTS idx_workspaces_project_status ON workspaces(project_id, status)`,
 		`CREATE INDEX IF NOT EXISTS idx_workspaces_lease ON workspaces(leased_by_session_id)`,
 	}

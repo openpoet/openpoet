@@ -118,7 +118,11 @@ type SessionCreationCollaborators struct {
 // Implemented by *WorkspaceService.
 type SessionWorkspaceProvider interface {
 	ResolveForSession(ctx context.Context, project *database.Project, workspaceID string) (*database.Workspace, error)
-	Lease(ctx context.Context, workspaceID, sessionID string) error
+	Reserve(ctx context.Context, workspaceID string) (string, error)
+	Bind(ctx context.Context, workspaceID, token, sessionID string) error
+	ReleaseReservation(ctx context.Context, workspaceID, token string) error
+	ReLease(ctx context.Context, workspaceID, sessionID string) error
+	ReleaseForSession(ctx context.Context, sessionID string) error
 }
 
 type SessionChange struct {
@@ -248,6 +252,7 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 	// flow against a shallow Project copy whose Path is the lane dir — the one
 	// string every subsystem (sync, runner cwd, transcript encoding) keys off.
 	var workspace *database.Workspace
+	reservationToken := ""
 	if workspaceID := strings.TrimSpace(command.WorkspaceID); workspaceID != "" {
 		if s.creation.Workspaces == nil {
 			return nil, validationError("workspace_unsupported", "Workspace sessions are not available")
@@ -256,6 +261,17 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 		if err != nil {
 			return nil, err
 		}
+		// Atomic reservation BEFORE anything slow: two concurrent creates for
+		// the same lane race on this CAS, never on runner startup.
+		reservationToken, err = s.creation.Workspaces.Reserve(ctx, workspace.ID)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if reservationToken != "" {
+				_ = s.creation.Workspaces.ReleaseReservation(ctx, workspace.ID, reservationToken)
+			}
+		}()
 		laneProject := *project
 		laneProject.Path = workspace.Path
 		project = &laneProject
@@ -356,8 +372,10 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 		}
 	}
 	if workspace != nil {
-		if err := s.creation.Workspaces.Lease(ctx, workspace.ID, created.ID); err != nil {
-			log.Printf("[Sessions] workspace lease failed for %s → %s: %v", workspace.ID, created.ID, err)
+		if err := s.creation.Workspaces.Bind(ctx, workspace.ID, reservationToken, created.ID); err != nil {
+			log.Printf("[Sessions] workspace lease bind failed for %s → %s: %v", workspace.ID, created.ID, err)
+		} else {
+			reservationToken = "" // consumed — the deferred release must not fire
 		}
 	}
 	s.publish(ctx, SessionChange{Action: "created", Session: created, ID: created.ID, Actor: command.Authorization.Actor})
@@ -458,6 +476,14 @@ func (s *SessionService) Reopen(ctx context.Context, command ReopenSessionComman
 		if _, statErr := os.Stat(session.WorkDir); statErr != nil {
 			return nil, conflictError("workspace_gone", "Session workspace directory no longer exists on disk")
 		}
+		// Re-take the lease BEFORE restarting the runner: a reopened session
+		// occupies its lane again, or the lane's remove/double-book guards
+		// are blind to it (review finding). Fails if another session holds it.
+		if session.WorkspaceID.Valid && session.WorkspaceID.String != "" && s.creation.Workspaces != nil {
+			if err := s.creation.Workspaces.ReLease(ctx, session.WorkspaceID.String, session.ID); err != nil {
+				return nil, err
+			}
+		}
 		laneProject := *project
 		laneProject.Path = session.WorkDir
 		project = &laneProject
@@ -485,6 +511,11 @@ func (s *SessionService) Reopen(ctx context.Context, command ReopenSessionComman
 		return nil, validationError("session_decryptor_unavailable", "Remote session decryptor is unavailable")
 	}
 	if err := s.manager.ReopenSession(ctx, session, project, environment, s.decrypt); err != nil {
+		if laneReopen && session.WorkspaceID.Valid && s.creation.Workspaces != nil {
+			// Runner never started: give the lease back so the lane isn't
+			// stranded 'leased' by a stopped session.
+			_ = s.creation.Workspaces.ReleaseForSession(ctx, session.ID)
+		}
 		return nil, err
 	}
 	stored, err := s.store.GetSession(ctx, session.ID)

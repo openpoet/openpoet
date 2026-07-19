@@ -1698,6 +1698,7 @@ func (a *API) AutoRestoreSession(ctx context.Context, sess *database.Session) er
 	project, err := a.db.GetProject(ctx, sess.ProjectID)
 	if err != nil {
 		a.db.EndSession(ctx, sessionID, "stopped")
+		_ = a.db.ReleaseWorkspaceLeaseBySession(ctx, sessionID)
 		return fmt.Errorf("project not found (may have been deleted): %w", err)
 	}
 
@@ -1705,16 +1706,26 @@ func (a *API) AutoRestoreSession(ctx context.Context, sess *database.Session) er
 	backend := session.GetBackend(sess.Backend)
 	if !backend.SupportsResume() {
 		a.db.EndSession(ctx, sessionID, "stopped")
+		_ = a.db.ReleaseWorkspaceLeaseBySession(ctx, sessionID)
 		return fmt.Errorf("backend %q does not support resume", sess.Backend)
 	}
 
 	// Workspace sessions restore back into their lane — never silently into
-	// the main checkout. A vanished lane fails the restore loudly.
+	// the main checkout. A vanished lane fails the restore loudly, and every
+	// failure path releases the lease so the lane can't stay stranded
+	// 'leased' by a session that will never run again.
 	laneRestore := false
 	if sess.WorkDir != "" && sess.WorkDir != project.Path {
 		if _, statErr := os.Stat(sess.WorkDir); statErr != nil {
 			a.db.EndSession(ctx, sessionID, "stopped")
+			_ = a.db.ReleaseWorkspaceLeaseBySession(ctx, sessionID)
 			return fmt.Errorf("workspace directory gone, not restoring session %s: %w", sessionID, statErr)
+		}
+		if sess.WorkspaceID.Valid && sess.WorkspaceID.String != "" {
+			if leaseErr := a.db.LeaseWorkspaceForSession(ctx, sess.WorkspaceID.String, sessionID); leaseErr != nil {
+				a.db.EndSession(ctx, sessionID, "stopped")
+				return fmt.Errorf("workspace lease unavailable, not restoring session %s: %w", sessionID, leaseErr)
+			}
 		}
 		laneProject := *project
 		laneProject.Path = sess.WorkDir
@@ -1772,6 +1783,9 @@ func (a *API) AutoRestoreSession(ctx context.Context, sess *database.Session) er
 
 	// Reopen the session
 	if err := a.sessionMgr.ReopenSession(ctx, sess, project, envVars, a.encryptor.Decrypt); err != nil {
+		// The runner never came back: free any lane lease this session held
+		// so the workspace isn't stranded 'leased' by a dead session.
+		_ = a.db.ReleaseWorkspaceLeaseBySession(ctx, sessionID)
 		return fmt.Errorf("failed to restore session %s: %w", sessionID, err)
 	}
 
