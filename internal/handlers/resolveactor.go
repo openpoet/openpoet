@@ -71,7 +71,7 @@ func resolveActorExemptPath(path string) bool {
 	// (/respond, /pending, /task-notification) are NOT exempted — they are UI
 	// mutations and must present a UI/owner credential like any other, so a
 	// session cannot answer its own permission prompt through them.
-	case "/api/hooks/event", "/api/hooks/permission":
+	case "/api/hooks/event", "/api/hooks/permission", "/api/hooks/pretooluse":
 		return true
 	}
 	return false
