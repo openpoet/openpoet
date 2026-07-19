@@ -101,6 +101,7 @@ func (i Incident) toRow() database.CoordinatorIncident {
 // conflict (R1, critical) — shared config contention must not read as a
 // critical code collision.
 func (c *Coordinator) noteWriteClaim(si *sessionInfo, rel, tool string, ts time.Time) {
+	rel = LogicalRel(rel) // lanes claim the logical project path (Phase 7.4)
 	key := claimKey{projectKey: si.projectKey, rel: rel}
 	set := c.claims[key]
 	if set == nil {

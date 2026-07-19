@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -470,6 +471,39 @@ func main() {
 
 	// Phase 7.4: TOFU host-key ledger for every SSH surface.
 	sshauth.SetKnownHostStore(db)
+
+	// Phase 7.4: remote transport drops get ONE reconnect attempt (backoff 5s)
+	// through the same auto-restore path a daemon restart uses, instead of
+	// killing the session (and its mission worker) on a network blip.
+	remoteRetryMu := sync.Mutex{}
+	remoteRetried := map[string]bool{}
+	sessionMgr.OnRemoteSessionDropped = func(sessionID string) bool {
+		remoteRetryMu.Lock()
+		if remoteRetried[sessionID] {
+			remoteRetryMu.Unlock()
+			return false // second drop: let it fail for real
+		}
+		remoteRetried[sessionID] = true
+		remoteRetryMu.Unlock()
+		go func() {
+			time.Sleep(5 * time.Second)
+			ctx := context.Background()
+			sess, err := db.GetSession(ctx, sessionID)
+			if err != nil || sess == nil {
+				return
+			}
+			if err := api.AutoRestoreSession(ctx, sess); err != nil {
+				log.Printf("[RemoteReconnect] session %s reconnect failed: %v", sessionID, err)
+				_ = db.EndSession(ctx, sessionID, "error")
+			} else {
+				log.Printf("[RemoteReconnect] session %s reconnected after transport drop", sessionID)
+				remoteRetryMu.Lock()
+				delete(remoteRetried, sessionID) // healthy again: future drops get a fresh shot
+				remoteRetryMu.Unlock()
+			}
+		}()
+		return true
+	}
 
 	// Wire AI evaluation callbacks into session manager
 	sessionMgr.OnSessionStart = func(sessionID string) {
