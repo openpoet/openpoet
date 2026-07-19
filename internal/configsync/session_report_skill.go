@@ -55,3 +55,50 @@ func EnsureSessionReportSkill(ctx context.Context, db *database.DB) error {
 	log.Printf("[configsync] registered built-in skill %q (worker milestone reports)", SessionReportSkillName)
 	return nil
 }
+
+// Phase 7.3: the coordinator-side briefing skill.
+
+const MissionCoordinatorSkillName = "mission-coordinator"
+
+const missionCoordinatorSkillContent = `You are (or are about to become) the COORDINATOR of an OpenPoet mission. Playbook:
+
+1. **Elect yourself**: call ` + "`openpoet_coordinator_elect`" + ` with the coordination
+   group (tag id). Keep the returned fence_version — every mutation needs it.
+   Renew before the TTL lapses; if a call returns coordinator_fence_stale,
+   re-elect and use the new fence.
+2. **Start the mission**: ` + "`openpoet_start_mission`" + ` with a goal stating what
+   done looks like. One active mission per group.
+3. **Decompose and spawn**: one worker session per project/front via
+   ` + "`openpoet_start_worker`" + ` (pass mission_id + role; use workspace_id/isolation
+   for parallel fronts in the same project; backend override for heterogeneous
+   workers; remote projects work exactly like local ones). Same-project fine
+   parallelism belongs to the worker's own native subagents — never spawn two
+   unisolated sessions into one tree.
+4. **Follow by reports, not transcripts**: wake on ` + "`openpoet_await_events`" + `
+   (session.turn_completed carries report_ref), read ` + "`openpoet_get_session_report`" + `
+   or ` + "`openpoet_get_mission`" + ` for the rolling roster. Drill into
+   read_session_history only to debug. Steer with ` + "`openpoet_send_to_worker`" + `.
+5. **QC is yours**: verify claims (build/test evidence in reports) before
+   integrating; documentation lands as OpenPoet Docs linked to the mission.
+6. **Close**: ` + "`openpoet_update_mission_status`" + ` completed/failed with a final
+   summary report of your own (openpoet_emit_session_report, finalize:true).`
+
+// EnsureMissionCoordinatorSkill registers the coordinator briefing skill once
+// (idempotent, never overwrites a user-edited skill of the same name).
+func EnsureMissionCoordinatorSkill(ctx context.Context, db *database.DB) error {
+	skills, err := db.ListSkills(ctx)
+	if err != nil {
+		return err
+	}
+	for _, skill := range skills {
+		if skill.Name == MissionCoordinatorSkillName {
+			return nil
+		}
+	}
+	skill := &database.Skill{Name: MissionCoordinatorSkillName, Content: missionCoordinatorSkillContent, Enabled: true}
+	if err := db.CreateSkillWithVersion(ctx, skill); err != nil {
+		return err
+	}
+	log.Printf("[configsync] registered built-in skill %q (mission coordinator briefing)", MissionCoordinatorSkillName)
+	return nil
+}

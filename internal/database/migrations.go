@@ -86,6 +86,7 @@ var migrations = []Migration{
 	{Version: 68, Description: "environments: resource registry + port allocator (environment_resources) with reserved 8080/8081/8090", Up: migrateV68},
 	{Version: 69, Description: "maestro: temp_documents mission_id link (docs land attached to the mission that produced them)", Up: migrateV69},
 	{Version: 70, Description: "maestro: milestone report fields on structured_session_reports (next_step, needs_from_coordinator_json)", Up: migrateV70},
+	{Version: 71, Description: "maestro: missions + mission_workers (goal-driven orchestration registry; one active mission per coordination group)", Up: migrateV71},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1894,6 +1895,55 @@ func migrateV70(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV70 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV71 — Phase 7.3 (Maestro): the durable mission registry. A mission is a
+// goal bound to a coordination group (tag with coordination=1) and its elected
+// coordinator session; mission_workers is the rolling roster (one row per
+// worker session: project, backend, workspace lane, role, last dense report).
+// Everything the central mission panel (7.6) renders lives here — not in any
+// session's context window.
+func migrateV71(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS missions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			goal TEXT NOT NULL CHECK(length(goal) BETWEEN 1 AND 4000),
+			group_tag_id INTEGER NOT NULL,
+			coordinator_session_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'active'
+				CHECK(status IN ('active','paused','completed','failed','archived')),
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			completed_at TIMESTAMP NULL
+		)`,
+		// One ACTIVE mission per coordination group — mirrors "one coordinator
+		// lease per group": deterministic ownership, no ambient mission soup.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_missions_one_active_per_group
+			ON missions(group_tag_id) WHERE status = 'active'`,
+		`CREATE TABLE IF NOT EXISTS mission_workers (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			mission_id INTEGER NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			backend TEXT NOT NULL DEFAULT '',
+			session_id TEXT NOT NULL DEFAULT '',
+			workspace_id TEXT NOT NULL DEFAULT '',
+			role TEXT NOT NULL DEFAULT 'worker',
+			status TEXT NOT NULL DEFAULT 'spawned'
+				CHECK(status IN ('spawned','running','done','failed','stopped')),
+			last_report_ref TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(mission_id, session_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_mission_workers_mission ON mission_workers(mission_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_mission_workers_session ON mission_workers(session_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV71 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil
