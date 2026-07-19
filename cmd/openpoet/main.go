@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 	"openpoet/internal/providerbridge"
 	"openpoet/internal/security"
 	"openpoet/internal/session"
+	"openpoet/internal/sshauth"
 	"openpoet/internal/tunnel"
 	"openpoet/internal/updater"
 	"openpoet/internal/voice"
@@ -465,6 +467,48 @@ func main() {
 	}
 	if err := configsync.EnsureMissionCoordinatorSkill(context.Background(), db); err != nil {
 		log.Printf("[Coordinator] ensure mission-coordinator skill: %v", err)
+	}
+
+	// Phase 7.4: TOFU host-key ledger for every SSH surface.
+	sshauth.SetKnownHostStore(db)
+
+	// Phase 7.4: remote transport drops get ONE reconnect attempt (backoff 5s)
+	// through the same auto-restore path a daemon restart uses, instead of
+	// killing the session (and its mission worker) on a network blip.
+	remoteRetryMu := sync.Mutex{}
+	remoteLastRetry := map[string]time.Time{}
+	sessionMgr.OnRemoteSessionDropped = func(sessionID string) bool {
+		remoteRetryMu.Lock()
+		// One reconnect attempt per 10-minute window per session: a flapping
+		// host gets bounded retries (not a restore↔drop hot loop), and a
+		// session whose retry failed regains eligibility after the window.
+		if last, seen := remoteLastRetry[sessionID]; seen && time.Since(last) < 10*time.Minute {
+			remoteRetryMu.Unlock()
+			return false
+		}
+		remoteLastRetry[sessionID] = time.Now()
+		remoteRetryMu.Unlock()
+		go func() {
+			time.Sleep(5 * time.Second)
+			ctx := context.Background()
+			sess, err := db.GetSession(ctx, sessionID)
+			if err != nil || sess == nil {
+				return
+			}
+			// The user may have stopped/discarded the session during the
+			// backoff — a deliberate stop must never be resurrected.
+			if sess.Status != "running" && sess.Status != "starting" {
+				log.Printf("[RemoteReconnect] session %s is %s — not reconnecting", sessionID, sess.Status)
+				return
+			}
+			if err := api.AutoRestoreSession(ctx, sess); err != nil {
+				log.Printf("[RemoteReconnect] session %s reconnect failed: %v", sessionID, err)
+				_ = db.EndSession(ctx, sessionID, "error")
+			} else {
+				log.Printf("[RemoteReconnect] session %s reconnected after transport drop", sessionID)
+			}
+		}()
+		return true
 	}
 
 	// Wire AI evaluation callbacks into session manager

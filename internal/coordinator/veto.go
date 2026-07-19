@@ -33,6 +33,7 @@ func (c *Coordinator) ConsultWrite(sessionID, tool string, toolInput map[string]
 		if !inProject {
 			continue
 		}
+		rel = LogicalRel(rel) // lanes share the logical conflict namespace
 		// .claude/** contention is the shared-config hazard (R5 warn), never a
 		// hard code-collision VETO — do not deny configsync-managed writes.
 		if IsClaudeDirPath(rel) {
@@ -81,6 +82,7 @@ func (c *Coordinator) ReleaseClaim(sessionID, tool string, toolInput map[string]
 		if !inProject {
 			continue
 		}
+		rel = LogicalRel(rel)
 		key := claimKey{projectKey: si.projectKey, rel: rel}
 		c.mu.Lock()
 		if set := c.claims[key]; set != nil {

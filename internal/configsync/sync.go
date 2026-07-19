@@ -2594,8 +2594,8 @@ func (cs *ConfigSyncer) buildSSHConfig(project *database.Project) (*ssh.ClientCo
 	return &ssh.ClientConfig{
 		User:            user,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         15 * time.Second,
+		HostKeyCallback: sshauth.HostKeyCallback(), // TOFU ledger (V72)
+		Timeout:         30 * time.Second,          // unified with the other SSH surfaces
 	}, nil
 }
 

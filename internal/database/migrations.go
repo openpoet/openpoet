@@ -87,6 +87,7 @@ var migrations = []Migration{
 	{Version: 69, Description: "maestro: temp_documents mission_id link (docs land attached to the mission that produced them)", Up: migrateV69},
 	{Version: 70, Description: "maestro: milestone report fields on structured_session_reports (next_step, needs_from_coordinator_json)", Up: migrateV70},
 	{Version: 71, Description: "maestro: missions + mission_workers (goal-driven orchestration registry; one active mission per coordination group)", Up: migrateV71},
+	{Version: 72, Description: "ssh hardening: ssh_known_hosts TOFU ledger (first contact records, later contacts verify, mismatch fails closed)", Up: migrateV72},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1944,6 +1945,30 @@ func migrateV71(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV71 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV72 — Phase 7.4 (SSH hardening): the trust-on-first-use host-key
+// ledger. Every SSH surface records the host key fingerprint on first contact
+// and fails CLOSED on later mismatch — replacing InsecureIgnoreHostKey on all
+// three dial paths (session runner, file manager, config syncer).
+func migrateV72(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS ssh_known_hosts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			host TEXT NOT NULL,
+			port INTEGER NOT NULL DEFAULT 22,
+			key_type TEXT NOT NULL DEFAULT '',
+			fingerprint_sha256 TEXT NOT NULL,
+			first_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(host, port, key_type)
+		)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV72 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil
