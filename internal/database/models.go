@@ -22,6 +22,7 @@ type Project struct {
 	DangerouslySkipPermissions  bool           `db:"dangerously_skip_permissions" json:"dangerously_skip_permissions"`
 	TaskAutoApproveVerification string         `db:"task_auto_approve_verification" json:"task_auto_approve_verification"` // 'inherit', 'enabled', or 'disabled'
 	CoordinatorMode             string         `db:"coordinator_mode" json:"coordinator_mode"`                             // 'off', 'observe', 'assist', or 'delegate'
+	ConflictPolicy              string         `db:"conflict_policy" json:"conflict_policy"`                               // 'observe', 'warn', 'gate', or 'enforce' — synchronous gate dial
 	Backend                     string         `db:"backend" json:"backend"`                                               // 'claude_code', 'copilot', 'acp', 'codex', or 'opencode'
 	BackendConfig               string         `db:"backend_config" json:"backend_config"`                                 // JSON blob for backend-specific settings
 	ConfigSyncedAt              sql.NullTime   `db:"config_synced_at" json:"config_synced_at,omitempty"`
@@ -43,15 +44,18 @@ type ProjectInput struct {
 	DangerouslySkipPermissions  bool   `json:"dangerously_skip_permissions"`
 	TaskAutoApproveVerification string `json:"task_auto_approve_verification,omitempty"`
 	CoordinatorMode             string `json:"coordinator_mode,omitempty"`
+	ConflictPolicy              string `json:"conflict_policy,omitempty"`
 	Backend                     string `json:"backend,omitempty"`
 	BackendConfig               string `json:"backend_config,omitempty"`
 }
 
 type Tag struct {
-	ID        int64     `db:"id" json:"id"`
-	Name      string    `db:"name" json:"name"`
-	Color     string    `db:"color" json:"color"`
-	CreatedAt time.Time `db:"created_at" json:"created_at"`
+	ID           int64          `db:"id" json:"id"`
+	Name         string         `db:"name" json:"name"`
+	Color        string         `db:"color" json:"color"`
+	Coordination int            `db:"coordination" json:"coordination"` // 1 = coordination group (see project_filter tag_ids)
+	SettingsJSON sql.NullString `db:"settings_json" json:"settings_json,omitempty"`
+	CreatedAt    time.Time      `db:"created_at" json:"created_at"`
 }
 
 type ProjectTag struct {

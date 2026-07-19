@@ -75,9 +75,10 @@ func (d *DB) migrate() error {
 func (d *DB) CreateProject(ctx context.Context, p *Project) error {
 	p.TaskAutoApproveVerification = normalizeTaskAutoApproveVerification(p.TaskAutoApproveVerification)
 	p.CoordinatorMode = normalizeCoordinatorMode(p.CoordinatorMode)
-	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv, tool_policy, skill_policy, backend, backend_config, task_auto_approve_verification, coordinator_mode)
-			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification, p.CoordinatorMode)
+	p.ConflictPolicy = normalizeConflictPolicy(p.ConflictPolicy)
+	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv, tool_policy, skill_policy, backend, backend_config, task_auto_approve_verification, coordinator_mode, conflict_policy)
+			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification, p.CoordinatorMode, p.ConflictPolicy)
 	if err != nil {
 		return err
 	}
@@ -118,8 +119,9 @@ func (d *DB) ListProjects(ctx context.Context) ([]Project, error) {
 func (d *DB) UpdateProject(ctx context.Context, p *Project) error {
 	p.TaskAutoApproveVerification = normalizeTaskAutoApproveVerification(p.TaskAutoApproveVerification)
 	p.CoordinatorMode = normalizeCoordinatorMode(p.CoordinatorMode)
-	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, tool_policy=?, skill_policy=?, dangerously_skip_permissions=?, backend=?, backend_config=?, task_auto_approve_verification=?, coordinator_mode=?, updated_at=? WHERE id=?`
-	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.DangerouslySkipPermissions, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification, p.CoordinatorMode, time.Now(), p.ID)
+	p.ConflictPolicy = normalizeConflictPolicy(p.ConflictPolicy)
+	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, tool_policy=?, skill_policy=?, dangerously_skip_permissions=?, backend=?, backend_config=?, task_auto_approve_verification=?, coordinator_mode=?, conflict_policy=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.DangerouslySkipPermissions, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification, p.CoordinatorMode, p.ConflictPolicy, time.Now(), p.ID)
 	return err
 }
 
@@ -138,6 +140,17 @@ func normalizeCoordinatorMode(value string) string {
 		return strings.TrimSpace(value)
 	default:
 		return "off"
+	}
+}
+
+// normalizeConflictPolicy defaults the synchronous-gate dial to 'observe' (the
+// safe, non-blocking default — the gate is strictly opt-in per project).
+func normalizeConflictPolicy(value string) string {
+	switch strings.TrimSpace(value) {
+	case "warn", "gate", "enforce":
+		return strings.TrimSpace(value)
+	default:
+		return "observe"
 	}
 }
 

@@ -20,6 +20,9 @@ type AutomationClient struct {
 	LastUsedAt  sql.NullTime `db:"last_used_at" json:"last_used_at,omitempty"`
 	CreatedAt   time.Time    `db:"created_at" json:"created_at"`
 	RotatedAt   sql.NullTime `db:"rotated_at" json:"rotated_at,omitempty"`
+	// ProjectFilter scopes the client to a set of projects/tags ({"project_ids":[],"tag_ids":[]}).
+	// NULL/empty = unrestricted (all projects). Enforced centrally in DispatchPlatformCapability.
+	ProjectFilter sql.NullString `db:"project_filter" json:"project_filter,omitempty"`
 }
 
 type AutomationCommand struct {
