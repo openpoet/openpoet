@@ -72,8 +72,9 @@ type CoordinatorStore interface {
 }
 
 type coordinatorAPI struct {
-	store CoordinatorStore
-	api   *commandAPI // reused for awaitEvents/waitForSession internals
+	store     CoordinatorStore
+	api       *commandAPI // reused for awaitEvents/waitForSession internals
+	predictor MergePredictor
 }
 
 type coordinatorSessionKey struct{}
@@ -105,7 +106,8 @@ func NewCoordinatorHandler(store CoordinatorStore, deps Dependencies) http.Handl
 		deps.ProjectScope, _ = store.(ProjectScopeStore)
 	}
 	c := &coordinatorAPI{
-		store: store,
+		store:     store,
+		predictor: deps.MergePredictor,
 		api: &commandAPI{
 			capabilities: deps.Capabilities, platform: deps.PlatformCapabilities,
 			events: deps.Events, waiter: deps.Waiter, sessions: deps.Sessions,
@@ -127,6 +129,8 @@ func NewCoordinatorHandler(store CoordinatorStore, deps Dependencies) http.Handl
 	router.Get("/missions/{id}", c.getMission)
 	router.Post("/missions/{id}/status", c.updateMissionStatus)
 	router.Post("/missions/workers/attach", c.attachWorker)
+	router.Get("/workspaces/{id}/merge_preview", c.predictMerge)
+	router.Post("/workspaces/{id}/merge", c.mergeWorkspace)
 	router.Get("/events/await", c.awaitEvents)
 	return router
 }

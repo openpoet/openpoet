@@ -1060,6 +1060,32 @@ func AllToolDefs() []ToolDef {
 			Context: ToolContextSession,
 		},
 		{
+			Name:        "predict_merge",
+			Description: "Forecast a workspace lane's merge WITHOUT touching the tree (git merge-tree): clean:true means guaranteed clean; otherwise conflict_files lists the files touched on both sides. Free read — negotiate integrations with facts.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"workspace_id": {Type: "string", Description: "Workspace (lane) id — must belong to the coordinated group"},
+				},
+				Required: []string{"workspace_id"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "merge_workspace",
+			Description: "Merge a workspace lane back into the main tree, spending one use of the mission's merge grant (pre-issued by the user). No grant → mission_grant_required: ask the user to grant workspaces.merge for the mission. A conflict aborts safely, lists the files, and costs nothing.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"workspace_id":  {Type: "string", Description: "Workspace (lane) id to merge"},
+					"mission_id":    {Type: "number", Description: "Mission whose grant authorizes the merge"},
+					"fence_version": {Type: "number", Description: "Current fence token"},
+				},
+				Required: []string{"workspace_id", "mission_id", "fence_version"},
+			},
+			Context: ToolContextSession,
+		},
+		{
 			Name:        "emit_session_report",
 			Description: "Emit THIS session's dense structured milestone report (condensed communication — the coordinator reads reports, not transcripts). Re-emitting the same turn_id updates the milestone; finalize:true closes it.",
 			InputSchema: ToolDefinitionInput{
