@@ -64,7 +64,10 @@ func EnsureCoordinatorClient(ctx context.Context, store coordinatorClientStore, 
 	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o755); err != nil {
 		return fmt.Errorf("preparing coordinator token dir: %w", err)
 	}
-	f, err := os.OpenFile(tokenPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	// We only reach here having just minted a NEW client (existing was nil), so
+	// any pre-existing token file is stale (its client is gone) — truncate and
+	// replace it rather than failing on O_EXCL.
+	f, err := os.OpenFile(tokenPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		// The client exists but we could not persist its token: disable it so a
 		// dangling, unreachable credential never lingers (CLI precedent).
