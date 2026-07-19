@@ -18,21 +18,47 @@ import (
 	"time"
 )
 
+// sessionTokenVerifier is satisfied by *database.DB and lets the MCP HTTP
+// transport verify an opst1_ bearer's digest before trusting the session id it
+// embeds — so the transport never adopts a forged identity even for policy
+// selection. Optional: without a store that implements it, verification is
+// skipped and the downstream REST resolver remains the sole authority.
+type sessionTokenVerifier interface {
+	GetSessionTokenHashes(ctx context.Context, id string) (mcpTokenHash, hookTokenHash string, err error)
+}
+
 // clientForRequest builds the downstream API client for an /mcp request. When
-// the caller presents an opst1_ session bearer, the client carries it (so REST
-// calls are attributed to the verified session) and the embedded session id
-// becomes the authoritative identity — no longer the spoofable query param.
+// the caller presents a VERIFIED opst1_ session bearer, the client carries it
+// (so REST calls are attributed to the verified session) and the embedded
+// session id becomes the authoritative identity — no longer the spoofable
+// query param. A bearer whose digest does not match is ignored.
 func (h *HTTPHandler) clientForRequest(r *http.Request) (client *APIClient, sessionID string) {
 	auth := r.Header.Get("Authorization")
 	if strings.HasPrefix(auth, "Bearer ") {
 		bearer := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
 		if sessiontoken.IsMCPToken(bearer) {
-			if sid, ok := sessiontoken.SessionIDFromMCPToken(bearer); ok {
+			if sid, ok := sessiontoken.SessionIDFromMCPToken(bearer); ok && h.bearerMatchesSession(r.Context(), sid, bearer) {
 				return NewAPIClientWithToken(h.apiURL, bearer), sid
 			}
 		}
 	}
 	return NewAPIClient(h.apiURL), ""
+}
+
+// bearerMatchesSession verifies the opst1_ bearer's digest against the stored
+// hash when a verifier store is available. Returns true (trust) when no
+// verifier is wired (tests), preserving prior behavior; the REST resolver still
+// re-verifies downstream in production.
+func (h *HTTPHandler) bearerMatchesSession(ctx context.Context, sessionID, bearer string) bool {
+	verifier, ok := h.store.(sessionTokenVerifier)
+	if !ok {
+		return true
+	}
+	mcpHash, _, err := verifier.GetSessionTokenHashes(ctx, sessionID)
+	if err != nil {
+		return false
+	}
+	return sessiontoken.EqualHash(bearer, mcpHash)
 }
 
 // HTTPHandler serves the MCP Streamable HTTP transport at /mcp.
@@ -179,7 +205,7 @@ func (h *HTTPHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if handler == nil && sessID != "" {
-		if restored := h.restoreSession(r.Context(), sessID, openpoetSessionID, mcpContext); restored != nil {
+		if restored := h.restoreSession(r.Context(), sessID, openpoetSessionID, mcpContext, adHocClient); restored != nil {
 			openpoetSessionID = restored.openpoetSessionID
 			mcpContext = restored.context
 			handler = restored.handler
@@ -308,7 +334,7 @@ func (h *HTTPHandler) cleanupLoop() {
 	}
 }
 
-func (h *HTTPHandler) restoreSession(ctx context.Context, sessID, fallbackOpenPoetSessionID, fallbackContext string) *httpSession {
+func (h *HTTPHandler) restoreSession(ctx context.Context, sessID, fallbackOpenPoetSessionID, fallbackContext string, requestClient *APIClient) *httpSession {
 	if h.store == nil {
 		return nil
 	}
@@ -325,7 +351,13 @@ func (h *HTTPHandler) restoreSession(ctx context.Context, sessID, fallbackOpenPo
 		mcpContext = fallbackContext
 	}
 	policy := h.getPolicy()
-	client := NewAPIClient(h.apiURL)
+	// Carry the current request's verified bearer (if any) into the restored
+	// handler so post-restart sessions keep their attributed identity; only
+	// fall back to a tokenless client when the request presented none.
+	client := requestClient
+	if client == nil {
+		client = NewAPIClient(h.apiURL)
+	}
 	restored := &httpSession{
 		id:                sessID,
 		openpoetSessionID: openpoetSessionID,

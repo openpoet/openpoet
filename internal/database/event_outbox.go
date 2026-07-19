@@ -146,10 +146,15 @@ func (d *DB) GetEventOutboxConsumerCursor(ctx context.Context, automationClientI
 	if automationClientID == "" || consumer == "" {
 		return nil, errors.New("automation_client_id and consumer are required")
 	}
+	// Register at zero on first sight; on every subsequent read, refresh
+	// updated_at so an actively-polling consumer that has nothing new to ack is
+	// still counted as live and is not wrongly evicted as stale.
 	if _, err := d.ExecContext(ctx, `
-		INSERT OR IGNORE INTO event_outbox_consumers
+		INSERT INTO event_outbox_consumers
 			(automation_client_id, consumer, cursor_sequence)
-		VALUES (?, ?, 0)`, automationClientID, consumer); err != nil {
+		VALUES (?, ?, 0)
+		ON CONFLICT(automation_client_id, consumer) DO UPDATE SET
+			updated_at = CURRENT_TIMESTAMP`, automationClientID, consumer); err != nil {
 		return nil, err
 	}
 	var cursor EventOutboxConsumerCursor

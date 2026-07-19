@@ -350,3 +350,43 @@ func TestAuthorizationRefFormat(t *testing.T) {
 		}
 	}
 }
+
+// TestApprovalBrokerDeniesSelfGrantUnlessScoped covers the Phase 0
+// deny_self_grant guard: a client with approvals:grant may grant to OTHERS but
+// not to ITSELF, unless it also holds approvals:self. Each successful grant runs
+// against its own DB/handler because the shared deterministic random reader
+// would otherwise mint two identical tokens and collide on token_hash.
+func TestApprovalBrokerDeniesSelfGrantUnlessScoped(t *testing.T) {
+	now := time.Date(2026, 7, 9, 18, 30, 0, 0, time.UTC)
+	body := func(target string) map[string]any {
+		return map[string]any{
+			"target_client_id": target, "capability": application.CapabilityTasksDelete,
+			"command_id": "cmd-self-1", "authorization_ref": "task:self:1",
+		}
+	}
+
+	// warden -> itself: forbidden with the dedicated error code (no persistence).
+	dbDeny := automationTestDB(t)
+	warden := provisionApprovalTestClient(t, dbDeny, "warden", ScopeApprovalsGrant, ScopeTasksWrite)
+	self := automationRequest(t, approvalTestHandler(t, dbDeny, &now), warden.Token, http.MethodPost, "/approvals", "", body(warden.Client.ID))
+	if self.Code != http.StatusForbidden || decodeAutomationErrorCode(t, self) != "approval_self_grant_forbidden" {
+		t.Fatalf("warden self-grant status=%d code=%s body=%s", self.Code, decodeAutomationErrorCode(t, self), self.Body.String())
+	}
+
+	// warden -> another client: allowed.
+	dbOther := automationTestDB(t)
+	warden2 := provisionApprovalTestClient(t, dbOther, "warden", ScopeApprovalsGrant, ScopeTasksWrite)
+	other := provisionApprovalTestClient(t, dbOther, "worker", ScopeTasksWrite)
+	toOther := automationRequest(t, approvalTestHandler(t, dbOther, &now), warden2.Token, http.MethodPost, "/approvals", "", body(other.Client.ID))
+	if toOther.Code != http.StatusCreated {
+		t.Fatalf("warden->other status=%d body=%s", toOther.Code, toOther.Body.String())
+	}
+
+	// approvals:self holder -> itself: allowed.
+	dbSelf := automationTestDB(t)
+	selfy := provisionApprovalTestClient(t, dbSelf, "autonomous", ScopeApprovalsGrant, ScopeApprovalsSelf)
+	selfOK := automationRequest(t, approvalTestHandler(t, dbSelf, &now), selfy.Token, http.MethodPost, "/approvals", "", body(selfy.Client.ID))
+	if selfOK.Code != http.StatusCreated {
+		t.Fatalf("selfy self-grant status=%d body=%s", selfOK.Code, selfOK.Body.String())
+	}
+}
