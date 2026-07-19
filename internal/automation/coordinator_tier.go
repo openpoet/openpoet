@@ -465,7 +465,10 @@ type coordinatorSpawnRequest struct {
 	// (briefing injected server-side; roster row registered at create).
 	MissionID int64  `json:"mission_id"`
 	Role      string `json:"role"`
-	DryRun    bool   `json:"dry_run"`
+	// IdempotencyKey fences retried spawns: a replay returns the SAME session
+	// instead of double-spawning (blackboard-backed, 24h TTL).
+	IdempotencyKey string `json:"idempotency_key"`
+	DryRun         bool   `json:"dry_run"`
 }
 
 // startWorker spawns a real worker session in any member project of the group —
@@ -487,15 +490,51 @@ func (c *coordinatorAPI) startWorker(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	var mission *database.Mission
 	if req.MissionID != 0 {
 		store, storeOK := c.missions()
 		if !storeOK {
 			writeError(w, http.StatusServiceUnavailable, "mission_store_unavailable", "the mission store is unavailable", true)
 			return
 		}
-		if c.missionForGroup(w, r, store, req.MissionID, group) == nil {
+		mission = c.missionForGroup(w, r, store, req.MissionID, group)
+		if mission == nil {
 			return
 		}
+	}
+	// Spawn idempotency fence FIRST: a replay of an already-completed spawn is
+	// side-effect-free and must return the recorded session even when the cap
+	// is currently saturated (the recovered session itself may be what fills
+	// it) — recovering a lost response is the fence's whole purpose.
+	reservedVersion := int64(0)
+	idempotencyKey := strings.TrimSpace(req.IdempotencyKey)
+	if idempotencyKey != "" && !req.DryRun {
+		existing, version, reserveErr := c.reserveSpawnKey(r.Context(), group, idempotencyKey, cs.SessionID)
+		if existing != "" {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"session_id": existing, "project_id": req.ProjectID, "status": "replayed",
+				"idempotency_key": idempotencyKey,
+			})
+			return
+		}
+		if reserveErr != nil {
+			var violation *safetyViolation
+			if errors.As(reserveErr, &violation) {
+				writeError(w, http.StatusConflict, violation.Code, violation.Message, true)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "spawn_reservation_failed", "the spawn idempotency key could not be reserved", true)
+			return
+		}
+		reservedVersion = version
+	}
+	// Safety nets (Phase 7.4): parallelism cap + mission budget. The anomaly
+	// auto-pause only fires on REAL spawns (a dry run is a declared probe).
+	if !c.enforceSpawnSafety(w, r, group, mission, !req.DryRun) {
+		if reservedVersion > 0 {
+			c.releaseSpawnKey(r.Context(), group, idempotencyKey, cs.SessionID, reservedVersion)
+		}
+		return
 	}
 	payload := map[string]any{}
 	if req.MissionID != 0 {
@@ -522,6 +561,9 @@ func (c *coordinatorAPI) startWorker(w http.ResponseWriter, r *http.Request) {
 	result, err := c.dispatch(r.Context(), cs, group, "sessions.create",
 		map[string]any{"type": "project", "project_id": req.ProjectID}, payload, req.DryRun)
 	if err != nil {
+		if reservedVersion > 0 {
+			c.releaseSpawnKey(r.Context(), group, idempotencyKey, cs.SessionID, reservedVersion)
+		}
 		writeCoordinatorDispatchError(w, err)
 		return
 	}
@@ -537,6 +579,9 @@ func (c *coordinatorAPI) startWorker(w http.ResponseWriter, r *http.Request) {
 		if json.Unmarshal(encoded, &view) == nil {
 			sessionID = view.ID
 		}
+	}
+	if reservedVersion > 0 && sessionID != "" {
+		c.completeSpawnKey(r.Context(), group, idempotencyKey, sessionID, reservedVersion)
 	}
 	response := map[string]any{
 		"session_id": sessionID, "project_id": req.ProjectID, "status": "created", "result": result.Result,

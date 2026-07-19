@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -42,6 +43,15 @@ func IsSubstratePath(relPath string) bool {
 // indexer; Gate touches the in-memory index idempotently. A cold (uncached)
 // session fails OPEN — the caller already verified the hook token, and blocking
 // a tool call on a cold radar is unacceptable.
+// LogicalRel maps a lane-relative path back to its logical project path:
+// ".openpoet/worktrees/<ws>/src/a.go" → "src/a.go". Claims are keyed by the
+// logical path so parallel lanes of one project share a conflict namespace.
+func LogicalRel(rel string) string {
+	return laneRelPattern.ReplaceAllString(rel, "")
+}
+
+var laneRelPattern = regexp.MustCompile(`^\.openpoet/worktrees/[^/]+/`)
+
 func (c *Coordinator) Gate(sessionID, tool string, toolInput map[string]interface{}) (bool, string) {
 	touches := ExtractTouches(tool, toolInput)
 
@@ -69,6 +79,12 @@ func (c *Coordinator) Gate(sessionID, tool string, toolInput map[string]interfac
 				"Substrate protected: %s is OpenPoet orchestration substrate (.openpoet metadata) "+
 					"and must not be written by a session.", rel)
 		}
+		// Lane normalization (Phase 7.4): a write inside a workspace lane
+		// (.openpoet/worktrees/<ws>/src/foo.go) claims the LOGICAL project
+		// path (src/foo.go) — main-tree and lane edits of the same file must
+		// collide, not slide past each other on different rel strings.
+		// Substrate protection above ran on the RAW rel on purpose.
+		rel = LogicalRel(rel)
 		// .claude/** contention is the shared-config hazard (R5 warn), never a
 		// hard code-collision deny — configsync manages those writes.
 		if IsClaudeDirPath(rel) {
