@@ -83,6 +83,7 @@ func (b *ACPBackend) BuildEnvVars(cfg *SessionConfig) map[string]string {
 		env["GITHUB_TOKEN"] = ac.GitHubToken
 	}
 
+	applySessionTokenEnv(env, cfg)
 	return env
 }
 

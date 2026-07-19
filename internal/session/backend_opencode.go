@@ -93,6 +93,7 @@ func (b *OpenCodeBackend) BuildEnvVars(cfg *SessionConfig) map[string]string {
 			env["OPENCODE_CONFIG_CONTENT"] = content
 		}
 	}
+	applySessionTokenEnv(env, cfg)
 	return env
 }
 

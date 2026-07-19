@@ -71,6 +71,7 @@ func (b *CopilotBackend) BuildEnvVars(cfg *SessionConfig) map[string]string {
 		env["GITHUB_TOKEN"] = cc.GitHubToken
 	}
 
+	applySessionTokenEnv(env, cfg)
 	return env
 }
 

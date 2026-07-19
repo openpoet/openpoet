@@ -80,6 +80,7 @@ func (b *ClaudeCodeBackend) BuildEnvVars(cfg *SessionConfig) map[string]string {
 		"OTEL_RESOURCE_ATTRIBUTES":     "openpoet.session_id=" + cfg.SessionID,
 		"OTEL_METRIC_EXPORT_INTERVAL":  "10000",
 	}
+	applySessionTokenEnv(env, cfg)
 	return env
 }
 
