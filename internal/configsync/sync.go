@@ -2414,7 +2414,22 @@ case "$EVENT" in
             echo "$RESPONSE"
         fi
         ;;
-    SessionStart|PreToolUse|PostToolUse|PostToolUseFailure|Notification|Stop|UserPromptSubmit)
+    PreToolUse)
+        # SYNCHRONOUS conflict gate (Phase 5): the verdict must reach Claude Code
+        # BEFORE the tool runs, and it must work even under skip-permissions
+        # (PreToolUse fires in every mode). The server also feeds the async index
+        # from this same call, so there is no separate background POST here.
+        RESPONSE=$(curl -s --max-time 5 -X POST \
+            "${HOOK_URL}/api/hooks/pretooluse" \
+            -H "Content-Type: application/json" \
+            -H "X-Session-ID: ${SESSION_ID}" \
+            -H "X-Hook-Token: ${HOOK_TOKEN}" \
+            -d "$INPUT" 2>/dev/null)
+        if [ $? -eq 0 ] && [ -n "$RESPONSE" ]; then
+            echo "$RESPONSE"
+        fi
+        ;;
+    SessionStart|PostToolUse|PostToolUseFailure|Notification|Stop|UserPromptSubmit)
         curl -s -X POST "${HOOK_URL}/api/hooks/event" \
             -H "Content-Type: application/json" \
             -H "X-Session-ID: ${SESSION_ID}" \
@@ -2464,7 +2479,22 @@ case "$EVENT" in
             echo "$RESPONSE"
         fi
         ;;
-    SessionStart|PreToolUse|PostToolUse|PostToolUseFailure|Notification|Stop|UserPromptSubmit)
+    PreToolUse)
+        # SYNCHRONOUS conflict gate (Phase 5): the verdict must reach Claude Code
+        # BEFORE the tool runs, and it must work even under skip-permissions
+        # (PreToolUse fires in every mode). The server also feeds the async index
+        # from this same call, so there is no separate background POST here.
+        RESPONSE=$(curl -s --max-time 5 -X POST \
+            "${HOOK_URL}/api/hooks/pretooluse" \
+            -H "Content-Type: application/json" \
+            -H "X-Session-ID: ${SESSION_ID}" \
+            -H "X-Hook-Token: ${HOOK_TOKEN}" \
+            -d "$INPUT" 2>/dev/null)
+        if [ $? -eq 0 ] && [ -n "$RESPONSE" ]; then
+            echo "$RESPONSE"
+        fi
+        ;;
+    SessionStart|PostToolUse|PostToolUseFailure|Notification|Stop|UserPromptSubmit)
         curl -s -X POST "${HOOK_URL}/api/hooks/event" \
             -H "Content-Type: application/json" \
             -H "X-Session-ID: ${SESSION_ID}" \

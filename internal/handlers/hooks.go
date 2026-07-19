@@ -49,6 +49,25 @@ type permissionDecision struct {
 	UpdatedPermissions []interface{}          `json:"updatedPermissions,omitempty"`
 }
 
+// preToolUseGateOutput is Claude Code's NATIVE PreToolUse hook contract — note
+// this differs from the PermissionRequest shape above (hookSpecificOutput.decision
+// object): PreToolUse uses a string permissionDecision + permissionDecisionReason,
+// and it is honored even under dangerously_skip_permissions.
+type preToolUseGateOutput struct {
+	HookSpecificOutput preToolUseHookOutput `json:"hookSpecificOutput"`
+}
+
+type preToolUseHookOutput struct {
+	HookEventName string `json:"hookEventName"`
+	// PermissionDecision is set ONLY to "deny" (a conflict/substrate block). On
+	// allow it is OMITTED so Claude Code's normal flow proceeds — emitting an
+	// explicit "allow" would AUTO-APPROVE the tool and bypass OpenPoet's
+	// permission dialog for every non-opted project (the default is observe), so
+	// the gate must stay silent unless it is actively denying.
+	PermissionDecision       string `json:"permissionDecision,omitempty"`       // "" (neutral) | "deny"
+	PermissionDecisionReason string `json:"permissionDecisionReason,omitempty"` // model reads this on deny
+}
+
 // pendingPermission tracks a blocking permission request
 type pendingPermission struct {
 	responseCh chan PermissionResponse
@@ -102,6 +121,16 @@ type HookHandler struct {
 	// denied (the write never happens), so a denied attempt cannot leave a
 	// residual claim that mutually locks out the legitimate claimant.
 	ReleaseClaim func(sessionID, toolName string, toolInput map[string]interface{})
+
+	// GatePreToolUse answers the SYNCHRONOUS PreToolUse gate (Phase 5, L2). Set by
+	// main.go: it resolves the project's conflict_policy + the global
+	// conflict_enforcement_enabled kill switch and, only for opted-in projects
+	// with the switch on, consults the conflict radar's atomic gate. Returns
+	// (deny, reason). A nil callback (or any non-opted path) means allow — the
+	// gate is strictly opt-in and fail-open. This is the ONLY control point that
+	// governs dangerously_skip_permissions sessions (they never fire
+	// PermissionRequest, but always fire PreToolUse).
+	GatePreToolUse func(ctx context.Context, sessionID, toolName string, toolInput map[string]interface{}) (bool, string)
 
 	// HasLinkedTask checks if a session has a linked task. Set by main.go.
 	HasLinkedTask func(sessionID string) bool
@@ -829,6 +858,50 @@ func (h *HookHandler) hookTokenAllowed(ctx context.Context, sessionID, token str
 		return true // legacy session without a minted token: fail open
 	}
 	return sessiontoken.EqualHash(token, hookHash)
+}
+
+// HandlePreToolUseGate handles POST /api/hooks/pretooluse — the SYNCHRONOUS
+// conflict gate (Phase 5, L2). The bridge calls this for write-class tools and
+// echoes the verdict to Claude Code. Because it answers the PreToolUse hook
+// (which fires in every permission mode), it is the only gate that governs
+// dangerously_skip_permissions sessions. Memory-only + fail-open: any error or
+// non-opted path returns allow so the gate can never brick a session; a missing
+// hook token is rejected 401 (a blocking gate over spoofable input would be a
+// denial-of-work weapon).
+func (h *HookHandler) HandlePreToolUseGate(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.Header.Get("X-Session-ID")
+	if sessionID == "" {
+		respondError(w, http.StatusBadRequest, "Missing X-Session-ID header")
+		return
+	}
+	if !h.hookTokenAllowed(r.Context(), sessionID, r.Header.Get("X-Hook-Token")) {
+		respondError(w, http.StatusUnauthorized, "invalid or missing hook token")
+		return
+	}
+	rawBody, _ := io.ReadAll(r.Body)
+	var hookEvent map[string]interface{}
+	_ = json.Unmarshal(normalizeUTF8Body(rawBody), &hookEvent)
+	toolName, _ := hookEvent["tool_name"].(string)
+	toolInput, _ := hookEvent["tool_input"].(map[string]interface{})
+
+	// The bridge routes PreToolUse HERE (synchronously) instead of the
+	// fire-and-forget /api/hooks/event, so feed the async conflict index / turn
+	// tracking exactly as HandleEvent's PreToolUse case would — the radar must
+	// still see every touch even though the verdict is now synchronous.
+	if h.OnToolEvent != nil {
+		h.OnToolEvent(sessionID, "PreToolUse", hookEvent)
+	}
+
+	deny, reason := false, ""
+	if h.GatePreToolUse != nil {
+		deny, reason = h.GatePreToolUse(r.Context(), sessionID, toolName, toolInput)
+	}
+	out := preToolUseHookOutput{HookEventName: "PreToolUse"}
+	if deny {
+		out.PermissionDecision = "deny" // allow stays neutral (omitted) — see the type
+		out.PermissionDecisionReason = reason
+	}
+	respondJSON(w, http.StatusOK, preToolUseGateOutput{HookSpecificOutput: out})
 }
 
 // HandleEvent handles POST /api/hooks/event
