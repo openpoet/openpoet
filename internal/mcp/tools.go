@@ -958,6 +958,25 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		payload, _ := json.Marshal(body)
 		return coordinatorResponse(client.Post("/api/coordinator/missions/workers/attach", string(payload)))
 
+	case "openpoet_predict_merge":
+		wsid, _ := params["workspace_id"].(string)
+		if wsid == "" {
+			return "", fmt.Errorf("workspace_id is required")
+		}
+		return coordinatorResponse(client.Get(fmt.Sprintf("/api/coordinator/workspaces/%s/merge_preview", url.PathEscape(wsid))))
+
+	case "openpoet_merge_workspace":
+		wsid, _ := params["workspace_id"].(string)
+		if wsid == "" {
+			return "", fmt.Errorf("workspace_id is required")
+		}
+		body := map[string]any{"mission_id": toolNumber(params["mission_id"])}
+		if fence, ok := params["fence_version"]; ok {
+			body["fence_version"] = toolNumber(fence)
+		}
+		payload, _ := json.Marshal(body)
+		return coordinatorResponse(client.Post(fmt.Sprintf("/api/coordinator/workspaces/%s/merge", url.PathEscape(wsid)), string(payload)))
+
 	case "openpoet_emit_session_report":
 		payload, _ := json.Marshal(params)
 		return coordinatorResponse(client.Post("/api/session/report", string(payload)))
