@@ -634,17 +634,19 @@ class OpenPoet {
             const sid = esc((w.session_id || '').slice(0, 8));
             const rep = esc((w.last_report_ref || '').slice(0, 8));
             return `<div class="mv-row mv-worker${live ? ' mv-live' : ''}"${live ? ` role="button" tabindex="0" onclick="app.openMissionSession('${esc(w.session_id)}')"` : ''}>
-                <div class="mv-row-main">${badge(st)}<span class="mv-row-title">${esc(w.role) || 'worker'}</span></div>
-                <div class="mv-row-meta"><span class="mv-mono">${sid}</span> · ${esc(w.backend)}${rep ? ` · relatório <span class="mv-mono">${rep}</span>` : ''}${live ? ` · <span class="mv-open">abrir ›</span>` : ''}</div>
+                <div class="mv-row-body">
+                    <div class="mv-row-main">${badge(st)}<span class="mv-row-title">${esc(w.role) || 'worker'}</span></div>
+                    <div class="mv-row-meta"><span class="mv-mono">${sid}</span> · ${esc(w.backend)}${rep ? ` · relatório <span class="mv-mono">${rep}</span>` : ''}</div>
+                </div>${live ? `<span class="mv-cta">abrir ›</span>` : ''}
             </div>`;
         }).join('') : `<div class="mv-empty">Nenhuma trabalhadora ainda.</div>`;
 
         const wsHTML = (p.workspaces && p.workspaces.length) ? p.workspaces.map(w =>
-            `<div class="mv-row"><div class="mv-row-main"><span class="mv-row-title">${esc(w.name)}</span>${badge(w.status)}</div><div class="mv-row-meta mv-mono">${esc(w.branch)}</div></div>`
+            `<div class="mv-row"><div class="mv-row-body"><div class="mv-row-main"><span class="mv-row-title">${esc(w.name)}</span></div><div class="mv-row-meta mv-mono">${esc(w.branch)}</div></div><span class="mv-row-end">${badge(w.status)}</span></div>`
         ).join('') : `<div class="mv-empty">Nenhum worktree em uso.</div>`;
 
         const docsHTML = (p.documents && p.documents.length) ? p.documents.map(d =>
-            `<div class="mv-row"><button class="mv-doc-open mv-row-title" onclick="app.openMissionDoc('${esc(d.id)}')">${esc(d.title)}</button>${badge(d.status)}</div>`
+            `<div class="mv-row"><div class="mv-row-body"><button class="mv-doc-open mv-row-title" onclick="app.openMissionDoc('${esc(d.id)}')">${esc(d.title)}</button></div><span class="mv-row-end">${badge(d.status)}</span></div>`
         ).join('') : `<div class="mv-empty">Nenhum documento linkado.</div>`;
 
         const tlHTML = (p.timeline && p.timeline.length)
@@ -661,8 +663,10 @@ class OpenPoet {
         const coordId = esc((m.coordinator_session_id || '').slice(0, 8));
         const coordHTML = m.coordinator_session_id ? `
             <div class="mv-row mv-coord${coordLive ? ' mv-worker mv-live' : ''}"${coordLive ? ` role="button" tabindex="0" onclick="app.openMissionSession('${esc(m.coordinator_session_id)}')"` : ''}>
-                <div class="mv-row-main">${coordStatus ? badge(coordStatus) : '<span class="mv-status mv-stopped">encerrada</span>'}<span class="mv-row-title">Coordenadora <span class="mv-tagword">maestro</span></span></div>
-                <div class="mv-row-meta"><span class="mv-mono mv-break">${coordId}</span>${coordLive ? ` · <span class="mv-open">abrir ›</span>` : ''}</div>
+                <div class="mv-row-body">
+                    <div class="mv-row-main">${coordStatus ? badge(coordStatus) : '<span class="mv-status mv-stopped">encerrada</span>'}<span class="mv-row-title">Coordenadora <span class="mv-tagword">maestro</span></span></div>
+                    <div class="mv-row-meta"><span class="mv-mono mv-break">${coordId}</span></div>
+                </div>${coordLive ? `<span class="mv-cta">abrir ›</span>` : ''}
             </div>` : '';
 
         c.innerHTML = `<div class="mv-grid">
