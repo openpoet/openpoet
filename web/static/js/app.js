@@ -624,41 +624,65 @@ class OpenPoet {
         const badge = (s) => `<span class="mv-status mv-${esc(s)}">${esc(s)}</span>`;
         const m = p.mission;
 
-        const workerRows = (p.workers || []).map(w => `<tr>
-            <td class="mv-mono">${esc((w.session_id || '').slice(0, 8))}</td>
-            <td>${esc(w.role)}</td><td>${esc(w.backend)}</td>
-            <td>${badge(w.session_status || w.status)}</td>
-            <td class="mv-mono">${esc((w.last_report_ref || '').slice(0, 8)) || '—'}</td></tr>`).join('');
-        const workersHTML = workerRows
-            ? `<table class="mv-table"><tr><th>sessão</th><th>papel</th><th>backend</th><th>status</th><th>relatório</th></tr>${workerRows}</table>`
-            : `<div class="mv-empty">Nenhuma trabalhadora ainda.</div>`;
+        const isLive = (s) => s === 'running' || s === 'starting';
+        const workers = p.workers || [];
+        const liveCount = workers.filter(w => isLive(w.session_status || w.status)).length;
 
-        const wsRows = (p.workspaces || []).map(w => `<tr>
-            <td>${esc(w.name)}</td><td class="mv-mono">${esc(w.branch)}</td><td>${badge(w.status)}</td></tr>`).join('');
-        const wsHTML = wsRows
-            ? `<table class="mv-table"><tr><th>lane</th><th>branch</th><th>estado</th></tr>${wsRows}</table>`
-            : `<div class="mv-empty">Nenhum worktree em uso.</div>`;
+        const workersHTML = workers.length ? workers.map(w => {
+            const st = w.session_status || w.status;
+            const live = isLive(st);
+            const sid = esc((w.session_id || '').slice(0, 8));
+            const rep = esc((w.last_report_ref || '').slice(0, 8));
+            return `<div class="mv-row mv-worker${live ? ' mv-live' : ''}"${live ? ` role="button" tabindex="0" onclick="app.openMissionSession('${esc(w.session_id)}')"` : ''}>
+                <div class="mv-row-main">${badge(st)}<span class="mv-row-title">${esc(w.role) || 'worker'}</span></div>
+                <div class="mv-row-meta"><span class="mv-mono">${sid}</span> · ${esc(w.backend)}${rep ? ` · relatório <span class="mv-mono">${rep}</span>` : ''}${live ? ` · <span class="mv-open">abrir ›</span>` : ''}</div>
+            </div>`;
+        }).join('') : `<div class="mv-empty">Nenhuma trabalhadora ainda.</div>`;
 
-        const docRows = (p.documents || []).map(d => `<tr>
-            <td><button class="mv-doc-open" onclick="app.openMissionDoc('${esc(d.id)}')">${esc(d.title)}</button></td>
-            <td>${badge(d.status)}</td></tr>`).join('');
-        const docsHTML = docRows ? `<table class="mv-table">${docRows}</table>` : `<div class="mv-empty">Nenhum documento linkado.</div>`;
+        const wsHTML = (p.workspaces && p.workspaces.length) ? p.workspaces.map(w =>
+            `<div class="mv-row"><div class="mv-row-main"><span class="mv-row-title">${esc(w.name)}</span>${badge(w.status)}</div><div class="mv-row-meta mv-mono">${esc(w.branch)}</div></div>`
+        ).join('') : `<div class="mv-empty">Nenhum worktree em uso.</div>`;
 
-        const evItems = (p.timeline || []).map(e => `<li><span class="t">${esc(e.event_type)}</span><span class="d">${esc(e.occurred_at)}</span></li>`).join('');
-        const tlHTML = evItems ? `<ul class="mv-ev">${evItems}</ul>` : `<div class="mv-empty">Sem eventos.</div>`;
+        const docsHTML = (p.documents && p.documents.length) ? p.documents.map(d =>
+            `<div class="mv-row"><button class="mv-doc-open mv-row-title" onclick="app.openMissionDoc('${esc(d.id)}')">${esc(d.title)}</button>${badge(d.status)}</div>`
+        ).join('') : `<div class="mv-empty">Nenhum documento linkado.</div>`;
+
+        const tlHTML = (p.timeline && p.timeline.length)
+            ? `<ul class="mv-ev">${p.timeline.map(e => `<li><span class="t">${esc(e.event_type)}</span><span class="d">${esc(e.occurred_at)}</span></li>`).join('')}</ul>`
+            : `<div class="mv-empty">Sem eventos.</div>`;
+
+        const workersTitle = liveCount
+            ? `Trabalhadoras <span class="mv-count">${liveCount} ativa${liveCount > 1 ? 's' : ''}</span>`
+            : 'Trabalhadoras';
 
         c.innerHTML = `<div class="mv-grid">
             <div class="mv-card mv-full">
                 <h4>Missão #${esc(m.id)}</h4>
                 <div class="mv-goal">${esc(m.goal)}</div>
-                ${badge(m.status)}
-                <span class="mv-meta"> · coordenadora <span class="mv-mono">${esc(m.coordinator_session_id)}</span> · criada ${esc(m.created_at)}</span>
+                <div class="mv-meta">${badge(m.status)} · coordenadora <span class="mv-mono mv-break">${esc(m.coordinator_session_id)}</span> · criada ${esc(m.created_at)}</div>
             </div>
-            <div class="mv-card"><h4>Trabalhadoras</h4>${workersHTML}</div>
+            <div class="mv-card"><h4>${workersTitle}</h4>${workersHTML}</div>
             <div class="mv-card"><h4>Worktrees</h4>${wsHTML}</div>
             <div class="mv-card"><h4>Documentos</h4>${docsHTML}</div>
             <div class="mv-card mv-full"><h4>Timeline</h4>${tlHTML}</div>
         </div>`;
+    }
+
+    // Shortcut: open a mission worker's live session in the terminal. Loads the
+    // sessions list on demand (the panel may be the first place the user lands).
+    async openMissionSession(id) {
+        if (!id) return;
+        try {
+            if (!this.sessions || !this.sessions.find(s => s.id === id)) {
+                this.sessions = await this.api('GET', '/sessions') || [];
+            }
+        } catch (e) { /* fall through to the not-found guard */ }
+        if (!(this.sessions || []).find(s => s.id === id)) {
+            this.showToast?.('Essa sessão não está mais ativa.', 'error');
+            return;
+        }
+        this.showView('terminal');
+        this.openTerminal(id);
     }
 
     async openMissionDoc(id) {
