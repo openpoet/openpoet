@@ -113,6 +113,9 @@ type sessionCreatePayload struct {
 	// in the dry-run preview; execution currently inherits the project's backend
 	// (per-session backend override is a future capability).
 	Backend string `json:"backend,omitempty"`
+	// Isolation:"auto" leases an idle pooled workspace when the project's main
+	// path is busy (Phase 6 pooling), instead of requiring an explicit workspace_id.
+	Isolation string `json:"isolation,omitempty"`
 }
 
 // knownSessionBackends mirrors internal/session BackendType constants (kept local
@@ -333,6 +336,7 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 				PlanningMode:        payload.PlanningMode,
 				CustomPrompt:        payload.CustomPrompt,
 				WorkspaceID:         payload.WorkspaceID,
+				Isolation:           payload.Isolation,
 				Authorization:       authorization,
 			})
 			if err != nil {
