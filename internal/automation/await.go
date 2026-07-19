@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -87,21 +88,28 @@ func (a *commandAPI) awaitEvents(w http.ResponseWriter, r *http.Request) {
 		if a.waiter != nil {
 			wake = a.waiter.OutboxWait()
 		}
-		matched, next, err := a.scanFiltered(r.Context(), after, filter)
+		matched, next, caughtUp, err := a.scanUntilMatchOrHead(r.Context(), after, filter)
 		if err != nil {
+			if errors.Is(err, database.ErrEventOutboxCursorAhead) {
+				writeError(w, http.StatusConflict, "event_cursor_ahead", "after is ahead of the current event cursor", false)
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "event_page_failed", "events could not be loaded", true)
 			return
 		}
+		after = next
 		if len(matched) > 0 {
 			cursor := strconv.FormatInt(next, 10)
 			writeJSON(w, http.StatusOK, eventPage{Events: matched, NextCursor: &cursor, HasMore: false})
 			return
 		}
-		if next > after {
-			after = next // advance past scanned-but-unmatched rows
+		// Only park once we have scanned all the way to the committed head:
+		// otherwise an already-committed matching event beyond the 500-row
+		// window would wait a full timeout for a notify that may never come.
+		if !caughtUp {
+			continue
 		}
 		if wake == nil {
-			// No notifier wired: degrade to a short poll interval.
 			wake = timeAfterChan(250 * time.Millisecond)
 		}
 		select {
@@ -116,30 +124,46 @@ func (a *commandAPI) awaitEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// scanFiltered reads forward from `after`, applying the event_type prefix
-// filter client-side, and returns the matches plus the highest sequence
-// scanned (so the caller can advance past unmatched rows).
-func (a *commandAPI) scanFiltered(ctx context.Context, after int64, filter string) ([]automationEvent, int64, error) {
-	stored, _, err := a.events.ReadEventOutboxPage(ctx, after, awaitScanLimit)
-	if err != nil {
-		return nil, after, err
+// scanUntilMatchOrHead pages forward from `after`, applying the prefix filter,
+// until it either finds matches or reaches the committed head-of-outbox. It
+// returns the matches, the new cursor, and whether the scan is caught up to
+// head. Bounded by maxAwaitScanPages so a huge backlog can't spin a request
+// forever — a not-caught-up return then asks the caller to continue.
+func (a *commandAPI) scanUntilMatchOrHead(ctx context.Context, after int64, filter string) ([]automationEvent, int64, bool, error) {
+	for page := 0; page < maxAwaitScanPages; page++ {
+		stored, head, err := a.events.ReadEventOutboxPage(ctx, after, awaitScanLimit)
+		if err != nil {
+			return nil, after, false, err
+		}
+		var matched []automationEvent
+		for _, ev := range stored {
+			if ev.Sequence > after {
+				after = ev.Sequence
+			}
+			if filter != "" && !strings.HasPrefix(ev.EventType, filter) {
+				continue
+			}
+			if mapped, mapErr := mapAutomationEvent(ev); mapErr == nil {
+				matched = append(matched, mapped)
+			}
+		}
+		if len(matched) > 0 {
+			return matched, after, after >= head, nil
+		}
+		if after >= head || len(stored) < awaitScanLimit {
+			return nil, maxInt64(after, head), true, nil
+		}
 	}
-	highest := after
-	var matched []automationEvent
-	for _, ev := range stored {
-		if ev.Sequence > highest {
-			highest = ev.Sequence
-		}
-		if filter != "" && !strings.HasPrefix(ev.EventType, filter) {
-			continue
-		}
-		mapped, mapErr := mapAutomationEvent(ev)
-		if mapErr != nil {
-			continue
-		}
-		matched = append(matched, mapped)
+	return nil, after, false, nil // more backlog to scan; caller continues
+}
+
+const maxAwaitScanPages = 40 // 40 * 500 = 20k rows per request before yielding
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
 	}
-	return matched, highest, nil
+	return b
 }
 
 func timeAfterChan(d time.Duration) <-chan struct{} {
@@ -177,18 +201,23 @@ func (a *commandAPI) waitForSession(w http.ResponseWriter, r *http.Request) {
 	}
 	timeout := parseAwaitTimeout(r.URL.Query().Get("timeout"))
 	deadline := time.After(timeout)
-	// Baseline cursor: only events AFTER the call count as "settled now".
-	_, after, err := a.scanFiltered(r.Context(), 0, "")
+	// Baseline = the committed head-of-outbox at call time, so only events that
+	// arrive AFTER the call count as "settled now". Reading the true head (not
+	// the 500th-oldest row) is what stops a stale historic turn_completed from
+	// masquerading as a fresh settle.
+	after, err := a.outboxHead(r.Context())
 	if err != nil {
-		after = 0
+		writeError(w, http.StatusInternalServerError, "event_page_failed", "events could not be loaded", true)
+		return
 	}
 	for {
 		var wake <-chan struct{}
 		if a.waiter != nil {
 			wake = a.waiter.OutboxWait()
 		}
-		matched, next, scanErr := a.scanFiltered(r.Context(), after, "session.")
+		matched, next, _, scanErr := a.scanUntilMatchOrHead(r.Context(), after, "session.")
 		if scanErr == nil {
+			after = next
 			for _, ev := range matched {
 				if ev.Aggregate.ID != sessionID {
 					continue
@@ -202,8 +231,13 @@ func (a *commandAPI) waitForSession(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			if next > after {
-				after = next
+		}
+		// A session that stops mid-wait emits no outbox event — re-check the
+		// row on every wake so we report 'stopped' promptly, not at timeout.
+		if cur, _ := a.sessions.GetSession(r.Context(), sessionID); cur != nil {
+			if ts, terminal := terminalSessionState(cur.Status); terminal {
+				writeJSON(w, http.StatusOK, sessionWaitResponse{SessionID: sessionID, State: ts, SignalQuality: "exact"})
+				return
 			}
 		}
 		if wake == nil {
@@ -212,21 +246,31 @@ func (a *commandAPI) waitForSession(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-wake:
 		case <-deadline:
-			// No settle signal in time: fall back to the polled status.
-			cur, _ := a.sessions.GetSession(r.Context(), sessionID)
-			state := "running"
-			quality := "heuristic"
-			if cur != nil {
-				if ts, terminal := terminalSessionState(cur.Status); terminal {
-					state, quality = ts, "exact"
-				}
-			}
-			writeJSON(w, http.StatusOK, sessionWaitResponse{SessionID: sessionID, State: state, SignalQuality: quality})
+			writeJSON(w, http.StatusOK, sessionWaitResponse{SessionID: sessionID, State: "running", SignalQuality: "heuristic"})
 			return
 		case <-r.Context().Done():
 			return
 		}
 	}
+}
+
+// outboxHead returns the highest committed sequence, paging past the scan-limit
+// so a large backlog does not cap the baseline at the 500th-oldest row.
+func (a *commandAPI) outboxHead(ctx context.Context) (int64, error) {
+	after := int64(0)
+	for page := 0; page < maxAwaitScanPages; page++ {
+		stored, head, err := a.events.ReadEventOutboxPage(ctx, after, awaitScanLimit)
+		if err != nil {
+			return 0, err
+		}
+		if head > after {
+			after = head
+		}
+		if len(stored) < awaitScanLimit || after >= head {
+			return after, nil
+		}
+	}
+	return after, nil
 }
 
 type sessionWaitResponse struct {

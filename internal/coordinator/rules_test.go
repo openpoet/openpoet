@@ -427,3 +427,29 @@ func contains(h, n string) bool {
 	}
 	return false
 }
+
+// TestReleaseClaimPreventsMutualLockout pins the fix: a denied write's claim is
+// released, so the peer whose write was denied cannot lock out the legitimate
+// holder on the holder's next write.
+func TestReleaseClaimPreventsMutualLockout(t *testing.T) {
+	root := "/proj"
+	c, clock := testCoordinator(t, map[string]*sessionInfo{
+		"sa": localSession("sa", 1, root, 0),
+		"sb": localSession("sb", 1, root, 0),
+	})
+	// SA holds shared.go.
+	c.process(touchMsg("sa", "Edit", root+"/shared.go", KindWrite, *clock))
+	// SB's PreToolUse registers a claim (async ingest), THEN its permission is
+	// vetoed — simulate by ingesting SB's touch then releasing on deny.
+	c.process(touchMsg("sb", "Edit", root+"/shared.go", KindWrite, *clock))
+	input := map[string]interface{}{"file_path": root + "/shared.go"}
+	deny, _ := c.ConsultWrite("sb", "Edit", input)
+	if !deny {
+		t.Fatal("SB not vetoed")
+	}
+	c.ReleaseClaim("sb", "Edit", input) // the deny handler releases SB's claim
+	// SA writes shared.go again — must NOT be vetoed by SB's released claim.
+	if deny, _ := c.ConsultWrite("sa", "Edit", input); deny {
+		t.Fatal("SA (legit holder) was locked out by SB's released claim — mutual lockout")
+	}
+}

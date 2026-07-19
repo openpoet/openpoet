@@ -59,3 +59,36 @@ func (c *Coordinator) ConsultWrite(sessionID, tool string, toolInput map[string]
 	}
 	return false, ""
 }
+
+// ReleaseClaim drops sessionID's write claim on the path a denied write tool
+// call targeted. Called after a veto deny (the write never happens), so a
+// denied attempt does not leave a residual claim that would mutually lock out
+// the session that legitimately holds the file. Also useful on
+// PostToolUseFailure. No-op for non-write / out-of-project / cold sessions.
+func (c *Coordinator) ReleaseClaim(sessionID, tool string, toolInput map[string]interface{}) {
+	touches := ExtractTouches(tool, toolInput)
+	c.mu.Lock()
+	si := c.sessions[sessionID]
+	c.mu.Unlock()
+	if si == nil {
+		return
+	}
+	for _, t := range touches {
+		if t.Kind != KindWrite || t.Path == "" || t.Scope {
+			continue
+		}
+		rel, inProject := si.relativize(t.Path)
+		if !inProject {
+			continue
+		}
+		key := claimKey{projectKey: si.projectKey, rel: rel}
+		c.mu.Lock()
+		if set := c.claims[key]; set != nil {
+			delete(set, sessionID)
+			if len(set) == 0 {
+				delete(c.claims, key)
+			}
+		}
+		c.mu.Unlock()
+	}
+}

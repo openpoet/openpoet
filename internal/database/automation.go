@@ -74,6 +74,13 @@ func (d *DB) GetAutomationClientByName(ctx context.Context, name string) (*Autom
 	return &client, nil
 }
 
+// DeleteAutomationClient removes a client row (used to re-provision a
+// coordinator whose token was never persisted).
+func (d *DB) DeleteAutomationClient(ctx context.Context, id string) error {
+	_, err := d.ExecContext(ctx, "DELETE FROM automation_clients WHERE id = ?", id)
+	return err
+}
+
 func (d *DB) SetAutomationClientEnabled(ctx context.Context, id string, enabled bool) error {
 	_, err := d.ExecContext(ctx, "UPDATE automation_clients SET enabled = ? WHERE id = ?", enabled, id)
 	return err
