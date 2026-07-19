@@ -11,6 +11,7 @@ const defaultTagColor = "#7aa2f7"
 
 type TagStore interface {
 	ListTags(context.Context) ([]database.Tag, error)
+	ListCoordinationTags(context.Context) ([]database.Tag, error)
 	GetTag(context.Context, int64) (*database.Tag, error)
 	CreateTag(context.Context, *database.Tag) error
 	UpdateTag(context.Context, *database.Tag) error
@@ -33,6 +34,15 @@ func (s *TagService) CapabilityServiceName() CapabilityServiceName {
 
 func (s *TagService) List(ctx context.Context) ([]database.Tag, error) {
 	tags, err := s.store.ListTags(ctx)
+	if tags == nil && err == nil {
+		tags = []database.Tag{}
+	}
+	return tags, err
+}
+
+// ListCoordination returns tags flagged as coordination groups (coordination=1).
+func (s *TagService) ListCoordination(ctx context.Context) ([]database.Tag, error) {
+	tags, err := s.store.ListCoordinationTags(ctx)
 	if tags == nil && err == nil {
 		tags = []database.Tag{}
 	}

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -20,6 +21,9 @@ type AutomationClient struct {
 	LastUsedAt  sql.NullTime `db:"last_used_at" json:"last_used_at,omitempty"`
 	CreatedAt   time.Time    `db:"created_at" json:"created_at"`
 	RotatedAt   sql.NullTime `db:"rotated_at" json:"rotated_at,omitempty"`
+	// ProjectFilter scopes the client to a set of projects/tags ({"project_ids":[],"tag_ids":[]}).
+	// NULL/empty = unrestricted (all projects). Enforced centrally in DispatchPlatformCapability.
+	ProjectFilter sql.NullString `db:"project_filter" json:"project_filter,omitempty"`
 }
 
 type AutomationCommand struct {
@@ -83,6 +87,18 @@ func (d *DB) DeleteAutomationClient(ctx context.Context, id string) error {
 
 func (d *DB) SetAutomationClientEnabled(ctx context.Context, id string, enabled bool) error {
 	_, err := d.ExecContext(ctx, "UPDATE automation_clients SET enabled = ? WHERE id = ?", enabled, id)
+	return err
+}
+
+// SetAutomationClientProjectFilter scopes a client to a set of projects/tags
+// ({"project_ids":[],"tag_ids":[]}). An empty string clears the filter
+// (unrestricted). The value must be valid JSON (enforced by the column CHECK).
+func (d *DB) SetAutomationClientProjectFilter(ctx context.Context, id, filterJSON string) error {
+	if strings.TrimSpace(filterJSON) == "" {
+		_, err := d.ExecContext(ctx, "UPDATE automation_clients SET project_filter = NULL WHERE id = ?", id)
+		return err
+	}
+	_, err := d.ExecContext(ctx, "UPDATE automation_clients SET project_filter = ? WHERE id = ?", filterJSON, id)
 	return err
 }
 
