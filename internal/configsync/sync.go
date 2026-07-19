@@ -284,6 +284,13 @@ func (cs *ConfigSyncer) syncToLocalMode(ctx context.Context, project *database.P
 	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing CLAUDE.md...")
 	cs.syncMemoryDocLocal(ctx, project, filepath.Join(projectPath, "CLAUDE.md"), materializeOnly)
 
+	// Managed steering: docs land as OpenPoet Docs, not native artifacts. Lives
+	// in .claude/CLAUDE.md (Claude Code loads it as project memory) so the
+	// bidirectional root CLAUDE.md ↔ memory-doc sync is never polluted.
+	if err := upsertDocsSteeringFile(filepath.Join(claudeDir, "CLAUDE.md")); err != nil {
+		cs.reportProgress(project.ID, "docs_steering", "error", err.Error())
+	}
+
 	return nil
 }
 
@@ -1448,6 +1455,8 @@ func (cs *ConfigSyncer) syncSkillsToCopilotInstructions(ctx context.Context, git
 		sb.WriteString("Always run `$OPENPOET_BIN cli tools` first to discover the exact tools available in the current session.\n\n")
 	}
 
+	sb.WriteString(OpenPoetDocsInstructionBlock())
+
 	instructionsPath := filepath.Join(githubDir, "copilot-instructions.md")
 	return os.WriteFile(instructionsPath, []byte(sb.String()), 0644)
 }
@@ -1544,6 +1553,12 @@ func (cs *ConfigSyncer) syncToLocalCodex(ctx context.Context, project *database.
 		cs.reportProgress(project.ID, "memory_doc", "done", "No AGENTS.md or CLAUDE.md found")
 	}
 
+	// Managed steering section in AGENTS.md (marker-guarded, idempotent):
+	// codex/opencode read AGENTS.md as their instruction surface.
+	if err := upsertDocsSteeringFile(filepath.Join(project.Path, "AGENTS.md")); err != nil {
+		cs.reportProgress(project.ID, "docs_steering", "error", err.Error())
+	}
+
 	return nil
 }
 
@@ -1595,6 +1610,12 @@ func (cs *ConfigSyncer) syncToLocalOpenCode(ctx context.Context, project *databa
 		cs.reportProgress(project.ID, "memory_doc", "done", "AGENTS.md and CLAUDE.md synced from "+source)
 	} else {
 		cs.reportProgress(project.ID, "memory_doc", "done", "No AGENTS.md or CLAUDE.md found")
+	}
+
+	// Managed steering section in AGENTS.md (marker-guarded, idempotent):
+	// codex/opencode read AGENTS.md as their instruction surface.
+	if err := upsertDocsSteeringFile(filepath.Join(project.Path, "AGENTS.md")); err != nil {
+		cs.reportProgress(project.ID, "docs_steering", "error", err.Error())
 	}
 
 	return nil
@@ -2374,6 +2395,8 @@ func (cs *ConfigSyncer) syncSkillsToACPInstructions(ctx context.Context, acpDir 
 		sb.WriteString("## " + skill.Name + "\n\n")
 		sb.WriteString(skill.Content + "\n\n")
 	}
+
+	sb.WriteString(OpenPoetDocsInstructionBlock())
 
 	instructionsPath := filepath.Join(acpDir, "instructions.md")
 	return os.WriteFile(instructionsPath, []byte(sb.String()), 0644)

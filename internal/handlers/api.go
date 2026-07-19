@@ -2606,6 +2606,7 @@ func (a *API) CreateTempDocument(w http.ResponseWriter, r *http.Request) {
 		Content        string `json:"content"`
 		ConversationID string `json:"conversation_id"`
 		TaskID         string `json:"task_id"`
+		MissionID      string `json:"mission_id"`
 		SessionID      string `json:"session_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -2614,14 +2615,18 @@ func (a *API) CreateTempDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	convID, _ := strconv.ParseInt(input.ConversationID, 10, 64)
 	taskID, _ := strconv.ParseInt(input.TaskID, 10, 64)
-	var conversationID, linkedTaskID *int64
+	missionID, _ := strconv.ParseInt(input.MissionID, 10, 64)
+	var conversationID, linkedTaskID, linkedMissionID *int64
 	if convID > 0 {
 		conversationID = &convID
 	}
 	if taskID > 0 {
 		linkedTaskID = &taskID
 	}
-	doc, err := services.Collaboration.Documents.CreateTemp(platformUIContext(r), application.CreateTempDocumentCommand{Title: input.Title, Content: input.Content, ConversationID: conversationID, TaskID: linkedTaskID, SessionID: input.SessionID, Authorization: platformUIAuthorization(r)})
+	if missionID > 0 {
+		linkedMissionID = &missionID
+	}
+	doc, err := services.Collaboration.Documents.CreateTemp(platformUIContext(r), application.CreateTempDocumentCommand{Title: input.Title, Content: input.Content, ConversationID: conversationID, TaskID: linkedTaskID, MissionID: linkedMissionID, SessionID: input.SessionID, Authorization: platformUIAuthorization(r)})
 	if err != nil {
 		respondApplicationError(w, err)
 		return

@@ -443,6 +443,7 @@ func AllToolDefs() []ToolDef {
 					"content":         {Type: "string", Description: "Full markdown content of the document"},
 					"conversation_id": {Type: "string", Description: "Current conversation ID (if available)"},
 					"task_id":         {Type: "string", Description: "Optional task ID to link this document to a task"},
+					"mission_id":      {Type: "string", Description: "Optional mission ID to link this document to an orchestration mission (Maestro)"},
 				},
 				Required: []string{"content"},
 			},
@@ -920,6 +921,101 @@ func AllToolDefs() []ToolDef {
 				Required: []string{"session_id"},
 			},
 			Context: ToolContextBoth,
+		},
+		// ──── Coordinator tier (Phase 7.1 — Maestro) ────
+		// The session that starts a mission elects itself coordinator of a
+		// coordination group and gains scoped cross-project reach. Local and
+		// remote (SSH) projects participate identically.
+		{
+			Name:        "coordinator_elect",
+			Description: "Elect this session as the coordinator of a coordination group (or renew the lease it already holds). Returns the fence_version that MUST accompany every coordinator mutation.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"group":       {Type: "number", Description: "Coordination group (tag id with coordination=1). The session's project must be a member."},
+					"ttl_seconds": {Type: "number", Description: "Lease TTL in seconds (default 300). Renew before it lapses or another session can take over."},
+				},
+				Required: []string{"group"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "coordinator_status",
+			Description: "Report whether this session holds a coordinator lease, for which group, the current fence_version, and the member project ids.",
+			InputSchema: ToolDefinitionInput{Type: "object", Properties: map[string]ToolPropertySchema{}},
+			Context:     ToolContextSession,
+		},
+		{
+			Name:        "list_group_sessions",
+			Description: "List every session across ALL projects of the coordinated group (local and remote). Requires holding the coordinator lease.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"status": {Type: "string", Description: "Optional status filter (running, stopped, ...)"},
+				},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "await_events",
+			Description: "Long-poll the durable event outbox for the coordinated group (session.turn_completed, session.awaiting_input, workspace.*, ...). Returns matching events past the cursor or an empty page on timeout. Events from projects outside the group never appear.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"after":    {Type: "number", Description: "Cursor: only events with sequence > after. Use next_cursor from the previous call."},
+					"filter":   {Type: "string", Description: "Event type prefix filter, e.g. 'session.'"},
+					"timeout":  {Type: "number", Description: "Long-poll timeout in seconds (default 20, max 60)"},
+					"consumer": {Type: "string", Description: "Named consumer cursor (optional; defaults to a per-session cursor)"},
+				},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "wait_for_session",
+			Description: "Block until a group session settles (turn_complete / awaiting_input / stopped) or the timeout. Reports signal_quality: exact (event-derived) vs heuristic (timeout fallback).",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"session_id": {Type: "string", Description: "Target session id (must belong to the coordinated group)"},
+					"timeout":    {Type: "number", Description: "Timeout in seconds (default 20, max 60)"},
+				},
+				Required: []string{"session_id"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "start_worker",
+			Description: "Start a worker session in any member project of the coordinated group — local or remote (SSH), any backend. Lineage records this session as parent. Requires the current fence_version.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id":    {Type: "number", Description: "Target project id (must be a group member)"},
+					"fence_version": {Type: "number", Description: "Current fence token from coordinator_elect/status"},
+					"task_id":       {Type: "number", Description: "Optional task to bind the worker to"},
+					"backend":       {Type: "string", Description: "Optional backend override (claude_code, codex, copilot, acp, opencode); defaults to the project's backend"},
+					"workspace_id":  {Type: "string", Description: "Optional workspace (worktree lane) to run in"},
+					"isolation":     {Type: "string", Description: "Optional: 'auto' leases a pooled workspace"},
+					"custom_prompt": {Type: "string", Description: "Optional initial brief for the worker"},
+					"dry_run":       {Type: "boolean", Description: "Validate without creating the session"},
+				},
+				Required: []string{"project_id", "fence_version"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "send_to_worker",
+			Description: "Send steering input to a worker session of the coordinated group, awaiting the prompt ack. Requires the current fence_version.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"session_id":    {Type: "string", Description: "Target worker session id (must belong to the group)"},
+					"text":          {Type: "string", Description: "Text to send (Enter appended automatically)"},
+					"fence_version": {Type: "number", Description: "Current fence token from coordinator_elect/status"},
+					"force":         {Type: "boolean", Description: "Send even if the worker is mid-turn"},
+				},
+				Required: []string{"session_id", "text", "fence_version"},
+			},
+			Context: ToolContextSession,
 		},
 		{
 			Name:        "unlink_session_task",
