@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"openpoet/internal/automation"
@@ -57,9 +58,14 @@ type Escalator func(ctx context.Context, incidentID, title, body string, extra m
 
 // Consultant runs one bounded consult per critical incident and enforces policy.
 type Consultant struct {
-	db          *database.DB
-	registry    *automation.PlatformCapabilityRegistry
-	provider    func() llm.Provider // resolves the ai_coordinator slot (nil = unconfigured)
+	db       *database.DB
+	registry *automation.PlatformCapabilityRegistry
+	provider func() llm.Provider // resolves the ai_coordinator slot (nil = unconfigured)
+	// mu serializes consults so the daily-budget check and the consult record
+	// are atomic across the concurrent per-incident goroutines — otherwise two
+	// consults both read count<cap before either records and both proceed.
+	// Consults are infrequent (one per critical incident), so serializing is fine.
+	mu          sync.Mutex
 	personaFn   func(ctx context.Context) string
 	escalate    Escalator
 	now         func() time.Time
@@ -81,6 +87,10 @@ func NewConsultant(db *database.DB, registry *automation.PlatformCapabilityRegis
 func (c *Consultant) Consult(inc coordinator.Incident) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	// Serialize consults: the budget check + record must be atomic across the
+	// concurrent per-incident goroutines.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if err := c.consult(ctx, inc); err != nil {
 		// Last-resort escalation so a brain failure never swallows an incident.
 		c.escalateIncident(ctx, inc, "Brain consult failed", err.Error(), "consult_error", 0)
