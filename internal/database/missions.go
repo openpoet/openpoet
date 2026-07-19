@@ -317,16 +317,20 @@ type MissionPanel struct {
 // GetMissionPanel aggregates the panel (nil when the mission does not exist).
 // All reads go through the WAL read pool.
 func (d *DB) GetMissionPanel(ctx context.Context, missionID int64) (*MissionPanel, error) {
-	mission, err := d.GetMission(ctx, missionID)
-	if err != nil || mission == nil {
+	var mission Mission
+	if err := d.Reader().GetContext(ctx, &mission, "SELECT * FROM missions WHERE id = ?", missionID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, err
 	}
-	panel := &MissionPanel{Mission: mission,
+	panel := &MissionPanel{Mission: &mission,
 		Workers: []MissionPanelWorker{}, Workspaces: []Workspace{},
 		Documents: []TempDocument{}, Timeline: []MissionPanelEvent{}}
 
-	workers, err := d.ListMissionWorkers(ctx, missionID)
-	if err != nil {
+	var workers []MissionWorker
+	if err := d.Reader().SelectContext(ctx, &workers,
+		"SELECT * FROM mission_workers WHERE mission_id = ? ORDER BY id", missionID); err != nil {
 		return nil, err
 	}
 	workspaceIDs := map[string]bool{}
@@ -357,7 +361,7 @@ func (d *DB) GetMissionPanel(ctx context.Context, missionID int64) (*MissionPane
 		return nil, err
 	}
 	if err := d.Reader().SelectContext(ctx, &panel.Timeline, `
-		SELECT sequence, event_type, payload_json AS payload, occurred_at FROM event_outbox
+		SELECT sequence, event_type, '' AS payload, occurred_at FROM event_outbox
 		WHERE aggregate_type = 'mission' AND aggregate_id = ?
 		ORDER BY sequence DESC LIMIT 200`, fmt.Sprintf("%d", missionID)); err != nil {
 		return nil, err
