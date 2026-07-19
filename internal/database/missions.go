@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -287,4 +288,94 @@ func (d *DB) RefundMissionGrantUse(ctx context.Context, grantID int64) error {
 	_, err := d.ExecContext(ctx, `
 		UPDATE mission_grants SET uses_remaining = uses_remaining + 1 WHERE id = ?`, grantID)
 	return err
+}
+
+// Mission panel (Phase 7.6) — the single durable view: mission root + worker
+// roster (with live session status) + the worktrees those workers occupy +
+// every OpenPoet Doc linked to the mission + the mission.* event timeline.
+
+type MissionPanelWorker struct {
+	MissionWorker
+	SessionStatus string `json:"session_status"`
+}
+
+type MissionPanelEvent struct {
+	Sequence   int64     `db:"sequence" json:"sequence"`
+	EventType  string    `db:"event_type" json:"event_type"`
+	Payload    string    `db:"payload" json:"payload"`
+	OccurredAt time.Time `db:"occurred_at" json:"occurred_at"`
+}
+
+type MissionPanel struct {
+	Mission    *Mission             `json:"mission"`
+	Workers    []MissionPanelWorker `json:"workers"`
+	Workspaces []Workspace          `json:"workspaces"`
+	Documents  []TempDocument       `json:"documents"`
+	Timeline   []MissionPanelEvent  `json:"timeline"`
+}
+
+// GetMissionPanel aggregates the panel (nil when the mission does not exist).
+// All reads go through the WAL read pool.
+func (d *DB) GetMissionPanel(ctx context.Context, missionID int64) (*MissionPanel, error) {
+	var mission Mission
+	if err := d.Reader().GetContext(ctx, &mission, "SELECT * FROM missions WHERE id = ?", missionID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	panel := &MissionPanel{Mission: &mission,
+		Workers: []MissionPanelWorker{}, Workspaces: []Workspace{},
+		Documents: []TempDocument{}, Timeline: []MissionPanelEvent{}}
+
+	var workers []MissionWorker
+	if err := d.Reader().SelectContext(ctx, &workers,
+		"SELECT * FROM mission_workers WHERE mission_id = ? ORDER BY id", missionID); err != nil {
+		return nil, err
+	}
+	workspaceIDs := map[string]bool{}
+	for _, worker := range workers {
+		view := MissionPanelWorker{MissionWorker: worker, SessionStatus: worker.Status}
+		if worker.SessionID != "" {
+			var status string
+			if err := d.Reader().GetContext(ctx, &status,
+				"SELECT status FROM sessions WHERE id = ?", worker.SessionID); err == nil {
+				view.SessionStatus = status
+			}
+		}
+		if worker.WorkspaceID != "" {
+			workspaceIDs[worker.WorkspaceID] = true
+		}
+		panel.Workers = append(panel.Workers, view)
+	}
+	for workspaceID := range workspaceIDs {
+		var ws Workspace
+		if err := d.Reader().GetContext(ctx, &ws,
+			"SELECT * FROM workspaces WHERE id = ?", workspaceID); err == nil {
+			panel.Workspaces = append(panel.Workspaces, ws)
+		}
+	}
+	if err := d.Reader().SelectContext(ctx, &panel.Documents, `
+		SELECT id, title, status, mission_id, session_id, created_at FROM temp_documents
+		WHERE mission_id = ? ORDER BY created_at DESC LIMIT 100`, missionID); err != nil {
+		return nil, err
+	}
+	if err := d.Reader().SelectContext(ctx, &panel.Timeline, `
+		SELECT sequence, event_type, '' AS payload, occurred_at FROM event_outbox
+		WHERE aggregate_type = 'mission' AND aggregate_id = ?
+		ORDER BY sequence DESC LIMIT 200`, fmt.Sprintf("%d", missionID)); err != nil {
+		return nil, err
+	}
+	return panel, nil
+}
+
+// ListMissions returns every mission, newest first (the panel's index).
+func (d *DB) ListMissions(ctx context.Context) ([]Mission, error) {
+	var missions []Mission
+	err := d.Reader().SelectContext(ctx, &missions,
+		"SELECT * FROM missions ORDER BY id DESC LIMIT 200")
+	if missions == nil {
+		missions = []Mission{}
+	}
+	return missions, err
 }

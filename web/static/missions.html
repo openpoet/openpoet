@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenPoet — Painel de Missões</title>
+<style>
+  :root { --bg:#1a1b26; --panel:#24283b; --fg:#c0caf5; --dim:#565f89; --ok:#9ece6a; --warn:#e0af68; --err:#f7768e; --acc:#7aa2f7; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system, "Segoe UI", sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid #2f3549; display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:16px; margin:0; }
+  header select { background:var(--panel); color:var(--fg); border:1px solid #2f3549; border-radius:6px; padding:6px 10px; }
+  main { padding:20px; display:grid; gap:16px; grid-template-columns:1fr 1fr; max-width:1200px; margin:0 auto; }
+  .card { background:var(--panel); border:1px solid #2f3549; border-radius:10px; padding:14px 16px; }
+  .card h2 { font-size:13px; margin:0 0 10px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+  .full { grid-column:1 / -1; }
+  .status { display:inline-block; padding:2px 8px; border-radius:99px; font-size:12px; border:1px solid; }
+  .status.active { color:var(--ok); border-color:var(--ok); }
+  .status.paused { color:var(--warn); border-color:var(--warn); }
+  .status.completed { color:var(--acc); border-color:var(--acc); }
+  .status.failed, .status.error { color:var(--err); border-color:var(--err); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #2f3549; }
+  th { color:var(--dim); font-weight:500; }
+  .mono { font-family:ui-monospace, monospace; font-size:12px; }
+  .goal { font-size:15px; margin:4px 0 8px; }
+  .timeline li { list-style:none; padding:4px 0; border-bottom:1px dotted #2f3549; }
+  .timeline { margin:0; padding:0; }
+  .ev-type { color:var(--acc); font-family:ui-monospace, monospace; font-size:12px; margin-right:8px; }
+  .dim { color:var(--dim); }
+  .empty { color:var(--dim); font-style:italic; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎼 Painel de Missões</h1>
+  <select id="mission-select"></select>
+  <span id="refresh-hint" class="dim"></span>
+</header>
+<main id="mission-panel">
+  <div class="card full" id="mission-card"><h2>Missão</h2><div class="empty">Carregando…</div></div>
+  <div class="card" id="workers-card"><h2>Trabalhadoras</h2></div>
+  <div class="card" id="workspaces-card"><h2>Worktrees</h2></div>
+  <div class="card" id="documents-card"><h2>Documentos</h2></div>
+  <div class="card full" id="timeline-card"><h2>Timeline</h2></div>
+</main>
+<script>
+(function () {
+  "use strict";
+  const REFRESH_MS = 4000;
+  let currentMission = null;
+  let inFlight = false;
+
+  const el = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
+    (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+  const badge = (s) => `<span class="status ${esc(s)}">${esc(s)}</span>`;
+
+  async function loadMissions() {
+    const res = await fetch("/api/missions");
+    if (!res.ok) return [];
+    return res.json();
+  }
+
+  async function loadPanel(id) {
+    const res = await fetch(`/api/missions/${id}/panel`);
+    if (!res.ok) return null;
+    return res.json();
+  }
+
+  function renderMission(m) {
+    el("mission-card").innerHTML = `<h2>Missão #${esc(m.id)}</h2>
+      <div class="goal">${esc(m.goal)}</div>
+      ${badge(m.status)} <span class="dim">coordenadora:</span>
+      <span class="mono">${esc(m.coordinator_session_id)}</span>
+      <span class="dim"> · criada ${esc(m.created_at)}</span>`;
+  }
+
+  function renderWorkers(workers) {
+    const rows = (workers || []).map((w) => `<tr>
+      <td class="mono">${esc((w.session_id || "").slice(0, 8))}</td>
+      <td>${esc(w.role)}</td><td>${esc(w.backend)}</td>
+      <td>${badge(w.session_status || w.status)}</td>
+      <td class="mono">${esc((w.last_report_ref || "").slice(0, 8) || "—")}</td></tr>`).join("");
+    el("workers-card").innerHTML = `<h2>Trabalhadoras</h2>` + (rows
+      ? `<table><tr><th>sessão</th><th>papel</th><th>backend</th><th>status</th><th>relatório</th></tr>${rows}</table>`
+      : `<div class="empty">Nenhuma trabalhadora ainda.</div>`);
+  }
+
+  function renderWorkspaces(workspaces) {
+    const rows = (workspaces || []).map((w) => `<tr>
+      <td>${esc(w.name)}</td><td class="mono">${esc(w.branch)}</td>
+      <td>${badge(w.status)}</td></tr>`).join("");
+    el("workspaces-card").innerHTML = `<h2>Worktrees</h2>` + (rows
+      ? `<table><tr><th>lane</th><th>branch</th><th>estado</th></tr>${rows}</table>`
+      : `<div class="empty">Nenhum worktree em uso.</div>`);
+  }
+
+  function renderDocuments(documents) {
+    const rows = (documents || []).map((d) => `<tr>
+      <td><a href="/app/doc/${esc(d.id)}" style="color:var(--acc)">${esc(d.title)}</a></td>
+      <td>${badge(d.status)}</td></tr>`).join("");
+    el("documents-card").innerHTML = `<h2>Documentos</h2>` + (rows
+      ? `<table>${rows}</table>` : `<div class="empty">Nenhum documento linkado.</div>`);
+  }
+
+  function renderTimeline(timeline) {
+    const items = (timeline || []).map((e) => `<li>
+      <span class="ev-type">${esc(e.event_type)}</span>
+      <span class="dim">${esc(e.occurred_at)}</span></li>`).join("");
+    el("timeline-card").innerHTML = `<h2>Timeline</h2>` + (items
+      ? `<ul class="timeline">${items}</ul>` : `<div class="empty">Sem eventos.</div>`);
+  }
+
+  async function refresh() {
+    if (currentMission == null || inFlight) return;
+    inFlight = true;
+    try {
+      const panel = await loadPanel(currentMission);
+      if (!panel) return;
+      renderMission(panel.mission);
+      renderWorkers(panel.workers);
+      renderWorkspaces(panel.workspaces);
+      renderDocuments(panel.documents);
+      renderTimeline(panel.timeline);
+    } catch (err) {
+      console.error("mission panel refresh failed", err);
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  async function boot() {
+    const missions = await loadMissions();
+    const select = el("mission-select");
+    select.innerHTML = missions.map((m) =>
+      `<option value="${esc(m.id)}">#${esc(m.id)} — ${esc(String(m.goal ?? "").slice(0, 60))} (${esc(m.status)})</option>`).join("");
+    select.onchange = () => { currentMission = select.value; refresh(); };
+    if (missions.length) { currentMission = missions[0].id; refresh(); }
+    else el("mission-card").innerHTML = `<h2>Missão</h2><div class="empty">Nenhuma missão registrada.</div>`;
+    el("refresh-hint").textContent = `atualiza a cada ${REFRESH_MS / 1000}s`;
+    setInterval(refresh, REFRESH_MS);
+  }
+  boot();
+})();
+</script>
+</body>
+</html>

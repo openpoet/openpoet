@@ -4892,3 +4892,34 @@ func (a *API) CreateMissionGrant(w http.ResponseWriter, r *http.Request) {
 		"uses_remaining": grant.UsesRemaining, "expires_at": grant.ExpiresAt,
 	})
 }
+
+// ListMissions (Phase 7.6): the mission panel's index.
+func (a *API) ListMissions(w http.ResponseWriter, r *http.Request) {
+	missions, err := a.db.ListMissions(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to list missions")
+		return
+	}
+	respondJSON(w, http.StatusOK, missions)
+}
+
+// GetMissionPanel (Phase 7.6): the single aggregated mission view — mission,
+// worker roster with live session status, occupied worktrees, mission-linked
+// documents, and the mission.* event timeline. Read-only, durable-backed.
+func (a *API) GetMissionPanel(w http.ResponseWriter, r *http.Request) {
+	missionID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || missionID <= 0 {
+		respondError(w, http.StatusBadRequest, "Invalid mission id")
+		return
+	}
+	panel, err := a.db.GetMissionPanel(r.Context(), missionID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to load mission panel")
+		return
+	}
+	if panel == nil {
+		respondError(w, http.StatusNotFound, "Mission not found")
+		return
+	}
+	respondJSON(w, http.StatusOK, panel)
+}
