@@ -573,34 +573,105 @@ class OpenPoet {
         }
     }
 
-    // ── Missões (Fase 7.6 — painel central nativo) ──────────────────────────
+    // ── Missões (Fase 7.6 — lista pesquisável/paginada + detalhe) ────────────
     async loadMissions() {
         try {
             this._missions = await this.api('GET', '/missions') || [];
         } catch (e) {
             this._missions = [];
         }
-        const sel = document.getElementById('mv-select');
-        if (sel) {
-            sel.innerHTML = this._missions.map(m =>
-                `<option value="${m.id}">#${m.id} — ${this.escapeHtml((m.goal || '').slice(0, 70))} (${this.escapeHtml(m.status)})</option>`
-            ).join('');
-        }
-        const content = document.getElementById('mv-content');
-        if (!this._missions.length) {
-            if (content) content.innerHTML = `<div class="mv-empty">Nenhuma missão registrada ainda.</div>`;
-            return;
-        }
-        const keep = this._currentMission && this._missions.some(m => String(m.id) === String(this._currentMission));
-        const target = keep ? this._currentMission : this._missions[0].id;
-        if (sel) sel.value = target;
-        this.loadMissionPanel(target);
-        // Live refresh only while this view is open (one interval).
+        if (this._missionSearch === undefined) this._missionSearch = '';
+        if (this._missionPage === undefined) this._missionPage = 0;
+        // Entering the view always lands on the LIST; detail is opened by a click.
+        this.showMissionList();
+        // Live refresh only while this view is open, and only the open detail.
         if (!this._missionTimer) {
             this._missionTimer = setInterval(() => {
-                if (this.currentView === 'missions' && this._currentMission) this.loadMissionPanel(this._currentMission);
+                if (this.currentView !== 'missions') return;
+                if (this._missionMode === 'detail' && this._currentMission) this.loadMissionPanel(this._currentMission);
             }, 4000);
         }
+    }
+
+    showMissionList() {
+        this._missionMode = 'list';
+        const listPane = document.getElementById('mv-list-pane');
+        const detailPane = document.getElementById('mv-detail-pane');
+        if (listPane) listPane.hidden = false;
+        if (detailPane) detailPane.hidden = true;
+        const search = document.getElementById('mv-search');
+        if (search && search.value !== this._missionSearch) search.value = this._missionSearch;
+        this.renderMissionList();
+    }
+
+    _filteredMissions() {
+        const q = (this._missionSearch || '').trim().toLowerCase();
+        let items = this._missions || [];
+        if (q) {
+            const idQuery = q.replace(/^#/, '');
+            items = items.filter(m => {
+                if (String(m.id) === idQuery) return true;
+                return `#${m.id} ${m.goal || ''} ${m.status || ''}`.toLowerCase().includes(q);
+            });
+        }
+        return items;
+    }
+
+    renderMissionList() {
+        const listEl = document.getElementById('mv-list');
+        if (!listEl) return;
+        const esc = (s) => this.escapeHtml(s == null ? '' : String(s));
+        const badge = (s) => `<span class="mv-status mv-${esc(s)}">${esc(s)}</span>`;
+        const items = this._filteredMissions();
+        const pageSize = 8;
+        const pages = Math.max(1, Math.ceil(items.length / pageSize));
+        if (this._missionPage >= pages) this._missionPage = pages - 1;
+        if (this._missionPage < 0) this._missionPage = 0;
+        const slice = items.slice(this._missionPage * pageSize, this._missionPage * pageSize + pageSize);
+
+        if (!items.length) {
+            const q = (this._missionSearch || '').trim();
+            listEl.innerHTML = `<div class="mv-empty">${q ? 'Nenhuma missão encontrada.' : 'Nenhuma missão registrada ainda.'}</div>`;
+        } else {
+            listEl.innerHTML = slice.map(m => `<button class="mv-mission-row" onclick="app.openMissionDetail('${esc(m.id)}')">
+                ${badge(m.status)}
+                <span class="mv-mission-body">
+                    <span class="mv-mission-goal">${esc(m.goal)}</span>
+                    <span class="mv-mission-sub">#${esc(m.id)} · criada ${esc(m.created_at)}</span>
+                </span>
+                <span class="mv-mission-chev">›</span>
+            </button>`).join('');
+        }
+        this.renderMissionPager(items.length, pageSize, pages);
+    }
+
+    renderMissionPager(total, pageSize, pages) {
+        const el = document.getElementById('mv-pager');
+        if (!el) return;
+        if (total <= pageSize) { el.innerHTML = ''; return; }
+        el.innerHTML = `<button onclick="app.gotoMissionPage(${this._missionPage - 1})" ${this._missionPage <= 0 ? 'disabled' : ''}>‹ Anterior</button>
+            <span>Página ${this._missionPage + 1} de ${pages} · ${total} missões</span>
+            <button onclick="app.gotoMissionPage(${this._missionPage + 1})" ${this._missionPage >= pages - 1 ? 'disabled' : ''}>Próxima ›</button>`;
+    }
+
+    gotoMissionPage(page) { this._missionPage = page; this.renderMissionList(); }
+    onMissionSearch(query) { this._missionSearch = query; this._missionPage = 0; this.renderMissionList(); }
+
+    openMissionDetail(id) {
+        this._currentMission = id;
+        this._missionMode = 'detail';
+        const listPane = document.getElementById('mv-list-pane');
+        const detailPane = document.getElementById('mv-detail-pane');
+        if (listPane) listPane.hidden = true;
+        if (detailPane) { detailPane.hidden = false; detailPane.scrollTop = 0; }
+        const content = document.getElementById('mv-content');
+        if (content) content.innerHTML = `<div class="mv-empty">Carregando…</div>`;
+        this.loadMissionPanel(id);
+    }
+
+    closeMissionDetail() {
+        this._currentMission = null;
+        this.showMissionList();
     }
 
     async loadMissionPanel(id) {
@@ -694,38 +765,60 @@ class OpenPoet {
         </div>`;
     }
 
-    // End a mission (non-destructive): mark it completed. Sessions and worktrees
-    // are untouched — stopping sessions is the button above, and the productive
-    // cleanup (merging lanes, discarding worktrees) stays a coordinator act.
-    async endMission() {
+    // Ending/reopening a mission is a COORDINATOR act: the button hands the
+    // instruction to the elected coordinator session (the maestro), which does
+    // the productive cleanup (merge lanes, discard worktrees, stop sessions,
+    // set status) and reports. Only when no coordinator is live does the button
+    // fall back to changing the mission record directly.
+    async _missionLifecycle(action) {
         const missionId = this._currentMission;
         if (!missionId) return;
-        if (!window.confirm('Encerrar esta missão (marcar como concluída)?\n\nO status vira "completed" e a missão fica registrada. As sessões e os worktrees NÃO são tocados — use "Parar todas as sessões" se quiser encerrá-las, e o merge/descarte de lanes continua sendo feito pela coordenadora.')) return;
+        let panel;
+        try { panel = await this.api('GET', `/missions/${missionId}/panel`); } catch (e) { return; }
+        const coord = panel.mission && panel.mission.coordinator_session_id;
+        const coordLive = ['running', 'starting'].includes(panel.coordinator_status);
+
+        const spec = action === 'end' ? {
+            confirmCoord: `Encerrar a missão #${missionId} PELA COORDENADORA?\n\nA coordenadora (maestro) recebe o comando para fazer a limpeza: integrar (merge) as lanes prontas, descartar as não aproveitadas, parar as sessões e marcar a missão como concluída. Você vai ao terminal dela para acompanhar.`,
+            command: `[Comando do usuário via painel] ENCERRE a missão #${missionId} com limpeza completa: (1) integre (merge) as lanes das trabalhadoras que estão prontas; (2) descarte os worktrees não aproveitados (workspaces.discard); (3) pare as sessões restantes; (4) marque a missão como concluída (update_mission_status completed). Reporte um resumo ao final.`,
+            sentToast: 'Comando de encerramento enviado à coordenadora.',
+            confirmFallback: `A coordenadora não está ativa — não há maestro para conduzir a limpeza.\n\nMarcar a missão como concluída mesmo assim (só o status; sessões e worktrees intactos)?`,
+            fallbackStatus: 'completed',
+            fallbackToast: 'Missão marcada como concluída (sem coordenadora ativa).',
+        } : {
+            confirmCoord: `Reabrir a missão #${missionId} PELA COORDENADORA?\n\nA coordenadora recebe o comando para reativar e retomar a coordenação. Você vai ao terminal dela.`,
+            command: `[Comando do usuário via painel] REABRA a missão #${missionId}: reative-a (update_mission_status active) e retome a coordenação de onde parou.`,
+            sentToast: 'Comando de reabertura enviado à coordenadora.',
+            confirmFallback: `A coordenadora não está ativa. Reabrir a missão (voltar para active) mesmo assim?`,
+            fallbackStatus: 'active',
+            fallbackToast: 'Missão reaberta.',
+        };
+
+        if (coordLive && coord) {
+            if (!window.confirm(spec.confirmCoord)) return;
+            try {
+                await this.api('POST', `/sessions/${coord}/input`, { text: spec.command });
+                this.showToast?.(spec.sentToast, 'success');
+                await this.openMissionSession(coord); // acompanha o maestro trabalhando
+            } catch (e) {
+                this.showToast?.('Não foi possível enviar o comando à coordenadora.', 'error');
+            }
+            return;
+        }
+        // Sem coordenadora ativa → altera o registro diretamente (fallback).
+        if (!window.confirm(spec.confirmFallback)) return;
         try {
-            await this.api('POST', `/missions/${missionId}/status`, { status: 'completed' });
-            this.showToast?.('Missão encerrada (concluída).', 'success');
+            await this.api('POST', `/missions/${missionId}/status`, { status: spec.fallbackStatus });
+            this.showToast?.(spec.fallbackToast, 'success');
         } catch (e) {
-            this.showToast?.('Não foi possível encerrar a missão.', 'error');
+            this.showToast?.((e && e.message) ? e.message : 'Não foi possível concluir a ação.', 'error');
             return;
         }
         this.loadMissions();
     }
 
-    // Reopen an ended mission (→ active). Subject to one-active-per-group: the
-    // server rejects it with a clear message if the group runs another mission.
-    async reopenMission() {
-        const missionId = this._currentMission;
-        if (!missionId) return;
-        if (!window.confirm('Reabrir esta missão (voltar para "active")?')) return;
-        try {
-            await this.api('POST', `/missions/${missionId}/status`, { status: 'active' });
-            this.showToast?.('Missão reaberta.', 'success');
-        } catch (e) {
-            this.showToast?.((e && e.message) ? e.message : 'Não foi possível reabrir a missão.', 'error');
-            return;
-        }
-        this.loadMissions();
-    }
+    async endMission() { return this._missionLifecycle('end'); }
+    async reopenMission() { return this._missionLifecycle('reopen'); }
 
     // Stop every LIVE session of the mission (coordinator + workers). This is a
     // blunt halt of the fleet; the productive cleanup (merging lanes back,
