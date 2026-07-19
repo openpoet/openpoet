@@ -395,7 +395,17 @@ func main() {
 	brainConsultant := brain.NewConsultant(
 		db,
 		api.PlatformCapabilityRegistry(),
-		func() llm.Provider { return providerMgr.GetProvider(llm.SlotCoordinator) },
+		// Resolve the ai_coordinator provider AND its model — but only if the
+		// slot is actually ASSIGNED. An unassigned slot must return nil (no
+		// spend): GetProvider(nil) would otherwise auto-detect a real provider
+		// and spend on every critical incident, violating no-spend-at-rest.
+		func(ctx context.Context) (llm.Provider, string) {
+			cfg, err := db.GetAIConfigForSlot(ctx, string(llm.SlotCoordinator))
+			if err != nil || cfg == nil {
+				return nil, ""
+			}
+			return providerMgr.GetProvider(llm.SlotCoordinator), cfg.Model
+		},
 		func(ctx context.Context) string {
 			if agent, err := db.GetAIAgentByName(ctx, "Coordinator"); err == nil && agent != nil {
 				return agent.SystemPrompt
