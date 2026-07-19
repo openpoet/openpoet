@@ -31,6 +31,12 @@ type SessionReportReader interface {
 	LatestStructuredSessionReport(ctx context.Context, sessionID string) (*database.StructuredSessionReportRecord, error)
 }
 
+// sessionReportCounter guards the per-session milestone cap.
+// *database.DB satisfies it.
+type sessionReportCounter interface {
+	CountStructuredSessionReports(ctx context.Context, sessionID, turnID string) (count int, turnExists bool, err error)
+}
+
 type sessionReportAPI struct {
 	coordinator *coordinatorAPI // reused for the verified-session middleware
 	reports     SessionReportService
@@ -87,6 +93,22 @@ func (s *sessionReportAPI) emit(w http.ResponseWriter, r *http.Request) {
 	turnID := strings.TrimSpace(req.TurnID)
 	if turnID == "" {
 		turnID = "milestone"
+	}
+	// "session-lifecycle" is the SYSTEM's turn_id (captureSessionLifecycle) —
+	// a worker must not overwrite its own audit record with forged content.
+	if turnID == "session-lifecycle" {
+		writeError(w, http.StatusBadRequest, "report_turn_reserved", "turn_id 'session-lifecycle' is reserved for the system lifecycle report", false)
+		return
+	}
+	// Durable-growth cap: a session may hold at most 200 distinct milestone
+	// rows; updates to existing milestones stay allowed. (Frequency budgets
+	// land with the 7.4 safety nets.)
+	if counter, ok := s.coordinator.store.(sessionReportCounter); ok {
+		count, exists, err := counter.CountStructuredSessionReports(r.Context(), cs.SessionID, turnID)
+		if err == nil && count >= 200 && !exists {
+			writeError(w, http.StatusTooManyRequests, "report_milestones_exceeded", "this session already holds 200 milestone reports — reuse an existing turn_id", false)
+			return
+		}
 	}
 	evidence := make([]application.ReportEvidence, 0, len(req.Files))
 	for _, file := range req.Files {
@@ -172,7 +194,7 @@ func (c *coordinatorAPI) getWorkerReport(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusOK, map[string]any{"session_id": targetID, "report": nil})
 		return
 	}
-	writeJSON(w, http.StatusOK, denseReportView(record))
+	writeJSON(w, http.StatusOK, map[string]any{"session_id": targetID, "report": denseReportView(record)})
 }
 
 // denseReportView shapes the stored record into the dense report the
