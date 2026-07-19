@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"strings"
 
 	"openpoet/internal/database"
+	"openpoet/internal/workspace"
 )
 
 // WorkspaceGitPort is the thin seam over GitHandler.runGitCmd: local exec or
@@ -43,13 +46,36 @@ var (
 // add + materialize-only sync), list/get, remove (destructive), and session
 // leasing. Local claude-style projects only in the MVP.
 type WorkspaceService struct {
-	db     *database.DB
-	git    WorkspaceGitPort
-	syncer WorkspaceSyncer
+	db          *database.DB
+	git         WorkspaceGitPort
+	syncer      WorkspaceSyncer
+	provisioner EnvironmentProvisioner
+}
+
+// EnvironmentProvisioner runs a project's `.openpoet/environment.yaml` for a
+// workspace (Phase 6). nil = plain Phase-2 workspaces (no env execution).
+type EnvironmentProvisioner interface {
+	Provision(ctx context.Context, projectID int64, workspaceID, workDir string, manifest []byte) (*workspace.ProvisionResult, error)
+	Teardown(ctx context.Context, workspaceID string) error
 }
 
 func NewWorkspaceService(db *database.DB, git WorkspaceGitPort, syncer WorkspaceSyncer) *WorkspaceService {
 	return &WorkspaceService{db: db, git: git, syncer: syncer}
+}
+
+// SetEnvironmentProvisioner wires the Phase-6 environment provisioner. Optional:
+// without it, workspaces are the plain Phase-2 worktree substrate.
+func (s *WorkspaceService) SetEnvironmentProvisioner(p EnvironmentProvisioner) {
+	s.provisioner = p
+}
+
+// ManifestApprovalRequiredError signals that a workspace could not be provisioned
+// because the project's manifest hash is not approved. It carries the SHA so the
+// caller can surface it for approval.
+type ManifestApprovalRequiredError struct{ SHA string }
+
+func (e *ManifestApprovalRequiredError) Error() string {
+	return "manifest_approval_required: content_sha256=" + e.SHA
 }
 
 type CreateWorkspaceCommand struct {
@@ -188,10 +214,77 @@ func (s *WorkspaceService) Create(ctx context.Context, command CreateWorkspaceCo
 		}
 	}
 
+	// Phase 6: if the PROJECT ships an approved `.openpoet/environment.yaml`, run
+	// its environment in this workspace (setup → port → service → health) before
+	// marking ready. The manifest is read from the main checkout (it may be
+	// uncommitted, so it never rides in the worktree ref).
+	if s.provisioner != nil {
+		if manifest, ok := readProjectManifest(project.Path); ok {
+			result, provErr := s.provisioner.Provision(ctx, project.ID, ws.ID, ws.Path, manifest)
+			if provErr != nil {
+				_ = s.db.SetWorkspaceStatus(ctx, ws.ID, "failed", "workspace.failed", actor)
+				var approval *workspace.ApprovalRequiredError
+				if errors.As(provErr, &approval) {
+					return nil, &ManifestApprovalRequiredError{SHA: approval.SHA}
+				}
+				return nil, fmt.Errorf("environment provision: %w", provErr)
+			}
+			// Snapshot the rendered coordinates so a reopened session inherits them.
+			resources, _ := json.Marshal(result)
+			_ = s.db.SetWorkspaceResources(ctx, ws.ID, string(resources), workspace.ManifestSHA256(manifest))
+		}
+	}
+
 	if err := s.db.SetWorkspaceStatus(ctx, ws.ID, "ready", "workspace.ready", actor); err != nil {
 		return nil, err
 	}
 	return s.db.GetWorkspace(ctx, ws.ID)
+}
+
+// readProjectManifest returns the raw `.openpoet/environment.yaml` bytes from a
+// project's main checkout, or ok=false when the project ships no manifest.
+func readProjectManifest(projectPath string) ([]byte, bool) {
+	b, err := os.ReadFile(filepath.Join(projectPath, ".openpoet", "environment.yaml"))
+	if err != nil || len(strings.TrimSpace(string(b))) == 0 {
+		return nil, false
+	}
+	return b, true
+}
+
+// ResolveAutoWorkspace implements sessions.create isolation:"auto": when the
+// project's main checkout is free it returns "" (use the main path, zero
+// regression); when the main path is busy it leases an idle POOLED workspace
+// (fast second concurrent session, no re-provision); if none is ready it fails
+// with no_workspace_ready pointing the caller at the async provision flow.
+func (s *WorkspaceService) ResolveAutoWorkspace(ctx context.Context, projectID int64) (string, error) {
+	busy, err := s.db.ProjectMainPathBusy(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	if !busy {
+		return "", nil // main path free → use it
+	}
+	ws, err := s.db.PickIdleWorkspace(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	if ws == nil {
+		return "", validationError("no_workspace_ready", "the main path is busy and no pooled workspace is ready — call workspaces.create and watch for workspace.ready")
+	}
+	return ws.ID, nil
+}
+
+// Discard tears down a workspace's environment (kills services, releases ports)
+// and removes the lane. Destructive.
+func (s *WorkspaceService) Discard(ctx context.Context, command RemoveWorkspaceCommand) (*database.Workspace, error) {
+	if err := requireActionActor(command.Authorization); err != nil {
+		return nil, err
+	}
+	if s.provisioner != nil {
+		_ = s.provisioner.Teardown(ctx, command.WorkspaceID)
+	}
+	// Reuse the Phase-2 destructive removal (worktree remove + status).
+	return s.Remove(ctx, command)
 }
 
 // ensureExcludeLine appends the managed-root pattern to .git/info/exclude once.
