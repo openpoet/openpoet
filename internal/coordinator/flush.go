@@ -223,11 +223,20 @@ func awaitingInputEvent(sessionID string, projectID int64, kind, excerpt string,
 	}
 }
 
-func turnCompletedEvent(sessionID string, projectID int64, files []string, ts time.Time) database.EventOutboxAppend {
+// turnCompletedEvent carries files_touched and, when the session has emitted a
+// structured milestone report (Phase 7.2), a report_ref pointer — the event is
+// the wake-up, the report is the payload; the coordinator never needs the
+// transcript to know what happened. reportRef == "" omits the field (additive,
+// SchemaVersion stays 1).
+func turnCompletedEvent(sessionID string, projectID int64, files []string, reportRef string, ts time.Time) database.EventOutboxAppend {
 	if files == nil {
 		files = []string{}
 	}
-	payload, _ := json.Marshal(map[string]interface{}{"session_id": sessionID, "project_id": projectID, "files_touched": files})
+	body := map[string]interface{}{"session_id": sessionID, "project_id": projectID, "files_touched": files}
+	if reportRef != "" {
+		body["report_ref"] = reportRef
+	}
+	payload, _ := json.Marshal(body)
 	return database.EventOutboxAppend{
 		EventID:       uuid.NewString(),
 		EventType:     "session.turn_completed",
