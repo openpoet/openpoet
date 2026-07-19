@@ -451,9 +451,10 @@ func (s *WorkspaceService) Merge(ctx context.Context, command MergeWorkspaceComm
 	if err != nil {
 		return nil, notFoundError("project_not_found", "Project not found", err)
 	}
-	// Precondition: the main checkout must be clean, or --no-ff would fail
-	// midway and leave a mess.
-	status, err := s.git.RunGit(ctx, project, "status", "--porcelain")
+	// Precondition: the main checkout must have no uncommitted TRACKED changes
+	// (they make --no-ff fail midway). Untracked files (e.g. the config-sync
+	// materialized .claude/ layer) never break a merge and must not block it.
+	status, err := s.git.RunGit(ctx, project, "status", "--porcelain", "--untracked-files=no")
 	if err != nil {
 		return nil, fmt.Errorf("checking main worktree status: %w", err)
 	}
