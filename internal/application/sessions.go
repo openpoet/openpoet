@@ -144,6 +144,10 @@ type SessionWorkspaceProvider interface {
 	ReleaseReservation(ctx context.Context, workspaceID, token string) error
 	ReLease(ctx context.Context, workspaceID, sessionID string) error
 	ReleaseForSession(ctx context.Context, sessionID string) error
+	// ResolveAutoWorkspace implements isolation:"auto": returns "" when the main
+	// path is free (use it), or an idle pooled workspace id to lease when it is
+	// busy; errors no_workspace_ready when busy with no pool available.
+	ResolveAutoWorkspace(ctx context.Context, projectID int64) (string, error)
 }
 
 type SessionChange struct {
@@ -203,7 +207,11 @@ type CreateSessionCommand struct {
 	CustomPrompt               string
 	// WorkspaceID runs the session inside an existing ready workspace lane
 	// (its git worktree becomes the runner cwd and sync target).
-	WorkspaceID   string
+	WorkspaceID string
+	// Isolation:"auto" leases an idle pooled workspace when the project's main
+	// path is already busy (Phase 6), so a second concurrent session lands in a
+	// sandbox instead of colliding on the main checkout.
+	Isolation     string
 	Authorization ActionAuthorization
 }
 
@@ -274,6 +282,15 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 	// string every subsystem (sync, runner cwd, transcript encoding) keys off.
 	var workspace *database.Workspace
 	reservationToken := ""
+	// isolation:"auto" — if the main path is busy, lease an idle pooled workspace
+	// (Phase 6); resolve it into command.WorkspaceID so the normal lease path runs.
+	if strings.EqualFold(strings.TrimSpace(command.Isolation), "auto") && strings.TrimSpace(command.WorkspaceID) == "" && s.creation.Workspaces != nil {
+		autoID, autoErr := s.creation.Workspaces.ResolveAutoWorkspace(ctx, command.ProjectID)
+		if autoErr != nil {
+			return nil, autoErr
+		}
+		command.WorkspaceID = autoID // "" → main path is free, use it
+	}
 	if workspaceID := strings.TrimSpace(command.WorkspaceID); workspaceID != "" {
 		if s.creation.Workspaces == nil {
 			return nil, validationError("workspace_unsupported", "Workspace sessions are not available")

@@ -14,13 +14,16 @@ import (
 	runtime "openpoet/internal/session"
 	"openpoet/internal/updater"
 	"openpoet/internal/websocket"
+	"openpoet/internal/workspace"
 )
 
 const (
 	// Phase 5 added groups.list (config read), blackboard.get (exec read),
 	// blackboard.put (exec write): +3 capabilities, +1 mutation, +2 reads.
-	expectedPlatformCapabilities = 166
-	expectedPlatformMutations    = 110
+	// Phase 6 added environments.approve_manifest (unsafe) + workspaces.discard
+	// (destructive): +2 capabilities, +2 mutations, +0 reads.
+	expectedPlatformCapabilities = 168
+	expectedPlatformMutations    = 112
 	expectedPlatformReads        = 56
 )
 
@@ -87,6 +90,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 	}
 
 	workspaceService := application.NewWorkspaceService(services.DB, NewGitCommandAdapter(services.GitHandler), services.ConfigSync)
+	workspaceService.SetEnvironmentProvisioner(workspace.NewProvisioner(services.DB)) // Phase 6: environment.yaml provisioning
 	workRunService := application.NewWorkRunService(services.DB)
 	sessionService := application.NewSessionService(
 		services.DB, services.SessionManager, services.ConfigSync, a.taskService,
@@ -123,6 +127,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		Conflicts:          services.DB,
 		Workspaces:         workspaceService,
 		Blackboard:         services.DB,
+		Environments:       application.NewEnvironmentService(services.DB),
 	}
 
 	collaboration := automation.CollaborationPlatformServices{

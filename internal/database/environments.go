@@ -196,6 +196,43 @@ func (d *DB) ReleaseWorkspaceResources(ctx context.Context, workspaceID string) 
 	return err
 }
 
+// PickIdleWorkspace returns one ready, unleased workspace for a project (the
+// pool) or nil when none is idle — the isolation:auto lease target.
+func (d *DB) PickIdleWorkspace(ctx context.Context, projectID int64) (*Workspace, error) {
+	var ws Workspace
+	err := d.GetContext(ctx, &ws,
+		`SELECT * FROM workspaces WHERE project_id=? AND status='ready' AND (leased_by_session_id IS NULL OR leased_by_session_id='')
+		 ORDER BY updated_at ASC LIMIT 1`, projectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ws, nil
+}
+
+// ProjectMainPathBusy reports whether the project has a live session running on
+// its MAIN checkout (no workspace) — the signal isolation:auto uses to decide it
+// must lease a sandbox instead of colliding on the main path.
+func (d *DB) ProjectMainPathBusy(ctx context.Context, projectID int64) (bool, error) {
+	var n int
+	err := d.GetContext(ctx, &n,
+		`SELECT COUNT(*) FROM sessions WHERE project_id=? AND status IN ('starting','running')
+		 AND (workspace_id IS NULL OR workspace_id='')`, projectID)
+	return n > 0, err
+}
+
+// SetWorkspaceResources snapshots the rendered environment (ports/env) and the
+// approved manifest hash onto the workspace row, so a reopened session inherits
+// identical coordinates.
+func (d *DB) SetWorkspaceResources(ctx context.Context, workspaceID, resourcesJSON, manifestSHA string) error {
+	_, err := d.ExecContext(ctx,
+		"UPDATE workspaces SET resources_json=?, manifest_sha256=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+		nullStr(resourcesJSON), nullStr(manifestSHA), workspaceID)
+	return err
+}
+
 func nullStr(s string) sql.NullString {
 	if s == "" {
 		return sql.NullString{}
