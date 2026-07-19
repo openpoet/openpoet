@@ -172,6 +172,27 @@ func TestCoordinatorElectRequiresMembership(t *testing.T) {
 	if status != http.StatusUnauthorized {
 		t.Fatalf("tokenless elect: status=%d", status)
 	}
+
+	// one coordinator lease per session: holding group A forbids electing into
+	// group B (keeps lease→group resolution deterministic).
+	second := &database.Tag{Name: "second-group", Color: "#0f0"}
+	if err := f.db.CreateTag(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec("UPDATE tags SET coordination=1 WHERE id=?", second.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.ReplaceProjectTagIDs(context.Background(), f.memberProjectID, []int64{f.tagID, second.ID}); err != nil {
+		t.Fatal(err)
+	}
+	_, holderBearer := f.mintSession(t, f.memberProjectID)
+	if status, body = f.call(t, holderBearer, "POST", "/elect", map[string]any{"group": f.tagID}); status != http.StatusOK {
+		t.Fatalf("elect into first group: %d %v", status, body)
+	}
+	status, body = f.call(t, holderBearer, "POST", "/elect", map[string]any{"group": second.ID})
+	if status != http.StatusConflict || errCode(body) != "coordinator_lease_held_elsewhere" {
+		t.Fatalf("second-group elect must be refused: status=%d body=%v", status, body)
+	}
 }
 
 // TestCoordinatorFenceStaleFailsClosed: after the lease changes hands, the
