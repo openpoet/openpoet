@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -384,6 +385,18 @@ func main() {
 	coord.Start()
 	hookHandler.OnToolEvent = coord.OnHookEvent
 	sessionMgr.OnSessionAttention = coord.RecordAttention
+	// Phase 3: the radar's first synchronous hand — deny a write permission
+	// when the file is contested by another live session, and drop the denied
+	// session's claim so it cannot mutually lock out the real holder.
+	hookHandler.ConsultConflict = coord.ConsultWrite
+	hookHandler.ReleaseClaim = coord.ReleaseClaim
+
+	// Provision the built-in coordinator automation client (grant-gated: no
+	// approvals scopes) and drop its one-time token next to the DB.
+	coordinatorTokenPath := filepath.Join(filepath.Dir(cfg.DBPath), "coordinator.token")
+	if err := automation.EnsureCoordinatorClient(context.Background(), db, coordinatorTokenPath); err != nil {
+		log.Printf("[Coordinator] ensure coordinator client: %v", err)
+	}
 
 	// Wire AI evaluation callbacks into session manager
 	sessionMgr.OnSessionStart = func(sessionID string) {
@@ -567,6 +580,8 @@ func main() {
 		Capabilities:         api.CapabilityRegistry(),
 		PlatformCapabilities: api.PlatformCapabilityRegistry(),
 		Snapshot:             db,
+		Waiter:               db,
+		Sessions:             db,
 	}
 	if reportService != nil {
 		automationDeps.Reports = reportService

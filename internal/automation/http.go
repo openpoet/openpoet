@@ -27,6 +27,8 @@ type Dependencies struct {
 	Snapshot             SnapshotStore
 	Events               EventStore
 	Reports              DailyReportService
+	Waiter               OutboxWaiter
+	Sessions             SessionStateStore
 	ApprovalRandom       io.Reader
 	Now                  func() time.Time
 }
@@ -42,6 +44,12 @@ func NewHandler(store Store, dependencies ...Dependencies) http.Handler {
 	if deps.Events == nil {
 		deps.Events, _ = store.(EventStore)
 	}
+	if deps.Waiter == nil {
+		deps.Waiter, _ = store.(OutboxWaiter)
+	}
+	if deps.Sessions == nil {
+		deps.Sessions, _ = store.(SessionStateStore)
+	}
 	if deps.Now == nil {
 		deps.Now = time.Now
 	}
@@ -51,6 +59,7 @@ func NewHandler(store Store, dependencies ...Dependencies) http.Handler {
 	api := &commandAPI{
 		capabilities: deps.Capabilities, platform: deps.PlatformCapabilities, snapshot: deps.Snapshot,
 		events: deps.Events, reports: deps.Reports, approvals: store,
+		waiter: deps.Waiter, sessions: deps.Sessions,
 		random: deps.ApprovalRandom, now: deps.Now,
 	}
 
@@ -67,7 +76,9 @@ func NewHandler(store Store, dependencies ...Dependencies) http.Handler {
 		IsMutation: registeredCapabilityMutationClassifier(deps.Capabilities, deps.PlatformCapabilities),
 	}).Middleware).Post("/commands", api.executeCommand)
 	router.With(RequireScopes(ScopeEventsRead)).Get("/events", api.listEvents)
+	router.With(RequireScopes(ScopeEventsRead)).Get("/events/await", api.awaitEvents)
 	router.With(RequireScopes(ScopeEventsRead)).Post("/events/ack", api.ackEvents)
+	router.With(RequireScopes(ScopeSessionsRead)).Get("/sessions/{id}/wait", api.waitForSession)
 	router.With(RequireScopes(ScopeReportsRead)).Get("/reports/daily", api.getDailyReport)
 	router.With(RequireScopes(
 		ScopeProjectsRead,
