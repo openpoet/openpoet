@@ -404,6 +404,10 @@ func main() {
 		// user-stop) — OnSessionEnd skips user-stopped sessions, and a ghost
 		// live claim would fire false critical conflicts against later peers.
 		coord.ForgetSession(sessionID)
+		// Free any workspace lane this session held (every terminal path).
+		if err := db.ReleaseWorkspaceLeaseBySession(context.Background(), sessionID); err != nil {
+			log.Printf("[Workspace] lease release failed for session %s: %v", sessionID, err)
+		}
 		// Expire all notifications for this session and clean up hook state
 		go notifService.MarkSessionRead(context.Background(), sessionID)
 		hookHandler.ClearSession(sessionID)

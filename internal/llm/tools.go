@@ -798,6 +798,7 @@ func AllToolDefs() []ToolDef {
 					"auto_start_task_prompt":       {Type: "boolean", Description: "Legacy compatibility flag. MCP task-linked starts always begin immediately without UI confirmation."},
 					"planning_mode":                {Type: "boolean", Description: "Start immediately with a planning prompt instead of the default task prompt."},
 					"custom_prompt":                {Type: "string", Description: "Start immediately with this prompt instead of the default task prompt. Cannot be combined with planning_mode."},
+					"workspace_id":                 {Type: "string", Description: "Run the session inside an existing ready workspace (isolated git-worktree lane) instead of the project's main checkout."},
 				},
 				Required: []string{"project_id"},
 			},

@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	expectedPlatformCapabilities = 158
-	expectedPlatformMutations    = 106
-	expectedPlatformReads        = 52
+	expectedPlatformCapabilities = 162
+	expectedPlatformMutations    = 108
+	expectedPlatformReads        = 54
 )
 
 // PlatformServices is the explicit runtime composition root for Automation.
@@ -84,6 +84,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		Configuration: application.NewConfigurationService(services.DB, services.Encryptor, effects, reinitializer, services.ConfigSync),
 	}
 
+	workspaceService := application.NewWorkspaceService(services.DB, NewGitCommandAdapter(services.GitHandler), services.ConfigSync)
 	sessionService := application.NewSessionService(
 		services.DB, services.SessionManager, services.ConfigSync, a.taskService,
 		services.HookHandler, services.HookHandler, a.DecryptFunc(), effects,
@@ -94,6 +95,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 			Input:        platformSessionInputSubmitter{api: a},
 			InitialInput: platformSessionInitialPromptSubmitter{api: a},
 			Settings:     platformSessionRuntimeSettings{api: a},
+			Workspaces:   workspaceService,
 		},
 	)
 	execution := automation.ExecutionPlatformServices{
@@ -114,6 +116,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		Tunnel:             platformTunnelReader{api: a},
 		Updates:            services.Updater,
 		Conflicts:          services.DB,
+		Workspaces:         workspaceService,
 	}
 
 	collaboration := automation.CollaborationPlatformServices{
