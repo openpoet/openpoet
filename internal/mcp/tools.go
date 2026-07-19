@@ -913,6 +913,17 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		payload, _ := json.Marshal(body)
 		return coordinatorResponse(client.Post("/api/coordinator/sessions", string(payload)))
 
+	case "openpoet_emit_session_report":
+		payload, _ := json.Marshal(params)
+		return coordinatorResponse(client.Post("/api/session/report", string(payload)))
+
+	case "openpoet_get_session_report":
+		sid, _ := params["session_id"].(string)
+		if sid == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		return coordinatorResponse(client.Get(fmt.Sprintf("/api/coordinator/sessions/%s/report", url.PathEscape(sid))))
+
 	case "openpoet_send_to_worker":
 		sid, _ := params["session_id"].(string)
 		text, _ := params["text"].(string)

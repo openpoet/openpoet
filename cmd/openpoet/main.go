@@ -458,6 +458,12 @@ func main() {
 		log.Printf("[Coordinator] ensure coordinator client: %v", err)
 	}
 
+	// Phase 7.2: worker-side milestone-report skill (materialized to every
+	// project by config sync; users may edit it — never overwritten).
+	if err := configsync.EnsureSessionReportSkill(context.Background(), db); err != nil {
+		log.Printf("[Coordinator] ensure session-report skill: %v", err)
+	}
+
 	// Wire AI evaluation callbacks into session manager
 	sessionMgr.OnSessionStart = func(sessionID string) {
 		log.Printf("[AI-Session] >>> OnSessionStart callback fired for session %s", sessionID[:8])
@@ -653,6 +659,10 @@ func main() {
 	// lets an ELECTED session coordinate a group cross-project. Reuses the same
 	// dependencies; authority never rests on the legacy localhost surface.
 	r.Mount("/api/coordinator", automation.NewCoordinatorHandler(db, automationDeps))
+
+	// Worker self-report surface (Phase 7.2): a session emits its own dense
+	// milestone report, authenticated by its opst1 bearer.
+	r.Mount("/api/session", automation.NewSessionReportHandler(db, reportService))
 
 	// API routes
 	// DEBUG: Client error reporting endpoint
