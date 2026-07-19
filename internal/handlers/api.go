@@ -1716,10 +1716,14 @@ func (a *API) AutoRestoreSession(ctx context.Context, sess *database.Session) er
 	// 'leased' by a session that will never run again.
 	laneRestore := false
 	if sess.WorkDir != "" && sess.WorkDir != project.Path {
-		if _, statErr := os.Stat(sess.WorkDir); statErr != nil {
-			a.db.EndSession(ctx, sessionID, "stopped")
-			_ = a.db.ReleaseWorkspaceLeaseBySession(ctx, sessionID)
-			return fmt.Errorf("workspace directory gone, not restoring session %s: %w", sessionID, statErr)
+		// The local Stat only proves anything for local lanes; a remote lane's
+		// path lives on the SSH host and is validated by the reopen itself.
+		if project.Type == "local" {
+			if _, statErr := os.Stat(sess.WorkDir); statErr != nil {
+				a.db.EndSession(ctx, sessionID, "stopped")
+				_ = a.db.ReleaseWorkspaceLeaseBySession(ctx, sessionID)
+				return fmt.Errorf("workspace directory gone, not restoring session %s: %w", sessionID, statErr)
+			}
 		}
 		if sess.WorkspaceID.Valid && sess.WorkspaceID.String != "" {
 			if leaseErr := a.db.LeaseWorkspaceForSession(ctx, sess.WorkspaceID.String, sessionID); leaseErr != nil {
