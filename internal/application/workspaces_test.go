@@ -190,19 +190,29 @@ func TestWorkspaceRejectsEscapingNames(t *testing.T) {
 	}
 }
 
+// Phase 7.3 superseded the phase-2 local-only restriction: remote projects ARE
+// supported, but only through the remote FS seam — a syncer without it must
+// fail CLOSED before any git command runs (this fixture's syncer has no remote
+// FS implementation).
 func TestWorkspaceRemoteNotSupported(t *testing.T) {
 	svc, git, _, _, remote := workspaceTestFixture(t)
 	ctx := context.Background()
 	_, err := svc.Create(ctx, CreateWorkspaceCommand{ProjectID: remote.ID, Name: "lane-r", Authorization: workspaceTestAuth})
-	if code := applicationErrorCode(err); code != "workspace_remote_unsupported" {
-		t.Fatalf("remote error = %v (code %q), want workspace_remote_unsupported", err, code)
+	if err == nil || !strings.Contains(err.Error(), "remote workspace filesystem is unavailable") {
+		t.Fatalf("remote without an FS seam must fail closed, got %v", err)
 	}
-	if len(git.commands) != 0 {
-		t.Fatalf("remote create still ran git: %v", git.commands)
+	sawWorktree := false
+	for _, cmd := range git.commands {
+		if len(cmd) > 0 && cmd[0] == "worktree" {
+			sawWorktree = true
+		}
 	}
-	rows, _ := svc.List(ctx, remote.ID, "", 10)
-	if len(rows) != 0 {
-		t.Fatalf("rows for remote project = %d, want 0 (no orphan row)", len(rows))
+	if sawWorktree {
+		t.Fatalf("remote create without FS seam still ran worktree commands: %v", git.commands)
+	}
+	ready, _ := svc.List(ctx, remote.ID, "ready", 10)
+	if len(ready) != 0 {
+		t.Fatalf("ready rows for failed remote create = %d, want 0", len(ready))
 	}
 }
 

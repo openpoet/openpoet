@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -144,6 +145,13 @@ func (s *sessionReportAPI) emit(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeApplicationReportError(w, err)
 		return
+	}
+	// Rolling mission summary: refresh last_report_ref on every roster row of
+	// this session (best-effort — the report itself already persisted).
+	if store, ok := s.coordinator.store.(missionStore); ok {
+		if refErr := store.UpdateMissionWorkerReport(r.Context(), cs.SessionID, report.ReportID); refErr != nil {
+			log.Printf("[SessionReport] mission last_report_ref update failed for %s: %v", cs.SessionID, refErr)
+		}
 	}
 	writeJSON(w, http.StatusOK, report)
 }

@@ -17,6 +17,7 @@ import (
 
 	"openpoet/internal/database"
 	"openpoet/internal/secretvalue"
+	"openpoet/internal/sshauth"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -189,7 +190,8 @@ func (cs *ConfigSyncer) SyncToProject(ctx context.Context, project *database.Pro
 // whose Path is the lane directory. Local claude-style projects only.
 func (cs *ConfigSyncer) MaterializeToWorkspace(ctx context.Context, project *database.Project) error {
 	if project.Type != "local" {
-		return fmt.Errorf("materialize-only sync supports local projects only")
+		// Remote lanes (Phase 7.3): same materialize-only layer over SFTP.
+		return cs.materializeToRemoteLane(ctx, project)
 	}
 	return cs.syncToLocalMode(ctx, project, true)
 }
@@ -2550,10 +2552,11 @@ exit 0
 func (cs *ConfigSyncer) buildSSHConfig(project *database.Project) (*ssh.ClientConfig, error) {
 	authType := project.SSHAuthType.String
 	user := project.SSHUser.String
+	hasCredential := project.SSHCredentialEncrypted.Valid && project.SSHCredentialEncrypted.String != ""
 
 	var authMethods []ssh.AuthMethod
 
-	if authType == "password" {
+	if authType == "password" && hasCredential {
 		password, err := cs.decryptFunc(
 			project.SSHCredentialEncrypted.String,
 			project.SSHCredentialIV.String,
@@ -2562,7 +2565,7 @@ func (cs *ConfigSyncer) buildSSHConfig(project *database.Project) (*ssh.ClientCo
 			return nil, err
 		}
 		authMethods = append(authMethods, ssh.Password(password))
-	} else if authType == "key" || authType == "key_passphrase" {
+	} else if (authType == "key" || authType == "key_passphrase") && hasCredential {
 		keyData, err := cs.decryptFunc(
 			project.SSHCredentialEncrypted.String,
 			project.SSHCredentialIV.String,
@@ -2576,22 +2579,12 @@ func (cs *ConfigSyncer) buildSSHConfig(project *database.Project) (*ssh.ClientCo
 			return nil, err
 		}
 		authMethods = append(authMethods, ssh.PublicKeys(signer))
-	} else {
-		// Try default keys
-		homeDir, _ := os.UserHomeDir()
-		keyPaths := []string{
-			homeDir + "/.ssh/id_rsa",
-			homeDir + "/.ssh/id_ed25519",
-			homeDir + "/.ssh/id_ecdsa",
-		}
-		for _, keyPath := range keyPaths {
-			if keyData, err := os.ReadFile(keyPath); err == nil {
-				if signer, err := ssh.ParsePrivateKey(keyData); err == nil {
-					authMethods = append(authMethods, ssh.PublicKeys(signer))
-					break
-				}
-			}
-		}
+	}
+
+	// No stored credential (or auth type without one): the user's own default
+	// keys — the standard ssh behavior, matching internal/files/sftp.go.
+	if len(authMethods) == 0 {
+		authMethods = sshauth.DefaultKeyAuthMethods()
 	}
 
 	if len(authMethods) == 0 {
