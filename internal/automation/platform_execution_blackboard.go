@@ -49,13 +49,28 @@ type blackboardPutPayload struct {
 	Fence           *blackboardFencePayload `json:"fence,omitempty"`
 }
 
-func validBlackboardScope(scope string, scopeID int64) error {
+// validBlackboardScope validates the scope enum AND confines it to the acting
+// client's project_filter: a scoped client may only touch a project/group board
+// inside its filter. The global board is the designated shared coordination
+// space and stays open to any client (isolation there is by key convention).
+func validBlackboardScope(scope string, scopeID int64, ps *ProjectScopeSet) error {
 	switch scope {
 	case "global":
 		return nil
-	case "group", "project":
+	case "project":
 		if scopeID <= 0 {
-			return platformFailure("platform_payload_invalid", "scope_id is required for group/project scope", false)
+			return platformFailure("platform_payload_invalid", "scope_id is required for project scope", false)
+		}
+		if !ps.Allows(scopeID) {
+			return platformFailure("blackboard_out_of_scope", "the client is not scoped to this project board", false)
+		}
+		return nil
+	case "group":
+		if scopeID <= 0 {
+			return platformFailure("platform_payload_invalid", "scope_id is required for group scope", false)
+		}
+		if !ps.AllowsTag(scopeID) {
+			return platformFailure("blackboard_out_of_scope", "the client is not scoped to this group board", false)
 		}
 		return nil
 	default:
@@ -73,7 +88,7 @@ func (e *blackboardPlatformExecutor) Validate(_ context.Context, input PlatformE
 		if strings.TrimSpace(payload.Key) == "" {
 			return nil, platformFailure("platform_payload_invalid", "key is required", false)
 		}
-		if err := validBlackboardScope(payload.Scope, payload.ScopeID); err != nil {
+		if err := validBlackboardScope(payload.Scope, payload.ScopeID, input.ProjectScope); err != nil {
 			return nil, err
 		}
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"scope": payload.Scope, "key": payload.Key}), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
@@ -95,7 +110,7 @@ func (e *blackboardPlatformExecutor) Validate(_ context.Context, input PlatformE
 		if strings.TrimSpace(payload.Key) == "" {
 			return nil, platformFailure("platform_payload_invalid", "key is required", false)
 		}
-		if err := validBlackboardScope(payload.Scope, payload.ScopeID); err != nil {
+		if err := validBlackboardScope(payload.Scope, payload.ScopeID, input.ProjectScope); err != nil {
 			return nil, err
 		}
 		put := database.BlackboardPutInput{

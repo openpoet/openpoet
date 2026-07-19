@@ -125,11 +125,13 @@ func (a *commandAPI) executeCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Central project-scope enforcement for EVERY command (legacy + platform): a
-	// client provisioned with a project_filter may only target projects inside its
-	// group. A target that names a project outside the filter fails closed. This
-	// lives here (the single /commands entry) because legacy capabilities like
-	// tasks.create bypass DispatchPlatformCapability's own scope check.
-	if scope := resolveActorProjectScope(r.Context(), a.scopeStore, actor); !scope.Allows(commandTargetProjectID(command)) {
+	// client provisioned with a project_filter may only touch projects inside its
+	// group. The effective project is resolved from the target AND the payload
+	// (legacy task handlers accept project_id in either), so a payload-carried
+	// project cannot slip past. list-all task reads (no project) are additionally
+	// filtered downstream via `scope`.
+	scope := resolveActorProjectScope(r.Context(), a.scopeStore, actor)
+	if !scope.Allows(effectiveCommandProjectID(command)) {
 		a.writeCommandError(w, command, &commandFailure{status: http.StatusForbidden, code: "project_out_of_scope", message: "the automation client is not scoped to this project"})
 		return
 	}
@@ -208,7 +210,7 @@ func (a *commandAPI) executeCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := dispatchProjectTaskCommand(r, capability, command, actor)
+	result, err := dispatchProjectTaskCommand(r, capability, command, actor, scope)
 	if err != nil {
 		a.writeCommandError(w, command, err)
 		return
@@ -254,6 +256,25 @@ func commandTargetProjectID(command *commandEnvelope) int64 {
 		var id int64
 		if err := json.Unmarshal(t.ID, &id); err == nil {
 			return id
+		}
+	}
+	return 0
+}
+
+// effectiveCommandProjectID is the project the command will actually act on:
+// the target project if present, else a project_id carried in the payload. The
+// legacy task handlers resolve the project from target OR payload, so the scope
+// gate must consider both or a payload-carried project would escape the filter.
+func effectiveCommandProjectID(command *commandEnvelope) int64 {
+	if pid := commandTargetProjectID(command); pid > 0 {
+		return pid
+	}
+	if command != nil && len(command.Payload) > 0 {
+		var p struct {
+			ProjectID int64 `json:"project_id"`
+		}
+		if err := json.Unmarshal(command.Payload, &p); err == nil && p.ProjectID > 0 {
+			return p.ProjectID
 		}
 	}
 	return 0
@@ -334,7 +355,23 @@ func projectTaskServiceFor(registry *application.CapabilityRegistry, name applic
 	return service, nil
 }
 
-func dispatchProjectTaskCommand(r *http.Request, capability application.Capability, command *commandEnvelope, actor Actor) (any, error) {
+// filterTasksByScope drops tasks (and cross-project summary counts) outside the
+// actor's project_filter, so a scoped client's list-all never leaks another
+// group's tasks or aggregate counts.
+func filterTasksByScope(result *application.AllTasksResult, scope *ProjectScopeSet) *application.AllTasksResult {
+	if result == nil {
+		return result
+	}
+	kept := make([]database.ProjectTask, 0, len(result.Tasks))
+	for _, t := range result.Tasks {
+		if scope.Allows(t.ProjectID) {
+			kept = append(kept, t)
+		}
+	}
+	return &application.AllTasksResult{Tasks: kept} // summary dropped: it is a cross-project aggregate
+}
+
+func dispatchProjectTaskCommand(r *http.Request, capability application.Capability, command *commandEnvelope, actor Actor, scope *ProjectScopeSet) (any, error) {
 	if service, ok := capability.Service.(*application.WorkRunService); ok && service != nil {
 		return dispatchWorkRunCommand(r, service, capability, command, actor)
 	}
@@ -360,7 +397,16 @@ func dispatchProjectTaskCommand(r *http.Request, capability application.Capabili
 		if projectID > 0 {
 			return service.ListByProject(commandContext, projectID)
 		}
-		return service.ListAll(commandContext, database.TaskFilter{Status: payload.Status, Priority: payload.Priority, Search: payload.Search})
+		tasks, err := service.ListAll(commandContext, database.TaskFilter{Status: payload.Status, Priority: payload.Priority, Search: payload.Search})
+		if err != nil {
+			return nil, err
+		}
+		// A project_filter-scoped client asking for ALL tasks only ever sees the
+		// projects inside its filter — list-all must never leak other groups.
+		if scope.Restricted() {
+			tasks = filterTasksByScope(tasks, scope)
+		}
+		return tasks, nil
 
 	case application.CapabilityHandlerTasksGet:
 		var payload taskReferencePayload
