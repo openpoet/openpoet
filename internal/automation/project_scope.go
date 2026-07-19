@@ -14,15 +14,20 @@ type ProjectScopeStore interface {
 }
 
 // ProjectScopeSet is a resolved project_filter. Unrestricted actors (no filter)
-// may touch any project; otherwise Allowed is the exact set they are scoped to.
+// may touch any project; otherwise Allowed is the exact set of projects they are
+// scoped to, and AllowedTags the coordination groups (tag ids) named directly in
+// the filter (for group-scoped resources like the blackboard).
 type ProjectScopeSet struct {
 	Unrestricted bool
 	Allowed      map[int64]bool
+	AllowedTags  map[int64]bool
 }
 
 // Allows reports whether the actor may touch projectID. A nil/unrestricted scope
 // allows everything; a projectID of 0 (unknown/global target) is allowed so
-// project-less capabilities are never blocked by scoping.
+// project-less capabilities are never blocked by scoping. Callers that must NOT
+// treat a project-less value as allowed (e.g. list-all guards) check
+// Restricted() first.
 func (s *ProjectScopeSet) Allows(projectID int64) bool {
 	if s == nil || s.Unrestricted {
 		return true
@@ -31,6 +36,25 @@ func (s *ProjectScopeSet) Allows(projectID int64) bool {
 		return true
 	}
 	return s.Allowed[projectID]
+}
+
+// Restricted reports whether a real project_filter is in force (the actor is NOT
+// unrestricted). List/broadcast surfaces use this to decide they must filter
+// results rather than return everything.
+func (s *ProjectScopeSet) Restricted() bool {
+	return !(s == nil || s.Unrestricted)
+}
+
+// AllowsTag reports whether the actor's filter names this coordination group tag
+// directly (unrestricted actors allow any tag).
+func (s *ProjectScopeSet) AllowsTag(tagID int64) bool {
+	if s == nil || s.Unrestricted {
+		return true
+	}
+	if tagID <= 0 {
+		return false
+	}
+	return s.AllowedTags[tagID]
 }
 
 type projectFilterSpec struct {
@@ -59,6 +83,12 @@ func resolveActorProjectScope(ctx context.Context, store ProjectScopeStore, acto
 			allowed[id] = true
 		}
 	}
+	tags := make(map[int64]bool, len(spec.TagIDs))
+	for _, id := range spec.TagIDs {
+		if id > 0 {
+			tags[id] = true
+		}
+	}
 	if len(spec.TagIDs) > 0 && store != nil {
 		if ids, err := store.ProjectIDsForTags(ctx, spec.TagIDs); err == nil {
 			for _, id := range ids {
@@ -66,7 +96,7 @@ func resolveActorProjectScope(ctx context.Context, store ProjectScopeStore, acto
 			}
 		}
 	}
-	return &ProjectScopeSet{Allowed: allowed}
+	return &ProjectScopeSet{Allowed: allowed, AllowedTags: tags}
 }
 
 // targetProjectID decodes a capability target's project id (0 if the target does

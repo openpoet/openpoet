@@ -92,8 +92,12 @@ func (a *commandAPI) streamEvents(w http.ResponseWriter, r *http.Request) {
 				flusher.Flush()
 			}
 		}
-		if !caughtUp {
-			continue // keep draining a backlog before parking
+		// Keep draining a backlog before parking — but ONLY on a clean scan. On a
+		// scan error caughtUp is false; a bare `continue` there would busy-loop at
+		// 100% CPU and never check the context/lifetime. Fall through to the select
+		// so the error path backs off and honors cancellation.
+		if scanErr == nil && !caughtUp {
+			continue
 		}
 		if wake == nil {
 			wake = timeAfterChan(250 * time.Millisecond)
@@ -121,6 +125,22 @@ func writeSSEEvent(w http.ResponseWriter, ev automationEvent) {
 	fmt.Fprintf(w, "id: %d\n", ev.Sequence)
 	fmt.Fprintf(w, "event: %s\n", ev.EventType)
 	fmt.Fprintf(w, "data: %s\n\n", data)
+}
+
+// filterEventsByScope drops events outside the actor's project_filter. Used by
+// the long-poll and page endpoints so every event surface honors the filter, not
+// just the SSE push path.
+func filterEventsByScope(events []automationEvent, scope *ProjectScopeSet) []automationEvent {
+	if scope == nil || scope.Unrestricted {
+		return events
+	}
+	out := make([]automationEvent, 0, len(events))
+	for _, ev := range events {
+		if scope.Allows(eventProjectID(ev)) {
+			out = append(out, ev)
+		}
+	}
+	return out
 }
 
 // eventProjectID extracts the project id from an event payload (0 when absent),

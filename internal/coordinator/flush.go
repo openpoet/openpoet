@@ -204,9 +204,10 @@ func conflictDetectedEvent(inc Incident, ts time.Time) database.EventOutboxAppen
 	}
 }
 
-func awaitingInputEvent(sessionID, kind, excerpt string, ts time.Time) database.EventOutboxAppend {
+func awaitingInputEvent(sessionID string, projectID int64, kind, excerpt string, ts time.Time) database.EventOutboxAppend {
 	payload, _ := json.Marshal(map[string]interface{}{
 		"session_id": sessionID,
+		"project_id": projectID,
 		"kind":       kind,
 		"excerpt":    excerpt,
 	})
