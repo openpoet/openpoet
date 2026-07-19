@@ -17,6 +17,8 @@ type commandAPI struct {
 	events       EventStore
 	reports      DailyReportService
 	approvals    ApprovalGrantStore
+	waiter       OutboxWaiter
+	sessions     SessionStateStore
 	random       io.Reader
 	now          func() time.Time
 }

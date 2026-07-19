@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	expectedPlatformCapabilities = 162
-	expectedPlatformMutations    = 108
+	expectedPlatformCapabilities = 163
+	expectedPlatformMutations    = 109
 	expectedPlatformReads        = 54
 )
 
@@ -85,6 +85,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 	}
 
 	workspaceService := application.NewWorkspaceService(services.DB, NewGitCommandAdapter(services.GitHandler), services.ConfigSync)
+	workRunService := application.NewWorkRunService(services.DB)
 	sessionService := application.NewSessionService(
 		services.DB, services.SessionManager, services.ConfigSync, a.taskService,
 		services.HookHandler, services.HookHandler, a.DecryptFunc(), effects,
@@ -96,6 +97,8 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 			InitialInput: platformSessionInitialPromptSubmitter{api: a},
 			Settings:     platformSessionRuntimeSettings{api: a},
 			Workspaces:   workspaceService,
+			Signals:      services.HookHandler,
+			WorkRuns:     workRunService,
 		},
 	)
 	execution := automation.ExecutionPlatformServices{

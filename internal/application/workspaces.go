@@ -66,6 +66,20 @@ type RemoveWorkspaceCommand struct {
 	Authorization ActionAuthorization
 }
 
+type MergeWorkspaceCommand struct {
+	WorkspaceID   string
+	Authorization ActionAuthorization
+}
+
+// MergeResult carries the merge outcome. A conflict is a business outcome, not
+// an execution error, so the file list rides the success path (error returns
+// carry only a code+message and would drop it).
+type MergeResult struct {
+	Merged        bool
+	ConflictFiles []string
+	Workspace     *database.Workspace
+}
+
 // Create provisions a git-worktree lane: row (provisioning) → exclude line →
 // git worktree add -b openpoet/<name> → materialize-only sync → ready + event.
 func (s *WorkspaceService) Create(ctx context.Context, command CreateWorkspaceCommand) (*database.Workspace, error) {
@@ -280,6 +294,65 @@ func (s *WorkspaceService) Remove(ctx context.Context, command RemoveWorkspaceCo
 		return nil, err
 	}
 	return s.db.GetWorkspace(ctx, ws.ID)
+}
+
+// Merge folds a lane's branch back into the main checkout: precondition
+// main-clean, git merge --no-ff, and on conflict abort + return the file list
+// (leaving main clean). Destructive tier. The lane branch is checked out in the
+// lane worktree, but merging FROM it into main is not blocked by git's
+// worktree lock (only checkout/branch -d/reset OF it would be).
+func (s *WorkspaceService) Merge(ctx context.Context, command MergeWorkspaceCommand) (*MergeResult, error) {
+	if err := requireExplicitActionApproval(command.Authorization); err != nil {
+		return nil, err
+	}
+	ws, err := s.Get(ctx, command.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	if ws.LeasedBySessionID.Valid && ws.LeasedBySessionID.String != "" {
+		return nil, conflictError("workspace_leased", "Workspace is leased by a running session; stop it before merging")
+	}
+	project, err := s.db.GetProject(ctx, ws.ProjectID)
+	if err != nil {
+		return nil, notFoundError("project_not_found", "Project not found", err)
+	}
+	// Precondition: the main checkout must be clean, or --no-ff would fail
+	// midway and leave a mess.
+	status, err := s.git.RunGit(ctx, project, "status", "--porcelain")
+	if err != nil {
+		return nil, fmt.Errorf("checking main worktree status: %w", err)
+	}
+	if strings.TrimSpace(status) != "" {
+		return nil, conflictError("workspace_main_dirty", "Main working tree has uncommitted changes; commit or stash before merging")
+	}
+	actor := EventActorValue(command.Authorization.Actor)
+	if _, mergeErr := s.git.RunGit(ctx, project, "merge", "--no-ff", "--no-edit", ws.Branch); mergeErr != nil {
+		// Non-zero exit is a conflict OR a real failure; git merge's CONFLICT
+		// lines go to stdout (dropped on error), so diagnose separately.
+		conflicts, _ := s.git.RunGit(ctx, project, "diff", "--name-only", "--diff-filter=U")
+		files := splitLines(conflicts)
+		// Always abort so main is left clean regardless of which case it was.
+		_, _ = s.git.RunGit(ctx, project, "merge", "--abort")
+		if len(files) == 0 {
+			return nil, fmt.Errorf("git merge failed: %w", mergeErr)
+		}
+		return &MergeResult{Merged: false, ConflictFiles: files, Workspace: ws}, nil
+	}
+	if err := s.db.SetWorkspaceStatus(ctx, ws.ID, "merged", "workspace.merged", actor); err != nil {
+		return nil, err
+	}
+	merged, _ := s.db.GetWorkspace(ctx, ws.ID)
+	return &MergeResult{Merged: true, Workspace: merged}, nil
+}
+
+func splitLines(s string) []string {
+	var out []string
+	for _, line := range strings.Split(strings.TrimSpace(s), "\n") {
+		if l := strings.TrimSpace(line); l != "" {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 func pathExists(p string) bool {

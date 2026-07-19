@@ -348,3 +348,82 @@ func TestStopEventQueuesTurnCompleted(t *testing.T) {
 		t.Fatal("Stop did not queue a session.turn_completed event")
 	}
 }
+
+// TestConsultWriteVetoesContestedFile pins the synchronous veto: a live peer's
+// write claim on the same path denies the request with a naming reason;
+// uncontested / cross-file / cross-project requests are allowed.
+func TestConsultWriteVetoesContestedFile(t *testing.T) {
+	root := "/proj"
+	c, clock := testCoordinator(t, map[string]*sessionInfo{
+		"sa": localSession("sa", 1, root, 0),
+		"sb": localSession("sb", 1, root, 0),
+	})
+	// SA claims shared.go.
+	c.process(touchMsg("sa", "Edit", root+"/shared.go", KindWrite, *clock))
+
+	deny, reason := c.ConsultWrite("sb", "Edit", map[string]interface{}{"file_path": root + "/shared.go"})
+	if !deny || reason == "" {
+		t.Fatalf("contested write not vetoed: deny=%v reason=%q", deny, reason)
+	}
+	// Uncontested file: allowed.
+	if deny, _ := c.ConsultWrite("sb", "Edit", map[string]interface{}{"file_path": root + "/other.go"}); deny {
+		t.Fatal("uncontested write vetoed")
+	}
+	// Read of the contested file: never vetoed (only write-class tools).
+	if deny, _ := c.ConsultWrite("sb", "Read", map[string]interface{}{"file_path": root + "/shared.go"}); deny {
+		t.Fatal("read vetoed")
+	}
+	// .claude/** contention is R5 warn, not a hard veto.
+	c.process(touchMsg("sa", "Write", root+"/.claude/settings.json", KindWrite, *clock))
+	if deny, _ := c.ConsultWrite("sb", "Write", map[string]interface{}{"file_path": root + "/.claude/settings.json"}); deny {
+		t.Fatal(".claude write vetoed (should be R5 warn, not veto)")
+	}
+	// Cold session (not in cache): fail open.
+	if deny, _ := c.ConsultWrite("unknown-session", "Edit", map[string]interface{}{"file_path": root + "/shared.go"}); deny {
+		t.Fatal("cold session vetoed (must fail open)")
+	}
+	// A dead peer never vetoes.
+	c.sessions["sa"].live = false
+	if deny, _ := c.ConsultWrite("sb", "Edit", map[string]interface{}{"file_path": root + "/shared.go"}); deny {
+		t.Fatal("dead peer's claim vetoed a write")
+	}
+}
+
+// TestTurnCompletedCarriesFilesTouched pins files_touched accumulation over a
+// turn, cleared on Stop.
+func TestTurnCompletedCarriesFilesTouched(t *testing.T) {
+	root := "/proj"
+	c, clock := testCoordinator(t, map[string]*sessionInfo{"sa": localSession("sa", 1, root, 0)})
+	c.process(touchMsg("sa", "Edit", root+"/a.go", KindWrite, *clock))
+	c.process(touchMsg("sa", "Read", root+"/b.go", KindRead, *clock))
+	c.process(touchMsg("sa", "Edit", root+"/a.go", KindWrite, *clock)) // dup path
+	c.process(ingestMsg{kind: "turn", sessionID: "sa", ts: *clock})
+
+	var payload string
+	for _, ev := range c.pendingEvents {
+		if ev.EventType == "session.turn_completed" {
+			payload = ev.PayloadJSON
+		}
+	}
+	if payload == "" {
+		t.Fatal("no turn_completed event")
+	}
+	if !contains(payload, "a.go") || !contains(payload, "b.go") {
+		t.Fatalf("files_touched missing paths: %s", payload)
+	}
+	// Second turn with no touches: empty files, not a leak of the first turn.
+	c.process(ingestMsg{kind: "turn", sessionID: "sa", ts: *clock})
+	last := c.pendingEvents[len(c.pendingEvents)-1]
+	if contains(last.PayloadJSON, "a.go") {
+		t.Fatalf("turn files leaked across turns: %s", last.PayloadJSON)
+	}
+}
+
+func contains(h, n string) bool {
+	for i := 0; i+len(n) <= len(h); i++ {
+		if h[i:i+len(n)] == n {
+			return true
+		}
+	}
+	return false
+}
