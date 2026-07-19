@@ -113,6 +113,10 @@ func (a *commandAPI) listEvents(w http.ResponseWriter, r *http.Request) {
 	if hasMore {
 		storedEvents = storedEvents[:limit]
 	}
+	// Honor the client's project_filter on the POLL path too — not only on the
+	// SSE push path — so a scoped client cannot read another group's events by
+	// simply choosing GET /events over GET /events/stream.
+	scope := resolveActorProjectScope(r.Context(), a.scopeStore, actor)
 	events := make([]automationEvent, 0, len(storedEvents))
 	for _, stored := range storedEvents {
 		event, err := mapAutomationEvent(stored)
@@ -120,11 +124,16 @@ func (a *commandAPI) listEvents(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "event_payload_invalid", "a persisted event payload is invalid", false)
 			return
 		}
+		if !scope.Allows(eventProjectID(event)) {
+			continue
+		}
 		events = append(events, event)
 	}
+	// The cursor advances past ALL rows read (even filtered ones) so a scoped
+	// client never re-scans events it is not allowed to see.
 	var nextCursor *string
-	if len(events) > 0 {
-		value := strconv.FormatInt(events[len(events)-1].Sequence, 10)
+	if len(storedEvents) > 0 {
+		value := strconv.FormatInt(storedEvents[len(storedEvents)-1].Sequence, 10)
 		nextCursor = &value
 	}
 	writeJSON(w, http.StatusOK, eventPage{Events: events, NextCursor: nextCursor, HasMore: hasMore})

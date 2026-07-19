@@ -17,9 +17,11 @@ import (
 )
 
 const (
-	expectedPlatformCapabilities = 163
-	expectedPlatformMutations    = 109
-	expectedPlatformReads        = 54
+	// Phase 5 added groups.list (config read), blackboard.get (exec read),
+	// blackboard.put (exec write): +3 capabilities, +1 mutation, +2 reads.
+	expectedPlatformCapabilities = 166
+	expectedPlatformMutations    = 110
+	expectedPlatformReads        = 56
 )
 
 // PlatformServices is the explicit runtime composition root for Automation.
@@ -120,6 +122,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		Updates:            services.Updater,
 		Conflicts:          services.DB,
 		Workspaces:         workspaceService,
+		Blackboard:         services.DB,
 	}
 
 	collaboration := automation.CollaborationPlatformServices{

@@ -75,9 +75,10 @@ func (d *DB) migrate() error {
 func (d *DB) CreateProject(ctx context.Context, p *Project) error {
 	p.TaskAutoApproveVerification = normalizeTaskAutoApproveVerification(p.TaskAutoApproveVerification)
 	p.CoordinatorMode = normalizeCoordinatorMode(p.CoordinatorMode)
-	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv, tool_policy, skill_policy, backend, backend_config, task_auto_approve_verification, coordinator_mode)
-			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification, p.CoordinatorMode)
+	p.ConflictPolicy = normalizeConflictPolicy(p.ConflictPolicy)
+	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv, tool_policy, skill_policy, backend, backend_config, task_auto_approve_verification, coordinator_mode, conflict_policy)
+			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification, p.CoordinatorMode, p.ConflictPolicy)
 	if err != nil {
 		return err
 	}
@@ -118,8 +119,9 @@ func (d *DB) ListProjects(ctx context.Context) ([]Project, error) {
 func (d *DB) UpdateProject(ctx context.Context, p *Project) error {
 	p.TaskAutoApproveVerification = normalizeTaskAutoApproveVerification(p.TaskAutoApproveVerification)
 	p.CoordinatorMode = normalizeCoordinatorMode(p.CoordinatorMode)
-	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, tool_policy=?, skill_policy=?, dangerously_skip_permissions=?, backend=?, backend_config=?, task_auto_approve_verification=?, coordinator_mode=?, updated_at=? WHERE id=?`
-	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.DangerouslySkipPermissions, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification, p.CoordinatorMode, time.Now(), p.ID)
+	p.ConflictPolicy = normalizeConflictPolicy(p.ConflictPolicy)
+	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, tool_policy=?, skill_policy=?, dangerously_skip_permissions=?, backend=?, backend_config=?, task_auto_approve_verification=?, coordinator_mode=?, conflict_policy=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.DangerouslySkipPermissions, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification, p.CoordinatorMode, p.ConflictPolicy, time.Now(), p.ID)
 	return err
 }
 
@@ -138,6 +140,17 @@ func normalizeCoordinatorMode(value string) string {
 		return strings.TrimSpace(value)
 	default:
 		return "off"
+	}
+}
+
+// normalizeConflictPolicy defaults the synchronous-gate dial to 'observe' (the
+// safe, non-blocking default — the gate is strictly opt-in per project).
+func normalizeConflictPolicy(value string) string {
+	switch strings.TrimSpace(value) {
+	case "warn", "gate", "enforce":
+		return strings.TrimSpace(value)
+	default:
+		return "observe"
 	}
 }
 
@@ -226,6 +239,31 @@ func (d *DB) UpdateTag(ctx context.Context, tag *Tag) error {
 func (d *DB) DeleteTag(ctx context.Context, id int64) error {
 	_, err := d.ExecContext(ctx, "DELETE FROM tags WHERE id = ?", id)
 	return err
+}
+
+// ListCoordinationTags returns tags flagged as coordination groups (V65).
+func (d *DB) ListCoordinationTags(ctx context.Context) ([]Tag, error) {
+	var tags []Tag
+	err := d.SelectContext(ctx, &tags, "SELECT * FROM tags WHERE coordination = 1 ORDER BY name")
+	return tags, err
+}
+
+// ProjectIDsForTags resolves the set of project ids that belong to ANY of the
+// given tags (project_filter tag membership). Returns distinct ids.
+func (d *DB) ProjectIDsForTags(ctx context.Context, tagIDs []int64) ([]int64, error) {
+	if len(tagIDs) == 0 {
+		return nil, nil
+	}
+	query, args, err := sqlx.In("SELECT DISTINCT project_id FROM project_tags WHERE tag_id IN (?)", tagIDs)
+	if err != nil {
+		return nil, err
+	}
+	query = d.Rebind(query)
+	var ids []int64
+	if err := d.SelectContext(ctx, &ids, query, args...); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // Project tag assignment operations

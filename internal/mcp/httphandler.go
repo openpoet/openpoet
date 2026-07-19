@@ -118,10 +118,52 @@ func (h *HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		h.handlePost(w, r)
+	case http.MethodGet:
+		h.handleGetStream(w, r)
 	case http.MethodDelete:
 		h.handleDelete(w, r)
 	default:
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+	}
+}
+
+// handleGetStream answers a GET on /mcp with an SSE stream per the MCP Streamable
+// HTTP transport (Phase 5). Previously GET returned 405 — external MCP clients
+// that open a server->client channel need a 200 text/event-stream. This opens
+// the stream and keeps it alive with heartbeats; server-initiated MCP messages
+// (notifications) would be pushed here. Non-SSE GETs (no event-stream Accept)
+// still get 405 so nothing else changes.
+func (h *HTTPHandler) handleGetStream(w http.ResponseWriter, r *http.Request) {
+	if !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, `{"error":"streaming unsupported"}`, http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, ": mcp stream open\n\n") // first frame so the client sees the stream is live
+	flusher.Flush()
+
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	deadline := time.After(10 * time.Minute)
+	for {
+		select {
+		case <-ticker.C:
+			fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
+		case <-deadline:
+			return
+		case <-r.Context().Done():
+			return
+		}
 	}
 }
 

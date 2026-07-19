@@ -109,6 +109,16 @@ type sessionCreatePayload struct {
 	PlanningMode               bool              `json:"planning_mode,omitempty"`
 	CustomPrompt               string            `json:"custom_prompt,omitempty"`
 	WorkspaceID                string            `json:"workspace_id,omitempty"`
+	// Backend, when set, must name a known backend. It is validated and surfaced
+	// in the dry-run preview; execution currently inherits the project's backend
+	// (per-session backend override is a future capability).
+	Backend string `json:"backend,omitempty"`
+}
+
+// knownSessionBackends mirrors internal/session BackendType constants (kept local
+// to avoid an import cycle from the automation package into session).
+var knownSessionBackends = map[string]struct{}{
+	"claude_code": {}, "copilot": {}, "acp": {}, "codex": {}, "opencode": {},
 }
 
 type sessionReopenPayload struct {
@@ -165,6 +175,7 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if payload.Limit == 0 {
 			payload.Limit = 100
 		}
+		scope := input.ProjectScope // client project_filter: never leak other groups' sessions
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"limit": payload.Limit}), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
 			items, err := e.queries.ListSessions(ctx)
 			if err != nil {
@@ -174,6 +185,9 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 			for _, item := range items {
 				if payload.ProjectID > 0 && item.ProjectID != payload.ProjectID || payload.Status != "" && item.Status != payload.Status {
 					continue
+				}
+				if !scope.Allows(item.ProjectID) {
+					continue // outside the client's project_filter
 				}
 				views = append(views, sessionAutomationView(item, e.runtime))
 				if len(views) == payload.Limit {
@@ -239,6 +253,7 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if err := requireEmptyExecutionPayload(input.Payload); err != nil {
 			return nil, err
 		}
+		scope := input.ProjectScope
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, nil), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
 			items, err := e.queries.ListSessions(ctx)
 			if err != nil {
@@ -248,6 +263,9 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 			for _, item := range items {
 				if !e.runtime.IsSessionRunning(item.ID) {
 					continue
+				}
+				if !scope.Allows(item.ProjectID) {
+					continue // outside the client's project_filter
 				}
 				views = append(views, sessionAutomationView(item, e.runtime))
 				if len(views) == 500 {
@@ -286,6 +304,12 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if len(payload.WorkspaceID) > 128 {
 			return nil, platformFailure("platform_payload_invalid", "workspace_id is too large", false)
 		}
+		payload.Backend = strings.TrimSpace(payload.Backend)
+		if payload.Backend != "" {
+			if _, ok := knownSessionBackends[payload.Backend]; !ok {
+				return nil, platformFailure("platform_payload_invalid", "backend must be one of claude_code, copilot, acp, codex, opencode", false)
+			}
+		}
 		startMode := "default"
 		if payload.PlanningMode {
 			startMode = "planning"
@@ -295,7 +319,7 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{
 			"project_id": projectID, "has_task": payload.TaskID != nil, "environment_count": len(payload.Environment),
 			"unsafe_permissions": payload.DangerouslySkipPermissions, "start_mode": startMode,
-			"workspace_id": payload.WorkspaceID,
+			"workspace_id": payload.WorkspaceID, "backend": payload.Backend,
 		}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
 			authorization.AllowEnvironment = len(payload.Environment) > 0
 			authorization.AllowUnsafePermissions = payload.DangerouslySkipPermissions
