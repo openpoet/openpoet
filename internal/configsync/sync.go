@@ -284,6 +284,13 @@ func (cs *ConfigSyncer) syncToLocalMode(ctx context.Context, project *database.P
 	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing CLAUDE.md...")
 	cs.syncMemoryDocLocal(ctx, project, filepath.Join(projectPath, "CLAUDE.md"), materializeOnly)
 
+	// Managed steering: docs land as OpenPoet Docs, not native artifacts. Lives
+	// in .claude/CLAUDE.md (Claude Code loads it as project memory) so the
+	// bidirectional root CLAUDE.md ↔ memory-doc sync is never polluted.
+	if err := upsertDocsSteeringFile(filepath.Join(claudeDir, "CLAUDE.md")); err != nil {
+		cs.reportProgress(project.ID, "docs_steering", "error", err.Error())
+	}
+
 	return nil
 }
 
@@ -1448,6 +1455,8 @@ func (cs *ConfigSyncer) syncSkillsToCopilotInstructions(ctx context.Context, git
 		sb.WriteString("Always run `$OPENPOET_BIN cli tools` first to discover the exact tools available in the current session.\n\n")
 	}
 
+	sb.WriteString(OpenPoetDocsInstructionBlock())
+
 	instructionsPath := filepath.Join(githubDir, "copilot-instructions.md")
 	return os.WriteFile(instructionsPath, []byte(sb.String()), 0644)
 }
@@ -1544,6 +1553,12 @@ func (cs *ConfigSyncer) syncToLocalCodex(ctx context.Context, project *database.
 		cs.reportProgress(project.ID, "memory_doc", "done", "No AGENTS.md or CLAUDE.md found")
 	}
 
+	// NOTE(docs steering): codex/opencode read the root AGENTS.md, which is
+	// synced bidirectionally with the memory doc — upserting the steering block
+	// there would leak it into the user's memory doc and root CLAUDE.md. These
+	// harnesses get the steering via the per-session system-prompt channel
+	// (OPENPOET_APPEND_SYSTEM_PROMPT) with the mission briefing in Phase 7.3.
+
 	return nil
 }
 
@@ -1596,6 +1611,12 @@ func (cs *ConfigSyncer) syncToLocalOpenCode(ctx context.Context, project *databa
 	} else {
 		cs.reportProgress(project.ID, "memory_doc", "done", "No AGENTS.md or CLAUDE.md found")
 	}
+
+	// NOTE(docs steering): codex/opencode read the root AGENTS.md, which is
+	// synced bidirectionally with the memory doc — upserting the steering block
+	// there would leak it into the user's memory doc and root CLAUDE.md. These
+	// harnesses get the steering via the per-session system-prompt channel
+	// (OPENPOET_APPEND_SYSTEM_PROMPT) with the mission briefing in Phase 7.3.
 
 	return nil
 }
@@ -2374,6 +2395,8 @@ func (cs *ConfigSyncer) syncSkillsToACPInstructions(ctx context.Context, acpDir 
 		sb.WriteString("## " + skill.Name + "\n\n")
 		sb.WriteString(skill.Content + "\n\n")
 	}
+
+	sb.WriteString(OpenPoetDocsInstructionBlock())
 
 	instructionsPath := filepath.Join(acpDir, "instructions.md")
 	return os.WriteFile(instructionsPath, []byte(sb.String()), 0644)

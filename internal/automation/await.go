@@ -64,12 +64,18 @@ func (a *commandAPI) awaitEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "event_consumer_invalid", err.Error(), false)
 		return
 	}
-	registered, err := a.events.GetEventOutboxConsumerCursor(r.Context(), actor.ClientID, consumer)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "event_consumer_failed", "the event consumer could not be registered", true)
-		return
+	// Durable consumer cursors are keyed by automation_clients rows (FK).
+	// Session actors (coordinator tier) have no client row — they page with an
+	// explicit `after` cursor instead and skip registration.
+	var after int64
+	if actor.Type == "automation_client" && actor.ClientID != "" {
+		registered, err := a.events.GetEventOutboxConsumerCursor(r.Context(), actor.ClientID, consumer)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "event_consumer_failed", "the event consumer could not be registered", true)
+			return
+		}
+		after = registered.CursorSequence
 	}
-	after := registered.CursorSequence
 	if rawAfter := strings.TrimSpace(r.URL.Query().Get("after")); rawAfter != "" {
 		after, err = parseEventCursor(rawAfter)
 		if err != nil {
