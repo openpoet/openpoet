@@ -108,6 +108,7 @@ type sessionCreatePayload struct {
 	AutoStartTaskPrompt        *bool             `json:"auto_start_task_prompt,omitempty"`
 	PlanningMode               bool              `json:"planning_mode,omitempty"`
 	CustomPrompt               string            `json:"custom_prompt,omitempty"`
+	WorkspaceID                string            `json:"workspace_id,omitempty"`
 }
 
 type sessionReopenPayload struct {
@@ -277,6 +278,10 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if environmentBytes > 64<<10 {
 			return nil, platformFailure("platform_payload_invalid", "session environment exceeds 64 KiB", false)
 		}
+		payload.WorkspaceID = strings.TrimSpace(payload.WorkspaceID)
+		if len(payload.WorkspaceID) > 128 {
+			return nil, platformFailure("platform_payload_invalid", "workspace_id is too large", false)
+		}
 		startMode := "default"
 		if payload.PlanningMode {
 			startMode = "planning"
@@ -286,6 +291,7 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{
 			"project_id": projectID, "has_task": payload.TaskID != nil, "environment_count": len(payload.Environment),
 			"unsafe_permissions": payload.DangerouslySkipPermissions, "start_mode": startMode,
+			"workspace_id": payload.WorkspaceID,
 		}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
 			authorization.AllowEnvironment = len(payload.Environment) > 0
 			authorization.AllowUnsafePermissions = payload.DangerouslySkipPermissions
@@ -298,6 +304,7 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 				AutoStartTaskPrompt: true,
 				PlanningMode:        payload.PlanningMode,
 				CustomPrompt:        payload.CustomPrompt,
+				WorkspaceID:         payload.WorkspaceID,
 				Authorization:       authorization,
 			})
 			if err != nil {

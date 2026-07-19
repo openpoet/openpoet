@@ -404,6 +404,10 @@ func main() {
 		// user-stop) — OnSessionEnd skips user-stopped sessions, and a ghost
 		// live claim would fire false critical conflicts against later peers.
 		coord.ForgetSession(sessionID)
+		// Free any workspace lane this session held (every terminal path).
+		if err := db.ReleaseWorkspaceLeaseBySession(context.Background(), sessionID); err != nil {
+			log.Printf("[Workspace] lease release failed for session %s: %v", sessionID, err)
+		}
 		// Expire all notifications for this session and clean up hook state
 		go notifService.MarkSessionRead(context.Background(), sessionID)
 		hookHandler.ClearSession(sessionID)
@@ -1076,12 +1080,15 @@ func main() {
 		}
 	}()
 
-	// Auto-restore previously active sessions (non-blocking)
-	if len(sessionsToRestore) > 0 {
-		go func() {
-			time.Sleep(2 * time.Second) // let server start first
+	// Auto-restore previously active sessions, then sweep orphaned workspace
+	// leases (crash strands, failed restores). The sweep runs even with zero
+	// sessions to restore — that is exactly the case after a crash whose
+	// sessions all ended before the DB was preserved.
+	go func() {
+		time.Sleep(2 * time.Second) // let server start first
+		restoreCtx := context.Background()
+		if len(sessionsToRestore) > 0 {
 			log.Printf("[AutoRestore] Restoring %d active session(s) from before restart...", len(sessionsToRestore))
-			restoreCtx := context.Background()
 			restored := 0
 			for _, sess := range sessionsToRestore {
 				sess := sess // capture loop var
@@ -1093,8 +1100,13 @@ func main() {
 				}
 			}
 			log.Printf("[AutoRestore] Done: %d/%d sessions restored", restored, len(sessionsToRestore))
-		}()
-	}
+		}
+		if freed, err := db.ReleaseOrphanWorkspaceLeases(restoreCtx); err != nil {
+			log.Printf("[Workspace] orphan lease sweep failed: %v", err)
+		} else if freed > 0 {
+			log.Printf("[Workspace] freed %d orphaned workspace lease(s)", freed)
+		}
+	}()
 
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
