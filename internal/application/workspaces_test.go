@@ -15,8 +15,9 @@ import (
 // fakeWorkspaceGit records git invocations and simulates worktree add/remove
 // on the real filesystem so the service's stat checks hold.
 type fakeWorkspaceGit struct {
-	commands [][]string
-	failOn   string
+	commands     [][]string
+	failOn       string
+	branchExists bool
 }
 
 func (f *fakeWorkspaceGit) RunGit(_ context.Context, project *database.Project, args ...string) (string, error) {
@@ -30,10 +31,19 @@ func (f *fakeWorkspaceGit) RunGit(_ context.Context, project *database.Project, 
 		return "true\n", nil
 	case joined == "rev-parse --abbrev-ref HEAD":
 		return "main\n", nil
+	case args[0] == "rev-parse" && args[1] == "--verify":
+		if f.branchExists {
+			return "", nil
+		}
+		return "", fmt.Errorf("unknown ref")
 	case args[0] == "worktree" && args[1] == "add":
-		return "", os.MkdirAll(args[3], 0o755)
+		path := args[2]
+		if path == "-b" {
+			path = args[4]
+		}
+		return "", os.MkdirAll(path, 0o755)
 	case args[0] == "worktree" && args[1] == "remove":
-		return "", os.RemoveAll(args[3])
+		return "", os.RemoveAll(args[len(args)-1])
 	}
 	return "", nil
 }
@@ -206,5 +216,91 @@ func TestWorkspaceRemoveRequiresApprovalAndTearsDown(t *testing.T) {
 	}
 	if _, err := os.Stat(ws.Path); err == nil {
 		t.Fatal("lane directory still exists after remove")
+	}
+}
+
+// TestWorkspaceCreateFailureMarksFailed pins the failure leg the review found
+// untested: a git failure flips the row to 'failed' (+event), and — because
+// failed rows do not occupy the name — the same name is retryable WITHOUT a
+// destructive-tier cleanup.
+func TestWorkspaceCreateFailureMarksFailed(t *testing.T) {
+	svc, git, _, local, _ := workspaceTestFixture(t)
+	ctx := context.Background()
+	git.failOn = "worktree add"
+	_, err := svc.Create(ctx, CreateWorkspaceCommand{ProjectID: local.ID, Name: "lane-f", Authorization: workspaceTestAuth})
+	if err == nil {
+		t.Fatal("create with failing git succeeded")
+	}
+	rows, err := svc.List(ctx, local.ID, "failed", 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("failed rows = %d (%v), want 1", len(rows), err)
+	}
+	// The name is NOT blocked by the failed residue.
+	git.failOn = ""
+	ws, err := svc.Create(ctx, CreateWorkspaceCommand{ProjectID: local.ID, Name: "lane-f", Authorization: workspaceTestAuth})
+	if err != nil {
+		t.Fatalf("retry after failure blocked: %v", err)
+	}
+	if ws.Status != "ready" {
+		t.Fatalf("retry status = %s, want ready", ws.Status)
+	}
+}
+
+// TestWorkspaceRecreateAttachesSurvivingBranch: a branch left behind by remove
+// (unmerged commits, branch -d refused) must not brick the name — recreate
+// attaches to the surviving branch instead of failing on -b.
+func TestWorkspaceRecreateAttachesSurvivingBranch(t *testing.T) {
+	svc, git, _, local, _ := workspaceTestFixture(t)
+	ctx := context.Background()
+	git.branchExists = true
+	ws, err := svc.Create(ctx, CreateWorkspaceCommand{ProjectID: local.ID, Name: "lane-a", Authorization: workspaceTestAuth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ws.Status != "ready" {
+		t.Fatalf("status = %s", ws.Status)
+	}
+	for _, cmd := range git.commands {
+		if cmd[0] == "worktree" && cmd[1] == "add" && cmd[2] == "-b" {
+			t.Fatalf("attach path still used -b: %v", cmd)
+		}
+	}
+}
+
+// TestWorkspaceReservationPreventsDoubleBooking pins the CAS: two concurrent
+// creates race on Reserve, and exactly one wins.
+func TestWorkspaceReservationPreventsDoubleBooking(t *testing.T) {
+	svc, _, _, local, _ := workspaceTestFixture(t)
+	ctx := context.Background()
+	ws, err := svc.Create(ctx, CreateWorkspaceCommand{ProjectID: local.ID, Name: "lane-a", Authorization: workspaceTestAuth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token1, err := svc.Reserve(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Reserve(ctx, ws.ID); err == nil {
+		t.Fatal("second reservation of a leased lane succeeded (double-booking)")
+	}
+	if err := svc.Bind(ctx, ws.ID, token1, "sess-1"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := svc.Get(ctx, ws.ID)
+	if !got.LeasedBySessionID.Valid || got.LeasedBySessionID.String != "sess-1" {
+		t.Fatalf("lease = %+v, want sess-1", got.LeasedBySessionID)
+	}
+	// ReLease by the SAME session succeeds (reopen path); by another, fails.
+	if err := svc.ReLease(ctx, ws.ID, "sess-1"); err != nil {
+		t.Fatalf("self re-lease failed: %v", err)
+	}
+	if err := svc.ReLease(ctx, ws.ID, "sess-2"); err == nil {
+		t.Fatal("foreign re-lease of an occupied lane succeeded")
+	}
+	if err := svc.ReleaseForSession(ctx, "sess-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ReLease(ctx, ws.ID, "sess-2"); err != nil {
+		t.Fatalf("re-lease of freed lane failed: %v", err)
 	}
 }
