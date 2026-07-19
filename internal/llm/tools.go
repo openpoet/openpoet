@@ -996,9 +996,65 @@ func AllToolDefs() []ToolDef {
 					"workspace_id":  {Type: "string", Description: "Optional workspace (worktree lane) to run in"},
 					"isolation":     {Type: "string", Description: "Optional: 'auto' leases a pooled workspace"},
 					"custom_prompt": {Type: "string", Description: "Optional initial brief for the worker"},
+					"mission_id":    {Type: "number", Description: "Enroll the worker in this mission (briefing injected server-side)"},
+					"role":          {Type: "string", Description: "Worker role label within the mission"},
 					"dry_run":       {Type: "boolean", Description: "Validate without creating the session"},
 				},
 				Required: []string{"project_id", "fence_version"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "start_mission",
+			Description: "Start a goal-driven mission for the coordinated group (this session becomes the mission's coordinator). One active mission per group. Requires the current fence_version.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"goal":          {Type: "string", Description: "The mission goal (what done looks like)"},
+					"fence_version": {Type: "number", Description: "Current fence token from coordinator_elect/status"},
+				},
+				Required: []string{"goal", "fence_version"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "get_mission",
+			Description: "Read a mission of the coordinated group: goal, status, and the worker roster (session, project, backend, role, status, last_report_ref).",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"mission_id": {Type: "number", Description: "Mission id"},
+				},
+				Required: []string{"mission_id"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "update_mission_status",
+			Description: "Transition a mission of the coordinated group (active|paused|completed|failed|archived). Requires the current fence_version.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"mission_id":    {Type: "number", Description: "Mission id"},
+					"status":        {Type: "string", Description: "active, paused, completed, failed or archived"},
+					"fence_version": {Type: "number", Description: "Current fence token"},
+				},
+				Required: []string{"mission_id", "status", "fence_version"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "attach_worker",
+			Description: "Adopt an EXISTING group session into a mission's worker roster (workers spawned via start_worker enroll automatically). Backfills its last dense report.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"mission_id":    {Type: "number", Description: "Mission id"},
+					"session_id":    {Type: "string", Description: "Existing session to adopt (must belong to the group)"},
+					"role":          {Type: "string", Description: "Worker role label (e.g. impl, qa)"},
+					"fence_version": {Type: "number", Description: "Current fence token"},
+				},
+				Required: []string{"mission_id", "session_id", "fence_version"},
 			},
 			Context: ToolContextSession,
 		},

@@ -115,6 +115,14 @@ func (s *semanticSessionStore) GetTask(context.Context, int64) (*database.Projec
 func (s *semanticSessionStore) GetTaskForSession(context.Context, string) (*database.ProjectTask, error) {
 	return nil, sql.ErrNoRows
 }
+func (s *semanticSessionStore) GetMission(_ context.Context, _ int64) (*database.Mission, error) {
+	return nil, nil
+}
+
+func (s *semanticSessionStore) UpsertMissionWorker(_ context.Context, _ *database.MissionWorker) error {
+	return nil
+}
+
 func (s *semanticSessionStore) UpdateSessionLineage(_ context.Context, _, _, _ string) error {
 	return nil
 }
