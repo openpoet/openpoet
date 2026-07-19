@@ -30,6 +30,17 @@ func ErrorIsKind(err error, kind ErrorKind) bool {
 	return errors.As(err, &appErr) && appErr.Kind == kind
 }
 
+// ErrorCode returns the stable machine-readable code of an application error
+// (e.g. "action_approval_required"), or "" when err is not an *Error. Transport
+// layers surface it so callers get a structured signal, not just prose.
+func ErrorCode(err error) string {
+	var appErr *Error
+	if errors.As(err, &appErr) {
+		return appErr.Code
+	}
+	return ""
+}
+
 func validationError(code, message string) error {
 	return &Error{Kind: ErrorValidation, Code: code, Message: message}
 }

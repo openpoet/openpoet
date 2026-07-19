@@ -150,6 +150,8 @@
     {"route":"/v1/metrics","method":"POST","reason":"otel_ingest"},
     {"route":"/v1/traces","method":"POST","reason":"otel_ingest"},
     {"route":"/v1/logs","method":"POST","reason":"otel_ingest"},
-    {"route":"/api/test/seed-token-usage","method":"POST","reason":"test_only"}
+    {"route":"/api/test/seed-token-usage","method":"POST","reason":"test_only"},
+    {"route":"/api/test/sessions","method":"POST","reason":"test_only"},
+    {"route":"/api/test/tunnel-jwt","method":"POST","reason":"test_only"}
   ]
 }
