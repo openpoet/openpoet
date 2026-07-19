@@ -520,12 +520,18 @@
             <section id="view-missions" class="view">
                 <header class="view-header">
                     <h2>Missões</h2>
-                    <div class="view-header-actions">
-                        <select id="mv-select" class="mv-select" onchange="app.loadMissionPanel(this.value)"></select>
-                    </div>
                 </header>
-                <div class="mv-content" id="mv-content">
-                    <div class="mv-empty">Carregando…</div>
+                <div class="mv-list-pane" id="mv-list-pane">
+                    <div class="mv-toolbar">
+                        <input id="mv-search" class="mv-search" type="search" autocomplete="off"
+                            placeholder="Buscar por objetivo, status ou #id…" oninput="app.onMissionSearch(this.value)">
+                    </div>
+                    <div class="mv-list" id="mv-list"><div class="mv-empty">Carregando…</div></div>
+                    <div class="mv-pager" id="mv-pager"></div>
+                </div>
+                <div class="mv-detail-pane" id="mv-detail-pane" hidden>
+                    <button class="mv-back" onclick="app.closeMissionDetail()">‹ Voltar para a lista</button>
+                    <div class="mv-content" id="mv-content"></div>
                 </div>
                 <div class="mv-modal" id="mv-modal">
                     <div class="mv-modal-inner">
@@ -538,7 +544,27 @@
                 </div>
             </section>
             <style>
-                #view-missions .mv-content { padding: 20px 24px 60px; overflow-y: auto; overflow-x: hidden; }
+                #view-missions .mv-list-pane, #view-missions .mv-detail-pane { padding: 18px 24px 60px; overflow-y: auto; overflow-x: hidden; }
+                #view-missions .mv-content { padding: 0; }
+                .mv-toolbar { margin-bottom: 14px; }
+                .mv-search { width: 100%; max-width: 520px; box-sizing: border-box; background: var(--color-surface); color: var(--color-text);
+                    border: 1px solid var(--color-border); border-radius: var(--border-radius); padding: 9px 14px; font: inherit; }
+                .mv-list { display: flex; flex-direction: column; gap: 8px; }
+                .mv-mission-row { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+                    padding: 12px 14px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-surface); cursor: pointer;
+                    font: inherit; color: var(--color-text); }
+                .mv-mission-row:hover { border-color: var(--color-primary); background: var(--color-surface-hover); }
+                .mv-mission-row:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
+                .mv-mission-body { flex: 1; min-width: 0; }
+                .mv-mission-goal { display: block; font-weight: 600; color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+                .mv-mission-sub { display: block; color: var(--color-text-muted); font-size: 12.5px; margin-top: 2px; }
+                .mv-mission-chev { flex-shrink: 0; color: var(--color-text-muted); font-size: 18px; }
+                .mv-pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 16px; color: var(--color-text-muted); font-size: 13px; }
+                .mv-pager button { background: none; border: 1px solid var(--color-border); color: var(--color-text); border-radius: 8px; padding: 6px 12px; cursor: pointer; font: inherit; }
+                .mv-pager button:hover:not(:disabled) { border-color: var(--color-primary); }
+                .mv-pager button:disabled { opacity: .4; cursor: default; }
+                .mv-back { background: none; border: none; color: var(--color-primary); font: inherit; font-weight: 600; cursor: pointer; padding: 4px 0; margin-bottom: 14px; }
+                .mv-back:hover { text-decoration: underline; }
                 .mv-select { background: var(--color-surface); color: var(--color-text); border: 1px solid var(--color-border);
                     border-radius: var(--border-radius); padding: 7px 12px; font: inherit; width: 100%; max-width: 520px; box-sizing: border-box;
                     text-overflow: ellipsis; }
@@ -611,7 +637,7 @@
                 .mv-doc-body hr { border: 0; border-top: 1px solid var(--color-border); margin: 18px 0; }
                 @media (max-width: 720px) {
                     .mv-grid { grid-template-columns: 1fr; gap: 12px; }
-                    #view-missions .mv-content { padding: 14px 14px 72px; }
+                    #view-missions .mv-list-pane, #view-missions .mv-detail-pane { padding: 14px 14px 72px; }
                     .mv-card { padding: 13px 14px; border-radius: 10px; }
                     .mv-goal { font-size: 15px; }
                     .mv-row { padding: 11px 12px; }
