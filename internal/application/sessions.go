@@ -40,6 +40,7 @@ type SessionStore interface {
 	GetTask(context.Context, int64) (*database.ProjectTask, error)
 	GetTaskForSession(context.Context, string) (*database.ProjectTask, error)
 	EndSession(context.Context, string, string) error
+	UpdateSessionLineage(ctx context.Context, sessionID, parentSessionID, spawnedBy string) error
 }
 
 type SessionManager interface {
@@ -103,6 +104,17 @@ type SessionRuntimeSettings interface {
 	SetSessionEffort(context.Context, string, string) (*database.Session, error)
 }
 
+// SessionSignalPort exposes hook-derived per-session signals to the
+// application layer: the prompt-accepted ack (UserPromptSubmit) and the
+// execution-mode tracker. Implemented by the HookHandler.
+type SessionSignalPort interface {
+	// RegisterPromptWaiter returns a channel that fires on the session's next
+	// UserPromptSubmit hook, plus a cancel func. Registration is synchronous so
+	// the caller can register BEFORE writing input (no lost-wakeup race).
+	RegisterPromptWaiter(sessionID string) (<-chan struct{}, func())
+	GetSessionMode(sessionID string) string
+}
+
 type SessionCreationCollaborators struct {
 	Environment  SessionEnvironmentProvider
 	Names        SessionNameStore
@@ -111,7 +123,16 @@ type SessionCreationCollaborators struct {
 	InitialInput SessionInitialPromptSubmitter
 	Settings     SessionRuntimeSettings
 	Workspaces   SessionWorkspaceProvider
+	Signals      SessionSignalPort
+	WorkRuns     WorkRunStarter
 	Now          func() time.Time
+}
+
+// WorkRunStarter records a durable work run for a programmatically-spawned
+// session (the dormant execution_target_type='session' slot). Implemented by
+// *WorkRunService.
+type WorkRunStarter interface {
+	Start(ctx context.Context, command StartWorkRunCommand) (*database.WorkRun, error)
 }
 
 // SessionWorkspaceProvider resolves and leases workspace lanes for sessions.
@@ -378,8 +399,48 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 			reservationToken = "" // consumed — the deferred release must not fire
 		}
 	}
+	s.recordLineageAndWorkRun(ctx, command, created)
 	s.publish(ctx, SessionChange{Action: "created", Session: created, ID: created.ID, Actor: command.Authorization.Actor})
 	return created, nil
+}
+
+// recordLineageAndWorkRun persists who spawned the session and, for
+// programmatic (non-UI) spawns, opens a durable work_run bound to the session —
+// the first consumer of execution_target_type='session'. Best-effort: a
+// lineage/work-run failure never fails the already-started session.
+func (s *SessionService) recordLineageAndWorkRun(ctx context.Context, command CreateSessionCommand, created *database.Session) {
+	actor := command.Authorization.Actor
+	spawnedBy := EventActorValue(actor)
+	parent := ""
+	if actor.Type == "session" {
+		parent = actor.ID
+	}
+	if err := s.store.UpdateSessionLineage(ctx, created.ID, parent, spawnedBy); err != nil {
+		log.Printf("[Sessions] lineage update failed for %s: %v", created.ID, err)
+	} else {
+		created.ParentSessionID = parent
+		created.SpawnedBy = spawnedBy
+	}
+	// Only programmatic spawns (automation clients or session actors) open a
+	// work run; interactive UI sessions do not need one.
+	if s.creation.WorkRuns == nil || (actor.Type != "automation_client" && actor.Type != "session") {
+		return
+	}
+	sid := created.ID
+	title := "Session " + created.Name
+	if title == "Session " {
+		title = "Spawned session"
+	}
+	if _, err := s.creation.WorkRuns.Start(ctx, StartWorkRunCommand{
+		Title:           title,
+		Source:          "coordinator",
+		ExpectedMinutes: 60,
+		SessionID:       &sid,
+		ExecutionTarget: &database.WorkRunExecutionTarget{Type: "session", ID: sid},
+		Actor:           actor,
+	}); err != nil {
+		log.Printf("[Sessions] work_run for spawned session %s failed: %v", sid, err)
+	}
 }
 
 func resolveInitialSessionPrompt(command CreateSessionCommand, hasTask bool) (string, error) {
@@ -530,27 +591,70 @@ type SendSessionInputCommand struct {
 	SessionID     string
 	Text          string
 	Authorization ActionAuthorization
+	// RejectIfBusy makes the send fail with session_busy when the session is
+	// mid-turn (executing). Opt-in: only coordinator/automation callers set it —
+	// the interactive UI must always be able to interrupt/queue.
+	RejectIfBusy bool
+	// AwaitAck blocks until the agent's UserPromptSubmit hook confirms the
+	// prompt was accepted (or a short timeout), reporting acknowledged.
+	AwaitAck bool
+}
+
+// SendInputResult reports whether the line reached the PTY and whether the
+// agent acknowledged it (UserPromptSubmit hook observed).
+type SendInputResult struct {
+	Submitted    bool
+	Acknowledged bool
 }
 
 func (s *SessionService) SendInput(ctx context.Context, command SendSessionInputCommand) error {
+	_, err := s.SendInputWithAck(ctx, command)
+	return err
+}
+
+const sessionAckTimeout = 8 * time.Second
+
+func (s *SessionService) SendInputWithAck(ctx context.Context, command SendSessionInputCommand) (SendInputResult, error) {
 	if err := requireActionActor(command.Authorization); err != nil {
-		return err
+		return SendInputResult{}, err
 	}
 	if _, err := s.requireRunningSession(ctx, command.SessionID); err != nil {
-		return err
+		return SendInputResult{}, err
 	}
 	text := strings.TrimSpace(command.Text)
 	if text == "" {
-		return validationError("session_input_required", "Session input is required")
+		return SendInputResult{}, validationError("session_input_required", "Session input is required")
 	}
 	if len([]byte(text)) > maxSessionInputBytes {
-		return validationError("session_input_too_large", "Session input exceeds 16 KiB")
+		return SendInputResult{}, validationError("session_input_too_large", "Session input exceeds 16 KiB")
+	}
+	if command.RejectIfBusy && s.creation.Signals != nil {
+		if s.creation.Signals.GetSessionMode(command.SessionID) == "executing" {
+			return SendInputResult{}, conflictError("session_busy", "Session is mid-turn; retry when it is idle or send with force")
+		}
+	}
+	// Register the ack waiter BEFORE writing, so a fast UserPromptSubmit can't
+	// slip between the write and the wait (lost-wakeup race).
+	var ackCh <-chan struct{}
+	if command.AwaitAck && s.creation.Signals != nil {
+		ch, cancel := s.creation.Signals.RegisterPromptWaiter(command.SessionID)
+		ackCh = ch
+		defer cancel()
 	}
 	if err := s.writeLine(ctx, command.SessionID, text); err != nil {
-		return err
+		return SendInputResult{}, err
 	}
 	s.publish(ctx, SessionChange{Action: "input_sent", ID: command.SessionID, Actor: command.Authorization.Actor})
-	return nil
+	result := SendInputResult{Submitted: true}
+	if ackCh != nil {
+		select {
+		case <-ackCh:
+			result.Acknowledged = true
+		case <-time.After(sessionAckTimeout):
+		case <-ctx.Done():
+		}
+	}
+	return result, nil
 }
 
 type SetSessionModelCommand struct {

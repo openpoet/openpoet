@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -90,6 +91,7 @@ type Coordinator struct {
 	sessions       map[string]*sessionInfo
 	failedResolve  map[string]time.Time              // sessionID → do-not-retry-before
 	claims         map[claimKey]map[string]TouchKind // (projectKey,rel) → sessionID → strongest kind
+	turnTouched    map[string]map[string]struct{}    // sessionID → rel paths touched this turn
 	incidents      map[string]*Incident              // rule|scope_key → incident
 	dirtyIncidents map[string]struct{}
 	dirtyLedger    map[ledgerKey]*ledgerDelta
@@ -115,6 +117,7 @@ func New(db *database.DB) *Coordinator {
 		sessions:       make(map[string]*sessionInfo),
 		failedResolve:  make(map[string]time.Time),
 		claims:         make(map[claimKey]map[string]TouchKind),
+		turnTouched:    make(map[string]map[string]struct{}),
 		incidents:      make(map[string]*Incident),
 		dirtyIncidents: make(map[string]struct{}),
 		dirtyLedger:    make(map[ledgerKey]*ledgerDelta),
@@ -226,6 +229,7 @@ func (c *Coordinator) ForgetSession(sessionID string) {
 	defer c.mu.Unlock()
 	delete(c.sessions, sessionID)
 	delete(c.failedResolve, sessionID)
+	delete(c.turnTouched, sessionID)
 	for key, set := range c.claims {
 		delete(set, sessionID)
 		if len(set) == 0 {
@@ -290,7 +294,10 @@ func (c *Coordinator) process(msg ingestMsg) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if msg.kind == "turn" {
-		c.queueEventLocked(turnCompletedEvent(si.id, msg.ts))
+		// Drain the paths this session touched since its last Stop into the
+		// turn_completed payload, then reset the accumulator atomically.
+		files := c.drainTurnTouchesLocked(si.id)
+		c.queueEventLocked(turnCompletedEvent(si.id, files, msg.ts))
 		return
 	}
 	for _, t := range msg.touches {
@@ -301,11 +308,34 @@ func (c *Coordinator) process(msg ingestMsg) {
 		}
 		rel, inProject := si.relativize(t.Path)
 		c.bumpLedger(si, rel, t.Kind, msg.tool, msg.ts)
+		if inProject {
+			c.recordTurnTouchLocked(si.id, rel)
+		}
 		if t.Kind == KindWrite && inProject {
 			c.noteWriteClaim(si, rel, msg.tool, msg.ts)
 		}
 	}
 	c.evalSameTask(si, msg.ts)
+}
+
+func (c *Coordinator) recordTurnTouchLocked(sessionID, rel string) {
+	set := c.turnTouched[sessionID]
+	if set == nil {
+		set = make(map[string]struct{})
+		c.turnTouched[sessionID] = set
+	}
+	set[rel] = struct{}{}
+}
+
+func (c *Coordinator) drainTurnTouchesLocked(sessionID string) []string {
+	set := c.turnTouched[sessionID]
+	delete(c.turnTouched, sessionID)
+	files := make([]string, 0, len(set))
+	for rel := range set {
+		files = append(files, rel)
+	}
+	sort.Strings(files)
+	return files
 }
 
 // session returns the cached resolution for sessionID, hitting the DB on

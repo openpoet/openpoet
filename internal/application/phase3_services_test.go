@@ -62,6 +62,8 @@ func (s *phase3Store) GetTaskForSession(context.Context, string) (*database.Proj
 	return &copy, nil
 }
 
+func (s *phase3Store) UpdateSessionLineage(_ context.Context, _, _, _ string) error { return nil }
+
 func (s *phase3Store) EndSession(_ context.Context, _ string, status string) error {
 	if s.endErr != nil {
 		return s.endErr
@@ -463,4 +465,73 @@ func TestPhase3BoundedInputs(t *testing.T) {
 	}); !ErrorIsKind(err, ErrorValidation) || len(manager.writes) != 0 {
 		t.Fatalf("oversized session input reached manager: err=%v writes=%d", err, len(manager.writes))
 	}
+}
+
+// fakeSignals implements SessionSignalPort for the send-ack/busy tests.
+type fakeSignals struct {
+	mode    string
+	ackCh   chan struct{}
+	waiters int
+}
+
+func (f *fakeSignals) RegisterPromptWaiter(string) (<-chan struct{}, func()) {
+	f.waiters++
+	if f.ackCh == nil {
+		f.ackCh = make(chan struct{}, 1)
+	}
+	return f.ackCh, func() {}
+}
+func (f *fakeSignals) GetSessionMode(string) string { return f.mode }
+
+// TestSendInputRejectsBusyWhenOptedIn pins the session_busy guard (N3): with
+// RejectIfBusy set and the session executing, the send is refused typed; the
+// interactive path (RejectIfBusy false) always goes through.
+func TestSendInputRejectsBusyWhenOptedIn(t *testing.T) {
+	store := &phase3Store{session: &database.Session{ID: "s1", Status: "running"}}
+	manager := &phase3SessionManager{running: true}
+	signals := &fakeSignals{mode: "executing"}
+	service := NewSessionService(store, manager, nil, nil, nil, nil, nil, &phase3SessionEffects{},
+		SessionCreationCollaborators{Signals: signals})
+
+	// Opted-in + executing → refused.
+	_, err := service.SendInputWithAck(context.Background(), SendSessionInputCommand{
+		SessionID: "s1", Text: "hi", Authorization: phase3Actor, RejectIfBusy: true,
+	})
+	if code := sendErrCode(err); code != "session_busy" {
+		t.Fatalf("busy send error = %v (code %q), want session_busy", err, code)
+	}
+	// Interactive (RejectIfBusy false) is never refused for being busy.
+	if _, err := service.SendInputWithAck(context.Background(), SendSessionInputCommand{
+		SessionID: "s1", Text: "hi", Authorization: phase3Actor,
+	}); err != nil {
+		t.Fatalf("interactive send refused while busy: %v", err)
+	}
+}
+
+// TestSendInputAckReportsAcknowledged pins that a UserPromptSubmit wakeup within
+// the window yields acknowledged=true, and no wakeup yields false.
+func TestSendInputAckReportsAcknowledged(t *testing.T) {
+	store := &phase3Store{session: &database.Session{ID: "s1", Status: "running"}}
+	manager := &phase3SessionManager{running: true}
+	signals := &fakeSignals{ackCh: make(chan struct{}, 1)}
+	signals.ackCh <- struct{}{} // simulate the prompt-submit hook already landed
+	service := NewSessionService(store, manager, nil, nil, nil, nil, nil, &phase3SessionEffects{},
+		SessionCreationCollaborators{Signals: signals})
+	res, err := service.SendInputWithAck(context.Background(), SendSessionInputCommand{
+		SessionID: "s1", Text: "hi", Authorization: phase3Actor, AwaitAck: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Submitted || !res.Acknowledged {
+		t.Fatalf("result = %+v, want submitted+acknowledged", res)
+	}
+}
+
+func sendErrCode(err error) string {
+	var appErr *Error
+	if errors.As(err, &appErr) {
+		return appErr.Code
+	}
+	return ""
 }

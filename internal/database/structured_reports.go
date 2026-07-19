@@ -98,7 +98,11 @@ func (d *DB) WithReportTx(ctx context.Context, fn func(*ReportTx) error) error {
 	if err := fn(&ReportTx{tx: tx}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	d.NotifyOutboxAppended()
+	return nil
 }
 
 func (t *ReportTx) AppendEventOutbox(ctx context.Context, input EventOutboxAppend) (*EventOutboxEvent, error) {
