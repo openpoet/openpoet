@@ -272,8 +272,8 @@ func (d *DB) ReplaceProjectTagIDs(ctx context.Context, projectID int64, tagIDs [
 
 // Session operations
 func (d *DB) CreateSession(ctx context.Context, s *Session) error {
-	query := `INSERT INTO sessions (id, project_id, status, pid, name, task_id, start_time, backend, skip_permissions, model, requested_model, effort, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.ExecContext(ctx, query, s.ID, s.ProjectID, s.Status, s.PID, s.Name, s.TaskID, s.StartTime, s.Backend, s.SkipPermissions, s.Model, s.RequestedModel, s.Effort, s.Harness)
+	query := `INSERT INTO sessions (id, project_id, status, pid, name, task_id, start_time, backend, skip_permissions, model, requested_model, effort, harness, work_dir, workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.ExecContext(ctx, query, s.ID, s.ProjectID, s.Status, s.PID, s.Name, s.TaskID, s.StartTime, s.Backend, s.SkipPermissions, s.Model, s.RequestedModel, s.Effort, s.Harness, s.WorkDir, s.WorkspaceID)
 	return err
 }
 
