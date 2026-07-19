@@ -1426,8 +1426,8 @@ func (d *DB) CreateTempDocument(ctx context.Context, doc *TempDocument) error {
 	if doc.Status == "" {
 		doc.Status = "pending"
 	}
-	query := `INSERT INTO temp_documents (id, title, content, conversation_id, task_id, session_id, summary, status, message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.ExecContext(ctx, query, doc.ID, doc.Title, doc.Content, doc.ConversationID, doc.TaskID, doc.SessionID, doc.Summary, doc.Status, doc.MessageID)
+	query := `INSERT INTO temp_documents (id, title, content, conversation_id, task_id, mission_id, session_id, summary, status, message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.ExecContext(ctx, query, doc.ID, doc.Title, doc.Content, doc.ConversationID, doc.TaskID, doc.MissionID, doc.SessionID, doc.Summary, doc.Status, doc.MessageID)
 	return err
 }
 
