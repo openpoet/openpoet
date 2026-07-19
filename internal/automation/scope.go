@@ -20,6 +20,7 @@ const (
 	ScopeNotificationsRead  Scope = "notifications:read"
 	ScopeNotificationsAck   Scope = "notifications:ack"
 	ScopeEventsRead         Scope = "events:read"
+	ScopeConflictsRead      Scope = "conflicts:read"
 	ScopeReportsRead        Scope = "reports:read"
 	ScopeWorkRunsRead       Scope = "work_runs:read"
 	ScopeWorkRunsWrite      Scope = "work_runs:write"
@@ -79,6 +80,7 @@ var knownScopes = map[Scope]struct{}{
 	ScopeNotificationsRead:  {},
 	ScopeNotificationsAck:   {},
 	ScopeEventsRead:         {},
+	ScopeConflictsRead:      {},
 	ScopeReportsRead:        {},
 	ScopeWorkRunsRead:       {},
 	ScopeWorkRunsWrite:      {},
