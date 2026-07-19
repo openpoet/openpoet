@@ -965,7 +965,7 @@ func AllToolDefs() []ToolDef {
 					"after":    {Type: "number", Description: "Cursor: only events with sequence > after. Use next_cursor from the previous call."},
 					"filter":   {Type: "string", Description: "Event type prefix filter, e.g. 'session.'"},
 					"timeout":  {Type: "number", Description: "Long-poll timeout in seconds (default 20, max 60)"},
-					"consumer": {Type: "string", Description: "Named consumer cursor (optional; defaults to a per-session cursor)"},
+					"consumer": {Type: "string", Description: "Reserved for automation clients; coordinator sessions page with the explicit after cursor"},
 				},
 			},
 			Context: ToolContextSession,
