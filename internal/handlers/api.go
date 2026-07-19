@@ -126,6 +126,7 @@ type API struct {
 	capabilities         *application.CapabilityRegistry
 	platformMu           sync.RWMutex
 	platformCapabilities *automation.PlatformCapabilityRegistry
+	workspaceService     *application.WorkspaceService
 	platformServices     *PlatformApplicationServices
 	providerBridge       *providerbridge.Manager
 
@@ -587,6 +588,17 @@ func (a *API) WorkRunService() *application.WorkRunService {
 
 func (a *API) CapabilityRegistry() *application.CapabilityRegistry {
 	return a.capabilities
+}
+
+// WorkspaceService exposes the workspace application service (merge
+// prediction for the coordinator tier, Phase 7.5).
+func (a *API) WorkspaceService() *application.WorkspaceService {
+	if a == nil {
+		return nil
+	}
+	a.platformMu.RLock()
+	defer a.platformMu.RUnlock()
+	return a.workspaceService
 }
 
 func (a *API) PlatformCapabilityRegistry() *automation.PlatformCapabilityRegistry {
@@ -4813,5 +4825,58 @@ func (a *API) ConfirmPairing(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"success":   true,
 		"device_id": result.DeviceID,
+	})
+}
+
+// CreateMissionGrant (Phase 7.5): the human pre-authorizes a destructive
+// capability for a mission with bounded uses and TTL — the coordinator's merge
+// gate spends these instead of per-command approval tokens. UI-credentialed
+// mutation (same trust boundary as project edits).
+func (a *API) CreateMissionGrant(w http.ResponseWriter, r *http.Request) {
+	missionID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || missionID <= 0 {
+		respondError(w, http.StatusBadRequest, "Invalid mission id")
+		return
+	}
+	var input struct {
+		Capability       string `json:"capability"`
+		MaxUses          int    `json:"max_uses"`
+		ExpiresInMinutes int    `json:"expires_in_minutes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	input.Capability = strings.TrimSpace(input.Capability)
+	if input.Capability != "workspaces.merge" {
+		respondError(w, http.StatusBadRequest, "Only workspaces.merge grants are supported")
+		return
+	}
+	if input.MaxUses <= 0 || input.MaxUses > 100 {
+		respondError(w, http.StatusBadRequest, "max_uses must be between 1 and 100")
+		return
+	}
+	if input.ExpiresInMinutes <= 0 || input.ExpiresInMinutes > 24*60 {
+		respondError(w, http.StatusBadRequest, "expires_in_minutes must be between 1 and 1440")
+		return
+	}
+	mission, err := a.db.GetMission(r.Context(), missionID)
+	if err != nil || mission == nil {
+		respondError(w, http.StatusNotFound, "Mission not found")
+		return
+	}
+	grant := &database.MissionGrant{
+		MissionID: missionID, Capability: input.Capability,
+		UsesRemaining: input.MaxUses,
+		ExpiresAt:     time.Now().UTC().Add(time.Duration(input.ExpiresInMinutes) * time.Minute),
+		GrantedBy:     platformUIAuthorization(r).Actor.ID,
+	}
+	if err := a.db.CreateMissionGrant(r.Context(), grant); err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to create mission grant")
+		return
+	}
+	respondJSON(w, http.StatusCreated, map[string]any{
+		"grant_id": grant.ID, "mission_id": missionID, "capability": grant.Capability,
+		"uses_remaining": grant.UsesRemaining, "expires_at": grant.ExpiresAt,
 	})
 }

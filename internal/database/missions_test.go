@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestMissionSingleActivePerGroup: the partial unique index allows exactly one
@@ -42,5 +43,54 @@ func TestMissionSingleActivePerGroup(t *testing.T) {
 	active, err := db.ListActiveMissions(ctx)
 	if err != nil || len(active) != 2 {
 		t.Fatalf("expected 2 active missions, got %d (%v)", len(active), err)
+	}
+}
+
+// TestMissionGrantConsumeAndExhaust: peek distinguishes never-granted from
+// exhausted; consume decrements atomically; expiry counts as absent.
+func TestMissionGrantConsumeAndExhaust(t *testing.T) {
+	db, err := New(filepath.Join(t.TempDir(), "grants.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	mission, err := db.CreateMission(ctx, "g", 5, "sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.PeekMissionGrant(ctx, mission.ID, "workspaces.merge"); !errors.Is(err, ErrMissionGrantRequired) {
+		t.Fatalf("never-granted must be required, got %v", err)
+	}
+	grant := &MissionGrant{MissionID: mission.ID, Capability: "workspaces.merge",
+		UsesRemaining: 2, ExpiresAt: time.Now().Add(time.Hour), GrantedBy: "user"}
+	if err := db.CreateMissionGrant(ctx, grant); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PeekMissionGrant(ctx, mission.ID, "workspaces.merge"); err != nil {
+		t.Fatalf("live grant must peek clean: %v", err)
+	}
+	if err := db.ConsumeMissionGrantUse(ctx, mission.ID, "workspaces.merge"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ConsumeMissionGrantUse(ctx, mission.ID, "workspaces.merge"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ConsumeMissionGrantUse(ctx, mission.ID, "workspaces.merge"); !errors.Is(err, ErrMissionGrantExhausted) {
+		t.Fatalf("third consume must exhaust, got %v", err)
+	}
+	if err := db.PeekMissionGrant(ctx, mission.ID, "workspaces.merge"); !errors.Is(err, ErrMissionGrantExhausted) {
+		t.Fatalf("exhausted peek must be typed, got %v", err)
+	}
+
+	// Expired grant reads as never-granted-alive → required.
+	expired := &MissionGrant{MissionID: mission.ID, Capability: "workspaces.remove",
+		UsesRemaining: 5, ExpiresAt: time.Now().Add(-time.Hour), GrantedBy: "user"}
+	if err := db.CreateMissionGrant(ctx, expired); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PeekMissionGrant(ctx, mission.ID, "workspaces.remove"); !errors.Is(err, ErrMissionGrantRequired) {
+		t.Fatalf("expired grant must read as required, got %v", err)
 	}
 }
