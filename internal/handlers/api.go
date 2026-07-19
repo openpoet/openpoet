@@ -4860,16 +4860,28 @@ func (a *API) CreateMissionGrant(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "expires_in_minutes must be between 1 and 1440")
 		return
 	}
+	// HUMAN authority only: mission grants exist precisely so a human stays in
+	// the loop. A session bearer (the coordinator itself, or any worker) must
+	// never mint its own merge authority — that is the deny_self_grant stance.
+	authorization := platformUIAuthorization(r)
+	if !authorization.Approved || authorization.Actor.Type == "session" {
+		respondError(w, http.StatusForbidden, "Mission grants require an approved user credential (a session cannot grant itself authority)")
+		return
+	}
 	mission, err := a.db.GetMission(r.Context(), missionID)
 	if err != nil || mission == nil {
 		respondError(w, http.StatusNotFound, "Mission not found")
+		return
+	}
+	if mission.Status != "active" {
+		respondError(w, http.StatusConflict, "Mission is not active — grants attach to running missions only")
 		return
 	}
 	grant := &database.MissionGrant{
 		MissionID: missionID, Capability: input.Capability,
 		UsesRemaining: input.MaxUses,
 		ExpiresAt:     time.Now().UTC().Add(time.Duration(input.ExpiresInMinutes) * time.Minute),
-		GrantedBy:     platformUIAuthorization(r).Actor.ID,
+		GrantedBy:     application.EventActorValue(authorization.Actor),
 	}
 	if err := a.db.CreateMissionGrant(r.Context(), grant); err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to create mission grant")
