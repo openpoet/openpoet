@@ -700,6 +700,7 @@ func main() {
 	if reportService != nil {
 		automationDeps.Reports = reportService
 	}
+	automationDeps.MergePredictor = api.WorkspaceService()
 	r.Mount("/api/automation/v1", automation.NewHandler(db, automationDeps))
 
 	// Coordinator tier (Phase 7.1 — Maestro): token-authed (opst1) surface that
@@ -1038,6 +1039,7 @@ func main() {
 
 		// Temp Documents
 		r.Post("/documents", api.CreateTempDocument)
+		r.Post("/missions/{id}/grants", api.CreateMissionGrant)
 		r.Get("/documents/{id}", api.GetTempDocument)
 
 		// AI

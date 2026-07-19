@@ -163,6 +163,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 	}
 	a.platformMu.Lock()
 	a.platformCapabilities = registry
+	a.workspaceService = workspaceService
 	a.platformServices = &PlatformApplicationServices{
 		Configuration: configuration,
 		Execution:     execution,

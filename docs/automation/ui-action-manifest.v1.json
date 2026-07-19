@@ -6,6 +6,7 @@
     "generated_for": "#700"
   },
   "routes": [
+    {"route":"/api/missions/{id}/grants","method":"POST","capability":"missions.grant","domain":"missions","risk":"R4","scopes":["approvals:grant"],"application_service":"MissionGrantStore","ui_binding":"shared_application_service","status":"implemented"},
     {"route":"/api/projects","method":"POST","capability":"projects.create","domain":"projects","risk":"R4","scopes":["projects:write","credentials:write"],"application_service":"ProjectService","ui_binding":"shared_application_service","status":"implemented"},
     {"route":"/api/projects/{id}","method":"PUT","capability":"projects.update","domain":"projects","risk":"R4","scopes":["projects:write","credentials:write"],"application_service":"ProjectService","ui_binding":"shared_application_service","status":"implemented"},
     {"route":"/api/projects/{id}","method":"DELETE","capability":"projects.delete","domain":"projects","risk":"R3","scopes":["projects:write"],"application_service":"ProjectService","ui_binding":"shared_application_service","status":"implemented"},
