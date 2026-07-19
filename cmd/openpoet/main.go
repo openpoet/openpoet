@@ -24,6 +24,7 @@ import (
 	"openpoet/internal/benchmark"
 	"openpoet/internal/config"
 	"openpoet/internal/configsync"
+	"openpoet/internal/coordinator"
 	"openpoet/internal/database"
 	"openpoet/internal/handlers"
 	"openpoet/internal/llm"
@@ -357,6 +358,33 @@ func main() {
 	// Initialize OTEL handler for Claude Code token tracking
 	otelHandler := handlers.NewOTELHandler(db)
 
+	// Conflict radar (Phase 1, observe-only): taps the hook firehose, keeps an
+	// in-memory claim index, and emits conflict.detected / session.awaiting_input
+	// / session.turn_completed to the durable outbox. It never denies anything.
+	coord := coordinator.New(db)
+	coord.OnEscalate = func(inc coordinator.Incident) {
+		ctx := context.Background()
+		sessionID := ""
+		if len(inc.Sessions) > 0 {
+			sessionID = inc.Sessions[0]
+		}
+		body := fmt.Sprintf("Incidente %s: %s (%s) — %s", inc.ID, inc.Rule, inc.Severity, inc.ScopeKey)
+		if err := notifService.Send(ctx, sessionID, "warning", "Conflito entre sessões detectado", body, ""); err != nil {
+			log.Printf("[Coordinator] escalation notification failed: %v", err)
+		}
+		if _, err := aiHandler.CreateProactiveNotification(ctx, "warning", "conflict", "Conflito entre sessões detectado", body, nil, map[string]interface{}{
+			"incident_id": inc.ID,
+			"rule":        inc.Rule,
+			"severity":    inc.Severity,
+			"sessions":    inc.Sessions,
+		}); err != nil {
+			log.Printf("[Coordinator] proactive escalation failed: %v", err)
+		}
+	}
+	coord.Start()
+	hookHandler.OnToolEvent = coord.OnHookEvent
+	sessionMgr.OnSessionAttention = coord.RecordAttention
+
 	// Wire AI evaluation callbacks into session manager
 	sessionMgr.OnSessionStart = func(sessionID string) {
 		log.Printf("[AI-Session] >>> OnSessionStart callback fired for session %s", sessionID[:8])
@@ -371,6 +399,11 @@ func main() {
 	sessionMgr.OnSessionFlush = func(sessionID string) {
 		log.Printf("[OTEL] >>> OnSessionFlush callback fired for session %s", sessionID[:8])
 		otelHandler.FlushSession(sessionID)
+		// Drop the session's live claims from the conflict radar. This MUST
+		// live on the flush callback (fired on every terminal path, including
+		// user-stop) — OnSessionEnd skips user-stopped sessions, and a ghost
+		// live claim would fire false critical conflicts against later peers.
+		coord.ForgetSession(sessionID)
 		// Expire all notifications for this session and clean up hook state
 		go notifService.MarkSessionRead(context.Background(), sessionID)
 		hookHandler.ClearSession(sessionID)
@@ -918,6 +951,7 @@ func main() {
 		log.Printf("[TEST] Test mode enabled — test endpoints available")
 		r.Post("/api/test/seed-token-usage", api.SeedTokenUsage)
 		r.Post("/api/test/sessions", testCreateSession(db))
+		r.Post("/api/test/sessions/{sessionID}/pty", testInjectSessionPTY(sessionMgr))
 		r.Post("/api/test/tunnel-jwt", testMintTunnelJWT(db, jwtSecret))
 	}
 
@@ -1070,6 +1104,7 @@ func main() {
 	log.Println("Shutting down...")
 	stopCodexCleanup()
 	stopOutboxJanitor()
+	coord.Stop()
 
 	// Disconnect tunnel
 	api.DisconnectTunnel()

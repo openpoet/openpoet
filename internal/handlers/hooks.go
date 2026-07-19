@@ -87,6 +87,11 @@ type HookHandler struct {
 	// Claude turn so mid-session /model changes are reflected in session metadata.
 	OnReconcileEffectiveModel func(sessionID string)
 
+	// OnToolEvent taps the hook firehose for the conflict radar: fired for
+	// PreToolUse/PostToolUse/PostToolUseFailure (tool_input intact) and Stop.
+	// Implementations must only enqueue — this runs on the hook response path.
+	OnToolEvent func(sessionID, eventName string, hookEvent map[string]interface{})
+
 	// HasLinkedTask checks if a session has a linked task. Set by main.go.
 	HasLinkedTask func(sessionID string) bool
 
@@ -864,6 +869,15 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 			"event":      hookEvent,
 		},
 	})
+
+	// Conflict-radar tap: tool phases carry tool_input (file paths), Stop
+	// marks a completed turn. The callback only enqueues — no I/O here.
+	if h.OnToolEvent != nil {
+		switch eventName {
+		case "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop":
+			h.OnToolEvent(sessionID, eventName, hookEvent)
+		}
+	}
 
 	// Debounced activity tracking (max once per 30 seconds per session)
 	if h.OnActivityTouch != nil {

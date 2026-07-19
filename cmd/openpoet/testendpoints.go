@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"openpoet/internal/database"
+	"openpoet/internal/session"
 	"openpoet/internal/sessiontoken"
 	"openpoet/internal/tunnel"
 )
@@ -68,6 +70,24 @@ func testCreateSession(db *database.DB) http.HandlerFunc {
 			"hook_token":    hookToken,
 			"session_token": mcpToken,
 		})
+	}
+}
+
+// testInjectSessionPTY feeds synthetic bytes through the manager's attention
+// sentinel — the same entry point every real runner's outputHandler uses — so
+// a phase check can prove PTY-question detection without a live PTY.
+func testInjectSessionPTY(sessionMgr *session.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sessionID := chi.URLParam(r, "sessionID")
+		var body struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || sessionID == "" || body.Text == "" {
+			http.Error(w, `{"error":"session id and text are required"}`, http.StatusBadRequest)
+			return
+		}
+		sessionMgr.ScanOutputForAttention(sessionID, []byte(body.Text))
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
