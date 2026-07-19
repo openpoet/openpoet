@@ -35,6 +35,7 @@ import (
 	"openpoet/internal/providerbridge"
 	"openpoet/internal/security"
 	"openpoet/internal/session"
+	"openpoet/internal/sshauth"
 	"openpoet/internal/tunnel"
 	"openpoet/internal/updater"
 	"openpoet/internal/voice"
@@ -466,6 +467,9 @@ func main() {
 	if err := configsync.EnsureMissionCoordinatorSkill(context.Background(), db); err != nil {
 		log.Printf("[Coordinator] ensure mission-coordinator skill: %v", err)
 	}
+
+	// Phase 7.4: TOFU host-key ledger for every SSH surface.
+	sshauth.SetKnownHostStore(db)
 
 	// Wire AI evaluation callbacks into session manager
 	sessionMgr.OnSessionStart = func(sessionID string) {
