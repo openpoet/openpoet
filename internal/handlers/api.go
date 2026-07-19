@@ -4923,3 +4923,48 @@ func (a *API) GetMissionPanel(w http.ResponseWriter, r *http.Request) {
 	}
 	respondJSON(w, http.StatusOK, panel)
 }
+
+// UpdateMissionStatusUI (Phase 7.6): end/transition a mission from the panel.
+// Non-destructive — it only changes the mission's status. Sessions and
+// worktrees are untouched; the productive cleanup (merging lanes, discarding
+// worktrees, archiving) stays a coordinator-driven act. Approved user
+// credential only (a session cannot drive its own mission's lifecycle).
+func (a *API) UpdateMissionStatusUI(w http.ResponseWriter, r *http.Request) {
+	missionID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || missionID <= 0 {
+		respondError(w, http.StatusBadRequest, "Invalid mission id")
+		return
+	}
+	var input struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	status := strings.TrimSpace(input.Status)
+	switch status {
+	case "active", "paused", "completed", "failed", "archived":
+	default:
+		respondError(w, http.StatusBadRequest, "status must be active, paused, completed, failed or archived")
+		return
+	}
+	authorization := platformUIAuthorization(r)
+	if !authorization.Approved || authorization.Actor.Type == "session" {
+		respondError(w, http.StatusForbidden, "Ending a mission requires an approved user credential")
+		return
+	}
+	mission, err := a.db.GetMission(r.Context(), missionID)
+	if err != nil || mission == nil {
+		respondError(w, http.StatusNotFound, "Mission not found")
+		return
+	}
+	if err := a.db.UpdateMissionStatus(r.Context(), missionID, status); err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to update mission status")
+		return
+	}
+	_ = a.db.AppendMissionEvent(r.Context(), "mission.status_changed", missionID, map[string]any{
+		"mission_id": missionID, "status": status, "by_actor": application.EventActorValue(authorization.Actor),
+	})
+	respondJSON(w, http.StatusOK, map[string]any{"mission_id": missionID, "status": status})
+}

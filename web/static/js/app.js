@@ -673,6 +673,9 @@ class OpenPoet {
         const stopAllHTML = totalLive
             ? `<button class="mv-stopall" onclick="app.stopAllMissionSessions()">Parar todas as sessões (${totalLive})</button>`
             : '';
+        const canEnd = m.status === 'active' || m.status === 'paused';
+        const endHTML = canEnd ? `<button class="mv-endbtn" onclick="app.endMission()">Encerrar missão</button>` : '';
+        const actionsHTML = (stopAllHTML || endHTML) ? `<div class="mv-actions">${stopAllHTML}${endHTML}</div>` : '';
 
         c.innerHTML = `<div class="mv-grid">
             <div class="mv-card mv-full">
@@ -680,13 +683,30 @@ class OpenPoet {
                 <div class="mv-goal">${esc(m.goal)}</div>
                 <div class="mv-meta">${badge(m.status)} · criada ${esc(m.created_at)}</div>
                 ${coordHTML}
-                ${stopAllHTML}
+                ${actionsHTML}
             </div>
             <div class="mv-card"><h4>${workersTitle}</h4>${workersHTML}</div>
             <div class="mv-card"><h4>Worktrees</h4>${wsHTML}</div>
             <div class="mv-card"><h4>Documentos</h4>${docsHTML}</div>
             <div class="mv-card mv-full"><h4>Timeline</h4>${tlHTML}</div>
         </div>`;
+    }
+
+    // End a mission (non-destructive): mark it completed. Sessions and worktrees
+    // are untouched — stopping sessions is the button above, and the productive
+    // cleanup (merging lanes, discarding worktrees) stays a coordinator act.
+    async endMission() {
+        const missionId = this._currentMission;
+        if (!missionId) return;
+        if (!window.confirm('Encerrar esta missão (marcar como concluída)?\n\nO status vira "completed" e a missão fica registrada. As sessões e os worktrees NÃO são tocados — use "Parar todas as sessões" se quiser encerrá-las, e o merge/descarte de lanes continua sendo feito pela coordenadora.')) return;
+        try {
+            await this.api('POST', `/missions/${missionId}/status`, { status: 'completed' });
+            this.showToast?.('Missão encerrada (concluída).', 'success');
+        } catch (e) {
+            this.showToast?.('Não foi possível encerrar a missão.', 'error');
+            return;
+        }
+        this.loadMissions();
     }
 
     // Stop every LIVE session of the mission (coordinator + workers). This is a
