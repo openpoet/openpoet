@@ -649,6 +649,11 @@ func main() {
 	}
 	r.Mount("/api/automation/v1", automation.NewHandler(db, automationDeps))
 
+	// Coordinator tier (Phase 7.1 — Maestro): token-authed (opst1) surface that
+	// lets an ELECTED session coordinate a group cross-project. Reuses the same
+	// dependencies; authority never rests on the legacy localhost surface.
+	r.Mount("/api/coordinator", automation.NewCoordinatorHandler(db, automationDeps))
+
 	// API routes
 	// DEBUG: Client error reporting endpoint
 	if *debugFlag {

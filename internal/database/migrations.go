@@ -84,6 +84,7 @@ var migrations = []Migration{
 	{Version: 66, Description: "blackboard: shared CAS/TTL/fence key-value store (blackboard_entries)", Up: migrateV66},
 	{Version: 67, Description: "environments: manifest content-hash approval ledger (environment_manifests)", Up: migrateV67},
 	{Version: 68, Description: "environments: resource registry + port allocator (environment_resources) with reserved 8080/8081/8090", Up: migrateV68},
+	{Version: 69, Description: "maestro: temp_documents mission_id link (docs land attached to the mission that produced them)", Up: migrateV69},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1859,6 +1860,23 @@ func migrateV68(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV68 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV69 — Phase 7.1 (Maestro): optional mission link on documents. Follows
+// the V25 task_id precedent exactly: nullable column, no FK (the missions table
+// lands in a later sub-phase; task_id has no declared FK either), plus an index
+// so the mission panel can list its documents cheaply.
+func migrateV69(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE temp_documents ADD COLUMN mission_id INTEGER`,
+		`CREATE INDEX IF NOT EXISTS idx_temp_documents_mission ON temp_documents(mission_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV69 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil
