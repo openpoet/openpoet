@@ -569,3 +569,60 @@ func randomWorkspaceSuffix() string {
 	}
 	return hex.EncodeToString(buf)
 }
+
+// MergePrediction is the pre-merge forecast (Phase 7.5).
+type MergePrediction struct {
+	Clean bool `json:"clean"`
+	// ConflictFiles are the files touched on BOTH sides since the merge base —
+	// the conflict candidate set (a superset of real textual conflicts; empty
+	// means the merge is guaranteed clean).
+	ConflictFiles []string `json:"conflict_files"`
+}
+
+// PredictMerge forecasts a workspace merge without touching the tree. The
+// verdict comes from `git merge-tree --write-tree` (exit 0 = clean); the file
+// list on conflict comes from the both-sides-touched diff intersection
+// (runGit drops stdout on non-zero exit, so merge-tree's own listing is not
+// recoverable through the port). Works for local AND remote projects — every
+// step is a read-only git command through the port.
+func (s *WorkspaceService) PredictMerge(ctx context.Context, workspaceID string) (*MergePrediction, error) {
+	ws, err := s.Get(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	project, err := s.db.GetProject(ctx, ws.ProjectID)
+	if err != nil {
+		return nil, notFoundError("project_not_found", "Project not found", err)
+	}
+	if _, err := s.git.RunGit(ctx, project, "merge-tree", "--write-tree", "--name-only", "HEAD", ws.Branch); err == nil {
+		return &MergePrediction{Clean: true, ConflictFiles: []string{}}, nil
+	}
+	// Conflicted (or merge-tree unavailable): list the candidate files.
+	base, err := s.git.RunGit(ctx, project, "merge-base", "HEAD", ws.Branch)
+	if err != nil {
+		return nil, fmt.Errorf("merge-base: %w", err)
+	}
+	baseRef := strings.TrimSpace(base)
+	mainSide, err := s.git.RunGit(ctx, project, "diff", "--name-only", baseRef+"..HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("diff main side: %w", err)
+	}
+	laneSide, err := s.git.RunGit(ctx, project, "diff", "--name-only", baseRef+".."+ws.Branch)
+	if err != nil {
+		return nil, fmt.Errorf("diff lane side: %w", err)
+	}
+	mainTouched := map[string]bool{}
+	for _, f := range splitLines(mainSide) {
+		mainTouched[f] = true
+	}
+	var overlap []string
+	for _, f := range splitLines(laneSide) {
+		if mainTouched[f] {
+			overlap = append(overlap, f)
+		}
+	}
+	if overlap == nil {
+		overlap = []string{}
+	}
+	return &MergePrediction{Clean: false, ConflictFiles: overlap}, nil
+}
