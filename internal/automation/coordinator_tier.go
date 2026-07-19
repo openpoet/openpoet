@@ -32,8 +32,13 @@ const CoordinatorLeaseKey = "coordinator-lease"
 
 const (
 	coordinatorDefaultLeaseTTL = 300 // seconds
-	coordinatorMinLeaseTTL     = 2
-	coordinatorMaxLeaseTTL     = 3600
+	// The minimum TTL is deliberately far above worst-case dispatch latency
+	// (remote SSH spawns can take tens of seconds): the fence is checked at
+	// admission, so a lease that can expire mid-dispatch shrinks the window the
+	// fence actually covers. Post-dispatch the tier re-reads the lease and
+	// reports fence_lost_during_action when it changed hands in flight.
+	coordinatorMinLeaseTTL = 30
+	coordinatorMaxLeaseTTL = 3600
 )
 
 // coordinatorSessionScopes is the pinned scope set of the coordinator-tier
@@ -225,6 +230,15 @@ func (c *coordinatorAPI) elect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One coordinator lease per session: a session already coordinating another
+	// group must release (let lapse) that lease first. This keeps lease→group
+	// resolution deterministic for every coordinator-tier call.
+	if heldGroup, heldEntry, heldErr := c.heldLease(r.Context(), cs.SessionID); heldErr == nil && heldEntry != nil && heldGroup != req.Group {
+		writeError(w, http.StatusConflict, "coordinator_lease_held_elsewhere",
+			fmt.Sprintf("this session already coordinates group %d — one coordinator lease per session", heldGroup), false)
+		return
+	}
+
 	ttl := clampCoordinatorTTL(req.TTLSeconds)
 	valueJSON, _ := json.Marshal(coordinatorLeaseValue{SessionID: cs.SessionID})
 	lease, err := c.store.BlackboardGet(r.Context(), "group", req.Group, CoordinatorLeaseKey)
@@ -273,23 +287,34 @@ func (c *coordinatorAPI) elect(w http.ResponseWriter, r *http.Request) {
 }
 
 // heldLease finds the coordination group whose lease this session currently
-// holds. Coordination tags are few, so a scan is cheap.
-func (c *coordinatorAPI) heldLease(ctx context.Context, sessionID string) (int64, *database.BlackboardEntry) {
+// holds (at most one — enforced at election). Coordination tags are few, so a
+// scan is cheap. Store errors propagate so callers answer 500-retryable, never
+// a misleading "stale/absent lease".
+//
+// ABA note: the lease's row version resets after TTL expiry (BlackboardPut
+// treats an expired row as version 0), so raw blackboard FenceKey fencing by
+// version alone is unsafe across expiry. This tier is immune — it checks
+// HOLDER IDENTITY and version together — but do not hand the lease key to
+// V66 FenceKey consumers until versions are made monotonic (Phase 7.4).
+func (c *coordinatorAPI) heldLease(ctx context.Context, sessionID string) (int64, *database.BlackboardEntry, error) {
 	tags, err := c.store.ListCoordinationTags(ctx)
 	if err != nil {
-		return 0, nil
+		return 0, nil, err
 	}
 	for _, tag := range tags {
 		lease, err := c.store.BlackboardGet(ctx, "group", tag.ID, CoordinatorLeaseKey)
-		if err != nil || lease == nil {
+		if err != nil {
+			return 0, nil, err
+		}
+		if lease == nil {
 			continue
 		}
 		var held coordinatorLeaseValue
 		if json.Unmarshal([]byte(lease.ValueJSON), &held) == nil && held.SessionID == sessionID {
-			return tag.ID, lease
+			return tag.ID, lease, nil
 		}
 	}
-	return 0, nil
+	return 0, nil, nil
 }
 
 // requireCoordinator resolves the caller's held lease, optionally validating a
@@ -302,7 +327,11 @@ func (c *coordinatorAPI) requireCoordinator(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusUnauthorized, "authentication_required", "session identity is missing", false)
 		return coordinatorSession{}, 0, false
 	}
-	group, lease := c.heldLease(r.Context(), cs.SessionID)
+	group, lease, err := c.heldLease(r.Context(), cs.SessionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "coordinator_lease_failed", "the coordinator lease could not be read", true)
+		return coordinatorSession{}, 0, false
+	}
 	if lease == nil {
 		if fence != nil {
 			writeError(w, http.StatusConflict, "coordinator_fence_stale", "the coordinator lease is stale — it expired or another session took over", false)
@@ -338,7 +367,11 @@ func (c *coordinatorAPI) status(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication_required", "session identity is missing", false)
 		return
 	}
-	group, lease := c.heldLease(r.Context(), cs.SessionID)
+	group, lease, err := c.heldLease(r.Context(), cs.SessionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "coordinator_lease_failed", "the coordinator lease could not be read", true)
+		return
+	}
 	if lease == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"coordinator": false, "session_id": cs.SessionID})
 		return
@@ -367,6 +400,19 @@ func (c *coordinatorAPI) dispatch(ctx context.Context, cs coordinatorSession, gr
 		Actor: actor, Reason: "coordinator session " + cs.SessionID + " (group lease fence-checked)",
 		Approval: approval, DryRun: dryRun,
 	})
+}
+
+// fenceLostDuringAction re-reads the lease AFTER a mutation completed. The
+// admission check bounds the window, but a dispatch can outlive a lapsing lease
+// (e.g. a slow remote spawn); the effect cannot be undone, so the caller is
+// told the fence changed hands mid-flight and must reconcile with the new
+// coordinator instead of assuming it still leads.
+func (c *coordinatorAPI) fenceLostDuringAction(ctx context.Context, cs coordinatorSession, group, fence int64) bool {
+	heldGroup, lease, err := c.heldLease(ctx, cs.SessionID)
+	if err != nil {
+		return false // unknown ≠ lost; don't cry wolf on a transient read error
+	}
+	return lease == nil || heldGroup != group || lease.Version != fence
 }
 
 func writeCoordinatorDispatchError(w http.ResponseWriter, err error) {
@@ -467,9 +513,13 @@ func (c *coordinatorAPI) startWorker(w http.ResponseWriter, r *http.Request) {
 			sessionID = view.ID
 		}
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
+	response := map[string]any{
 		"session_id": sessionID, "project_id": req.ProjectID, "status": "created", "result": result.Result,
-	})
+	}
+	if c.fenceLostDuringAction(r.Context(), cs, group, *req.FenceVersion) {
+		response["fence_lost_during_action"] = true
+	}
+	writeJSON(w, http.StatusCreated, response)
 }
 
 type coordinatorSendRequest struct {
@@ -505,6 +555,15 @@ func (c *coordinatorAPI) sendToWorker(w http.ResponseWriter, r *http.Request) {
 		map[string]any{"text": req.Text, "await_ack": true, "force": req.Force}, false)
 	if err != nil {
 		writeCoordinatorDispatchError(w, err)
+		return
+	}
+	if c.fenceLostDuringAction(r.Context(), cs, group, *req.FenceVersion) {
+		merged := map[string]any{"fence_lost_during_action": true}
+		if encoded, marshalErr := json.Marshal(result.Result); marshalErr == nil {
+			_ = json.Unmarshal(encoded, &merged)
+			merged["fence_lost_during_action"] = true
+		}
+		writeJSON(w, http.StatusOK, merged)
 		return
 	}
 	writeJSON(w, http.StatusOK, result.Result)
