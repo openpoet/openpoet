@@ -50,6 +50,7 @@
   "use strict";
   const REFRESH_MS = 4000;
   let currentMission = null;
+  let inFlight = false;
 
   const el = (id) => document.getElementById(id);
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
@@ -113,21 +114,28 @@
   }
 
   async function refresh() {
-    if (currentMission == null) return;
-    const panel = await loadPanel(currentMission);
-    if (!panel) return;
-    renderMission(panel.mission);
-    renderWorkers(panel.workers);
-    renderWorkspaces(panel.workspaces);
-    renderDocuments(panel.documents);
-    renderTimeline(panel.timeline);
+    if (currentMission == null || inFlight) return;
+    inFlight = true;
+    try {
+      const panel = await loadPanel(currentMission);
+      if (!panel) return;
+      renderMission(panel.mission);
+      renderWorkers(panel.workers);
+      renderWorkspaces(panel.workspaces);
+      renderDocuments(panel.documents);
+      renderTimeline(panel.timeline);
+    } catch (err) {
+      console.error("mission panel refresh failed", err);
+    } finally {
+      inFlight = false;
+    }
   }
 
   async function boot() {
     const missions = await loadMissions();
     const select = el("mission-select");
     select.innerHTML = missions.map((m) =>
-      `<option value="${esc(m.id)}">#${esc(m.id)} — ${esc(m.goal.slice(0, 60))} (${esc(m.status)})</option>`).join("");
+      `<option value="${esc(m.id)}">#${esc(m.id)} — ${esc(String(m.goal ?? "").slice(0, 60))} (${esc(m.status)})</option>`).join("");
     select.onchange = () => { currentMission = select.value; refresh(); };
     if (missions.length) { currentMission = missions[0].id; refresh(); }
     else el("mission-card").innerHTML = `<h2>Missão</h2><div class="empty">Nenhuma missão registrada.</div>`;
