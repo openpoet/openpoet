@@ -98,6 +98,11 @@ type HookHandler struct {
 	// on I/O beyond a bounded cache read. Set by main.go to the conflict radar.
 	ConsultConflict func(sessionID, toolName string, toolInput map[string]interface{}) (bool, string)
 
+	// ReleaseClaim drops a session's write claim for a path whose write was just
+	// denied (the write never happens), so a denied attempt cannot leave a
+	// residual claim that mutually locks out the legitimate claimant.
+	ReleaseClaim func(sessionID, toolName string, toolInput map[string]interface{})
+
 	// HasLinkedTask checks if a session has a linked task. Set by main.go.
 	HasLinkedTask func(sessionID string) bool
 
@@ -390,6 +395,32 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	isAskUser := toolName == "AskUserQuestion"
 	isExitPlan := toolName == "ExitPlanMode"
 
+	// Synchronous conflict veto (Phase 3, L1): consult the radar BEFORE the
+	// always-allow fast-path — a contested write must be denied even when the
+	// user clicked "always allow Edit", because the conflict is cross-session,
+	// orthogonal to the per-session allow. Runs only for write-class tools (the
+	// consult filters), never touches the DB, fails open when the radar is cold.
+	// On deny it releases the requesting session's just-registered claim so a
+	// denied write cannot mutually lock out the legitimate claimant.
+	if h.ConsultConflict != nil {
+		toolInput, _ := hookEvent["tool_input"].(map[string]interface{})
+		if deny, reason := h.ConsultConflict(sessionID, toolName, toolInput); deny {
+			log.Printf("[hooks] Conflict veto for session %s tool %s: %s", sessionID, toolName, reason)
+			if h.ReleaseClaim != nil {
+				h.ReleaseClaim(sessionID, toolName, toolInput)
+			}
+			output := hookPermissionOutput{
+				HookSpecificOutput: hookSpecificOutput{
+					HookEventName: "PermissionRequest",
+					Decision:      permissionDecision{Behavior: "deny", Message: reason},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(output)
+			return
+		}
+	}
+
 	// Check if this tool is "always allowed" for this session
 	h.mu.Lock()
 	if tools, ok := h.alwaysAllow[sessionID]; ok && toolName != "" && tools[toolName] {
@@ -406,27 +437,6 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mu.Unlock()
-
-	// Synchronous conflict veto (Phase 3, L1): consult the radar BEFORE parking
-	// or broadcasting. On a contested write it denies with an explanatory
-	// message the model reads back — the first non-observe hand. Runs only for
-	// write-class tools (the consult filters), never touches the DB, and fails
-	// open when the radar is cold.
-	if h.ConsultConflict != nil {
-		toolInput, _ := hookEvent["tool_input"].(map[string]interface{})
-		if deny, reason := h.ConsultConflict(sessionID, toolName, toolInput); deny {
-			log.Printf("[hooks] Conflict veto for session %s tool %s: %s", sessionID, toolName, reason)
-			output := hookPermissionOutput{
-				HookSpecificOutput: hookSpecificOutput{
-					HookEventName: "PermissionRequest",
-					Decision:      permissionDecision{Behavior: "deny", Message: reason},
-				},
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(output)
-			return
-		}
-	}
 
 	// Create a context with timeout (590s, just under Claude Code's 600s default)
 	ctx, cancel := context.WithTimeout(r.Context(), 590*time.Second)
@@ -1228,15 +1238,10 @@ func (h *HookHandler) ClearSession(sessionID string) {
 	delete(h.sessionMode, sessionID)
 	delete(h.imagePromptMeta, sessionID)
 	delete(h.acpUsage, sessionID)
-	if waiters := h.promptWaiters[sessionID]; len(waiters) > 0 {
-		for _, ch := range waiters {
-			select {
-			case ch <- struct{}{}:
-			default:
-			}
-		}
-		delete(h.promptWaiters, sessionID)
-	}
+	// Drop any prompt waiters WITHOUT signaling them: a torn-down session never
+	// accepted the pending input, so the ack must time out to acknowledged=false
+	// rather than fabricate a true ack from teardown.
+	delete(h.promptWaiters, sessionID)
 	if t, ok := h.evalTimers[sessionID]; ok {
 		t.Stop()
 		delete(h.evalTimers, sessionID)
