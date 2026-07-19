@@ -502,13 +502,10 @@ func (c *coordinatorAPI) startWorker(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Safety nets (Phase 7.4): parallelism cap + mission budget (+ anomaly
-	// auto-pause). Evaluated for dry runs too — a dry run is a cheap probe.
-	if !c.enforceSpawnSafety(w, r, group, mission) {
-		return
-	}
-	// Spawn idempotency fence: reserve the key BEFORE the spawn; a replay
-	// returns the recorded session with zero side effects.
+	// Spawn idempotency fence FIRST: a replay of an already-completed spawn is
+	// side-effect-free and must return the recorded session even when the cap
+	// is currently saturated (the recovered session itself may be what fills
+	// it) — recovering a lost response is the fence's whole purpose.
 	reservedVersion := int64(0)
 	idempotencyKey := strings.TrimSpace(req.IdempotencyKey)
 	if idempotencyKey != "" && !req.DryRun {
@@ -530,6 +527,14 @@ func (c *coordinatorAPI) startWorker(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		reservedVersion = version
+	}
+	// Safety nets (Phase 7.4): parallelism cap + mission budget. The anomaly
+	// auto-pause only fires on REAL spawns (a dry run is a declared probe).
+	if !c.enforceSpawnSafety(w, r, group, mission, !req.DryRun) {
+		if reservedVersion > 0 {
+			c.releaseSpawnKey(r.Context(), group, idempotencyKey, cs.SessionID, reservedVersion)
+		}
+		return
 	}
 	payload := map[string]any{}
 	if req.MissionID != 0 {

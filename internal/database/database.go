@@ -86,6 +86,7 @@ func New(path string) (*DB, error) {
 	// connection. Deliberately no _txlock: read transactions stay DEFERRED.
 	readDB, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_pragma=query_only(1)")
 	if err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to open read pool: %w", err)
 	}
 	readDB.SetMaxOpenConns(4)
@@ -98,10 +99,10 @@ func New(path string) (*DB, error) {
 // migrations. Offline dry-run/cutover tools use it so inspection itself cannot
 // change production schema.
 func OpenExisting(path string) (*DB, error) {
-	// journal_mode(WAL) matches New(): a database served by this process must
-	// be in WAL for the read pool semantics (it is a persistent file property,
-	// but declaring it here keeps cutover copies consistent too).
-	db, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_txlock=immediate")
+	// Deliberately NO journal_mode/_txlock here: this entry point is the
+	// inspect-only path (dry-run/cutover tooling) and must not convert a
+	// rollback-journal file to WAL nor grab write locks it does not need.
+	db, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)")
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to existing database: %w", err)
 	}
