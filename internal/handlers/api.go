@@ -4960,6 +4960,12 @@ func (a *API) UpdateMissionStatusUI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.db.UpdateMissionStatus(r.Context(), missionID, status); err != nil {
+		// Reopening (→ active) trips the one-active-mission-per-group index when
+		// the group already runs another mission — surface it as a clear 409.
+		if strings.Contains(err.Error(), "idx_missions_one_active_per_group") || strings.Contains(err.Error(), "UNIQUE constraint") {
+			respondError(w, http.StatusConflict, "This group already has an active mission — end it before reopening another")
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "Failed to update mission status")
 		return
 	}
