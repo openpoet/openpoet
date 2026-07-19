@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"openpoet/internal/database"
@@ -44,6 +45,7 @@ type SessionStore interface {
 	// Phase 7.3 mission enrollment.
 	GetMission(ctx context.Context, id int64) (*database.Mission, error)
 	UpsertMissionWorker(ctx context.Context, worker *database.MissionWorker) error
+	ProjectIDsForTags(ctx context.Context, tagIDs []int64) ([]int64, error)
 }
 
 type SessionManager interface {
@@ -363,6 +365,24 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 		if mission.Status != "active" {
 			return nil, validationError("mission_not_active", "Mission is not active")
 		}
+		// The target project must belong to the mission's coordination group —
+		// otherwise any sessions:write client could enroll itself in a foreign
+		// mission, polluting the roster AND reading the goal through the
+		// project_filter isolation.
+		memberIDs, memberErr := s.store.ProjectIDsForTags(ctx, []int64{mission.GroupTagID})
+		if memberErr != nil {
+			return nil, memberErr
+		}
+		isMember := false
+		for _, id := range memberIDs {
+			if id == project.ID {
+				isMember = true
+				break
+			}
+		}
+		if !isMember {
+			return nil, validationError("mission_project_not_in_group", "The project is not a member of the mission's coordination group")
+		}
 		injectMissionEnvironment(environment, mission, command.MissionRole)
 	}
 	initialPrompt, err := resolveInitialSessionPrompt(command, linkedTask != nil)
@@ -602,8 +622,12 @@ func (s *SessionService) Reopen(ctx context.Context, command ReopenSessionComman
 	// dump the session into the wrong working tree.
 	laneReopen := false
 	if session.WorkDir != "" && session.WorkDir != project.Path {
-		if _, statErr := os.Stat(session.WorkDir); statErr != nil {
-			return nil, conflictError("workspace_gone", "Session workspace directory no longer exists on disk")
+		// The local Stat only proves anything for local lanes; a remote lane's
+		// dir lives on the SSH host and is validated by the reopen itself.
+		if project.Type == "local" {
+			if _, statErr := os.Stat(session.WorkDir); statErr != nil {
+				return nil, conflictError("workspace_gone", "Session workspace directory no longer exists on disk")
+			}
 		}
 		// Re-take the lease BEFORE restarting the runner: a reopened session
 		// occupies its lane again, or the lane's remove/double-book guards
@@ -996,6 +1020,17 @@ func applySessionBackendOverride(project *database.Project, backend string) (*da
 	return &overridden, nil
 }
 
+// sanitizeSingleLine flattens any control character (\n, \r, tabs, ...) to a
+// space — the briefing's single-line contract (Windows cmd quoting).
+func sanitizeSingleLine(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, value)
+}
+
 // knownSessionBackend mirrors the automation layer's backend vocabulary.
 func knownSessionBackend(backend string) bool {
 	switch backend {
@@ -1023,7 +1058,7 @@ func injectMissionEnvironment(environment map[string]string, mission *database.M
 			"(objective, summary, decisions, files, verification, blockers, needs_from_coordinator, next) — the coordinator reads reports, not your transcript; "+
 			"(2) publish documentation as OpenPoet Docs via openpoet_create_document with mission_id=%d, never as harness-native artifacts; "+
 			"(3) stay inside your assigned scope and surface conflicts instead of resolving them unilaterally.",
-		mission.ID, role, strings.ReplaceAll(mission.Goal, "\n", " "), mission.ID)
+		mission.ID, role, sanitizeSingleLine(mission.Goal), mission.ID)
 	if existing := environment["OPENPOET_APPEND_SYSTEM_PROMPT"]; existing != "" {
 		environment["OPENPOET_APPEND_SYSTEM_PROMPT"] = existing + " " + briefing
 	} else {

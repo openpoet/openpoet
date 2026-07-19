@@ -193,6 +193,10 @@ func (c *coordinatorAPI) attachWorker(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "mission_worker_required", "a mission_id and session_id are required", false)
 		return
 	}
+	if len(req.Role) > 100 {
+		writeError(w, http.StatusBadRequest, "mission_worker_invalid", "role must not exceed 100 characters", false)
+		return
+	}
 	if req.FenceVersion == nil {
 		writeError(w, http.StatusBadRequest, "coordinator_fence_required", "a fence_version is required for coordinator mutations", false)
 		return

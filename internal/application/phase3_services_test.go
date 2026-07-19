@@ -62,6 +62,10 @@ func (s *phase3Store) GetTaskForSession(context.Context, string) (*database.Proj
 	return &copy, nil
 }
 
+func (s *phase3Store) ProjectIDsForTags(_ context.Context, _ []int64) ([]int64, error) {
+	return nil, nil
+}
+
 func (s *phase3Store) GetMission(_ context.Context, _ int64) (*database.Mission, error) {
 	return nil, nil
 }
