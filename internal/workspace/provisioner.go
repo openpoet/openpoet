@@ -40,14 +40,15 @@ type ProvisionResult struct {
 // Provisioner runs manifest environments and tracks live service drivers so they
 // can be torn down.
 type Provisioner struct {
-	store       ProvisionStore
-	setupBudget time.Duration
-	mu          sync.Mutex
-	drivers     map[string]*ProcessDriver // workspaceID → live process driver
+	store         ProvisionStore
+	setupBudget   time.Duration
+	healthTimeout time.Duration
+	mu            sync.Mutex
+	drivers       map[string][]*ProcessDriver // workspaceID → live process drivers (all services)
 }
 
 func NewProvisioner(store ProvisionStore) *Provisioner {
-	return &Provisioner{store: store, setupBudget: 5 * time.Minute, drivers: map[string]*ProcessDriver{}}
+	return &Provisioner{store: store, setupBudget: 5 * time.Minute, healthTimeout: 30 * time.Second, drivers: map[string][]*ProcessDriver{}}
 }
 
 // Provision executes an approved manifest for a workspace: setup commands, port
@@ -55,19 +56,31 @@ func NewProvisioner(store ProvisionStore) *Provisioner {
 // env (for resources_json). On an unapproved hash it returns *ApprovalRequiredError
 // (nothing is executed). A failed setup or health check returns an error with no
 // orphan process left running.
-func (p *Provisioner) Provision(ctx context.Context, projectID int64, workspaceID, workDir string, manifestContent []byte) (*ProvisionResult, error) {
+func (p *Provisioner) Provision(ctx context.Context, projectID int64, workspaceID, workDir string, manifestContent []byte) (result *ProvisionResult, err error) {
 	sha := ManifestSHA256(manifestContent)
-	approved, err := p.store.IsManifestApproved(ctx, projectID, sha)
-	if err != nil {
-		return nil, err
+	approved, appErr := p.store.IsManifestApproved(ctx, projectID, sha)
+	if appErr != nil {
+		return nil, appErr
 	}
 	if !approved {
 		return nil, &ApprovalRequiredError{SHA: sha}
 	}
-	m, err := ParseManifest(manifestContent)
-	if err != nil {
-		return nil, err
+	m, parseErr := ParseManifest(manifestContent)
+	if parseErr != nil {
+		return nil, parseErr
 	}
+
+	// Self-cleaning: if provisioning fails at ANY point after a port is allocated
+	// or a service is spawned, tear down (kill spawned services, release port rows)
+	// so a failed provision never leaks a port — which would eventually exhaust the
+	// allocator range — nor orphans a service. Uses a detached context because the
+	// caller's ctx may already be cancelling.
+	provisioned := false
+	defer func() {
+		if err != nil && !provisioned {
+			_ = p.Teardown(context.Background(), workspaceID)
+		}
+	}()
 
 	// Setup commands run FIRST, in the workspace cwd with a scrubbed env. Any
 	// non-zero exit aborts provisioning before a service is ever spawned.
@@ -75,19 +88,23 @@ func (p *Provisioner) Provision(ctx context.Context, projectID int64, workspaceI
 		if strings.TrimSpace(c) == "" {
 			continue
 		}
-		if err := p.runSetup(ctx, c, workDir); err != nil {
-			return nil, fmt.Errorf("setup %q failed: %w", c, err)
+		if setupErr := p.runSetup(ctx, c, workDir); setupErr != nil {
+			return nil, fmt.Errorf("setup %q failed: %w", c, setupErr)
 		}
 	}
 
-	result := &ProvisionResult{Env: map[string]string{}}
+	timeout := p.healthTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	result = &ProvisionResult{Env: map[string]string{}}
 	for name, svc := range m.Services {
 		if strings.EqualFold(svc.Scope, "shared") {
 			continue // shared services are declare-only in the MVP (driver=none)
 		}
 		port, allocErr := p.allocatePort(ctx, projectID, workspaceID, name, svc.Port)
 		if allocErr != nil {
-			return nil, allocErr // port_reserved / no free port bubbles up
+			return nil, allocErr // port_reserved / no free port bubbles up (defer cleans up)
 		}
 		env := m.RenderedEnv(port)
 		driver := &ProcessDriver{}
@@ -96,13 +113,11 @@ func (p *Provisioner) Provision(ctx context.Context, projectID int64, workspaceI
 			return nil, fmt.Errorf("service %q spawn failed: %w", name, spErr)
 		}
 		p.mu.Lock()
-		p.drivers[workspaceID] = driver
+		p.drivers[workspaceID] = append(p.drivers[workspaceID], driver)
 		p.mu.Unlock()
 		svcID, _ := p.store.InsertServiceResource(ctx, projectID, workspaceID, name, "process", strconv.Itoa(pid), "allocating")
 
-		if !WaitHealthy(RenderTemplate(svc.Health, port), 30*time.Second) {
-			KillPID(pid)
-			driver.Kill()
+		if !WaitHealthy(RenderTemplate(svc.Health, port), timeout) {
 			_ = p.store.SetResourceStatus(ctx, svcID, "unhealthy")
 			return nil, fmt.Errorf("service %q failed its health check", name)
 		}
@@ -112,6 +127,7 @@ func (p *Provisioner) Provision(ctx context.Context, projectID int64, workspaceI
 			result.Env[k] = v
 		}
 	}
+	provisioned = true
 	return result, nil
 }
 
@@ -143,10 +159,10 @@ func (p *Provisioner) runSetup(ctx context.Context, command, workDir string) err
 // pid after a restart) and marks its resources released, freeing the port.
 func (p *Provisioner) Teardown(ctx context.Context, workspaceID string) error {
 	p.mu.Lock()
-	driver := p.drivers[workspaceID]
+	drivers := p.drivers[workspaceID]
 	delete(p.drivers, workspaceID)
 	p.mu.Unlock()
-	if driver != nil {
+	for _, driver := range drivers {
 		driver.Kill()
 	}
 	// Also kill by persisted pid (covers restart / driver-less teardown).
