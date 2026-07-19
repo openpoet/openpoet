@@ -141,8 +141,8 @@ func validateUIActionManifest(t *testing.T, manifest uiActionManifest) (map[stri
 			t.Errorf("credential/tunnel/update mutation must be R4: %s", key)
 		}
 	}
-	if implemented != 123 || internal != 3 {
-		t.Errorf("manifest convergence = %d implemented/%d internal, want 123/3", implemented, internal)
+	if implemented != 124 || internal != 3 {
+		t.Errorf("manifest convergence = %d implemented/%d internal, want 124/3", implemented, internal)
 	}
 	allowlist := make(map[string]struct{}, len(manifest.Allowlist))
 	for _, item := range manifest.Allowlist {

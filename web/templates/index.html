@@ -573,10 +573,15 @@
                 .mv-coord { margin-top: 12px; border-left: 3px solid var(--color-primary); }
                 .mv-tagword { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--color-primary);
                     border: 1px solid currentColor; border-radius: 99px; padding: 1px 7px; margin-left: 7px; font-weight: 600; vertical-align: middle; }
-                .mv-stopall { display: inline-block; margin-top: 12px; background: none; border: 1px solid var(--color-danger);
+                .mv-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+                .mv-stopall { background: none; border: 1px solid var(--color-danger);
                     color: var(--color-danger); border-radius: 8px; padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; }
                 .mv-stopall:hover { background: var(--color-danger); color: #fff; }
                 .mv-stopall:focus-visible { outline: 2px solid var(--color-danger); outline-offset: 2px; }
+                .mv-endbtn { background: none; border: 1px solid var(--color-primary); color: var(--color-primary);
+                    border-radius: 8px; padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; }
+                .mv-endbtn:hover { background: var(--color-primary); color: #fff; }
+                .mv-endbtn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
                 button.mv-doc-open.mv-row-title { background: none; border: none; padding: 0; cursor: pointer; color: var(--color-primary); text-align: left; }
                 .mv-status { display: inline-block; padding: 2px 9px; border-radius: 99px; font-size: 12px; border: 1px solid currentColor; white-space: nowrap; }
                 .mv-running, .mv-active { color: var(--color-status-running); }
@@ -610,7 +615,8 @@
                     .mv-card { padding: 13px 14px; border-radius: 10px; }
                     .mv-goal { font-size: 15px; }
                     .mv-row { padding: 11px 12px; }
-                    .mv-stopall { display: block; width: 100%; text-align: center; }
+                    .mv-actions { flex-direction: column; }
+                    .mv-stopall, .mv-endbtn { display: block; width: 100%; text-align: center; }
                     .mv-modal.open { padding: 0; }
                     .mv-modal-inner { border-radius: 0; min-height: 100%; }
                     .mv-doc-body { padding: 8px 16px 40px; }
