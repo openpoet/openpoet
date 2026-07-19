@@ -119,8 +119,8 @@ func (s *WorkspaceService) Create(ctx context.Context, command CreateWorkspaceCo
 	if err != nil {
 		return nil, notFoundError("project_not_found", "Project not found", err)
 	}
-	if project.Type != "local" {
-		return nil, validationError("workspace_remote_unsupported", "Workspaces support local projects only in this phase")
+	if project.Type != "local" && project.Type != "remote" {
+		return nil, validationError("workspace_project_type_unsupported", "Workspaces support local and remote projects")
 	}
 	if project.Backend != "" && project.Backend != "claude_code" {
 		return nil, validationError("workspace_backend_unsupported", "Workspaces support claude_code projects only in this phase")
@@ -182,7 +182,7 @@ func (s *WorkspaceService) Create(ctx context.Context, command CreateWorkspaceCo
 
 	// The exclude line must land BEFORE the worktree dir is created, or the
 	// main checkout's porcelain shows .openpoet/ as untracked dirt.
-	if err := s.ensureExcludeLine(project); err != nil {
+	if err := s.ensureExcludeLineFor(ctx, project); err != nil {
 		_ = s.db.SetWorkspaceStatus(ctx, ws.ID, "failed", "workspace.failed", actor)
 		return nil, fmt.Errorf("preparing git exclude: %w", err)
 	}
@@ -218,7 +218,7 @@ func (s *WorkspaceService) Create(ctx context.Context, command CreateWorkspaceCo
 	// its environment in this workspace (setup → port → service → health) before
 	// marking ready. The manifest is read from the main checkout (it may be
 	// uncommitted, so it never rides in the worktree ref).
-	if s.provisioner != nil {
+	if s.provisioner != nil && project.Type == "local" {
 		if manifest, ok := readProjectManifest(project.Path); ok {
 			result, provErr := s.provisioner.Provision(ctx, project.ID, ws.ID, ws.Path, manifest)
 			if provErr != nil {
@@ -302,6 +302,24 @@ func (s *WorkspaceService) Discard(ctx context.Context, command RemoveWorkspaceC
 	return s.Remove(ctx, command)
 }
 
+// RemoteWorkspaceFS is the remote counterpart of the local FS seams —
+// implemented by the config syncer (it owns the SSH/SFTP machinery).
+type RemoteWorkspaceFS interface {
+	EnsureRemoteExcludeLine(ctx context.Context, project *database.Project, line string) error
+}
+
+// ensureExcludeLineFor routes the exclude write to the host that owns the repo.
+func (s *WorkspaceService) ensureExcludeLineFor(ctx context.Context, project *database.Project) error {
+	if project.Type == "local" {
+		return s.ensureExcludeLine(project)
+	}
+	remoteFS, ok := s.syncer.(RemoteWorkspaceFS)
+	if !ok {
+		return fmt.Errorf("remote workspace filesystem is unavailable")
+	}
+	return remoteFS.EnsureRemoteExcludeLine(ctx, project, workspaceExcludeLine)
+}
+
 // ensureExcludeLine appends the managed-root pattern to .git/info/exclude once.
 // info/exclude is unversioned, so this never dirties the repo.
 func (s *WorkspaceService) ensureExcludeLine(project *database.Project) error {
@@ -380,6 +398,9 @@ func (s *WorkspaceService) Remove(ctx context.Context, command RemoveWorkspaceCo
 	actor := EventActorValue(command.Authorization.Actor)
 	if _, err := s.git.RunGit(ctx, project, "worktree", "remove", "--force", ws.Path); err != nil {
 		switch {
+		case project.Type != "local":
+			// Remote lane: no local-FS fallbacks; prune metadata and accept.
+			_, _ = s.git.RunGit(ctx, project, "worktree", "prune")
 		case !pathExists(ws.Path):
 			// Directory already gone (manual cleanup): prune stale metadata.
 			_, _ = s.git.RunGit(ctx, project, "worktree", "prune")
@@ -491,9 +512,13 @@ func (s *WorkspaceService) ResolveForSession(ctx context.Context, project *datab
 	if ws.Status != "ready" {
 		return nil, conflictError("workspace_not_ready", fmt.Sprintf("Workspace is %s, not ready", ws.Status))
 	}
-	if _, err := os.Stat(ws.Path); err != nil {
-		return nil, conflictError("workspace_gone", "Workspace directory no longer exists on disk")
+	if project.Type == "local" {
+		if _, err := os.Stat(ws.Path); err != nil {
+			return nil, conflictError("workspace_gone", "Workspace directory no longer exists on disk")
+		}
 	}
+	// Remote lanes: the path lives on the SSH host — existence is proven by the
+	// git/worktree operations themselves; a local Stat would always fail.
 	return ws, nil
 }
 
