@@ -23,6 +23,7 @@ import (
 	"openpoet/internal/application"
 	"openpoet/internal/automation"
 	"openpoet/internal/benchmark"
+	"openpoet/internal/brain"
 	"openpoet/internal/config"
 	"openpoet/internal/configsync"
 	"openpoet/internal/coordinator"
@@ -382,6 +383,29 @@ func main() {
 			log.Printf("[Coordinator] proactive escalation failed: %v", err)
 		}
 	}
+	// Phase 4: the pluggable brain. Fired once per critical incident; it
+	// re-validates the LLM's proposed action against the project dial, daily
+	// budget, and hallucination checks before executing as the coordinator
+	// client. The ai_coordinator slot (nil when unconfigured = no spend).
+	brainEscalator := func(ctx context.Context, incidentID, title, body string, extra map[string]interface{}) {
+		if _, err := aiHandler.CreateProactiveNotification(ctx, "warning", "conflict", title, body, nil, extra); err != nil {
+			log.Printf("[Brain] escalation failed: %v", err)
+		}
+	}
+	brainConsultant := brain.NewConsultant(
+		db,
+		api.PlatformCapabilityRegistry(),
+		func() llm.Provider { return providerMgr.GetProvider(llm.SlotCoordinator) },
+		func(ctx context.Context) string {
+			if agent, err := db.GetAIAgentByName(ctx, "Coordinator"); err == nil && agent != nil {
+				return agent.SystemPrompt
+			}
+			return "You are OpenPoet's fleet coordinator. Respond with one JSON action."
+		},
+		brainEscalator,
+	)
+	coord.OnBrainConsult = brainConsultant.Consult
+
 	coord.Start()
 	hookHandler.OnToolEvent = coord.OnHookEvent
 	sessionMgr.OnSessionAttention = coord.RecordAttention
@@ -1353,7 +1377,7 @@ func initProviderManager(db *database.DB, enc *security.Encryptor, apiURL string
 	pm := llm.NewProviderManager(apiURL)
 	ctx := context.Background()
 
-	for _, slot := range []llm.Slot{llm.SlotChat, llm.SlotBackground, llm.SlotSession} {
+	for _, slot := range []llm.Slot{llm.SlotChat, llm.SlotBackground, llm.SlotSession, llm.SlotCoordinator} {
 		cfg, err := db.GetAIConfigForSlot(ctx, string(slot))
 		if err != nil || cfg == nil {
 			log.Printf("[AI] Slot %s: no config assigned (auto-detect)", slot)

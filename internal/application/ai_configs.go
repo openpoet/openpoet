@@ -8,7 +8,7 @@ import (
 )
 
 var validAIConfigSlots = map[string]struct{}{
-	"ai_chat": {}, "ai_background": {}, "claude_session": {},
+	"ai_chat": {}, "ai_background": {}, "claude_session": {}, "ai_coordinator": {},
 }
 
 type AIConfigStore interface {
