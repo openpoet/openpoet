@@ -425,6 +425,32 @@ func main() {
 	hookHandler.ConsultConflict = coord.ConsultWrite
 	hookHandler.ReleaseClaim = coord.ReleaseClaim
 
+	// Phase 5: the synchronous PreToolUse gate (L2). Strictly opt-in per project
+	// (conflict_policy in {gate, enforce}) and globally kill-switchable — every
+	// non-opted path and every error fails OPEN so the gate can never brick a
+	// session. This is the only control point that reaches
+	// dangerously_skip_permissions sessions (they never fire PermissionRequest).
+	hookHandler.GatePreToolUse = func(ctx context.Context, sessionID, toolName string, toolInput map[string]interface{}) (bool, string) {
+		// Global kill switch: absent/anything-but-"false" = enabled.
+		if v, _ := db.GetSetting(ctx, "conflict_enforcement_enabled"); strings.EqualFold(strings.TrimSpace(v), "false") {
+			return false, ""
+		}
+		s, err := db.GetSession(ctx, sessionID)
+		if err != nil || s == nil {
+			return false, ""
+		}
+		p, err := db.GetProject(ctx, s.ProjectID)
+		if err != nil || p == nil {
+			return false, ""
+		}
+		switch p.ConflictPolicy {
+		case "gate", "enforce":
+			return coord.Gate(sessionID, toolName, toolInput)
+		default:
+			return false, "" // observe/warn never block — opt-in is real
+		}
+	}
+
 	// Provision the built-in coordinator automation client (grant-gated: no
 	// approvals scopes) and drop its one-time token next to the DB.
 	coordinatorTokenPath := filepath.Join(filepath.Dir(cfg.DBPath), "coordinator.token")
@@ -943,6 +969,7 @@ func main() {
 		r.Post("/hooks/permission", hookHandler.HandlePermission)
 		r.Post("/hooks/permission/{sessionId}/respond", hookHandler.HandlePermissionRespond)
 		r.Post("/hooks/event", hookHandler.HandleEvent)
+		r.Post("/hooks/pretooluse", hookHandler.HandlePreToolUseGate) // Phase 5 synchronous gate
 		r.Get("/hooks/pending/{sessionId}", hookHandler.HandleGetPending)
 		r.Post("/hooks/task-notification/{sessionId}/respond", hookHandler.HandleTaskNotificationRespond)
 
