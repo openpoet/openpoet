@@ -241,6 +241,31 @@ func (d *DB) DeleteTag(ctx context.Context, id int64) error {
 	return err
 }
 
+// ListCoordinationTags returns tags flagged as coordination groups (V65).
+func (d *DB) ListCoordinationTags(ctx context.Context) ([]Tag, error) {
+	var tags []Tag
+	err := d.SelectContext(ctx, &tags, "SELECT * FROM tags WHERE coordination = 1 ORDER BY name")
+	return tags, err
+}
+
+// ProjectIDsForTags resolves the set of project ids that belong to ANY of the
+// given tags (project_filter tag membership). Returns distinct ids.
+func (d *DB) ProjectIDsForTags(ctx context.Context, tagIDs []int64) ([]int64, error) {
+	if len(tagIDs) == 0 {
+		return nil, nil
+	}
+	query, args, err := sqlx.In("SELECT DISTINCT project_id FROM project_tags WHERE tag_id IN (?)", tagIDs)
+	if err != nil {
+		return nil, err
+	}
+	query = d.Rebind(query)
+	var ids []int64
+	if err := d.SelectContext(ctx, &ids, query, args...); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 // Project tag assignment operations
 
 type ProjectTagWithDetails struct {

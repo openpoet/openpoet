@@ -303,7 +303,7 @@ func (c *Coordinator) process(msg ingestMsg) {
 		// Drain the paths this session touched since its last Stop into the
 		// turn_completed payload, then reset the accumulator atomically.
 		files := c.drainTurnTouchesLocked(si.id)
-		c.queueEventLocked(turnCompletedEvent(si.id, files, msg.ts))
+		c.queueEventLocked(turnCompletedEvent(si.id, si.projectID, files, msg.ts))
 		return
 	}
 	for _, t := range msg.touches {
