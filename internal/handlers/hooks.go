@@ -92,6 +92,12 @@ type HookHandler struct {
 	// Implementations must only enqueue — this runs on the hook response path.
 	OnToolEvent func(sessionID, eventName string, hookEvent map[string]interface{})
 
+	// ConsultConflict is called SYNCHRONOUSLY in HandlePermission before parking
+	// a write permission. Returns (deny, reason) — a non-empty reason when
+	// another live session holds a write claim on the same path. Must not block
+	// on I/O beyond a bounded cache read. Set by main.go to the conflict radar.
+	ConsultConflict func(sessionID, toolName string, toolInput map[string]interface{}) (bool, string)
+
 	// HasLinkedTask checks if a session has a linked task. Set by main.go.
 	HasLinkedTask func(sessionID string) bool
 
@@ -112,6 +118,7 @@ type HookHandler struct {
 	imagePromptMeta   map[string]string                 // sessionID -> user's text prompt when images were included
 	evalTimers        map[string]*time.Timer            // sessionID -> debounced evaluation timer
 	acpUsage          map[string]*ACPUsageInfo          // sessionID -> ACP usage tracking (model, premium requests)
+	promptWaiters     map[string][]chan struct{}        // sessionID -> awaiters woken by the next UserPromptSubmit (send ack)
 }
 
 // ACPUsageInfo holds Copilot ACP usage tracking data for a session.
@@ -148,6 +155,7 @@ func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, ses
 		imagePromptMeta:   make(map[string]string),
 		evalTimers:        make(map[string]*time.Timer),
 		acpUsage:          make(map[string]*ACPUsageInfo),
+		promptWaiters:     make(map[string][]chan struct{}),
 	}
 }
 
@@ -398,6 +406,27 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mu.Unlock()
+
+	// Synchronous conflict veto (Phase 3, L1): consult the radar BEFORE parking
+	// or broadcasting. On a contested write it denies with an explanatory
+	// message the model reads back — the first non-observe hand. Runs only for
+	// write-class tools (the consult filters), never touches the DB, and fails
+	// open when the radar is cold.
+	if h.ConsultConflict != nil {
+		toolInput, _ := hookEvent["tool_input"].(map[string]interface{})
+		if deny, reason := h.ConsultConflict(sessionID, toolName, toolInput); deny {
+			log.Printf("[hooks] Conflict veto for session %s tool %s: %s", sessionID, toolName, reason)
+			output := hookPermissionOutput{
+				HookSpecificOutput: hookSpecificOutput{
+					HookEventName: "PermissionRequest",
+					Decision:      permissionDecision{Behavior: "deny", Message: reason},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(output)
+			return
+		}
+	}
 
 	// Create a context with timeout (590s, just under Claude Code's 600s default)
 	ctx, cancel := context.WithTimeout(r.Context(), 590*time.Second)
@@ -988,9 +1017,64 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	// giving the evaluator richer context (especially for image inputs).
 	if eventName == "UserPromptSubmit" {
 		h.scheduleDebouncedEval(sessionID)
+		h.wakePromptWaiters(sessionID)
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// RegisterPromptWaiter returns a channel that fires when the session's next
+// UserPromptSubmit hook arrives — the reliable "the agent accepted the input"
+// signal for claude_code PTY sessions. The cancel func must be called to avoid
+// leaking the waiter if it is abandoned before firing.
+func (h *HookHandler) RegisterPromptWaiter(sessionID string) (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	h.mu.Lock()
+	h.promptWaiters[sessionID] = append(h.promptWaiters[sessionID], ch)
+	h.mu.Unlock()
+	cancel := func() {
+		h.mu.Lock()
+		waiters := h.promptWaiters[sessionID]
+		for i, w := range waiters {
+			if w == ch {
+				h.promptWaiters[sessionID] = append(waiters[:i], waiters[i+1:]...)
+				break
+			}
+		}
+		if len(h.promptWaiters[sessionID]) == 0 {
+			delete(h.promptWaiters, sessionID)
+		}
+		h.mu.Unlock()
+	}
+	return ch, cancel
+}
+
+func (h *HookHandler) wakePromptWaiters(sessionID string) {
+	h.mu.Lock()
+	waiters := h.promptWaiters[sessionID]
+	delete(h.promptWaiters, sessionID)
+	h.mu.Unlock()
+	for _, ch := range waiters {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// WaitForPromptSubmit blocks until the session's next UserPromptSubmit hook or
+// the deadline. Used by send-with-ack.
+func (h *HookHandler) WaitForPromptSubmit(ctx context.Context, sessionID string, timeout time.Duration) bool {
+	ch, cancel := h.RegisterPromptWaiter(sessionID)
+	defer cancel()
+	select {
+	case <-ch:
+		return true
+	case <-time.After(timeout):
+		return false
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // HasPendingPermission checks if a session has a pending permission request
@@ -1144,6 +1228,15 @@ func (h *HookHandler) ClearSession(sessionID string) {
 	delete(h.sessionMode, sessionID)
 	delete(h.imagePromptMeta, sessionID)
 	delete(h.acpUsage, sessionID)
+	if waiters := h.promptWaiters[sessionID]; len(waiters) > 0 {
+		for _, ch := range waiters {
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
+		}
+		delete(h.promptWaiters, sessionID)
+	}
 	if t, ok := h.evalTimers[sessionID]; ok {
 		t.Stop()
 		delete(h.evalTimers, sessionID)

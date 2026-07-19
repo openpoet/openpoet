@@ -86,7 +86,11 @@ func (d *DB) CreateWorkspace(ctx context.Context, ws *Workspace, actor string) e
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	d.NotifyOutboxAppended()
+	return nil
 }
 
 func isUniqueConstraintErr(err error) bool {
@@ -130,7 +134,13 @@ func (d *DB) SetWorkspaceStatus(ctx context.Context, id, status, eventType, acto
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if eventType != "" {
+		d.NotifyOutboxAppended()
+	}
+	return nil
 }
 
 // ReserveWorkspace atomically claims a ready workspace with a pending token

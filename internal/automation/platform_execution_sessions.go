@@ -117,6 +117,10 @@ type sessionReopenPayload struct {
 
 type sessionInputPayload struct {
 	Text string `json:"text"`
+	// AwaitAck blocks for the agent's UserPromptSubmit ack (default true for
+	// coordinator send-with-ack); Force bypasses the mid-turn busy guard.
+	AwaitAck *bool `json:"await_ack,omitempty"`
+	Force    bool  `json:"force,omitempty"`
 }
 
 type sessionModelPayload struct {
@@ -350,11 +354,20 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if text == "" || len([]byte(text)) > 16<<10 {
 			return nil, platformFailure("platform_payload_invalid", "session input must contain between 1 byte and 16 KiB", false)
 		}
+		awaitAck := true
+		if payload.AwaitAck != nil {
+			awaitAck = *payload.AwaitAck
+		}
+		rejectIfBusy := !payload.Force
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"session_id": sessionID, "input_bytes": len([]byte(text))}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
-			if err := e.service.SendInput(ctx, application.SendSessionInputCommand{SessionID: sessionID, Text: text, Authorization: authorization}); err != nil {
+			result, err := e.service.SendInputWithAck(ctx, application.SendSessionInputCommand{
+				SessionID: sessionID, Text: text, Authorization: authorization,
+				RejectIfBusy: rejectIfBusy, AwaitAck: awaitAck,
+			})
+			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"sent": true, "session_id": sessionID}, nil
+			return map[string]any{"sent": result.Submitted, "acknowledged": result.Acknowledged, "session_id": sessionID}, nil
 		}}, nil
 	case "sessions.set_model":
 		sessionID, err := executionStringID(target, "session id")

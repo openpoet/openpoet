@@ -26,7 +26,11 @@ func (d *DB) WithProjectTaskTx(ctx context.Context, fn func(*ProjectTaskTx) erro
 	if err := fn(&ProjectTaskTx{tx: tx}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	d.NotifyOutboxAppended()
+	return nil
 }
 
 func (t *ProjectTaskTx) ProjectExists(ctx context.Context, projectID int64) (bool, error) {
