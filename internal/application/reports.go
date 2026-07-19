@@ -94,33 +94,38 @@ type UpsertTurnReportCommand struct {
 	ChangedTaskIDs    []int64
 	Incomplete        bool
 	IncompleteReasons []string
-	ThroughCursor     int64
-	StartedAt         time.Time
-	EndedAt           *time.Time
-	Actor             Actor
-	CorrelationID     string
+	// Phase 7.2: dense milestone-report routing fields.
+	NextStep             string
+	NeedsFromCoordinator []string
+	ThroughCursor        int64
+	StartedAt            time.Time
+	EndedAt              *time.Time
+	Actor                Actor
+	CorrelationID        string
 }
 
 type TurnReport struct {
-	ReportID          string             `json:"report_id"`
-	SessionID         string             `json:"session_id"`
-	TurnID            string             `json:"turn_id"`
-	State             string             `json:"state"`
-	Incomplete        bool               `json:"incomplete"`
-	Objective         string             `json:"objective"`
-	Outcome           string             `json:"outcome"`
-	WorkSummary       string             `json:"work_summary"`
-	Decisions         []string           `json:"decisions"`
-	Verification      ReportVerification `json:"verification"`
-	Evidence          []ReportEvidence   `json:"evidence"`
-	CompletedTaskIDs  []int64            `json:"completed_task_ids"`
-	ChangedTaskIDs    []int64            `json:"changed_task_ids"`
-	IncompleteReasons []string           `json:"incomplete_reasons"`
-	ThroughCursor     int64              `json:"through_cursor"`
-	StartedAt         time.Time          `json:"started_at"`
-	EndedAt           *time.Time         `json:"ended_at,omitempty"`
-	UpdatedAt         time.Time          `json:"updated_at"`
-	FinalizedAt       *time.Time         `json:"finalized_at,omitempty"`
+	ReportID             string             `json:"report_id"`
+	SessionID            string             `json:"session_id"`
+	TurnID               string             `json:"turn_id"`
+	State                string             `json:"state"`
+	Incomplete           bool               `json:"incomplete"`
+	Objective            string             `json:"objective"`
+	Outcome              string             `json:"outcome"`
+	WorkSummary          string             `json:"work_summary"`
+	Decisions            []string           `json:"decisions"`
+	Verification         ReportVerification `json:"verification"`
+	Evidence             []ReportEvidence   `json:"evidence"`
+	CompletedTaskIDs     []int64            `json:"completed_task_ids"`
+	ChangedTaskIDs       []int64            `json:"changed_task_ids"`
+	IncompleteReasons    []string           `json:"incomplete_reasons"`
+	NextStep             string             `json:"next_step,omitempty"`
+	NeedsFromCoordinator []string           `json:"needs_from_coordinator"`
+	ThroughCursor        int64              `json:"through_cursor"`
+	StartedAt            time.Time          `json:"started_at"`
+	EndedAt              *time.Time         `json:"ended_at,omitempty"`
+	UpdatedAt            time.Time          `json:"updated_at"`
+	FinalizedAt          *time.Time         `json:"finalized_at,omitempty"`
 }
 
 type DailySessionReport struct {
@@ -375,6 +380,7 @@ func (s *ReportService) upsertTurn(ctx context.Context, command UpsertTurnReport
 		completedJSON, _ := json.Marshal(normalized.CompletedTaskIDs)
 		changedJSON, _ := json.Marshal(normalized.ChangedTaskIDs)
 		reasonsJSON, _ := json.Marshal(normalized.IncompleteReasons)
+		needsJSON, _ := json.Marshal(normalized.NeedsFromCoordinator)
 		record := &database.StructuredSessionReportRecord{
 			ReportID: reportID, SessionID: normalized.SessionID, TurnID: normalized.TurnID,
 			ReportDate: source.StartTime.In(s.location).Format(time.DateOnly), Timezone: s.location.String(),
@@ -386,6 +392,7 @@ func (s *ReportService) upsertTurn(ctx context.Context, command UpsertTurnReport
 			DecisionsJSON: string(decisionsJSON), VerificationJSON: string(verificationJSON),
 			EvidenceJSON: string(evidenceJSON), CompletedTaskIDsJSON: string(completedJSON),
 			ChangedTaskIDsJSON: string(changedJSON), IncompleteReasonsJSON: string(reasonsJSON),
+			NextStep: normalized.NextStep, NeedsFromCoordinator: string(needsJSON),
 			ThroughCursor: normalized.ThroughCursor, TurnStartedAt: startedAt,
 		}
 		if normalized.EndedAt != nil {
@@ -552,8 +559,15 @@ func normalizeTurnReportCommand(command UpsertTurnReportCommand) (UpsertTurnRepo
 	if command.WorkSummary, err = boundedReportText(command.WorkSummary, 4000, "work_summary"); err != nil {
 		return command, err
 	}
-	if len(command.Decisions) > 50 || len(command.Evidence) > 100 || len(command.IncompleteReasons) > 50 {
+	if len(command.Decisions) > 50 || len(command.Evidence) > 100 || len(command.IncompleteReasons) > 50 || len(command.NeedsFromCoordinator) > 50 {
 		return command, validationError("report_content_too_large", "report collection limits were exceeded")
+	}
+	if command.NextStep, err = boundedReportText(command.NextStep, 1000, "next_step"); err != nil {
+		return command, err
+	}
+	command.NeedsFromCoordinator, err = normalizeReportStrings(command.NeedsFromCoordinator, 500, true)
+	if err != nil {
+		return command, err
 	}
 	command.Decisions, err = normalizeReportStrings(command.Decisions, 500, false)
 	if err != nil {
@@ -899,6 +913,7 @@ func turnReportFromRecord(record database.StructuredSessionReportRecord) (*TurnR
 		ReportID: record.ReportID, SessionID: record.SessionID, TurnID: record.TurnID,
 		State: record.State, Incomplete: record.Incomplete,
 		Objective: record.Objective, Outcome: record.Outcome, WorkSummary: record.WorkSummary,
+		NextStep:      record.NextStep,
 		ThroughCursor: record.ThroughCursor, StartedAt: record.TurnStartedAt,
 		EndedAt: nullTimePointer(record.TurnEndedAt), UpdatedAt: record.UpdatedAt,
 		FinalizedAt: nullTimePointer(record.FinalizedAt),
@@ -913,6 +928,12 @@ func turnReportFromRecord(record database.StructuredSessionReportRecord) (*TurnR
 		{record.CompletedTaskIDsJSON, &turn.CompletedTaskIDs},
 		{record.ChangedTaskIDsJSON, &turn.ChangedTaskIDs},
 		{record.IncompleteReasonsJSON, &turn.IncompleteReasons},
+	}
+	if strings.TrimSpace(record.NeedsFromCoordinator) != "" {
+		encoded = append(encoded, struct {
+			raw    string
+			target any
+		}{record.NeedsFromCoordinator, &turn.NeedsFromCoordinator})
 	}
 	for _, value := range encoded {
 		if err := json.Unmarshal([]byte(value.raw), value.target); err != nil {
@@ -933,6 +954,9 @@ func turnReportFromRecord(record database.StructuredSessionReportRecord) (*TurnR
 	}
 	if turn.IncompleteReasons == nil {
 		turn.IncompleteReasons = []string{}
+	}
+	if turn.NeedsFromCoordinator == nil {
+		turn.NeedsFromCoordinator = []string{}
 	}
 	return turn, nil
 }
