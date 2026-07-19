@@ -52,6 +52,7 @@ type ExecutionPlatformServices struct {
 	Conflicts      ConflictReadPort
 	Workspaces     *application.WorkspaceService
 	Blackboard     BlackboardPort
+	Environments   EnvironmentManifestApprover
 }
 
 func RegisterExecutionPlatformCapabilities(registry *PlatformCapabilityRegistry, services ExecutionPlatformServices) error {
@@ -63,7 +64,8 @@ func RegisterExecutionPlatformCapabilities(registry *PlatformCapabilityRegistry,
 		services.Voice == nil || services.TunnelMutations == nil || services.UpdateMutations == nil ||
 		services.SessionQueries == nil || services.SessionRuntime == nil || services.SessionEvents == nil ||
 		services.Files == nil || services.Git == nil || services.Tunnel == nil || services.Updates == nil ||
-		services.Conflicts == nil || services.Workspaces == nil || services.Blackboard == nil {
+		services.Conflicts == nil || services.Workspaces == nil || services.Blackboard == nil ||
+		services.Environments == nil {
 		return errors.New("all execution platform services and read ports are required")
 	}
 	groups := []struct {
@@ -82,6 +84,7 @@ func RegisterExecutionPlatformCapabilities(registry *PlatformCapabilityRegistry,
 		{conflictPlatformDefinitions(), &conflictPlatformExecutor{queries: services.Conflicts}},
 		{workspacePlatformDefinitions(), &workspacePlatformExecutor{service: services.Workspaces}},
 		{blackboardPlatformDefinitions(), &blackboardPlatformExecutor{port: services.Blackboard}},
+		{environmentPlatformDefinitions(), &environmentPlatformExecutor{service: services.Environments}},
 	}
 	for _, group := range groups {
 		for _, definition := range group.definitions {

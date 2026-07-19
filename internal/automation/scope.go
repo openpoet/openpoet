@@ -60,6 +60,8 @@ const (
 	ScopeGroupsRead         Scope = "groups:read"
 	ScopeBlackboardRead     Scope = "blackboard:read"
 	ScopeBlackboardWrite    Scope = "blackboard:write"
+	ScopeEnvironmentsManage Scope = "environments:manage"
+	ScopeEnvironmentsRead   Scope = "environments:read"
 	ScopeTokenUsageRead     Scope = "token_usage:read"
 	ScopeTokenUsageWrite    Scope = "token_usage:write"
 	ScopeToolsExecute       Scope = "tools:execute"
@@ -125,6 +127,8 @@ var knownScopes = map[Scope]struct{}{
 	ScopeGroupsRead:         {},
 	ScopeBlackboardRead:     {},
 	ScopeBlackboardWrite:    {},
+	ScopeEnvironmentsManage: {},
+	ScopeEnvironmentsRead:   {},
 	ScopeTokenUsageRead:     {},
 	ScopeTokenUsageWrite:    {},
 	ScopeToolsExecute:       {},
