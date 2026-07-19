@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 )
 
 // Phase 7.3 (Maestro): durable mission registry. See migrateV71.
@@ -166,4 +167,36 @@ func (d *DB) AppendMissionEvent(ctx context.Context, eventType string, missionID
 	}
 	d.NotifyOutboxAppended()
 	return nil
+}
+
+// CountActiveSessionsInProjects counts live (starting|running) sessions across
+// a set of projects — the mission parallelism cap's input.
+func (d *DB) CountActiveSessionsInProjects(ctx context.Context, projectIDs []int64) (int, error) {
+	if len(projectIDs) == 0 {
+		return 0, nil
+	}
+	query, args, err := sqlx.In(
+		"SELECT COUNT(*) FROM sessions WHERE status IN ('starting','running') AND project_id IN (?)", projectIDs)
+	if err != nil {
+		return 0, err
+	}
+	var count int
+	err = d.Reader().GetContext(ctx, &count, d.Rebind(query), args...)
+	return count, err
+}
+
+// SumTokensForSessions totals input+output tokens recorded for a set of
+// sessions (the mission token budget's input). Missing rows count as zero.
+func (d *DB) SumTokensForSessions(ctx context.Context, sessionIDs []string) (int64, error) {
+	if len(sessionIDs) == 0 {
+		return 0, nil
+	}
+	query, args, err := sqlx.In(
+		"SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM token_usage WHERE session_id IN (?)", sessionIDs)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	err = d.Reader().GetContext(ctx, &total, d.Rebind(query), args...)
+	return total, err
 }

@@ -75,6 +75,12 @@ type Manager struct {
 	OnSessionEnd          func(sessionID string, output []byte)
 	OnUserPromptSubmitted func(sessionID string)
 	OnSessionFlush        func(sessionID string) // Always called on session end (even user-stopped) for OTEL flush
+	// OnRemoteSessionDropped (Phase 7.4): called when a REMOTE session's runner
+	// exits with an error that was not a user stop — usually a transport (SSH)
+	// drop, not a real process exit. Returning true means the handler took over
+	// (it will re-open the session); the manager then preserves the row as
+	// "running" instead of marking a terminal error.
+	OnRemoteSessionDropped func(sessionID string) bool
 	// OnProviderSessionIDChange is called when a native backend switches to a
 	// different transcript/thread, for example after Claude Code's /resume.
 	OnProviderSessionIDChange func(sessionID, providerSessionID string)
@@ -140,6 +146,7 @@ type runningSession struct {
 	output       chan []byte
 	outputBuffer *OutputBuffer
 	userStopped  bool // set when user explicitly stops the session
+	remote       bool // remote (SSH) runner — transport drops get a reconnect shot
 	// inputMu serializes writes into this session's PTY so concurrent writers
 	// (WS client, hook automation, platform send_input) never interleave bytes
 	// mid-line. Only the input path takes it; runner internals are untouched.
@@ -552,6 +559,7 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 		cancel:       cancel,
 		output:       make(chan []byte, 100),
 		outputBuffer: outputBuffer,
+		remote:       project.Type != "local",
 	}
 
 	m.mu.Lock()
@@ -1570,6 +1578,21 @@ func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 		status = "error"
 	}
 
+	// Remote transport drop (Phase 7.4): a non-user error exit of a remote
+	// runner is far more often an SSH drop than a process death. Give the
+	// reconnect handler one shot BEFORE declaring the session dead — if it
+	// accepts, the row stays "running" for the re-open path (mirrors the
+	// shutdown-preserve branch above).
+	if status == "error" && rs.remote && m.OnRemoteSessionDropped != nil {
+		if m.OnRemoteSessionDropped(sessionID) {
+			log.Printf("Session %s: remote transport dropped — reconnect handler took over (row preserved)", sessionID)
+			if m.OnSessionFlush != nil {
+				m.OnSessionFlush(sessionID)
+			}
+			return
+		}
+	}
+
 	// Send exit message to terminal before cleaning up
 	if rs.outputBuffer != nil {
 		var exitMsg string
@@ -1914,6 +1937,7 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 		cancel:       cancel,
 		output:       make(chan []byte, 100),
 		outputBuffer: outputBuffer,
+		remote:       true,
 	}
 
 	m.mu.Lock()
