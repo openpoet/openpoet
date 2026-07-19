@@ -259,21 +259,32 @@ func (d *DB) PeekMissionGrant(ctx context.Context, missionID int64, capability s
 	return nil
 }
 
-// ConsumeMissionGrantUse atomically spends one use of the oldest live grant.
-func (d *DB) ConsumeMissionGrantUse(ctx context.Context, missionID int64, capability string) error {
-	res, err := d.ExecContext(ctx, `
+// ConsumeMissionGrantUse atomically spends one use of the oldest live grant
+// and returns its id so a non-effect (conflict/failed dispatch) can refund.
+func (d *DB) ConsumeMissionGrantUse(ctx context.Context, missionID int64, capability string) (int64, error) {
+	var grantID int64
+	err := d.GetContext(ctx, &grantID, `
 		UPDATE mission_grants SET uses_remaining = uses_remaining - 1
 		WHERE id = (
 			SELECT id FROM mission_grants
 			WHERE mission_id = ? AND capability = ? AND expires_at > CURRENT_TIMESTAMP AND uses_remaining > 0
 			ORDER BY id LIMIT 1
-		)`, missionID, capability)
-	if err != nil {
-		return err
+		)
+		RETURNING id`, missionID, capability)
+	if errors.Is(err, sql.ErrNoRows) {
+		peekErr := d.PeekMissionGrant(ctx, missionID, capability)
+		if peekErr == nil {
+			peekErr = ErrMissionGrantExhausted
+		}
+		return 0, peekErr
 	}
-	affected, _ := res.RowsAffected()
-	if affected == 0 {
-		return d.PeekMissionGrant(ctx, missionID, capability)
-	}
-	return nil
+	return grantID, err
+}
+
+// RefundMissionGrantUse returns a use spent on an action that had no effect
+// (merge conflict, dispatch failure) — a conflict must cost nothing.
+func (d *DB) RefundMissionGrantUse(ctx context.Context, grantID int64) error {
+	_, err := d.ExecContext(ctx, `
+		UPDATE mission_grants SET uses_remaining = uses_remaining + 1 WHERE id = ?`, grantID)
+	return err
 }

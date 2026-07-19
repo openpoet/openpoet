@@ -29,7 +29,8 @@ type MergePredictor interface {
 // missionGrantStore is the V73 grant ledger. *database.DB satisfies it.
 type missionGrantStore interface {
 	PeekMissionGrant(ctx context.Context, missionID int64, capability string) error
-	ConsumeMissionGrantUse(ctx context.Context, missionID int64, capability string) error
+	ConsumeMissionGrantUse(ctx context.Context, missionID int64, capability string) (int64, error)
+	RefundMissionGrantUse(ctx context.Context, grantID int64) error
 }
 
 // workspaceProjectStore resolves a workspace's project for scope checks.
@@ -112,6 +113,10 @@ func (c *coordinatorAPI) mergeWorkspace(w http.ResponseWriter, r *http.Request) 
 	if mission == nil {
 		return
 	}
+	if mission.Status != "active" {
+		writeError(w, http.StatusConflict, "mission_not_active", "the mission is not active — grants only spend on running missions", false)
+		return
+	}
 	workspaceID := strings.TrimSpace(chi.URLParam(r, "id"))
 	ws := c.resolveGroupWorkspace(w, r, cs, group, workspaceID)
 	if ws == nil {
@@ -122,9 +127,11 @@ func (c *coordinatorAPI) mergeWorkspace(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusServiceUnavailable, "mission_grant_store_unavailable", "the mission grant ledger is unavailable", true)
 		return
 	}
-	// Authority check BEFORE any effect: the typed refusal is the conversation
-	// ("ask the user for a merge grant" vs "ask for more uses").
-	if err := grants.PeekMissionGrant(r.Context(), req.MissionID, "workspaces.merge"); err != nil {
+	// CONSUME BEFORE the effect (no peek-then-act TOCTOU: two concurrent
+	// merges with one use left race the atomic decrement, exactly one wins).
+	// A non-effect outcome (conflict, dispatch failure) refunds the use.
+	grantID, err := grants.ConsumeMissionGrantUse(r.Context(), req.MissionID, "workspaces.merge")
+	if err != nil {
 		writeMissionGrantError(w, err)
 		return
 	}
@@ -133,6 +140,7 @@ func (c *coordinatorAPI) mergeWorkspace(w http.ResponseWriter, r *http.Request) 
 	// capability — attributed as such in the audit trail.
 	approval, err := NewValidatedPlatformApproval(fmt.Sprintf("mission-grant:%d", req.MissionID))
 	if err != nil {
+		_ = grants.RefundMissionGrantUse(r.Context(), grantID)
 		writeError(w, http.StatusInternalServerError, "mission_grant_store_unavailable", "the merge approval could not be constructed", true)
 		return
 	}
@@ -145,6 +153,7 @@ func (c *coordinatorAPI) mergeWorkspace(w http.ResponseWriter, r *http.Request) 
 		Approval: approval,
 	})
 	if err != nil {
+		_ = grants.RefundMissionGrantUse(r.Context(), grantID)
 		writeCoordinatorDispatchError(w, err)
 		return
 	}
@@ -153,15 +162,12 @@ func (c *coordinatorAPI) mergeWorkspace(w http.ResponseWriter, r *http.Request) 
 	_ = json.Unmarshal(encoded, &view)
 	merged, _ := view["merged"].(bool)
 	if merged {
-		// Spend the use only on a REAL integration — a conflict costs nothing.
-		if err := grants.ConsumeMissionGrantUse(r.Context(), req.MissionID, "workspaces.merge"); err != nil {
-			// The merge happened; a consume failure is an audit gap, not a
-			// reason to fail the response. Surface it.
-			view["grant_consume_error"] = err.Error()
-		}
 		_ = missions.AppendMissionEvent(r.Context(), "mission.merge_completed", req.MissionID, map[string]any{
 			"mission_id": req.MissionID, "workspace_id": workspaceID, "project_id": ws.ProjectID,
 		})
+	} else {
+		// A conflict costs nothing — the use goes back.
+		_ = grants.RefundMissionGrantUse(r.Context(), grantID)
 	}
 	writeJSON(w, http.StatusOK, view)
 }
