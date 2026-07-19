@@ -291,13 +291,9 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 	// Per-session backend override (Phase 7.3): a shallow Project copy carries
 	// the override so every downstream consumer (config sync, runner selection,
 	// the persisted session row) sees the effective backend.
-	if backendOverride := strings.TrimSpace(command.Backend); backendOverride != "" && backendOverride != project.Backend {
-		if !knownSessionBackend(backendOverride) {
-			return nil, validationError("session_backend_invalid", "Unknown session backend override")
-		}
-		overridden := *project
-		overridden.Backend = backendOverride
-		project = &overridden
+	project, err = applySessionBackendOverride(project, command.Backend)
+	if err != nil {
+		return nil, err
 	}
 
 	// Workspace threading: resolve the lane FIRST, then run the entire create
@@ -983,6 +979,21 @@ func trustedProviderEnvironmentKey(key string) bool {
 	default:
 		return false
 	}
+}
+
+// applySessionBackendOverride returns a shallow Project copy carrying a valid
+// per-session backend override (or the original project when no override).
+func applySessionBackendOverride(project *database.Project, backend string) (*database.Project, error) {
+	backendOverride := strings.TrimSpace(backend)
+	if backendOverride == "" || backendOverride == project.Backend {
+		return project, nil
+	}
+	if !knownSessionBackend(backendOverride) {
+		return nil, validationError("session_backend_invalid", "Unknown session backend override")
+	}
+	overridden := *project
+	overridden.Backend = backendOverride
+	return &overridden, nil
 }
 
 // knownSessionBackend mirrors the automation layer's backend vocabulary.
