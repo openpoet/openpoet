@@ -189,7 +189,8 @@ func (cs *ConfigSyncer) SyncToProject(ctx context.Context, project *database.Pro
 // whose Path is the lane directory. Local claude-style projects only.
 func (cs *ConfigSyncer) MaterializeToWorkspace(ctx context.Context, project *database.Project) error {
 	if project.Type != "local" {
-		return fmt.Errorf("materialize-only sync supports local projects only")
+		// Remote lanes (Phase 7.3): same materialize-only layer over SFTP.
+		return cs.materializeToRemoteLane(ctx, project)
 	}
 	return cs.syncToLocalMode(ctx, project, true)
 }
