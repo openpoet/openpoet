@@ -675,7 +675,9 @@ class OpenPoet {
             : '';
         const canEnd = m.status === 'active' || m.status === 'paused';
         const endHTML = canEnd ? `<button class="mv-endbtn" onclick="app.endMission()">Encerrar missão</button>` : '';
-        const actionsHTML = (stopAllHTML || endHTML) ? `<div class="mv-actions">${stopAllHTML}${endHTML}</div>` : '';
+        const canReopen = m.status === 'completed' || m.status === 'failed' || m.status === 'archived';
+        const reopenHTML = canReopen ? `<button class="mv-endbtn" onclick="app.reopenMission()">Reabrir missão</button>` : '';
+        const actionsHTML = (stopAllHTML || endHTML || reopenHTML) ? `<div class="mv-actions">${stopAllHTML}${endHTML}${reopenHTML}</div>` : '';
 
         c.innerHTML = `<div class="mv-grid">
             <div class="mv-card mv-full">
@@ -704,6 +706,22 @@ class OpenPoet {
             this.showToast?.('Missão encerrada (concluída).', 'success');
         } catch (e) {
             this.showToast?.('Não foi possível encerrar a missão.', 'error');
+            return;
+        }
+        this.loadMissions();
+    }
+
+    // Reopen an ended mission (→ active). Subject to one-active-per-group: the
+    // server rejects it with a clear message if the group runs another mission.
+    async reopenMission() {
+        const missionId = this._currentMission;
+        if (!missionId) return;
+        if (!window.confirm('Reabrir esta missão (voltar para "active")?')) return;
+        try {
+            await this.api('POST', `/missions/${missionId}/status`, { status: 'active' });
+            this.showToast?.('Missão reaberta.', 'success');
+        } catch (e) {
+            this.showToast?.((e && e.message) ? e.message : 'Não foi possível reabrir a missão.', 'error');
             return;
         }
         this.loadMissions();
