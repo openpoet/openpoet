@@ -1553,11 +1553,11 @@ func (cs *ConfigSyncer) syncToLocalCodex(ctx context.Context, project *database.
 		cs.reportProgress(project.ID, "memory_doc", "done", "No AGENTS.md or CLAUDE.md found")
 	}
 
-	// Managed steering section in AGENTS.md (marker-guarded, idempotent):
-	// codex/opencode read AGENTS.md as their instruction surface.
-	if err := upsertDocsSteeringFile(filepath.Join(project.Path, "AGENTS.md")); err != nil {
-		cs.reportProgress(project.ID, "docs_steering", "error", err.Error())
-	}
+	// NOTE(docs steering): codex/opencode read the root AGENTS.md, which is
+	// synced bidirectionally with the memory doc — upserting the steering block
+	// there would leak it into the user's memory doc and root CLAUDE.md. These
+	// harnesses get the steering via the per-session system-prompt channel
+	// (OPENPOET_APPEND_SYSTEM_PROMPT) with the mission briefing in Phase 7.3.
 
 	return nil
 }
@@ -1612,11 +1612,11 @@ func (cs *ConfigSyncer) syncToLocalOpenCode(ctx context.Context, project *databa
 		cs.reportProgress(project.ID, "memory_doc", "done", "No AGENTS.md or CLAUDE.md found")
 	}
 
-	// Managed steering section in AGENTS.md (marker-guarded, idempotent):
-	// codex/opencode read AGENTS.md as their instruction surface.
-	if err := upsertDocsSteeringFile(filepath.Join(project.Path, "AGENTS.md")); err != nil {
-		cs.reportProgress(project.ID, "docs_steering", "error", err.Error())
-	}
+	// NOTE(docs steering): codex/opencode read the root AGENTS.md, which is
+	// synced bidirectionally with the memory doc — upserting the steering block
+	// there would leak it into the user's memory doc and root CLAUDE.md. These
+	// harnesses get the steering via the per-session system-prompt channel
+	// (OPENPOET_APPEND_SYSTEM_PROMPT) with the mission briefing in Phase 7.3.
 
 	return nil
 }
