@@ -548,8 +548,10 @@ func (c *coordinatorAPI) waitForSession(w http.ResponseWriter, r *http.Request) 
 }
 
 // awaitEvents delegates to the existing long-poll. The session actor's
-// ProjectFilter makes filterEventsByScope drop out-of-group events, and the
-// synthetic ClientID gives the coordinator its own durable consumer cursors.
+// ProjectFilter makes filterEventsByScope drop out-of-group events. Session
+// actors have no automation_clients row (the durable consumer-cursor FK), so
+// they page with an explicit `after` cursor — next_cursor comes back in every
+// response and the coordinator keeps it in its own context.
 func (c *coordinatorAPI) awaitEvents(w http.ResponseWriter, r *http.Request) {
 	cs, group, ok := c.requireCoordinator(w, r, nil)
 	if !ok {
