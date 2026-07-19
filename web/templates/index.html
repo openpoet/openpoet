@@ -58,6 +58,12 @@
                     </svg>
                     <span>Tasks</span>
                 </a>
+                <a href="#" class="nav-item" data-view="missions">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 11l19-9-9 19-2-8-8-2z"></path>
+                    </svg>
+                    <span>Missions</span>
+                </a>
                 <a href="#" class="nav-item nav-notifications" id="nav-notifications" onclick="window.notifBadge?.toggle(); return false;">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
@@ -509,6 +515,70 @@
                     </div>
                 </div>
             </section>
+
+            <!-- Missions View (Fase 7.6 — painel central da missão, nativo no app) -->
+            <section id="view-missions" class="view">
+                <header class="view-header">
+                    <h2>Missões</h2>
+                    <div class="view-header-actions">
+                        <select id="mv-select" class="mv-select" onchange="app.loadMissionPanel(this.value)"></select>
+                    </div>
+                </header>
+                <div class="mv-content" id="mv-content">
+                    <div class="mv-empty">Carregando…</div>
+                </div>
+                <div class="mv-modal" id="mv-modal">
+                    <div class="mv-modal-inner">
+                        <div class="mv-modal-head">
+                            <h3 id="mv-doc-title">Documento</h3>
+                            <button class="btn btn-sm btn-outline" onclick="app.closeMissionDoc()">Fechar</button>
+                        </div>
+                        <div class="mv-doc-body" id="mv-doc-body"></div>
+                    </div>
+                </div>
+            </section>
+            <style>
+                #view-missions .mv-content { padding: 20px 24px 60px; overflow-y: auto; }
+                .mv-select { background: var(--color-surface); color: var(--color-text); border: 1px solid var(--color-border);
+                    border-radius: var(--border-radius); padding: 7px 12px; font: inherit; max-width: 460px; }
+                .mv-grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; max-width: 1100px; }
+                .mv-card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; padding: 15px 17px; }
+                .mv-card.mv-full { grid-column: 1 / -1; }
+                .mv-card h4 { margin: 0 0 11px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--color-text-muted); }
+                .mv-goal { font-size: 16px; margin: 2px 0 10px; color: var(--color-text); }
+                .mv-meta { color: var(--color-text-muted); font-size: 13px; }
+                .mv-mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+                .mv-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+                .mv-table th, .mv-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--color-border); }
+                .mv-table th { color: var(--color-text-muted); font-weight: 500; }
+                .mv-status { display: inline-block; padding: 2px 9px; border-radius: 99px; font-size: 12px; border: 1px solid currentColor; }
+                .mv-running, .mv-active { color: var(--color-status-running); }
+                .mv-paused { color: var(--color-priority-medium); }
+                .mv-completed { color: var(--color-info); }
+                .mv-failed, .mv-error, .mv-stopped { color: var(--color-status-error); }
+                .mv-empty { color: var(--color-text-muted); font-style: italic; padding: 8px 2px; }
+                .mv-ev { list-style: none; margin: 0; padding: 0; }
+                .mv-ev li { padding: 4px 0; border-bottom: 1px dotted var(--color-border); font-size: 13px; }
+                .mv-ev .t { color: var(--color-primary); font-family: ui-monospace, monospace; margin-right: 8px; }
+                .mv-ev .d { color: var(--color-text-muted); }
+                .mv-doc-open { background: none; border: none; color: var(--color-primary); font: inherit; cursor: pointer; padding: 0; text-align: left; }
+                .mv-doc-open:hover { text-decoration: underline; }
+                .mv-modal { position: fixed; inset: 0; z-index: 3000; display: none; background: var(--color-overlay-bg, rgba(0,0,0,.55)); }
+                .mv-modal.open { display: flex; align-items: flex-start; justify-content: center; padding: 24px 16px; overflow: auto; }
+                .mv-modal-inner { background: var(--color-bg); border: 1px solid var(--color-border); border-radius: 12px; max-width: 820px; width: 100%; margin: auto; }
+                .mv-modal-head { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--color-border); position: sticky; top: 0; background: var(--color-bg); border-radius: 12px 12px 0 0; }
+                .mv-modal-head h3 { margin: 0; font-size: 16px; flex: 1; color: var(--color-text); }
+                .mv-doc-body { padding: 10px 24px 28px; color: var(--color-text); line-height: 1.6; }
+                .mv-doc-body h2, .mv-doc-body h3, .mv-doc-body h4 { color: var(--color-text); margin: 20px 0 8px; }
+                .mv-doc-body h2 { font-size: 20px; } .mv-doc-body h3 { font-size: 17px; } .mv-doc-body h4 { font-size: 15px; }
+                .mv-doc-body code { background: var(--color-bg-secondary); padding: 1px 6px; border-radius: 5px; font-family: ui-monospace, monospace; font-size: 12.5px; }
+                .mv-doc-body pre { background: var(--color-bg-secondary); border: 1px solid var(--color-border); border-radius: 8px; padding: 12px 14px; overflow-x: auto; }
+                .mv-doc-body pre code { background: none; padding: 0; }
+                .mv-doc-body table { border-collapse: collapse; margin: 10px 0; }
+                .mv-doc-body th, .mv-doc-body td { border: 1px solid var(--color-border); padding: 5px 9px; text-align: left; font-size: 13px; }
+                .mv-doc-body hr { border: 0; border-top: 1px solid var(--color-border); margin: 18px 0; }
+                @media (max-width: 720px) { .mv-grid { grid-template-columns: 1fr; } }
+            </style>
 
             <!-- Config View -->
             <section id="view-config" class="view">
