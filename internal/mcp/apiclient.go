@@ -12,6 +12,7 @@ import (
 // APIClient is a simple HTTP client for calling the OpenPoet API.
 type APIClient struct {
 	baseURL string
+	token   string // opst1_ session bearer attached to every request when set
 	client  *http.Client
 }
 
@@ -25,96 +26,62 @@ func NewAPIClient(baseURL string) *APIClient {
 	}
 }
 
-// Get performs a GET request and returns the response body.
-func (c *APIClient) Get(path string) ([]byte, error) {
-	resp, err := c.client.Get(c.baseURL + path)
+// NewAPIClientWithToken creates an API client that carries a per-session bearer
+// on every request, so the OpenPoet REST layer resolves the true actor.
+func NewAPIClientWithToken(baseURL, token string) *APIClient {
+	c := NewAPIClient(baseURL)
+	c.token = strings.TrimSpace(token)
+	return c
+}
+
+// do builds and executes a request, attaching the session bearer when present.
+func (c *APIClient) do(method, path, contentType string, body io.Reader) ([]byte, error) {
+	req, err := http.NewRequest(method, c.baseURL+path, body)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", path, err)
+		return nil, fmt.Errorf("%s %s: %w", method, path, err)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("GET %s: status %d: %s", path, resp.StatusCode, string(body))
+		return nil, fmt.Errorf("%s %s: status %d: %s", method, path, resp.StatusCode, string(respBody))
 	}
-	return body, nil
+	return respBody, nil
+}
+
+// Get performs a GET request and returns the response body.
+func (c *APIClient) Get(path string) ([]byte, error) {
+	return c.do("GET", path, "", nil)
 }
 
 // Post performs a POST request with a JSON body and returns the response body.
 func (c *APIClient) Post(path string, jsonBody string) ([]byte, error) {
-	resp, err := c.client.Post(c.baseURL+path, "application/json", strings.NewReader(jsonBody))
-	if err != nil {
-		return nil, fmt.Errorf("POST %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("POST %s: status %d: %s", path, resp.StatusCode, string(body))
-	}
-	return body, nil
+	return c.do("POST", path, "application/json", strings.NewReader(jsonBody))
 }
 
 // Put performs a PUT request with a JSON body and returns the response body.
 func (c *APIClient) Put(path string, jsonBody string) ([]byte, error) {
-	req, err := http.NewRequest("PUT", c.baseURL+path, strings.NewReader(jsonBody))
-	if err != nil {
-		return nil, fmt.Errorf("PUT %s: %w", path, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("PUT %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("PUT %s: status %d: %s", path, resp.StatusCode, string(body))
-	}
-	return body, nil
+	return c.do("PUT", path, "application/json", strings.NewReader(jsonBody))
 }
 
 // PostRaw performs a POST request with raw bytes and returns the response body.
 func (c *APIClient) PostRaw(path string, data []byte) ([]byte, error) {
-	resp, err := c.client.Post(c.baseURL+path, "application/octet-stream", bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("POST %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("POST %s: status %d: %s", path, resp.StatusCode, string(body))
-	}
-	return body, nil
+	return c.do("POST", path, "application/octet-stream", bytes.NewReader(data))
 }
 
 // Delete performs a DELETE request and returns the response body.
 func (c *APIClient) Delete(path string) ([]byte, error) {
-	req, err := http.NewRequest("DELETE", c.baseURL+path, nil)
-	if err != nil {
-		return nil, fmt.Errorf("DELETE %s: %w", path, err)
-	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("DELETE %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("DELETE %s: status %d: %s", path, resp.StatusCode, string(body))
-	}
-	return body, nil
+	return c.do("DELETE", path, "", nil)
 }

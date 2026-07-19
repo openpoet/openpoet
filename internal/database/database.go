@@ -36,7 +36,7 @@ type MCPHTTPCleanupStats struct {
 }
 
 func New(path string) (*DB, error) {
-	db, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)")
+	db, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)")
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
@@ -337,8 +337,33 @@ func (d *DB) UpdateSessionPID(ctx context.Context, id string, pid int) error {
 }
 
 func (d *DB) EndSession(ctx context.Context, id string, status string) error {
-	_, err := d.ExecContext(ctx, "UPDATE sessions SET status=?, end_time=? WHERE id=?", status, time.Now(), id)
+	// Per-session credentials die with the session; Reopen mints fresh ones.
+	_, err := d.ExecContext(ctx, "UPDATE sessions SET status=?, end_time=?, mcp_token_hash=NULL, hook_token_hash=NULL WHERE id=?", status, time.Now(), id)
 	return err
+}
+
+// UpdateSessionTokenHashes stores the SHA-256 hex digests of a session's
+// MCP/REST bearer and hook bridge tokens. Empty strings clear a hash.
+func (d *DB) UpdateSessionTokenHashes(ctx context.Context, id, mcpTokenHash, hookTokenHash string) error {
+	_, err := d.ExecContext(ctx,
+		"UPDATE sessions SET mcp_token_hash=NULLIF(?, ''), hook_token_hash=NULLIF(?, '') WHERE id=?",
+		mcpTokenHash, hookTokenHash, id)
+	return err
+}
+
+// GetSessionTokenHashes returns the stored MCP/REST and hook token hex digests
+// for a session. Empty strings mean the credential is unset (legacy session);
+// sql.ErrNoRows means the session id is unknown.
+func (d *DB) GetSessionTokenHashes(ctx context.Context, id string) (mcpTokenHash, hookTokenHash string, err error) {
+	var row struct {
+		Mcp  sql.NullString `db:"mcp_token_hash"`
+		Hook sql.NullString `db:"hook_token_hash"`
+	}
+	err = d.GetContext(ctx, &row, "SELECT mcp_token_hash, hook_token_hash FROM sessions WHERE id = ?", id)
+	if err != nil {
+		return "", "", err
+	}
+	return row.Mcp.String, row.Hook.String, nil
 }
 
 func (d *DB) TouchSessionActivity(ctx context.Context, id string) error {

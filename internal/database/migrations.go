@@ -72,6 +72,7 @@ var migrations = []Migration{
 	{Version: 54, Description: "sessions: distinguish requested and effective runtime models", Up: migrateV54},
 	{Version: 55, Description: "projects: remove foreign backend settings from Claude Code", Up: migrateV55},
 	{Version: 56, Description: "tasks: add per-project verification auto-approval override", Up: migrateV56},
+	{Version: 57, Description: "sessions: add per-session MCP and hook token hashes", Up: migrateV57},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1544,6 +1545,19 @@ func migrateV56(tx *sqlx.Tx) error {
 		CHECK(task_auto_approve_verification IN ('inherit', 'enabled', 'disabled'))`)
 	if err != nil {
 		return fmt.Errorf("migrateV56 failed: %w", err)
+	}
+	return nil
+}
+
+func migrateV57(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE sessions ADD COLUMN mcp_token_hash TEXT`,
+		`ALTER TABLE sessions ADD COLUMN hook_token_hash TEXT`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV57 failed: %w\nSQL: %s", err, s)
+		}
 	}
 	return nil
 }

@@ -99,9 +99,13 @@ func registeredCapabilityMutationClassifier(capabilities *application.Capability
 
 func (a *commandAPI) health(w http.ResponseWriter, r *http.Request) {
 	actor, _ := ActorFromContext(r.Context())
+	// Counts are DERIVED from the live registry — the exact catalog /capabilities
+	// serves — so readiness can never silently drift from what is registered.
+	// The per-phase expected inventory is enforced separately at composition time
+	// (validatePlatformCapabilityInventory), not by magic numbers here.
 	total, mutations := 0, 0
-	if a != nil && a.platform != nil {
-		for _, descriptor := range a.platform.ListForActor(actor) {
+	if a != nil {
+		for _, descriptor := range a.mergedCapabilityDescriptors(actor) {
 			total++
 			if descriptor.Mutation {
 				mutations++
@@ -109,13 +113,14 @@ func (a *commandAPI) health(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	reads := total - mutations
+	platformReady := a != nil && a.platform != nil && total > 0
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status":                "ok",
 		"version":               APIVersion,
 		"client_id":             actor.ClientID,
-		"platform_ready":        total == 155 && mutations == 106 && reads == 49,
+		"platform_ready":        platformReady,
 		"platform_capabilities": total,
 		"platform_mutations":    mutations,
 		"platform_reads":        reads,
