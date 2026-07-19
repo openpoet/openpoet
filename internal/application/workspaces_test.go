@@ -47,7 +47,7 @@ func (f *fakeWorkspaceGit) RunGit(_ context.Context, project *database.Project, 
 		return "", os.MkdirAll(path, 0o755)
 	case args[0] == "worktree" && args[1] == "remove":
 		return "", os.RemoveAll(args[len(args)-1])
-	case joined == "status --porcelain":
+	case joined == "status --porcelain --untracked-files=no":
 		if f.dirtyMain {
 			return " M file.go\n", nil
 		}
