@@ -1472,9 +1472,13 @@ func runCodexTranscriptCleanup(ctx context.Context, db *database.DB) {
 	}
 }
 
-// outboxRetention is how long an acknowledged outbox event is kept before the
-// janitor may prune it. Only events at or below the (post-eviction) minimum
-// consumer cursor are ever removed, so this never drops unseen events.
+// outboxRetention is how long an outbox event is kept before the janitor may
+// prune it. Pruning only removes events at or below the minimum LIVE consumer
+// cursor: a consumer that keeps polling or acking stays live and its unseen
+// events are protected. The one deliberate trade-off is a consumer that goes
+// silent past the staleness window — it is evicted first, so events it never
+// saw may then be pruned. That is the intended escape from a dead cursor
+// pinning the floor forever; a returning consumer simply re-registers at zero.
 const outboxRetention = 14 * 24 * time.Hour
 
 func runOutboxJanitorLoop(ctx context.Context, db *database.DB) {
