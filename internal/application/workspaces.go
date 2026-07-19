@@ -598,7 +598,10 @@ func (s *WorkspaceService) PredictMerge(ctx context.Context, workspaceID string)
 	if _, err := s.git.RunGit(ctx, project, "merge-tree", "--write-tree", "--name-only", "HEAD", ws.Branch); err == nil {
 		return &MergePrediction{Clean: true, ConflictFiles: []string{}}, nil
 	}
-	// Conflicted (or merge-tree unavailable): list the candidate files.
+	// merge-tree failed: EITHER real conflicts OR an old git without
+	// --write-tree (possible on remote hosts). The diff intersection decides:
+	// empty overlap → clean (sound modulo rename conflicts, which the real
+	// merge still aborts on safely); non-empty → the candidate list.
 	base, err := s.git.RunGit(ctx, project, "merge-base", "HEAD", ws.Branch)
 	if err != nil {
 		return nil, fmt.Errorf("merge-base: %w", err)
@@ -622,8 +625,8 @@ func (s *WorkspaceService) PredictMerge(ctx context.Context, workspaceID string)
 			overlap = append(overlap, f)
 		}
 	}
-	if overlap == nil {
-		overlap = []string{}
+	if len(overlap) == 0 {
+		return &MergePrediction{Clean: true, ConflictFiles: []string{}}, nil
 	}
 	return &MergePrediction{Clean: false, ConflictFiles: overlap}, nil
 }

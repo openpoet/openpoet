@@ -71,14 +71,22 @@ func TestMissionGrantConsumeAndExhaust(t *testing.T) {
 	if err := db.PeekMissionGrant(ctx, mission.ID, "workspaces.merge"); err != nil {
 		t.Fatalf("live grant must peek clean: %v", err)
 	}
-	if err := db.ConsumeMissionGrantUse(ctx, mission.ID, "workspaces.merge"); err != nil {
+	grantID1, err := db.ConsumeMissionGrantUse(ctx, mission.ID, "workspaces.merge")
+	if err != nil || grantID1 != grant.ID {
+		t.Fatalf("first consume: id=%d err=%v", grantID1, err)
+	}
+	if _, err := db.ConsumeMissionGrantUse(ctx, mission.ID, "workspaces.merge"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ConsumeMissionGrantUse(ctx, mission.ID, "workspaces.merge"); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.ConsumeMissionGrantUse(ctx, mission.ID, "workspaces.merge"); !errors.Is(err, ErrMissionGrantExhausted) {
+	if _, err := db.ConsumeMissionGrantUse(ctx, mission.ID, "workspaces.merge"); !errors.Is(err, ErrMissionGrantExhausted) {
 		t.Fatalf("third consume must exhaust, got %v", err)
+	}
+	// Refund (conflict costs nothing) re-arms exactly one use.
+	if err := db.RefundMissionGrantUse(ctx, grant.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ConsumeMissionGrantUse(ctx, mission.ID, "workspaces.merge"); err != nil {
+		t.Fatalf("refunded use must be spendable: %v", err)
 	}
 	if err := db.PeekMissionGrant(ctx, mission.ID, "workspaces.merge"); !errors.Is(err, ErrMissionGrantExhausted) {
 		t.Fatalf("exhausted peek must be typed, got %v", err)
