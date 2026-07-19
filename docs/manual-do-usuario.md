@@ -1,34 +1,35 @@
 # Manual do Usuário — OpenPoet, Plataforma de Orquestração
 
-> **⚠️ Este documento é uma PROJEÇÃO DE PRODUTO.**
-> Ele descreve o OpenPoet como ele será quando as fases 2–6 da plataforma de
-> orquestração estiverem entregues — escrito no presente, como um manual normal,
-> para que você consiga avaliar o produto final antes de ele existir.
-> Hoje (baseline) estão entregues apenas as Fases 0 (segurança endurecida) e
-> 1 (radar de conflitos observe-only). Tudo o mais está **em desenvolvimento**:
-> nomes de capabilities, parâmetros, eventos e endpoints citados adiante são a
-> **sintaxe prevista** pelas especificações de fase e pelos documentos de design
-> do repositório, e podem mudar até a entrega. Exemplos de uso estão sempre
-> marcados como *(sintaxe prevista)*, exceto quando a seção indicar que a
-> funcionalidade já existe no baseline.
+> 🔮 **Este documento é uma PROJEÇÃO DE PRODUTO.**
+> Ele descreve o OpenPoet como ele **será** quando a plataforma de orquestração
+> estiver completa — escrito no presente, como um manual normal, para que você
+> consiga avaliar o produto final antes de ele existir. Só uma base enxuta já
+> funciona hoje (seção 2); **quase tudo nas seções seguintes é projeção de
+> produto**. Nomes de capabilities, parâmetros, eventos, endpoints e formatos de
+> configuração citados adiante são **sintaxe prevista** pelos documentos de
+> design do produto e **podem mudar até a entrega**. Cada seção de projeção
+> carrega o selo **🔮 Projeção de produto — sintaxe prevista, sujeita a
+> mudança**, e os exemplos aparecem marcados como *(sintaxe prevista)*. Nada
+> aqui é um compromisso de API estável.
 
 ---
 
 ## Sumário
 
 1. [O que o OpenPoet está se tornando](#1-o-que-o-openpoet-está-se-tornando)
-2. [Onde estamos hoje — o baseline (Fases 0–1, entregues)](#2-onde-estamos-hoje--o-baseline-fases-01-entregues)
-3. [Workspaces — N sessões no mesmo repositório sem conflito (Fase 2)](#3-workspaces--n-sessões-no-mesmo-repositório-sem-conflito-fase-2)
-4. [Coordenação entre sessões — esperar, enviar, confirmar, vetar (Fase 3)](#4-coordenação-entre-sessões--esperar-enviar-confirmar-vetar-fase-3)
-5. [O Coordenador IA (Fase 4)](#5-o-coordenador-ia-fase-4)
-6. [Gate de conflitos e alcance (Fase 5)](#6-gate-de-conflitos-e-alcance-fase-5)
-7. [Ambientes por projeto — environment.yaml (Fase 6)](#7-ambientes-por-projeto--environmentyaml-fase-6)
-8. [Segurança e limites — o que vale em todas as fases](#8-segurança-e-limites--o-que-vale-em-todas-as-fases)
-9. [Roadmap e status](#9-roadmap-e-status)
+2. [O que já funciona hoje — a base](#2-o-que-já-funciona-hoje--a-base)
+3. [Workspaces — N sessões no mesmo repositório sem conflito](#3-workspaces--n-sessões-no-mesmo-repositório-sem-conflito)
+4. [Coordenação entre sessões — esperar, enviar, confirmar, vetar](#4-coordenação-entre-sessões--esperar-enviar-confirmar-vetar)
+5. [O Coordenador IA](#5-o-coordenador-ia)
+6. [Radar de conflitos com gate síncrono — bloquear em tempo real](#6-radar-de-conflitos-com-gate-síncrono--bloquear-em-tempo-real)
+7. [Alcance — mais backends, streaming SSE, grupos e blackboard](#7-alcance--mais-backends-streaming-sse-grupos-e-blackboard)
+8. [Ambientes por projeto — environment.yaml](#8-ambientes-por-projeto--environmentyaml)
+9. [Segurança e limites — o contrato que vale em tudo](#9-segurança-e-limites--o-contrato-que-vale-em-tudo)
+10. [Como este manual evolui](#10-como-este-manual-evolui)
 
 Convenções dos exemplos: `BASE=http://localhost:8080` (a porta padrão do
 OpenPoet); `AV1=$BASE/api/automation/v1`. A API de automação é restrita a
-loopback e exige um bearer `opav1_` — veja a seção 8.
+loopback e exige um bearer `opav1_` — veja a seção 9.
 
 ---
 
@@ -63,41 +64,45 @@ arquivo, o OpenPoet passa a:
 O princípio de projeto que atravessa tudo: **detecção e enforcement são código
 determinístico dentro do servidor; a IA nunca fica entre uma chamada de
 ferramenta e seu veredito**. LLMs consomem eventos e propõem ações; regras e
-grants decidem.
+grants decidem. É esse princípio que torna a autonomia da frota tolerável — e é
+por isso que este manual insiste tanto, adiante, em *quem* pode fazer *o quê*.
 
 ---
 
-## 2. Onde estamos hoje — o baseline (Fases 0–1, entregues)
+## 2. O que já funciona hoje — a base
 
-**Fase 0 — Segurança endurecida (entregue).** Toda mutação REST exige uma
-credencial verificada — uma de quatro: o cookie de UI da instalação, o bearer
-por sessão `opst1_`, o bearer de automação `opav1_`, ou a credencial de
-dispositivo pareado do túnel. Os hooks das sessões autenticam com token por
-sessão (`X-Hook-Token`, prefixo `opht1_`); o MCP injetado executa como o ator
-real da sessão pelo pipeline de capabilities (com erro estruturado
-`approval_required` para verbos destrutivos); o broker de aprovações proíbe
-auto-concessão (`deny_self_grant`, salvo escopo explícito `approvals:self`); e
-o `GET /api/automation/v1/health` deriva suas contagens do registry real de
-capabilities.
+Esta é a única parte do manual que descreve comportamento **já entregue**. Tudo
+o mais (seções 3–8) é projeção.
 
-**Fase 1 — Radar de conflitos, somente observação (entregue).** Um
-coordenador em processo observa o firehose de hooks e mantém um índice de
-claims: duas sessões vivas escrevendo o mesmo arquivo geram incidente
-`file_overlap` (crítico), duas sessões na mesma task geram `same_task` (warn),
-escrita concorrente em `.claude/**` gera `shared_claude_dir` (warn). Incidentes
-viram eventos duráveis no feed de automação (`conflict.detected`,
-`session.awaiting_input`, `session.turn_completed`), linhas nas tabelas
-`session_file_activity` e `coordinator_incidents`, e notificação proativa
-quando críticos. Capabilities de leitura: `conflicts.list`, `conflicts.get`,
-`sessions.file_activity` (escopo `conflicts:read`). **Nada é bloqueado nesta
-fase** — o radar só observa e avisa. É sobre esse alicerce (identidade
-verificada + sinal durável) que tudo abaixo é construído.
+**Orquestração multi-projeto e multi-backend.** Hoje o OpenPoet já roda sessões
+de IA sobre cinco backends (Claude Code, Codex, Copilot, ACP, OpenCode), em
+projetos locais e remotos por SSH, com tarefas, skills, documentos, MCP injetado
+por sessão e uma API de automação com ~150+ capabilities auditadas. Essa é a
+fundação madura sobre a qual a orquestração é construída.
+
+**Identidade verificada e aprovações.** A base de segurança já está de pé: toda
+mutação REST exige uma credencial verificada — uma de quatro (o cookie de UI da
+instalação, o bearer por sessão `opst1_`, o bearer de automação `opav1_`, ou a
+credencial de dispositivo pareado do túnel). Os hooks das sessões autenticam com
+token por sessão (`X-Hook-Token`, prefixo `opht1_`); o MCP injetado executa como
+o **ator real** da sessão pelo pipeline de capabilities (com erro estruturado
+`approval_required` para verbos destrutivos); e o broker de aprovações proíbe
+auto-concessão (`deny_self_grant`, salvo escopo explícito `approvals:self`). É
+esse alicerce — **identidade verificada + sinal durável** — que torna seguro
+tudo o que vem a seguir.
+
+**Radar de conflitos, em observação.** A primeira geração do radar já está sendo
+assentada: um coordenador em processo observa o firehose de hooks e começa a
+manter um índice de claims — duas sessões vivas escrevendo o mesmo arquivo geram
+um incidente, que vira evento durável no feed de automação e badge na UI. **Nesta
+base, nada é bloqueado** — o radar só observa e avisa. O salto de *observar* para
+*bloquear em tempo real* é a projeção da seção 6.
 
 ---
 
-## 3. Workspaces — N sessões no mesmo repositório sem conflito (Fase 2)
+## 3. Workspaces — N sessões no mesmo repositório sem conflito
 
-> Status: **em desenvolvimento** (Fase 2 do roadmap). Sintaxe prevista.
+> 🔮 **Projeção de produto — sintaxe prevista, sujeita a mudança.**
 
 ### O que você poderá fazer
 
@@ -108,7 +113,7 @@ O checkout principal do projeto fica intocado enquanto as sessões trabalham.
 
 - Um **workspace** é um worktree + branch + registro no banco (tabela
   `workspaces`, com `kind`, `status`, lease e metadados de ambiente — o schema
-  já nasce com o formato final para as fases seguintes).
+  já nasce com o formato final que os ambientes por projeto (seção 8) exigem).
 - Workspaces vivem em `<projeto>/.openpoet/worktrees/<nome>`, escondidos do
   git via `.git/info/exclude`.
 - Branches seguem o padrão **`openpoet/…`** — por exemplo
@@ -135,7 +140,7 @@ Modos previstos do objeto `workspace`:
 
 | Modo | Comportamento |
 |---|---|
-| `auto` | Reusa uma lane livre da mesma task, ou cria uma nova; com pooling (ver Fase 6), lease atômico de um workspace ocioso |
+| `auto` | Reusa uma lane livre da mesma task, ou cria uma nova; com o pooling de ambientes (seção 8), faz lease atômico de um workspace ocioso |
 | `named` | Cria/usa uma lane com nome explícito (`name`); erro tipado em colisão |
 | `existing` | Entra em um workspace já existente (`id`) |
 
@@ -162,7 +167,7 @@ curl -s "$AV1/events?consumer=meu-orquestrador" -H "Authorization: Bearer $OPAV1
 
 Capabilities previstas: `workspaces.create` (escrita), `workspaces.list` /
 `workspaces.get` (leitura), `workspaces.remove` e `workspaces.merge`
-(**destrutivas — exigem grant de aprovação**, como `sessions.stop` hoje).
+(**destrutivas — exigem grant de aprovação**, como `sessions.stop` já hoje).
 Escopos novos: `workspaces:read` / `workspaces:write`. Eventos previstos no
 outbox: `workspace.created`, `workspace.ready`, `workspace.needs_merge`,
 `workspace.removed`, além dos resultados de merge.
@@ -195,8 +200,8 @@ reconcilia banco × `git worktree list`, e lanes sujas paradas há dias viram
 - **O checkout principal é inviolável**: criar/usar/derrubar lanes nunca deixa
   o worktree principal sujo nem muda sua branch.
 - Workspaces MVP são para **projetos locais**; em projetos remotos SSH a
-  criação retorna erro tipado de não suportado (chega em fase posterior,
-  atrás de flag por projeto, quando o hardening SSH permitir).
+  criação retorna erro tipado de não suportado (chega depois, atrás de flag por
+  projeto, quando o hardening SSH permitir).
 - Superfícies "spoofáveis" (MCP com identidade de sessão, REST de sessão) só
   alcançam verbos **aditivos** (criar, listar). `workspaces.remove` e
   `workspaces.merge` existem apenas na automação com bearer + aprovação
@@ -204,17 +209,18 @@ reconcilia banco × `git worktree list`, e lanes sujas paradas há dias viram
   destruição do trabalho de outra lane.
 - Nomes de workspace com escape de path (`../…`) são rejeitados; todo `path`
   registrado fica sob a raiz gerenciada.
-- Lanes **compartilham serviços globais** até a Fase 6: duas lanes rodando
-  `npm run dev` brigam pela mesma porta. Tarefas que precisam de ambiente vivo
-  devem rodar no worktree principal (ou esperar o `environment.yaml`).
+- Lanes **compartilham serviços globais** até chegarem os ambientes por projeto
+  (seção 8): duas lanes rodando `npm run dev` brigam pela mesma porta. Tarefas
+  que precisam de ambiente vivo devem rodar no worktree principal (ou esperar o
+  `environment.yaml`).
 - Cada lane precisa de seu próprio `node_modules`/venv (custo de disco); a
   sessão instala o que precisar pelo próprio shell.
 
 ---
 
-## 4. Coordenação entre sessões — esperar, enviar, confirmar, vetar (Fase 3)
+## 4. Coordenação entre sessões — esperar, enviar, confirmar, vetar
 
-> Status: **em desenvolvimento** (Fase 3 do roadmap). Sintaxe prevista.
+> 🔮 **Projeção de produto — sintaxe prevista, sujeita a mudança.**
 
 ### O que você poderá fazer
 
@@ -224,8 +230,9 @@ temporais e "mãos" determinísticas:
 - **Eventos de turno**: `session.turn_completed {session_id, files_touched}`
   quando uma sessão termina um turno (hook `Stop`), e
   `session.awaiting_input` quando o sentinela de PTY detecta uma pergunta ou
-  uma permissão parqueada. (Os dois tipos de evento já existem no baseline da
-  Fase 1; a Fase 3 os enriquece — p.ex. `files_touched` no turn_completed.)
+  uma permissão parqueada. (Esses dois tipos de evento já começam a existir na
+  base atual; a projeção os enriquece — p.ex. `files_touched` no
+  `turn_completed`.)
 - **`await_events`** — long-poll HTTP sobre o outbox durável: um orquestrador
   parqueia em uma chamada com filtros (tipo de evento, projeto, sessão) e
   cursor; é **acordado pelo commit** do evento, não por polling; retoma de onde
@@ -235,9 +242,10 @@ temporais e "mãos" determinísticas:
   `signal_quality: exact|heuristic` — exato para codex (fase estruturada do
   app-server), heurístico (hook Stop + janela de idle) para os backends PTY.
 - **`send_to_session` com ack** — enviar texto a outra sessão deixa de ser
-  "torcer para chegar": o input é serializado por um mutex por sessão (Fase 0)
-  e o retorno traz `{submitted: true, acknowledged: true|false}`, correlacionado
-  com o hook `UserPromptSubmit` da sessão-alvo (para codex, `turn_id` exato).
+  "torcer para chegar": o input é serializado por um mutex por sessão (que a
+  base já garante) e o retorno traz `{submitted: true, acknowledged: true|false}`,
+  correlacionado com o hook `UserPromptSubmit` da sessão-alvo (para codex,
+  `turn_id` exato).
 - **Veto síncrono de conflito** — a primeira "mão" de verdade: quando uma
   sessão pede permissão para escrever um arquivo que **outra sessão viva já
   reivindicou**, o servidor responde o pedido de permissão com **deny + uma
@@ -272,7 +280,7 @@ openpoet_send_to_session {"session_id": "<alvo>", "text": "rode os testes e repo
 ```
 
 **Parar a sessão de outra pessoa exige grant** (fluxo do broker de aprovações,
-que já existe no baseline):
+que já existe hoje):
 
 ```bash
 # 1) o orquestrador tenta sessions.stop → recebe erro estruturado approval_required
@@ -298,7 +306,7 @@ repetir o token falha.
   HTTP); um turno de sessão nunca fica bloqueado por um await de terceiro.
 - O cliente de automação do coordenador **não possui `approvals:grant`**: toda
   ação destrutiva dele passa pelo warden (ou por você). Auto-grant continua
-  bloqueado (Fase 0).
+  bloqueado pela base de segurança.
 - Sinal heurístico é rotulado como tal (`signal_quality`) — um orquestrador
   não deve tratar `idle` heurístico como verdade absoluta em backends PTY.
 - Todas as ações do coordenador aparecem no ledger de comandos da automação:
@@ -306,9 +314,9 @@ repetir o token falha.
 
 ---
 
-## 5. O Coordenador IA (Fase 4)
+## 5. O Coordenador IA
 
-> Status: **em desenvolvimento** (Fase 4 do roadmap). Sintaxe prevista.
+> 🔮 **Projeção de produto — sintaxe prevista, sujeita a mudança.**
 
 ### O que você poderá fazer
 
@@ -365,9 +373,14 @@ operárias instruídas, não sessões soltas.
 
 ---
 
-## 6. Gate de conflitos e alcance (Fase 5)
+## 6. Radar de conflitos com gate síncrono — bloquear em tempo real
 
-> Status: **em desenvolvimento** (Fase 5 do roadmap). Sintaxe prevista.
+> 🔮 **Projeção de produto — sintaxe prevista, sujeita a mudança.**
+
+Este é o salto que transforma o radar de *observação* (seção 2) em *enforcement*:
+o servidor passa a poder **negar, em tempo real, uma escrita conflitante** —
+sub-segundo, sem LLM no caminho, com verdicto explicável ("a sessão A escreveu
+`internal/handlers/api.go` há 40s; você está prestes a escrevê-lo").
 
 ### A escada de intervenção
 
@@ -376,8 +389,8 @@ O comportamento diante de conflito é um **dial por projeto**,
 
 | Política | O que acontece |
 |---|---|
-| `observe` | Só observação: incidentes, eventos, badges (o baseline da Fase 1) |
-| `warn` | + o pedido de permissão em arquivo contestado é anotado ou **negado com mensagem explicativa** que o modelo lê e re-roteia (o veto da Fase 3) |
+| `observe` | Só observação: incidentes, eventos, badges (é a base de hoje) |
+| `warn` | + o pedido de permissão em arquivo contestado é anotado ou **negado com mensagem explicativa** que o modelo lê e re-roteia (o veto síncrono da seção 4) |
 | `gate` | + **PreToolUse síncrono**: o bridge de hooks consulta o servidor **antes** de cada ferramenta de escrita; o servidor responde em sub-segundo, da memória, com o deny nativo do Claude Code (`hookSpecificOutput.permissionDecision`) e uma razão nomeando a outra sessão |
 | `enforce` | + pausa determinística do "perdedor" (toque mais tardio; desempate por task não vinculada / sessão mais nova): todas as escritas dele são negadas com "pausado pelo conflito C-x; aguardando sessão Y" até resolver |
 
@@ -400,45 +413,115 @@ Garantias do gate:
   independentes de cada sessão nunca conflitam.
 - **Opt-in real**: projeto que não subiu o dial não é governado pelo gate.
 - **Proteção de substrato**: escrita no workspace de outra sessão ou nos
-  internos `.openpoet/` é negada com razão própria, distinta de conflito.
+  internos `.openpoet/` é negada com razão própria, distinta de conflito — uma
+  sessão não corrompe a lane da outra nem os metadados de orquestração.
 - **Sem token de hook, sem gate**: o endpoint do gate exige o `X-Hook-Token`
-  da sessão (Fase 0) — um gate bloqueante sobre entrada forjável seria uma
-  arma de negação de trabalho.
+  da sessão (base de segurança) — um gate bloqueante sobre entrada forjável
+  seria uma arma de negação de trabalho.
 
-### Alcance: mais backends, push e grupos
-
-- **Adapter codex + ACP**: o codex app-server não tem hooks; um adapter tapa o
-  stream JSON-RPC (itens de patch/exec carregam paths) e alimenta o mesmo
-  índice de claims; eventos ACP sintetizam PreToolUse. Fidelidade por backend é
-  explícita: claude/acp > copilot > codex > opencode, com o reconciliador git
-  como piso universal.
-- **SSE — push de verdade** *(sintaxe prevista)*:
-  `GET $AV1/events/stream` (com `Accept: text/event-stream`, retomada por
-  `Last-Event-ID` mapeada ao cursor do outbox) e `GET /mcp` deixa de responder
-  405 e vira stream SSE para clientes MCP externos.
-- **Grupos e tags**: um grupo de coordenação é uma *tag* de projetos; um
-  cliente de automação pode ser provisionado com
-  `project_filter={tag_ids:[…]}` e então **só enxerga e só toca** projetos do
-  grupo — comandos fora do grupo retornam 403 tipado, e o filtro vale também
-  no stream de eventos.
-- **Blackboard com fencing** *(sintaxe prevista)*: memória compartilhada
-  chaveada (`blackboard.put/get`) com CAS por versão (`expected_version`),
-  TTL e escopo global/grupo/projeto. Eleição de coordenador = CAS numa chave
-  de lease com TTL; mutações "fenced" carregando uma versão de lease velha
-  **falham fechado** — um coordenador zumbi não consegue agir.
+**Recomendação de adoção.** Como qualquer dial de enforcement, suba um degrau
+por vez: rode em `observe` por alguns dias de uso real para calibrar a taxa de
+falso-positivo, então promova para `warn`, e só ligue `gate`/`enforce` quando
+tiver confiança na precisão do radar naquele projeto. O kill switch está sempre
+a um comando de distância.
 
 ---
 
-## 7. Ambientes por projeto — environment.yaml (Fase 6)
+## 7. Alcance — mais backends, streaming SSE, grupos e blackboard
 
-> Status: **em desenvolvimento** (Fase 6 do roadmap). Sintaxe prevista.
+> 🔮 **Projeção de produto — sintaxe prevista, sujeita a mudança.**
+
+Com o radar e as mãos de pé, a plataforma estende o alcance: mais backends sob o
+mesmo guarda-chuva, push de eventos em tempo real, escopo por grupo de projetos
+e uma memória compartilhada para múltiplos agentes se coordenarem.
+
+### Mais backends sob um só guarda-chuva
+
+- **Adapter codex + ACP/Copilot**: o codex app-server não tem hooks; um adapter
+  tapa o stream JSON-RPC (itens de patch/exec carregam paths) e alimenta o mesmo
+  índice de claims; eventos ACP sintetizam PreToolUse. Fidelidade por backend é
+  explícita e honesta: **claude/acp > copilot > codex > opencode**, com o
+  reconciliador git como piso universal — nenhum backend fica cego, mesmo que
+  alguns reportem com menos precisão. O objetivo é que a mesma coordenação —
+  esperar, vetar, gate — valha para toda a frota, não só para Claude Code.
+
+### SSE — push de eventos em tempo real
+
+*(sintaxe prevista)* Além do long-poll, o feed de eventos ganha **push de
+verdade** por Server-Sent Events, ideal para dashboards ao vivo e integrações
+externas:
+
+```bash
+# (sintaxe prevista) stream contínuo de eventos, retomável por Last-Event-ID:
+curl -N "$AV1/events/stream" \
+  -H "Authorization: Bearer $OPAV1_TOKEN" \
+  -H "Accept: text/event-stream" \
+  -H "Last-Event-ID: 12345"
+```
+
+O `Last-Event-ID` é mapeado ao cursor durável do outbox, então uma reconexão
+retoma exatamente de onde parou. Para clientes MCP externos, o `GET /mcp` deixa
+de responder 405 e passa a servir o mesmo stream SSE — push conforme o spec de
+Streamable HTTP, sempre respeitando o escopo do ator autenticado.
+
+### Grupos e tags — escopo por conjunto de projetos
+
+Um **grupo de coordenação é uma tag** de projetos. Um cliente de automação pode
+ser provisionado com um `project_filter` e então **só enxerga e só toca** os
+projetos do grupo — comandos fora do grupo retornam 403 tipado, e o filtro vale
+também no stream de eventos.
+
+```json
+// (sintaxe prevista) provisionamento de um cliente escopado ao grupo G:
+{ "client_id": "coordenador-time-web",
+  "scopes": ["conflicts:read", "sessions:control"],
+  "project_filter": { "tag_ids": [7] } }
+```
+
+Assim, "coordenador do grupo X" é uma **decisão de provisionamento**, não lógica
+de aplicação: o mesmo binário de orquestrador, provisionado com filtros
+diferentes, governa times diferentes sem nunca cruzar a fronteira.
+
+### Blackboard — quadro compartilhado com leases e fencing
+
+*(sintaxe prevista)* Uma **memória compartilhada chaveada** para múltiplos
+agentes coordenarem estado, com escopo `global | group | project`, TTL opcional
+e **compare-and-swap por versão** (CAS):
+
+```
+openpoet_blackboard_put {
+  "scope": "group", "scope_id": 7,
+  "key": "release-freeze",
+  "value": {"active": true, "by": "coordenador-time-web"},
+  "expected_version": 3            // CAS: falha se a versão atual não for 3
+}
+→ {"ok": true, "version": 4}
+
+openpoet_blackboard_get {"scope": "group", "scope_id": 7, "key": "release-freeze"}
+→ {"value": {"active": true, "by": "..."}, "version": 4}
+```
+
+O CAS é a peça central de **eleição de coordenador e fencing**: eleger um
+coordenador é um CAS numa chave de *lease* com TTL; e uma mutação "fenced"
+carregando uma versão de lease **velha falha fechado** — um coordenador zumbi
+(que perdeu o lease mas ainda está rodando) **não consegue agir**. É o que
+permite ter candidatos a coordenador redundantes sem risco de dois cérebros
+mandando ao mesmo tempo. Escopos previstos: `blackboard:read` /
+`blackboard:write`; toda escrita registra o **ator verificado** que a fez.
+
+---
+
+## 8. Ambientes por projeto — environment.yaml
+
+> 🔮 **Projeção de produto — sintaxe prevista, sujeita a mudança.**
 
 ### O que você poderá fazer
 
 Fechar a última lacuna do paralelismo: **ambiente**. Um projeto declara em
 `.openpoet/environment.yaml` como se prepara e roda; o OpenPoet provisiona
 cada workspace com setup executado, porta alocada e serviço de dev com health
-check — e desmonta tudo na devolução.
+check — e desmonta tudo na devolução. É o que finalmente permite duas sessões
+rodarem `npm run dev` no mesmo projeto sem brigar por porta.
 
 Exemplo *(formato previsto)*:
 
@@ -517,7 +600,7 @@ Leases expiradas (sessão que morreu) são recuperadas pelo janitor. Política
 
 ### Limites e garantias
 
-- Projeto **sem** manifesto continua ganhando workspace simples da Fase 2 com
+- Projeto **sem** manifesto continua ganhando o workspace simples da seção 3 com
   **zero execução** de setup — nada roda que você não declarou.
 - Setup que falha ⇒ workspace `failed`, evento `workspace.failed`, sem
   processos órfãos, checkout principal limpo.
@@ -531,22 +614,24 @@ Leases expiradas (sessão que morreu) são recuperadas pelo janitor. Política
 
 ---
 
-## 8. Segurança e limites — o que vale em todas as fases
+## 9. Segurança e limites — o contrato que vale em tudo
 
-O contrato de segurança **não relaxa** conforme as fases avançam — ele é o que
-torna a autonomia tolerável:
+O contrato de segurança **não relaxa** conforme as capacidades crescem — ele é o
+que torna a autonomia da frota tolerável. As linhas marcadas *(já vale hoje)*
+descrevem a base entregue; as demais são o compromisso que cada capacidade
+projetada terá de honrar quando entregar.
 
 1. **Toda mutação tem um ator verificado.** Uma de quatro credenciais (cookie
    de UI, `opst1_` de sessão, `opav1_` de automação, dispositivo pareado do
    túnel); mutação sem credencial = 401. Auditoria registra quem realmente
-   agiu — clique de UI ≠ agente de sessão ≠ cliente de automação. *(Entregue.)*
+   agiu — clique de UI ≠ agente de sessão ≠ cliente de automação. *(já vale hoje)*
 2. **Verbos destrutivos exigem aprovação explícita.** `sessions.stop`,
    `workspaces.remove/merge`, `environments.teardown` etc. retornam
    `approval_required` estruturado; grants são one-shot, com TTL de minutos,
    emitidos por um cliente warden (escopo `approvals:grant`) ou por você.
    Auto-grant é negado por padrão (`deny_self_grant`); `approvals:self` é uma
-   decisão de provisionamento sua, nunca um acidente. *(Broker entregue; os
-   novos verbos aderem a ele.)*
+   decisão de provisionamento sua, nunca um acidente. *(o broker já existe hoje;
+   os verbos projetados aderem a ele)*
 3. **Superfícies spoofáveis só recebem verbos aditivos.** MCP com identidade
    de sessão e REST de sessão criam e listam; remover, mergear e aprovar
    manifesto vivem apenas no plano de automação autenticado.
@@ -560,9 +645,9 @@ torna a autonomia tolerável:
    sessões.
 7. **A API de automação continua loopback-only**, rejeita Origin de navegador
    e exige bearer mesmo em localhost; requisições vindas do túnel são
-   rejeitadas no plano de automação. *(Entregue.)*
+   rejeitadas no plano de automação. *(já vale hoje)*
 8. **Portas de produção são dados reservados** que o alocador se recusa a
-   entregar (Fase 6).
+   entregar.
 
 O que continua exigindo **você**, sempre: aprovar manifesto de ambiente;
 conceder (ou delegar a um warden) grants destrutivos; subir os dials
@@ -571,22 +656,29 @@ cliente merece `approvals:self`.
 
 ---
 
-## 9. Roadmap e status
+## 10. Como este manual evolui
 
-| Fase | Nome | O que entrega | Status |
-|---|---|---|---|
-| 0 | Hardening | 4 credenciais REST, tokens por sessão (hooks + MCP), MCP como ator real, `deny_self_grant`, `/health` derivado do registry | ✅ **Entregue** |
-| 1 | Observar | Radar de conflitos observe-only: `file_overlap`/`same_task`/`shared_claude_dir`, eventos duráveis, incidentes, escalação por notificação | ✅ **Entregue** |
-| 2 | Workspaces | Worktrees por sessão (`workspaces.*`, `workspace{}` em REST/automação/MCP), merge-back assistido, GC | 🔨 Projetada — em desenvolvimento |
-| 3 | Primitivas + mãos | `await_events`/`wait_for_session`, `send_to_session` com ack, veto síncrono, stop com grant, linhagem de spawn | 🔮 Projetada |
-| 4 | Cérebro v1 | Slot `ai_coordinator`, consulta one-shot com budget, vocabulário fechado revalidado, dial `coordinator_mode`, modo delegate | 🔮 Projetada |
-| 5 | Gate + alcance | Gate PreToolUse síncrono (cobre skip-permissions), escada `observe→warn→gate→enforce`, kill switch, SSE, grupos/tags, blackboard com fencing, adapter codex/ACP | 🔮 Projetada |
-| 6 | Ambientes | `environment.yaml` + aprovação SHA-256, alocador de portas com reservas, process driver, pooling/leases de workspaces | 🔮 Projetada |
+As seções 3–8 descrevem o **comportamento-alvo do produto**, fiéis aos
+documentos de design consolidados do OpenPoet. São **projeções**: cada
+capacidade só passa a valer quando é entregue e validada de ponta a ponta; até
+lá, nomes de capabilities, parâmetros, eventos, endpoints e formatos de config
+podem mudar. Este documento é atualizado à medida que cada capacidade sai do
+papel — e o selo 🔮 some de uma seção somente quando a funcionalidade dela existe
+de verdade.
 
-**Como ler este manual até lá:** as seções 3–7 descrevem o comportamento-alvo
-fiel às especificações de fase (`.claude/autodev/PHASE-SPECS.md`) e aos
-designs consolidados (`.claude/autodev/design/*.md`) deste repositório. Cada
-fase só é considerada pronta quando seu portão determinístico de aceitação
-(E2E, custo ~zero, contra projetos de teste) fica verde — o mesmo critério
-que já validou as Fases 0 e 1. Nomes e formatos podem mudar na entrega; este
-documento será atualizado fase a fase.
+Panorama das capacidades:
+
+| Capacidade | O que entrega | Situação |
+|---|---|---|
+| Orquestração multi-projeto e identidade verificada | Sessões de IA sobre 5 backends e múltiplos projetos, API de automação (~150 capabilities), MCP por sessão, credenciais verificadas por ator, broker de aprovações | ✅ Base de hoje |
+| Radar de conflitos (observação) | Detecção de sobreposição de arquivos entre sessões vivas, eventos duráveis, incidentes, badges na UI | 🌱 Base em introdução |
+| Workspaces | Worktrees por sessão, `workspace{}` em REST/automação/MCP, merge-back assistido, GC | 🔮 Projeção |
+| Coordenação entre sessões | `await_events`/`wait_for_session`, `send_to_session` com ack, veto síncrono, stop com grant, linhagem de spawn | 🔮 Projeção |
+| Coordenador IA | Slot `ai_coordinator`, consulta one-shot com budget, vocabulário fechado revalidado, dial `coordinator_mode`, modo delegate | 🔮 Projeção |
+| Gate de conflitos síncrono | PreToolUse bloqueante (cobre skip-permissions), escada `observe→warn→gate→enforce`, kill switch, proteção de substrato | 🔮 Projeção |
+| Alcance | Adapter codex/ACP/Copilot, streaming SSE, grupos/tags com `project_filter`, blackboard com CAS/fencing | 🔮 Projeção |
+| Ambientes por projeto | `environment.yaml` + aprovação SHA-256, alocador de portas com reservas, driver de processo, pooling/leases | 🔮 Projeção |
+
+Este manual foi escrito para você poder **avaliar o destino antes da viagem**.
+Se algo aqui não fizer sentido para o seu fluxo, é exatamente o momento certo de
+dizer — enquanto é projeção, e não API estável.
