@@ -399,6 +399,11 @@ func main() {
 	sessionMgr.OnSessionFlush = func(sessionID string) {
 		log.Printf("[OTEL] >>> OnSessionFlush callback fired for session %s", sessionID[:8])
 		otelHandler.FlushSession(sessionID)
+		// Drop the session's live claims from the conflict radar. This MUST
+		// live on the flush callback (fired on every terminal path, including
+		// user-stop) — OnSessionEnd skips user-stopped sessions, and a ghost
+		// live claim would fire false critical conflicts against later peers.
+		coord.ForgetSession(sessionID)
 		// Expire all notifications for this session and clean up hook state
 		go notifService.MarkSessionRead(context.Background(), sessionID)
 		hookHandler.ClearSession(sessionID)
@@ -410,8 +415,6 @@ func main() {
 	}
 	sessionMgr.OnSessionEnd = func(sessionID string, output []byte) {
 		log.Printf("[AI-Session] >>> OnSessionEnd callback fired for session %s (outputLen=%d)", sessionID[:8], len(output))
-		// Drop the ended session's live claims from the conflict radar
-		coord.ForgetSession(sessionID)
 		// Stop structured view watcher for this session
 		svHandler.StopSessionWatcher(sessionID)
 		// Record basic session_ended history (AI may enrich with summary later)

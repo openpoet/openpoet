@@ -234,6 +234,14 @@ func (s *AttentionSentinel) Feed(sessionID string, data []byte) []Attention {
 			sessionSeen = make(map[string]time.Time)
 			s.seen[sessionID] = sessionSeen
 		}
+		if len(sessionSeen) > 256 {
+			// Bound long-session growth: expired dedup entries are useless.
+			for h, t := range sessionSeen {
+				if nowTs.Sub(t) >= attentionDedupTTL {
+					delete(sessionSeen, h)
+				}
+			}
+		}
 		if t, ok := sessionSeen[hash]; ok && nowTs.Sub(t) < attentionDedupTTL {
 			continue
 		}
@@ -269,7 +277,13 @@ func matchesAttentionQuestion(line string) bool {
 	return false
 }
 
+// attentionHash normalizes digits out of the line before hashing so a live
+// prompt whose only variation is a counter ("waiting for your input (12s)")
+// deduplicates as ONE question instead of re-emitting on every redraw.
 func attentionHash(line string) string {
-	sum := sha256.Sum256([]byte(line))
+	normalized := attentionDigitsPattern.ReplaceAllString(line, "#")
+	sum := sha256.Sum256([]byte(normalized))
 	return hex.EncodeToString(sum[:8])
 }
+
+var attentionDigitsPattern = regexp.MustCompile(`[0-9]+`)

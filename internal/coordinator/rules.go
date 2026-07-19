@@ -39,6 +39,34 @@ type Incident struct {
 	Details         map[string]interface{}
 }
 
+// incidentFromRow rebuilds the in-memory incident from its durable row at
+// startup, preserving identity (id), counters and hysteresis across restarts.
+func incidentFromRow(row database.CoordinatorIncident) (*Incident, error) {
+	var sessions []string
+	if err := json.Unmarshal([]byte(row.SessionsJSON), &sessions); err != nil {
+		return nil, fmt.Errorf("sessions_json: %w", err)
+	}
+	details := map[string]interface{}{}
+	if row.DetailsJSON != "" {
+		if err := json.Unmarshal([]byte(row.DetailsJSON), &details); err != nil {
+			return nil, fmt.Errorf("details_json: %w", err)
+		}
+	}
+	return &Incident{
+		ID:              row.ID,
+		Rule:            row.Rule,
+		Severity:        row.Severity,
+		ProjectID:       row.ProjectID,
+		ScopeKey:        row.ScopeKey,
+		Sessions:        sessions,
+		State:           row.State,
+		FirstDetectedAt: row.FirstDetectedAt,
+		LastEvidenceAt:  row.LastEvidenceAt,
+		EvidenceCount:   row.EvidenceCount,
+		Details:         details,
+	}, nil
+}
+
 func (i Incident) toRow() database.CoordinatorIncident {
 	sessionsJSON, err := json.Marshal(i.Sessions)
 	if err != nil {
@@ -144,13 +172,22 @@ func (c *Coordinator) recordIncident(rule, severity string, projectID int64, sco
 	c.dirtyIncidents[key] = struct{}{}
 	if last, seen := c.lastEmit[key]; !seen || ts.Sub(last) >= hysteresisWindow {
 		c.lastEmit[key] = ts
-		c.pendingEvents = append(c.pendingEvents, conflictDetectedEvent(*inc, ts))
+		c.queueEventLocked(conflictDetectedEvent(*inc, ts))
 	}
 	if fresh && severity == SeverityCritical && c.OnEscalate != nil {
-		// Escalation does notification/DB work — never on the indexer goroutine.
-		go c.OnEscalate(*inc)
+		// Rate-limit human escalation per project: a parallel refactor touching
+		// 30 shared files is ONE situation, not 30 webpush bursts. The incident
+		// rows and conflict.detected events still record every conflict.
+		if last, seen := c.lastEscalate[projectID]; !seen || ts.Sub(last) >= escalateCooldown {
+			c.lastEscalate[projectID] = ts
+			// Escalation does notification/DB work — never on the indexer goroutine.
+			go c.OnEscalate(*inc)
+		}
 	}
 }
+
+// escalateCooldown is the per-project floor between human escalations.
+const escalateCooldown = 60 * time.Second
 
 func pairKey(a, b string) string {
 	p := sortedPair(a, b)
