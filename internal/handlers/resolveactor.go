@@ -55,7 +55,6 @@ func resolveActorExemptPath(path string) bool {
 	}
 	exemptPrefixes := []string{
 		"/api/automation/", // own bearer auth + loopback/origin policy
-		"/api/hooks/",      // own per-session hook token
 		"/api/test/",       // test-mode only, env-gated at registration
 		"/api/debug/",      // debug-only telemetry
 	}
@@ -66,6 +65,13 @@ func resolveActorExemptPath(path string) bool {
 	}
 	switch path {
 	case "/api/version", "/api/client-log":
+		return true
+	// ONLY the two bridge ingestion endpoints carry their own per-session hook
+	// token and must bypass the actor resolver. The browser-driven hook routes
+	// (/respond, /pending, /task-notification) are NOT exempted — they are UI
+	// mutations and must present a UI/owner credential like any other, so a
+	// session cannot answer its own permission prompt through them.
+	case "/api/hooks/event", "/api/hooks/permission":
 		return true
 	}
 	return false
