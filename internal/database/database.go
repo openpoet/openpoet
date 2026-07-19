@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -16,8 +17,32 @@ import (
 type DB struct {
 	*sqlx.DB
 
+	// readDB is the WAL read pool (Phase 7.4): N read-only-purpose connections
+	// so long reads (snapshot, outbox scans) stop queueing behind the single
+	// serialized write connection — and writes stop stalling behind long reads.
+	// May be nil (tests constructing DB by hand); Reader() falls back to the
+	// write handle then.
+	readDB *sqlx.DB
+
 	outboxOnce sync.Once
 	outboxNtf  *OutboxNotifier
+}
+
+// Reader returns the read pool (or the write handle when no pool exists).
+// Route ONLY reads through it — it has no serialization guarantees.
+func (d *DB) Reader() *sqlx.DB {
+	if d.readDB != nil {
+		return d.readDB
+	}
+	return d.DB
+}
+
+// Close closes both handles.
+func (d *DB) Close() error {
+	if d.readDB != nil {
+		_ = d.readDB.Close()
+	}
+	return d.DB.Close()
 }
 
 const (
@@ -40,17 +65,31 @@ type MCPHTTPCleanupStats struct {
 }
 
 func New(path string) (*DB, error) {
-	db, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)")
+	// Write handle: ONE connection (SQLite has a single writer) and
+	// _txlock=immediate so every transaction takes the write lock at BEGIN —
+	// this kills the read→write upgrade-deadlock class (BlackboardPut,
+	// AckEventOutbox) at the root instead of relying on pool serialization.
+	db, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	db.SetMaxOpenConns(1) // SQLite doesn't support concurrent writes
+	db.SetMaxOpenConns(1) // single writer; reads go through the read pool
 
 	d := &DB{DB: db}
 	if err := d.migrate(); err != nil {
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
+
+	// Read pool (Phase 7.4): WAL readers never block the writer nor each other.
+	// The _pragma DSN params are re-applied by modernc on every pooled
+	// connection. Deliberately no _txlock: read transactions stay DEFERRED.
+	readDB, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_pragma=query_only(1)")
+	if err != nil {
+		return nil, fmt.Errorf("failed to open read pool: %w", err)
+	}
+	readDB.SetMaxOpenConns(4)
+	d.readDB = readDB
 
 	return d, nil
 }
@@ -59,7 +98,10 @@ func New(path string) (*DB, error) {
 // migrations. Offline dry-run/cutover tools use it so inspection itself cannot
 // change production schema.
 func OpenExisting(path string) (*DB, error) {
-	db, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)")
+	// journal_mode(WAL) matches New(): a database served by this process must
+	// be in WAL for the read pool semantics (it is a persistent file property,
+	// but declaring it here keeps cutover copies consistent too).
+	db, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to existing database: %w", err)
 	}
@@ -2449,5 +2491,29 @@ func (d *DB) RevokePairedDevice(ctx context.Context, id string) error {
 
 func (d *DB) DeletePairedDevice(ctx context.Context, id string) error {
 	_, err := d.ExecContext(ctx, "DELETE FROM paired_devices WHERE id = ?", id)
+	return err
+}
+
+// SSH known hosts (Phase 7.4 TOFU) — see migrateV72.
+
+// GetSSHKnownHost returns the recorded fingerprint for (host, port, keyType),
+// "" when the host was never seen.
+func (d *DB) GetSSHKnownHost(ctx context.Context, host string, port int, keyType string) (string, error) {
+	var fingerprint string
+	err := d.Reader().GetContext(ctx, &fingerprint, `
+		SELECT fingerprint_sha256 FROM ssh_known_hosts
+		WHERE host = ? AND port = ? AND key_type = ?`, host, port, keyType)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return fingerprint, err
+}
+
+// RecordSSHKnownHost stores the first-seen fingerprint (no-op if present).
+func (d *DB) RecordSSHKnownHost(ctx context.Context, host string, port int, keyType, fingerprint string) error {
+	_, err := d.ExecContext(ctx, `
+		INSERT INTO ssh_known_hosts (host, port, key_type, fingerprint_sha256)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(host, port, key_type) DO NOTHING`, host, port, keyType, fingerprint)
 	return err
 }

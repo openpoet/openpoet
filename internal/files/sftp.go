@@ -16,6 +16,8 @@ import (
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+
+	"openpoet/internal/sshauth"
 )
 
 type RemoteFileManager struct {
@@ -108,7 +110,7 @@ func (m *RemoteFileManager) buildSSHConfig() (*ssh.ClientConfig, error) {
 	return &ssh.ClientConfig{
 		User:            user,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: sshauth.HostKeyCallback(), // TOFU ledger (V72)
 		Timeout:         30 * time.Second,
 	}, nil
 }
