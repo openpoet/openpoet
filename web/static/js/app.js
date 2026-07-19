@@ -399,7 +399,7 @@ class OpenPoet {
 
     _readURLState() {
         const params = new URLSearchParams(window.location.search);
-        const allowedViews = new Set(['projects', 'project-detail', 'sessions', 'tasks', 'terminal', 'config']);
+        const allowedViews = new Set(['projects', 'project-detail', 'sessions', 'tasks', 'missions', 'terminal', 'config']);
         const doc = params.get('doc') || '';
         let view = params.get('view') || '';
         if (!view && params.get('session')) view = 'terminal';
@@ -567,7 +567,153 @@ class OpenPoet {
             case 'config':
                 this.loadConfig();
                 break;
+            case 'missions':
+                this.loadMissions();
+                break;
         }
+    }
+
+    // ── Missões (Fase 7.6 — painel central nativo) ──────────────────────────
+    async loadMissions() {
+        try {
+            this._missions = await this.api('GET', '/missions') || [];
+        } catch (e) {
+            this._missions = [];
+        }
+        const sel = document.getElementById('mv-select');
+        if (sel) {
+            sel.innerHTML = this._missions.map(m =>
+                `<option value="${m.id}">#${m.id} — ${this.escapeHtml((m.goal || '').slice(0, 70))} (${this.escapeHtml(m.status)})</option>`
+            ).join('');
+        }
+        const content = document.getElementById('mv-content');
+        if (!this._missions.length) {
+            if (content) content.innerHTML = `<div class="mv-empty">Nenhuma missão registrada ainda.</div>`;
+            return;
+        }
+        const keep = this._currentMission && this._missions.some(m => String(m.id) === String(this._currentMission));
+        const target = keep ? this._currentMission : this._missions[0].id;
+        if (sel) sel.value = target;
+        this.loadMissionPanel(target);
+        // Live refresh only while this view is open (one interval).
+        if (!this._missionTimer) {
+            this._missionTimer = setInterval(() => {
+                if (this.currentView === 'missions' && this._currentMission) this.loadMissionPanel(this._currentMission);
+            }, 4000);
+        }
+    }
+
+    async loadMissionPanel(id) {
+        if (!id) return;
+        this._currentMission = id;
+        let panel;
+        try {
+            panel = await this.api('GET', `/missions/${id}/panel`);
+        } catch (e) {
+            const c = document.getElementById('mv-content');
+            if (c) c.innerHTML = `<div class="mv-empty">Não foi possível carregar a missão.</div>`;
+            return;
+        }
+        this.renderMissionPanel(panel);
+    }
+
+    renderMissionPanel(p) {
+        const c = document.getElementById('mv-content');
+        if (!c || !p || !p.mission) return;
+        const esc = (s) => this.escapeHtml(s == null ? '' : String(s));
+        const badge = (s) => `<span class="mv-status mv-${esc(s)}">${esc(s)}</span>`;
+        const m = p.mission;
+
+        const workerRows = (p.workers || []).map(w => `<tr>
+            <td class="mv-mono">${esc((w.session_id || '').slice(0, 8))}</td>
+            <td>${esc(w.role)}</td><td>${esc(w.backend)}</td>
+            <td>${badge(w.session_status || w.status)}</td>
+            <td class="mv-mono">${esc((w.last_report_ref || '').slice(0, 8)) || '—'}</td></tr>`).join('');
+        const workersHTML = workerRows
+            ? `<table class="mv-table"><tr><th>sessão</th><th>papel</th><th>backend</th><th>status</th><th>relatório</th></tr>${workerRows}</table>`
+            : `<div class="mv-empty">Nenhuma trabalhadora ainda.</div>`;
+
+        const wsRows = (p.workspaces || []).map(w => `<tr>
+            <td>${esc(w.name)}</td><td class="mv-mono">${esc(w.branch)}</td><td>${badge(w.status)}</td></tr>`).join('');
+        const wsHTML = wsRows
+            ? `<table class="mv-table"><tr><th>lane</th><th>branch</th><th>estado</th></tr>${wsRows}</table>`
+            : `<div class="mv-empty">Nenhum worktree em uso.</div>`;
+
+        const docRows = (p.documents || []).map(d => `<tr>
+            <td><button class="mv-doc-open" onclick="app.openMissionDoc('${esc(d.id)}')">${esc(d.title)}</button></td>
+            <td>${badge(d.status)}</td></tr>`).join('');
+        const docsHTML = docRows ? `<table class="mv-table">${docRows}</table>` : `<div class="mv-empty">Nenhum documento linkado.</div>`;
+
+        const evItems = (p.timeline || []).map(e => `<li><span class="t">${esc(e.event_type)}</span><span class="d">${esc(e.occurred_at)}</span></li>`).join('');
+        const tlHTML = evItems ? `<ul class="mv-ev">${evItems}</ul>` : `<div class="mv-empty">Sem eventos.</div>`;
+
+        c.innerHTML = `<div class="mv-grid">
+            <div class="mv-card mv-full">
+                <h4>Missão #${esc(m.id)}</h4>
+                <div class="mv-goal">${esc(m.goal)}</div>
+                ${badge(m.status)}
+                <span class="mv-meta"> · coordenadora <span class="mv-mono">${esc(m.coordinator_session_id)}</span> · criada ${esc(m.created_at)}</span>
+            </div>
+            <div class="mv-card"><h4>Trabalhadoras</h4>${workersHTML}</div>
+            <div class="mv-card"><h4>Worktrees</h4>${wsHTML}</div>
+            <div class="mv-card"><h4>Documentos</h4>${docsHTML}</div>
+            <div class="mv-card mv-full"><h4>Timeline</h4>${tlHTML}</div>
+        </div>`;
+    }
+
+    async openMissionDoc(id) {
+        const modal = document.getElementById('mv-modal');
+        const body = document.getElementById('mv-doc-body');
+        if (!modal || !body) return;
+        body.innerHTML = `<div class="mv-empty">Carregando…</div>`;
+        modal.classList.add('open');
+        try {
+            const doc = await this.api('GET', `/documents/${id}`);
+            document.getElementById('mv-doc-title').textContent = doc.title || 'Documento';
+            body.innerHTML = this._renderMissionMarkdown(doc.content || '');
+        } catch (e) {
+            body.innerHTML = `<div class="mv-empty">Não foi possível abrir o documento.</div>`;
+        }
+    }
+    closeMissionDoc() { document.getElementById('mv-modal')?.classList.remove('open'); }
+
+    // Minimal, escape-first Markdown → HTML for the mission doc viewer.
+    _renderMissionMarkdown(md) {
+        const inline = (t) => this.escapeHtml(t)
+            .replace(/`([^`]+)`/g, '<code>$1</code>')
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        const lines = String(md == null ? '' : md).split('\n');
+        let html = '', i = 0, list = null;
+        const closeList = () => { if (list) { html += `</${list}>`; list = null; } };
+        while (i < lines.length) {
+            const line = lines[i];
+            if (/^```/.test(line)) {
+                closeList(); i++; let code = '';
+                while (i < lines.length && !/^```/.test(lines[i])) { code += lines[i] + '\n'; i++; }
+                i++; html += `<pre><code>${this.escapeHtml(code)}</code></pre>`; continue;
+            }
+            if (/^\s*\|.*\|\s*$/.test(line)) {
+                closeList(); const rows = [];
+                while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { rows.push(lines[i]); i++; }
+                const cells = (r) => r.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+                const bodyRows = rows.filter(r => !/^\s*\|[\s:|-]+\|\s*$/.test(r));
+                html += '<table>';
+                bodyRows.forEach((r, idx) => {
+                    const tag = idx === 0 ? 'th' : 'td';
+                    html += '<tr>' + cells(r).map(cell => `<${tag}>${inline(cell)}</${tag}>`).join('') + '</tr>';
+                });
+                html += '</table>'; continue;
+            }
+            let m2;
+            if ((m2 = line.match(/^(#{1,3})\s+(.*)$/))) { closeList(); const n = m2[1].length + 1; html += `<h${n}>${inline(m2[2])}</h${n}>`; i++; continue; }
+            if (/^---+\s*$/.test(line)) { closeList(); html += '<hr>'; i++; continue; }
+            if ((m2 = line.match(/^\s*\d+\.\s+(.*)$/))) { if (list !== 'ol') { closeList(); html += '<ol>'; list = 'ol'; } html += `<li>${inline(m2[1])}</li>`; i++; continue; }
+            if ((m2 = line.match(/^\s*[-*]\s+(.*)$/))) { if (list !== 'ul') { closeList(); html += '<ul>'; list = 'ul'; } html += `<li>${inline(m2[1])}</li>`; i++; continue; }
+            if (line.trim() === '') { closeList(); i++; continue; }
+            closeList(); html += `<p>${inline(line)}</p>`; i++;
+        }
+        closeList();
+        return html;
     }
 
     // View state preservation
