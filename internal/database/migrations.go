@@ -82,6 +82,8 @@ var migrations = []Migration{
 	{Version: 64, Description: "conflict gate: per-project conflict_policy dial (observe|warn|gate|enforce)", Up: migrateV64},
 	{Version: 65, Description: "reach: tags coordination flag + settings_json; automation_clients project_filter scoping", Up: migrateV65},
 	{Version: 66, Description: "blackboard: shared CAS/TTL/fence key-value store (blackboard_entries)", Up: migrateV66},
+	{Version: 67, Description: "environments: manifest content-hash approval ledger (environment_manifests)", Up: migrateV67},
+	{Version: 68, Description: "environments: resource registry + port allocator (environment_resources) with reserved 8080/8081/8090", Up: migrateV68},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1787,6 +1789,76 @@ func migrateV66(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV66 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV67 — the manifest content-hash approval ledger. `.openpoet/environment.yaml`
+// turns repo content into commands OpenPoet runs as the server user, BEFORE any
+// human watches. The provisioner refuses to execute a manifest whose SHA-256 is
+// not recorded here as approved — the one load-bearing security gate of Phase 6.
+func migrateV67(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS environment_manifests (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			source_path TEXT NOT NULL DEFAULT '.openpoet/environment.yaml',
+			content TEXT NOT NULL DEFAULT '',
+			content_sha256 TEXT NOT NULL,
+			approved_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			approved_by TEXT NOT NULL DEFAULT '',
+			UNIQUE(project_id, content_sha256)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_env_manifests_project ON environment_manifests(project_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV67 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV68 — the resource registry + DB-backed port allocator. Live port/service
+// rows make allocation restart-safe (a partial-unique index forbids two live rows
+// on the same port), and RESERVED rows encode prose conventions as data: the port
+// allocator refuses to hand out 8080/8081 (user app / PRODUCTION) or 8090. A
+// manifest that explicitly demands a reserved port is refused. Turning "8081 is
+// production, never touch it" from prose into a row is the point.
+func migrateV68(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS environment_resources (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			workspace_id TEXT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			kind TEXT NOT NULL CHECK(kind IN ('port','service','database','url','volume')),
+			name TEXT NOT NULL DEFAULT '',
+			value TEXT NOT NULL DEFAULT '',
+			driver TEXT NOT NULL DEFAULT 'none' CHECK(driver IN ('none','process','compose')),
+			status TEXT NOT NULL DEFAULT 'allocating'
+				CHECK(status IN ('allocating','reserved','ready','unhealthy','released','failed')),
+			health_json TEXT NULL CHECK(health_json IS NULL OR json_valid(health_json)),
+			runtime_ref TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		// A live port row (anything but released) is unique on its value, so no two
+		// sandboxes ever claim the same port — including the reserved rows.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_env_resources_live_port
+			ON environment_resources(value) WHERE kind='port' AND status != 'released'`,
+		`CREATE INDEX IF NOT EXISTS idx_env_resources_ws ON environment_resources(workspace_id)`,
+		// Reserved-port rows: 8080 (user's bun app), 8081 (PRODUCTION), 8090 (other
+		// bun app). The allocator must never return these; a manifest demanding one
+		// is refused with port_reserved.
+		`INSERT OR IGNORE INTO environment_resources (project_id, workspace_id, kind, name, value, driver, status)
+			VALUES (0, NULL, 'port', 'reserved:8080', '8080', 'none', 'reserved'),
+			       (0, NULL, 'port', 'reserved:8081', '8081', 'none', 'reserved'),
+			       (0, NULL, 'port', 'reserved:8090', '8090', 'none', 'reserved')`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV68 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil
