@@ -476,14 +476,17 @@ func main() {
 	// through the same auto-restore path a daemon restart uses, instead of
 	// killing the session (and its mission worker) on a network blip.
 	remoteRetryMu := sync.Mutex{}
-	remoteRetried := map[string]bool{}
+	remoteLastRetry := map[string]time.Time{}
 	sessionMgr.OnRemoteSessionDropped = func(sessionID string) bool {
 		remoteRetryMu.Lock()
-		if remoteRetried[sessionID] {
+		// One reconnect attempt per 10-minute window per session: a flapping
+		// host gets bounded retries (not a restore↔drop hot loop), and a
+		// session whose retry failed regains eligibility after the window.
+		if last, seen := remoteLastRetry[sessionID]; seen && time.Since(last) < 10*time.Minute {
 			remoteRetryMu.Unlock()
-			return false // second drop: let it fail for real
+			return false
 		}
-		remoteRetried[sessionID] = true
+		remoteLastRetry[sessionID] = time.Now()
 		remoteRetryMu.Unlock()
 		go func() {
 			time.Sleep(5 * time.Second)
@@ -492,14 +495,17 @@ func main() {
 			if err != nil || sess == nil {
 				return
 			}
+			// The user may have stopped/discarded the session during the
+			// backoff — a deliberate stop must never be resurrected.
+			if sess.Status != "running" && sess.Status != "starting" {
+				log.Printf("[RemoteReconnect] session %s is %s — not reconnecting", sessionID, sess.Status)
+				return
+			}
 			if err := api.AutoRestoreSession(ctx, sess); err != nil {
 				log.Printf("[RemoteReconnect] session %s reconnect failed: %v", sessionID, err)
 				_ = db.EndSession(ctx, sessionID, "error")
 			} else {
 				log.Printf("[RemoteReconnect] session %s reconnected after transport drop", sessionID)
-				remoteRetryMu.Lock()
-				delete(remoteRetried, sessionID) // healthy again: future drops get a fresh shot
-				remoteRetryMu.Unlock()
 			}
 		}()
 		return true

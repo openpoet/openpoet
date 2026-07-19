@@ -39,7 +39,7 @@ func TestMissionParallelCapAndBudget(t *testing.T) {
 	}
 
 	// Wall-clock budget: 0 minutes → any mission age exceeds it.
-	if _, err := f.db.Exec(`UPDATE tags SET settings_json='{"max_parallel":10,"wall_clock_minutes":0}' WHERE id=?`, f.tagID); err != nil {
+	if _, err := f.db.Exec(`UPDATE tags SET settings_json='{"max_parallel":10,"wall_clock_minutes":-1}' WHERE id=?`, f.tagID); err != nil {
 		t.Fatal(err)
 	}
 	mission, err := f.db.CreateMission(ctx, "goal", f.tagID, "sess-c")

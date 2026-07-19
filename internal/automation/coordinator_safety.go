@@ -27,8 +27,8 @@ type GroupSettings struct {
 	// TokenBudget caps summed input+output tokens across the mission's
 	// workers (0 = unlimited).
 	TokenBudget int64 `json:"token_budget"`
-	// WallClockMinutes caps mission age (0 = unlimited; negative = expired,
-	// useful for tests).
+	// WallClockMinutes caps mission age. 0 or absent = unlimited (consistent
+	// with the other budgets); negative = already expired (test hook).
 	WallClockMinutes *int `json:"wall_clock_minutes"`
 }
 
@@ -120,7 +120,7 @@ func (c *coordinatorAPI) checkSpawnSafety(ctx context.Context, group int64, miss
 		return &safetyViolation{Code: "mission_budget_exceeded",
 			Message: fmt.Sprintf("the mission roster already holds %d workers (max_workers=%d)", len(workers), settings.maxWorkers())}, nil
 	}
-	if settings.WallClockMinutes != nil {
+	if settings.WallClockMinutes != nil && *settings.WallClockMinutes != 0 {
 		age := now.Sub(mission.CreatedAt)
 		if age > time.Duration(*settings.WallClockMinutes)*time.Minute {
 			return &safetyViolation{Code: "mission_budget_exceeded",
@@ -149,7 +149,9 @@ func (c *coordinatorAPI) checkSpawnSafety(ctx context.Context, group int64, miss
 // enforceSpawnSafety runs the nets and, on a budget violation, pulls the
 // anomaly brake: mission → paused + mission.paused_anomaly on the outbox.
 // Returns false when the spawn must not proceed (response already written).
-func (c *coordinatorAPI) enforceSpawnSafety(w http.ResponseWriter, r *http.Request, group int64, mission *database.Mission) bool {
+// allowPause gates the anomaly brake: only a REAL spawn may pause the mission —
+// a dry_run is a declared side-effect-free probe.
+func (c *coordinatorAPI) enforceSpawnSafety(w http.ResponseWriter, r *http.Request, group int64, mission *database.Mission, allowPause bool) bool {
 	violation, err := c.checkSpawnSafety(r.Context(), group, mission, time.Now().UTC())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "mission_safety_check_failed", "the mission safety nets could not be evaluated", true)
@@ -158,7 +160,7 @@ func (c *coordinatorAPI) enforceSpawnSafety(w http.ResponseWriter, r *http.Reque
 	if violation == nil {
 		return true
 	}
-	if violation.Code == "mission_budget_exceeded" && mission != nil && mission.Status == "active" {
+	if allowPause && violation.Code == "mission_budget_exceeded" && mission != nil && mission.Status == "active" {
 		if store, ok := c.missions(); ok {
 			if err := store.UpdateMissionStatus(r.Context(), mission.ID, "paused"); err == nil {
 				_ = store.AppendMissionEvent(r.Context(), "mission.paused_anomaly", mission.ID, map[string]any{
@@ -176,7 +178,12 @@ func (c *coordinatorAPI) enforceSpawnSafety(w http.ResponseWriter, r *http.Reque
 // before the spawn (CAS at version 0) and completed with the session id after;
 // a replay reads the recorded session instead of double-spawning.
 
-const spawnKeyTTLSeconds = 24 * 60 * 60
+const (
+	spawnKeyTTLSeconds = 24 * 60 * 60
+	// A PENDING reservation (reserve→crash before complete) must not jam the
+	// key for a day — it expires in 15 minutes; completion extends to 24h.
+	spawnKeyPendingTTLSeconds = 15 * 60
+)
 
 type spawnKeyValue struct {
 	SessionID string `json:"session_id"`
@@ -195,7 +202,7 @@ func (c *coordinatorAPI) reserveSpawnKey(ctx context.Context, group int64, key, 
 	version, err := c.store.BlackboardPut(ctx, database.BlackboardPutInput{
 		ScopeType: "group", ScopeID: group, Key: blackboardKey,
 		ValueJSON: string(value), ExpectedVersion: &expected,
-		TTLSeconds: spawnKeyTTLSeconds, Actor: "session:" + sessionID,
+		TTLSeconds: spawnKeyPendingTTLSeconds, Actor: "session:" + sessionID,
 	})
 	if err == nil {
 		return "", version, nil
