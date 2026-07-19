@@ -174,14 +174,23 @@ func (c *Coordinator) recordIncident(rule, severity string, projectID int64, sco
 		c.lastEmit[key] = ts
 		c.queueEventLocked(conflictDetectedEvent(*inc, ts))
 	}
-	if fresh && severity == SeverityCritical && c.OnEscalate != nil {
-		// Rate-limit human escalation per project: a parallel refactor touching
-		// 30 shared files is ONE situation, not 30 webpush bursts. The incident
-		// rows and conflict.detected events still record every conflict.
-		if last, seen := c.lastEscalate[projectID]; !seen || ts.Sub(last) >= escalateCooldown {
-			c.lastEscalate[projectID] = ts
-			// Escalation does notification/DB work — never on the indexer goroutine.
-			go c.OnEscalate(*inc)
+	if fresh && severity == SeverityCritical {
+		if c.OnEscalate != nil {
+			// Rate-limit human escalation per project: a parallel refactor touching
+			// 30 shared files is ONE situation, not 30 webpush bursts. The incident
+			// rows and conflict.detected events still record every conflict.
+			if last, seen := c.lastEscalate[projectID]; !seen || ts.Sub(last) >= escalateCooldown {
+				c.lastEscalate[projectID] = ts
+				// Escalation does notification/DB work — never on the indexer goroutine.
+				go c.OnEscalate(*inc)
+			}
+		}
+		if c.OnBrainConsult != nil {
+			// One-shot per incident: `fresh` is true exactly once per incident
+			// key, so no extra guard is needed. NOT per-project rate-limited —
+			// each distinct critical incident gets its own consult (the brain's
+			// own daily budget bounds total spend).
+			go c.OnBrainConsult(*inc)
 		}
 	}
 }
