@@ -73,6 +73,8 @@ var migrations = []Migration{
 	{Version: 55, Description: "projects: remove foreign backend settings from Claude Code", Up: migrateV55},
 	{Version: 56, Description: "tasks: add per-project verification auto-approval override", Up: migrateV56},
 	{Version: 57, Description: "sessions: add per-session MCP and hook token hashes", Up: migrateV57},
+	{Version: 58, Description: "coordinator: add session_file_activity claim ledger", Up: migrateV58},
+	{Version: 59, Description: "coordinator: add conflict incidents table", Up: migrateV59},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1557,6 +1559,57 @@ func migrateV57(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV57 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV58(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS session_file_activity (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			project_id INTEGER NOT NULL,
+			path TEXT NOT NULL,
+			kind TEXT NOT NULL CHECK(kind IN ('read', 'write', 'opaque')),
+			first_touch_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_touch_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			touch_count INTEGER NOT NULL DEFAULT 1,
+			last_tool TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT 'hook' CHECK(source IN ('hook', 'jsonl', 'acp', 'codex', 'git')),
+			UNIQUE(session_id, path, kind)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_file_activity_project_path ON session_file_activity(project_id, path)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV58 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV59(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS coordinator_incidents (
+			id TEXT PRIMARY KEY,
+			rule TEXT NOT NULL CHECK(rule IN ('file_overlap', 'scope_overlap', 'same_task', 'divergent_plans', 'shared_claude_dir', 'unattributed_dirt')),
+			severity TEXT NOT NULL CHECK(severity IN ('info', 'warn', 'critical')),
+			project_id INTEGER NOT NULL,
+			scope_key TEXT NOT NULL,
+			sessions_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(sessions_json)),
+			state TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open', 'acknowledged', 'resolved', 'expired')),
+			first_detected_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_evidence_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			evidence_count INTEGER NOT NULL DEFAULT 1,
+			details_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(details_json)),
+			UNIQUE(rule, scope_key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_coordinator_incidents_project_state ON coordinator_incidents(project_id, state)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV59 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

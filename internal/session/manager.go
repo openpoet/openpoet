@@ -78,6 +78,11 @@ type Manager struct {
 	// OnProviderSessionIDChange is called when a native backend switches to a
 	// different transcript/thread, for example after Claude Code's /resume.
 	OnProviderSessionIDChange func(sessionID, providerSessionID string)
+
+	// OnSessionAttention surfaces PTY sentinel detections (a session waiting on
+	// a real question) without this package knowing who consumes them.
+	OnSessionAttention func(sessionID, kind, excerpt string)
+	attention          *AttentionSentinel
 }
 
 // OutputBuffer is a ring buffer for storing recent terminal output
@@ -170,6 +175,7 @@ func NewManager(db *database.DB, hub *websocket.Hub, serverAddr string) *Manager
 		sessions:    make(map[string]*runningSession),
 		clientSizes: make(map[string]map[string]TermSize),
 		ptySizes:    make(map[string]TermSize),
+		attention:   NewAttentionSentinel(),
 	}
 }
 
@@ -1521,6 +1527,9 @@ func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 	shuttingDown := m.shuttingDown
 	delete(m.sessions, sessionID)
 	m.mu.Unlock()
+	if m.attention != nil {
+		m.attention.Forget(sessionID)
+	}
 
 	if shuttingDown {
 		log.Printf("Session %s stopped for restart (preserving DB state)", sessionID)
@@ -1582,8 +1591,22 @@ func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 }
 
 func (m *Manager) checkForNotificationTriggers(sessionID string, data []byte) {
-	// This will be implemented to parse output for notification triggers
-	// For now, just a placeholder
+	m.ScanOutputForAttention(sessionID, data)
+}
+
+// ScanOutputForAttention runs the PTY attention sentinel over one output
+// chunk and forwards detections through OnSessionAttention. It is the live
+// implementation of the output-chain notification hook: every runner's
+// outputHandler funnels here, and test mode injects synthetic output through
+// the same entry point.
+func (m *Manager) ScanOutputForAttention(sessionID string, data []byte) {
+	callback := m.OnSessionAttention
+	if callback == nil || m.attention == nil {
+		return
+	}
+	for _, att := range m.attention.Feed(sessionID, data) {
+		callback(sessionID, att.Kind, att.Excerpt)
+	}
 }
 
 // buildMCPConfigJSON builds a JSON string for the --mcp-config CLI flag.

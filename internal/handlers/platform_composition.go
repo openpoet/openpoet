@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	expectedPlatformCapabilities = 155
+	expectedPlatformCapabilities = 158
 	expectedPlatformMutations    = 106
-	expectedPlatformReads        = 49
+	expectedPlatformReads        = 52
 )
 
 // PlatformServices is the explicit runtime composition root for Automation.
@@ -113,6 +113,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		Git:                platformGitReader{handler: services.GitHandler},
 		Tunnel:             platformTunnelReader{api: a},
 		Updates:            services.Updater,
+		Conflicts:          services.DB,
 	}
 
 	collaboration := automation.CollaborationPlatformServices{
