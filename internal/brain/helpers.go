@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"regexp"
 	"strconv"
 	"strings"
@@ -96,17 +97,24 @@ func (c *Consultant) dailyCap(ctx context.Context) int {
 	return n
 }
 
-func (c *Consultant) sessionExists(ctx context.Context, id string) bool {
+// sessionExists returns true only when the session exists AND belongs to the
+// incident's project. The project gate is a hard tenancy boundary: the brain
+// reasons over one project's incident, so a proposed stop/message/set_model may
+// only ever touch a session in THAT project — a hallucinated (or adversarial)
+// cross-project session id is rejected, not steered.
+func (c *Consultant) sessionExists(ctx context.Context, id string, projectID int64) bool {
 	if strings.TrimSpace(id) == "" {
 		return false
 	}
 	s, err := c.db.GetSession(ctx, id)
-	return err == nil && s != nil && s.ID == id
+	return err == nil && s != nil && s.ID == id && s.ProjectID == projectID
 }
 
-func (c *Consultant) taskExists(ctx context.Context, id int64) bool {
+// taskExists likewise confirms the task is in the incident's project so a
+// spawn can't be aimed at another tenant's task.
+func (c *Consultant) taskExists(ctx context.Context, id int64, projectID int64) bool {
 	t, err := c.db.GetTask(ctx, id)
-	return err == nil && t != nil
+	return err == nil && t != nil && t.ProjectID == projectID
 }
 
 // record persists the consult outcome AND emits the durable coordinator.consulted
@@ -146,7 +154,11 @@ func (c *Consultant) escalateIncident(ctx context.Context, inc coordinator.Incid
 	if c.escalate == nil {
 		return
 	}
-	c.escalate(ctx, inc.ID, title, fmt.Sprintf("%s — incident %s (%s)", body, inc.ID, inc.Rule), map[string]interface{}{
+	// The body carries model-controlled text (proposed reasons, hallucinated
+	// verbs/session-ids) into a rendered notification. Strip ANSI/secrets AND
+	// HTML-escape it: it must be unable to leak a credential or inject markup.
+	safeBody := html.EscapeString(sanitize(body))
+	c.escalate(ctx, inc.ID, title, fmt.Sprintf("%s — incident %s (%s)", safeBody, inc.ID, inc.Rule), map[string]interface{}{
 		"incident_id": inc.ID, "rule": inc.Rule, "project_id": inc.ProjectID,
 	})
 }

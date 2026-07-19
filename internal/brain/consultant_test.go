@@ -41,7 +41,7 @@ func brainTestDB(t *testing.T, mode string) (*database.DB, int64, string) {
 }
 
 func newTestConsultant(db *database.DB, provider llm.Provider, escalations *int) *Consultant {
-	c := NewConsultant(db, nil, func() llm.Provider { return provider },
+	c := NewConsultant(db, nil, func(context.Context) (llm.Provider, string) { return provider, "test-model" },
 		func(context.Context) string { return "system" },
 		func(context.Context, string, string, string, map[string]interface{}) { *escalations++ })
 	return c
@@ -155,6 +155,88 @@ func TestBrainSanitizesBrief(t *testing.T) {
 	}
 	if !containsAny(clean, "ANSI", "[REDACTED]") {
 		t.Fatalf("sanitize destroyed too much: %q", clean)
+	}
+}
+
+// TestBrainLadderObserveVsAssist: the autonomy ladder is enforced per-verb.
+// observe is advisory-only (message/set_model refused); assist adds
+// non-destructive steering (message allowed → past the dial); assist still
+// refuses destructive stop (delegate-only).
+func TestBrainLadderObserveVsAssist(t *testing.T) {
+	// observe refuses a non-destructive steer (message_session).
+	db, pid, sid := brainTestDB(t, "observe")
+	esc := 0
+	c := newTestConsultant(db, &cannedProvider{text: `{"action":"message_session","session_id":"sess-brain","text":"hi"}`}, &esc)
+	c.Consult(incidentFor(pid, sid))
+	if _, d := lastDecision(t, db, pid); d != "refused_by_dial" {
+		t.Fatalf("observe message decision = %q, want refused_by_dial", d)
+	}
+
+	// assist ALLOWS the same steer past the dial (no coordinator client in the
+	// test DB, so it records no_actor — the point is it was NOT refused_by_dial).
+	db2, pid2, sid2 := brainTestDB(t, "assist")
+	c2 := newTestConsultant(db2, &cannedProvider{text: `{"action":"message_session","session_id":"sess-brain","text":"hi"}`}, &esc)
+	c2.Consult(incidentFor(pid2, sid2))
+	if _, d := lastDecision(t, db2, pid2); d == "refused_by_dial" {
+		t.Fatalf("assist message was refused_by_dial; the ladder should allow it")
+	}
+
+	// assist STILL refuses a destructive stop (delegate-only).
+	db3, pid3, sid3 := brainTestDB(t, "assist")
+	c3 := newTestConsultant(db3, &cannedProvider{text: `{"action":"stop_session","session_id":"sess-brain"}`}, &esc)
+	c3.Consult(incidentFor(pid3, sid3))
+	if _, d := lastDecision(t, db3, pid3); d != "refused_by_dial" {
+		t.Fatalf("assist stop decision = %q, want refused_by_dial", d)
+	}
+}
+
+// TestBrainRejectsCrossProjectSession: a session that EXISTS but belongs to a
+// different project than the incident is rejected as invalid_session — the
+// brain may never steer another tenant's session.
+func TestBrainRejectsCrossProjectSession(t *testing.T) {
+	db, pid, _ := brainTestDB(t, "delegate")
+	ctx := context.Background()
+	// A second project with its own session.
+	other := &database.Project{Name: "other", Path: "/tmp/other", Type: "local", Backend: "claude_code", CoordinatorMode: "delegate"}
+	if err := db.CreateProject(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	foreign := &database.Session{ID: "sess-foreign", ProjectID: other.ID, Status: "running", Backend: "claude_code", Model: "m", RequestedModel: "d", Effort: "d"}
+	if err := db.CreateSession(ctx, foreign); err != nil {
+		t.Fatal(err)
+	}
+	esc := 0
+	// Incident is for `pid`, but the action names the FOREIGN session.
+	c := newTestConsultant(db, &cannedProvider{text: `{"action":"stop_session","session_id":"sess-foreign"}`}, &esc)
+	c.Consult(incidentFor(pid, "sess-brain"))
+	if _, d := lastDecision(t, db, pid); d != "invalid_session" {
+		t.Fatalf("cross-project session decision = %q, want invalid_session", d)
+	}
+	if esc == 0 {
+		t.Fatal("cross-project session did not escalate")
+	}
+}
+
+// TestBrainEscalationEscapesBody: model-controlled escalation text is stripped
+// of secrets AND HTML-escaped before it reaches the notification.
+func TestBrainEscalationEscapesBody(t *testing.T) {
+	db, pid, sid := brainTestDB(t, "observe")
+	var body string
+	c := NewConsultant(db, nil,
+		func(context.Context) (llm.Provider, string) {
+			return &cannedProvider{text: `{"action":"escalate_human","reason":"<script>alert(1)</script> token opav1_supersecretvalue"}`}, "m"
+		},
+		func(context.Context) string { return "system" },
+		func(_ context.Context, _, _, b string, _ map[string]interface{}) { body = b })
+	c.Consult(incidentFor(pid, sid))
+	if body == "" {
+		t.Fatal("no escalation captured")
+	}
+	if containsAny(body, "<script>", "opav1_supersecret") {
+		t.Fatalf("escalation body leaked markup/secret: %q", body)
+	}
+	if !containsAny(body, "&lt;script&gt;", "[REDACTED]") {
+		t.Fatalf("escalation body was not escaped/redacted as expected: %q", body)
 	}
 }
 
