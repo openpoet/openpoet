@@ -115,6 +115,10 @@ func (s *semanticSessionStore) GetTask(context.Context, int64) (*database.Projec
 func (s *semanticSessionStore) GetTaskForSession(context.Context, string) (*database.ProjectTask, error) {
 	return nil, sql.ErrNoRows
 }
+func (s *semanticSessionStore) ProjectIDsForTags(_ context.Context, _ []int64) ([]int64, error) {
+	return nil, nil
+}
+
 func (s *semanticSessionStore) GetMission(_ context.Context, _ int64) (*database.Mission, error) {
 	return nil, nil
 }

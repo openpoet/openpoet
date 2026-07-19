@@ -399,7 +399,13 @@ func (s *WorkspaceService) Remove(ctx context.Context, command RemoveWorkspaceCo
 	if _, err := s.git.RunGit(ctx, project, "worktree", "remove", "--force", ws.Path); err != nil {
 		switch {
 		case project.Type != "local":
-			// Remote lane: no local-FS fallbacks; prune metadata and accept.
+			// Remote lane: no local-FS fallbacks. Only accept the failure when
+			// git itself no longer tracks the worktree (then prune metadata);
+			// an SSH outage or live registration must fail CLOSED so the row
+			// stays retryable instead of orphaning the lane on the host.
+			if s.worktreeRegistered(ctx, project, ws.Path) {
+				return nil, fmt.Errorf("git worktree remove (remote): %w", err)
+			}
 			_, _ = s.git.RunGit(ctx, project, "worktree", "prune")
 		case !pathExists(ws.Path):
 			// Directory already gone (manual cleanup): prune stale metadata.
