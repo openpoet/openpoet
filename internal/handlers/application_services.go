@@ -232,6 +232,21 @@ func (a gitMutationAdapter) Commit(ctx context.Context, project *database.Projec
 	return a.handler.CommitDirect(ctx, project, message)
 }
 
+// gitCommandAdapter exposes the generic local-or-SSH git executor to the
+// WorkspaceService (worktree add/list/remove, rev-parse) without widening the
+// mutation port.
+type gitCommandAdapter struct {
+	handler *GitHandler
+}
+
+func NewGitCommandAdapter(handler *GitHandler) application.WorkspaceGitPort {
+	return gitCommandAdapter{handler: handler}
+}
+
+func (a gitCommandAdapter) RunGit(ctx context.Context, project *database.Project, args ...string) (string, error) {
+	return a.handler.runGitCmd(ctx, project, args...)
+}
+
 func (h *VoiceHandler) TranscribeAudio(ctx context.Context, data []byte, filename, language string) (*voice.TranscriptionResult, error) {
 	if h.getProviderConfig == nil {
 		return nil, errors.New("voice provider configuration is unavailable")

@@ -310,9 +310,15 @@ func (h *StructuredViewHandler) resolveJSONLSourceContext(ctx context.Context, s
 	}
 
 	if project.Type == "local" {
+		// Workspace sessions run in a lane, and Claude Code keys transcript
+		// dirs by cwd — resolve against the dir the session actually ran in.
+		transcriptRoot := project.Path
+		if sess.WorkDir != "" {
+			transcriptRoot = sess.WorkDir
+		}
 		return &jsonlSource{
 			isRemote:  false,
-			localPath: jsonlview.ResolveJSONLPath(project.Path, providerSessionID),
+			localPath: jsonlview.ResolveJSONLPath(transcriptRoot, providerSessionID),
 			sessionID: providerSessionID,
 		}, ""
 	}
