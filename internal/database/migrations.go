@@ -85,6 +85,7 @@ var migrations = []Migration{
 	{Version: 67, Description: "environments: manifest content-hash approval ledger (environment_manifests)", Up: migrateV67},
 	{Version: 68, Description: "environments: resource registry + port allocator (environment_resources) with reserved 8080/8081/8090", Up: migrateV68},
 	{Version: 69, Description: "maestro: temp_documents mission_id link (docs land attached to the mission that produced them)", Up: migrateV69},
+	{Version: 70, Description: "maestro: milestone report fields on structured_session_reports (next_step, needs_from_coordinator_json)", Up: migrateV70},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1877,6 +1878,22 @@ func migrateV69(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV69 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV70 — Phase 7.2 (Maestro): the dense per-milestone report gains the two
+// fields the coordinator actually routes on — "what I need from you" and "what
+// I do next" — extending the V51 schema additively.
+func migrateV70(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE structured_session_reports ADD COLUMN next_step TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE structured_session_reports ADD COLUMN needs_from_coordinator_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(needs_from_coordinator_json))`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV70 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

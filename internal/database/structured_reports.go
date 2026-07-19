@@ -34,6 +34,8 @@ type StructuredSessionReportRecord struct {
 	CompletedTaskIDsJSON  string        `db:"completed_task_ids_json"`
 	ChangedTaskIDsJSON    string        `db:"changed_task_ids_json"`
 	IncompleteReasonsJSON string        `db:"incomplete_reasons_json"`
+	NextStep              string        `db:"next_step"`
+	NeedsFromCoordinator  string        `db:"needs_from_coordinator_json"`
 	ThroughCursor         int64         `db:"through_cursor"`
 	TurnStartedAt         time.Time     `db:"turn_started_at"`
 	TurnEndedAt           sql.NullTime  `db:"turn_ended_at"`
@@ -167,8 +169,9 @@ func (t *ReportTx) UpsertSessionReport(ctx context.Context, report *StructuredSe
 			state, incomplete, objective, outcome, work_summary,
 			decisions_json, verification_json, evidence_json,
 			completed_task_ids_json, changed_task_ids_json, incomplete_reasons_json,
+			next_step, needs_from_coordinator_json,
 			through_cursor, turn_started_at, turn_ended_at, finalized_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 			CASE WHEN ? = 'finalized' THEN CURRENT_TIMESTAMP ELSE NULL END)
 		ON CONFLICT(session_id, turn_id) DO UPDATE SET
 			report_date = excluded.report_date,
@@ -195,6 +198,8 @@ func (t *ReportTx) UpsertSessionReport(ctx context.Context, report *StructuredSe
 			completed_task_ids_json = excluded.completed_task_ids_json,
 			changed_task_ids_json = excluded.changed_task_ids_json,
 			incomplete_reasons_json = excluded.incomplete_reasons_json,
+			next_step = excluded.next_step,
+			needs_from_coordinator_json = excluded.needs_from_coordinator_json,
 			through_cursor = MAX(structured_session_reports.through_cursor, excluded.through_cursor),
 			turn_started_at = excluded.turn_started_at,
 			turn_ended_at = excluded.turn_ended_at,
@@ -209,8 +214,54 @@ func (t *ReportTx) UpsertSessionReport(ctx context.Context, report *StructuredSe
 		report.State, report.Incomplete, report.Objective, report.Outcome, report.WorkSummary,
 		report.DecisionsJSON, report.VerificationJSON, report.EvidenceJSON,
 		report.CompletedTaskIDsJSON, report.ChangedTaskIDsJSON, report.IncompleteReasonsJSON,
+		report.NextStep, report.NeedsFromCoordinator,
 		report.ThroughCursor, report.TurnStartedAt, report.TurnEndedAt, report.State)
 	return err
+}
+
+// LatestStructuredSessionReport returns the most recently updated report row of
+// a session (nil, nil when the session has none) — the coordinator's dense view.
+func (d *DB) LatestStructuredSessionReport(ctx context.Context, sessionID string) (*StructuredSessionReportRecord, error) {
+	var record StructuredSessionReportRecord
+	err := d.GetContext(ctx, &record, `
+		SELECT * FROM structured_session_reports
+		WHERE session_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT 1`, sessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+// LatestSessionReportRef returns the report_id pointer that rides on
+// session.turn_completed events ("" when the session has no report yet).
+func (d *DB) LatestSessionReportRef(ctx context.Context, sessionID string) (string, error) {
+	var reportID string
+	err := d.GetContext(ctx, &reportID, `
+		SELECT report_id FROM structured_session_reports
+		WHERE session_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT 1`, sessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return reportID, err
+}
+
+// CountStructuredSessionReports returns how many report rows a session holds
+// and whether the given turn_id already exists (the emit surface's growth cap).
+func (d *DB) CountStructuredSessionReports(ctx context.Context, sessionID, turnID string) (int, bool, error) {
+	var count int
+	if err := d.GetContext(ctx, &count,
+		"SELECT COUNT(*) FROM structured_session_reports WHERE session_id = ?", sessionID); err != nil {
+		return 0, false, err
+	}
+	var exists int
+	if err := d.GetContext(ctx, &exists,
+		"SELECT COUNT(*) FROM structured_session_reports WHERE session_id = ? AND turn_id = ?", sessionID, turnID); err != nil {
+		return count, false, err
+	}
+	return count, exists > 0, nil
 }
 
 func (t *ReportTx) ListSessionsForWindow(ctx context.Context, start, end time.Time) ([]StructuredReportSessionSource, error) {

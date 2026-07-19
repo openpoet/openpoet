@@ -1003,6 +1003,40 @@ func AllToolDefs() []ToolDef {
 			Context: ToolContextSession,
 		},
 		{
+			Name:        "emit_session_report",
+			Description: "Emit THIS session's dense structured milestone report (condensed communication — the coordinator reads reports, not transcripts). Re-emitting the same turn_id updates the milestone; finalize:true closes it.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"turn_id":                {Type: "string", Description: "Stable milestone id (m1, m2, ...). Default: 'milestone'"},
+					"objective":              {Type: "string", Description: "What this milestone set out to do"},
+					"summary":                {Type: "string", Description: "Tight summary of what actually happened"},
+					"outcome":                {Type: "string", Description: "Optional outcome statement"},
+					"decisions":              {Type: "array", Description: "Key decisions made (strings)"},
+					"files":                  {Type: "array", Description: "Files changed (strings)"},
+					"verification":           {Type: "object", Description: "{status: passed|failed|partial|not_run, summary}"},
+					"blockers":               {Type: "array", Description: "Current blockers (marks the report incomplete)"},
+					"needs_from_coordinator": {Type: "array", Description: "What you need decided/unblocked by the coordinator"},
+					"next":                   {Type: "string", Description: "Next step you will take"},
+					"finalize":               {Type: "boolean", Description: "true on the last report of this milestone"},
+				},
+				Required: []string{"objective", "summary"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "get_session_report",
+			Description: "Read the latest dense structured report of a coordinated-group session (progressive disclosure — use read_session_history only to debug). Requires holding the coordinator lease.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"session_id": {Type: "string", Description: "Target session id (must belong to the coordinated group)"},
+				},
+				Required: []string{"session_id"},
+			},
+			Context: ToolContextSession,
+		},
+		{
 			Name:        "send_to_worker",
 			Description: "Send steering input to a worker session of the coordinated group, awaiting the prompt ack. Requires the current fence_version.",
 			InputSchema: ToolDefinitionInput{
