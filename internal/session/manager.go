@@ -439,7 +439,10 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 		m.db.UpdateSessionSkipPermissions(ctx, sessionID, true)
 		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
-	// Lane markers never reach the child process environment.
+	// Lane markers never reach the child process environment. For REMOTE lane
+	// sessions the lane still has to become the runner cwd — the persisted
+	// sess.WorkDir is applied to the runner's project copy further down (the
+	// local runner path already consumes sess.WorkDir directly).
 	delete(envVars, "OPENPOET_WORKDIR")
 	delete(envVars, "OPENPOET_WORKSPACE_ID")
 
@@ -1845,6 +1848,17 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	if v, ok := envVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"]; ok && v == "true" {
 		cfg.DangerouslySkipPermissions = true
 		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
+	}
+	// Remote lanes (Phase 7.3): persist the lane like the local path does, and
+	// run the session inside it by handing the runner a shallow project copy
+	// whose Path IS the lane (the runner cds to project.Path on the SSH host).
+	if workDir, ok := envVars["OPENPOET_WORKDIR"]; ok && workDir != "" {
+		if err := m.db.UpdateSessionWorkspace(ctx, sessionID, envVars["OPENPOET_WORKSPACE_ID"], workDir); err != nil {
+			log.Printf("[Session] failed to persist workspace for remote %s: %v", sessionID, err)
+		}
+		laneProject := *project
+		laneProject.Path = workDir
+		project = &laneProject
 	}
 	delete(envVars, "OPENPOET_WORKDIR")
 	delete(envVars, "OPENPOET_WORKSPACE_ID")

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"openpoet/internal/database"
+	"openpoet/internal/sshauth"
 	"strconv"
 	"strings"
 	"sync"
@@ -246,26 +247,29 @@ func (r *RemoteRunner) buildSSHConfig() (*ssh.ClientConfig, error) {
 		authMethods = append(authMethods, ssh.Password(password))
 	} else if authType == "key" || authType == "key_passphrase" {
 		if !r.project.SSHCredentialEncrypted.Valid || r.project.SSHCredentialEncrypted.String == "" {
-			return nil, fmt.Errorf("SSH private key not configured for project %q — edit the project and paste your private key", r.project.Name)
-		}
-		keyData, err := r.decryptFunc(
-			r.project.SSHCredentialEncrypted.String,
-			r.project.SSHCredentialIV.String,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt key: %w", err)
-		}
-
-		var signer ssh.Signer
-		if authType == "key_passphrase" {
-			signer, err = ssh.ParsePrivateKey([]byte(keyData))
+			// No pasted key: fall back to the user's default keys (standard ssh
+			// behavior; parity with internal/files and configsync).
+			if defaults := sshauth.DefaultKeyAuthMethods(); len(defaults) > 0 {
+				authMethods = append(authMethods, defaults...)
+			} else {
+				return nil, fmt.Errorf("SSH private key not configured for project %q — edit the project and paste your private key", r.project.Name)
+			}
 		} else {
+			keyData, err := r.decryptFunc(
+				r.project.SSHCredentialEncrypted.String,
+				r.project.SSHCredentialIV.String,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decrypt key: %w", err)
+			}
+
+			var signer ssh.Signer
 			signer, err = ssh.ParsePrivateKey([]byte(keyData))
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse private key: %w", err)
+			}
+			authMethods = append(authMethods, ssh.PublicKeys(signer))
 		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse private key: %w", err)
-		}
-		authMethods = append(authMethods, ssh.PublicKeys(signer))
 	}
 
 	if len(authMethods) == 0 {
