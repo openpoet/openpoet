@@ -642,6 +642,7 @@ func main() {
 		Snapshot:             db,
 		Waiter:               db,
 		Sessions:             db,
+		ProjectScope:         db, // resolves client project_filter tag membership
 	}
 	if reportService != nil {
 		automationDeps.Reports = reportService

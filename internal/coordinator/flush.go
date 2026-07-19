@@ -222,11 +222,11 @@ func awaitingInputEvent(sessionID, kind, excerpt string, ts time.Time) database.
 	}
 }
 
-func turnCompletedEvent(sessionID string, files []string, ts time.Time) database.EventOutboxAppend {
+func turnCompletedEvent(sessionID string, projectID int64, files []string, ts time.Time) database.EventOutboxAppend {
 	if files == nil {
 		files = []string{}
 	}
-	payload, _ := json.Marshal(map[string]interface{}{"session_id": sessionID, "files_touched": files})
+	payload, _ := json.Marshal(map[string]interface{}{"session_id": sessionID, "project_id": projectID, "files_touched": files})
 	return database.EventOutboxAppend{
 		EventID:       uuid.NewString(),
 		EventType:     "session.turn_completed",
