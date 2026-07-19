@@ -225,7 +225,7 @@ func (d *DB) LatestStructuredSessionReport(ctx context.Context, sessionID string
 	var record StructuredSessionReportRecord
 	err := d.GetContext(ctx, &record, `
 		SELECT * FROM structured_session_reports
-		WHERE session_id = ? ORDER BY updated_at DESC, turn_id DESC LIMIT 1`, sessionID)
+		WHERE session_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT 1`, sessionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -241,11 +241,27 @@ func (d *DB) LatestSessionReportRef(ctx context.Context, sessionID string) (stri
 	var reportID string
 	err := d.GetContext(ctx, &reportID, `
 		SELECT report_id FROM structured_session_reports
-		WHERE session_id = ? ORDER BY updated_at DESC, turn_id DESC LIMIT 1`, sessionID)
+		WHERE session_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT 1`, sessionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return reportID, err
+}
+
+// CountStructuredSessionReports returns how many report rows a session holds
+// and whether the given turn_id already exists (the emit surface's growth cap).
+func (d *DB) CountStructuredSessionReports(ctx context.Context, sessionID, turnID string) (int, bool, error) {
+	var count int
+	if err := d.GetContext(ctx, &count,
+		"SELECT COUNT(*) FROM structured_session_reports WHERE session_id = ?", sessionID); err != nil {
+		return 0, false, err
+	}
+	var exists int
+	if err := d.GetContext(ctx, &exists,
+		"SELECT COUNT(*) FROM structured_session_reports WHERE session_id = ? AND turn_id = ?", sessionID, turnID); err != nil {
+		return count, false, err
+	}
+	return count, exists > 0, nil
 }
 
 func (t *ReportTx) ListSessionsForWindow(ctx context.Context, start, end time.Time) ([]StructuredReportSessionSource, error) {
