@@ -218,8 +218,8 @@ func executionPlatformActor(definitions []PlatformCapabilityDefinition) Actor {
 
 func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := executionPlatformDefinitionsForTest()
-	if len(definitions) != 51 {
-		t.Fatalf("execution surface has %d capabilities, want 51", len(definitions))
+	if len(definitions) != 52 {
+		t.Fatalf("execution surface has %d capabilities, want 52", len(definitions))
 	}
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -229,11 +229,11 @@ func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 		seen[definition.Name] = struct{}{}
 	}
 	capabilities, registry := executionPlatformTestRegistry(t, &executionPlatformFakePorts{})
-	if got := len(capabilities.List()); got != 51 {
-		t.Fatalf("application registry has %d execution capabilities, want 51", got)
+	if got := len(capabilities.List()); got != 52 {
+		t.Fatalf("application registry has %d execution capabilities, want 52", got)
 	}
-	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 51 {
-		t.Fatalf("platform discovery has %d execution capabilities, want 51", got)
+	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 52 {
+		t.Fatalf("platform discovery has %d execution capabilities, want 52", got)
 	}
 }
 
@@ -423,6 +423,7 @@ func executionDryRunCases() []executionDryRunCase {
 		{name: "workspaces.get", target: `{"type":"workspace","id":"ws-1"}`, payload: `{}`},
 		{name: "workspaces.create", target: `{"project_id":1}`, payload: `{"name":"lane-a"}`},
 		{name: "workspaces.remove", target: `{"type":"workspace","id":"ws-1"}`, payload: `{}`},
+		{name: "workspaces.merge", target: `{"type":"workspace","id":"ws-1"}`, payload: `{}`},
 		{name: "update.apply", target: `{}`, payload: `{}`},
 	}
 }

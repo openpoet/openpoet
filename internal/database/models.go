@@ -87,6 +87,10 @@ type Session struct {
 	// reopen/auto-restore land back in the same lane.
 	WorkDir     string         `db:"work_dir" json:"work_dir,omitempty"`
 	WorkspaceID sql.NullString `db:"workspace_id" json:"workspace_id,omitempty"`
+	// Lineage (V62): the session that spawned this one (when a session actor
+	// created it) and the audit identity of whoever created it.
+	ParentSessionID string `db:"parent_session_id" json:"parent_session_id,omitempty"`
+	SpawnedBy       string `db:"spawned_by" json:"spawned_by,omitempty"`
 }
 
 // Workspace is one isolated execution lane for a project (V60). In the MVP the

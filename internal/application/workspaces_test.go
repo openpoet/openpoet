@@ -15,9 +15,12 @@ import (
 // fakeWorkspaceGit records git invocations and simulates worktree add/remove
 // on the real filesystem so the service's stat checks hold.
 type fakeWorkspaceGit struct {
-	commands     [][]string
-	failOn       string
-	branchExists bool
+	commands           [][]string
+	failOn             string
+	branchExists       bool
+	dirtyMain          bool
+	mergeConflictFiles string
+	abortRan           bool
 }
 
 func (f *fakeWorkspaceGit) RunGit(_ context.Context, project *database.Project, args ...string) (string, error) {
@@ -44,6 +47,16 @@ func (f *fakeWorkspaceGit) RunGit(_ context.Context, project *database.Project, 
 		return "", os.MkdirAll(path, 0o755)
 	case args[0] == "worktree" && args[1] == "remove":
 		return "", os.RemoveAll(args[len(args)-1])
+	case joined == "status --porcelain":
+		if f.dirtyMain {
+			return " M file.go\n", nil
+		}
+		return "", nil
+	case joined == "diff --name-only --diff-filter=U":
+		return f.mergeConflictFiles, nil
+	case args[0] == "merge" && len(args) > 1 && args[1] == "--abort":
+		f.abortRan = true
+		return "", nil
 	}
 	return "", nil
 }
@@ -302,5 +315,60 @@ func TestWorkspaceReservationPreventsDoubleBooking(t *testing.T) {
 	}
 	if err := svc.ReLease(ctx, ws.ID, "sess-2"); err != nil {
 		t.Fatalf("re-lease of freed lane failed: %v", err)
+	}
+}
+
+// TestWorkspaceMergeCleanAndConflict pins merge-back: clean merge flips the row
+// to 'merged'; a conflict aborts (main left clean) and returns the file list
+// on the success path, not as an error.
+func TestWorkspaceMergeCleanAndConflict(t *testing.T) {
+	svc, git, _, local, _ := workspaceTestFixture(t)
+	ctx := context.Background()
+	ws, err := svc.Create(ctx, CreateWorkspaceCommand{ProjectID: local.ID, Name: "lane-m", Authorization: workspaceTestAuth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved := workspaceTestAuth
+	approved.Approved, approved.ApprovedBy, approved.Reason = true, "warden", "merge"
+
+	// Clean merge (fake git returns success for merge).
+	res, err := svc.Merge(ctx, MergeWorkspaceCommand{WorkspaceID: ws.ID, Authorization: approved})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Merged || res.Workspace.Status != "merged" {
+		t.Fatalf("clean merge = %+v, want merged", res)
+	}
+
+	// Conflict leg: git merge fails, diff returns a file list, abort runs.
+	ws2, _ := svc.Create(ctx, CreateWorkspaceCommand{ProjectID: local.ID, Name: "lane-c", Authorization: workspaceTestAuth})
+	git.mergeConflictFiles = "calc.go\n"
+	git.failOn = "merge --no-ff"
+	res, err = svc.Merge(ctx, MergeWorkspaceCommand{WorkspaceID: ws2.ID, Authorization: approved})
+	if err != nil {
+		t.Fatalf("conflict returned an error (file list would be lost): %v", err)
+	}
+	if res.Merged || len(res.ConflictFiles) != 1 || res.ConflictFiles[0] != "calc.go" {
+		t.Fatalf("conflict result = %+v, want merged=false + [calc.go]", res)
+	}
+	if !git.abortRan {
+		t.Fatal("merge --abort did not run after conflict (main left dirty)")
+	}
+}
+
+// TestWorkspaceMergeRequiresApprovalAndCleanMain pins the two refusals.
+func TestWorkspaceMergeRequiresApprovalAndCleanMain(t *testing.T) {
+	svc, git, _, local, _ := workspaceTestFixture(t)
+	ctx := context.Background()
+	ws, _ := svc.Create(ctx, CreateWorkspaceCommand{ProjectID: local.ID, Name: "lane-m", Authorization: workspaceTestAuth})
+	if _, err := svc.Merge(ctx, MergeWorkspaceCommand{WorkspaceID: ws.ID, Authorization: workspaceTestAuth}); err == nil {
+		t.Fatal("merge without explicit approval succeeded")
+	}
+	approved := workspaceTestAuth
+	approved.Approved, approved.ApprovedBy, approved.Reason = true, "warden", "merge"
+	git.dirtyMain = true
+	_, err := svc.Merge(ctx, MergeWorkspaceCommand{WorkspaceID: ws.ID, Authorization: approved})
+	if code := applicationErrorCode(err); code != "workspace_main_dirty" {
+		t.Fatalf("dirty-main merge error = %v (code %q), want workspace_main_dirty", err, code)
 	}
 }

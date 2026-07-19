@@ -14,6 +14,7 @@ func workspacePlatformDefinitions() []PlatformCapabilityDefinition {
 		executionReadCapability("workspaces.get", "workspaces", "workspaces:read"),
 		executionWriteCapability("workspaces.create", "workspaces", "workspaces:write"),
 		executionDestructiveCapability("workspaces.remove", "workspaces", "workspaces:write"),
+		executionDestructiveCapability("workspaces.merge", "workspaces", "workspaces:write"),
 	}
 }
 
@@ -168,6 +169,32 @@ func (e *workspacePlatformExecutor) Validate(_ context.Context, input PlatformEx
 				return nil, err
 			}
 			return map[string]any{"workspace": workspaceView(*ws)}, nil
+		}}, nil
+	case "workspaces.merge":
+		if err := requireEmptyExecutionPayload(input.Payload); err != nil {
+			return nil, err
+		}
+		workspaceID, err := executionStringID(target, "workspace id")
+		if err != nil {
+			return nil, err
+		}
+		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"workspace_id": workspaceID}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+			result, err := e.service.Merge(ctx, application.MergeWorkspaceCommand{
+				WorkspaceID:   workspaceID,
+				Authorization: authorization,
+			})
+			if err != nil {
+				return nil, err
+			}
+			out := map[string]any{"merged": result.Merged}
+			if result.Workspace != nil {
+				out["workspace"] = workspaceView(*result.Workspace)
+			}
+			if !result.Merged {
+				out["code"] = "workspace_merge_conflict"
+				out["conflict_files"] = result.ConflictFiles
+			}
+			return out, nil
 		}}, nil
 	}
 	return nil, platformFailure("platform_capability_unknown", "unknown workspace capability", false)

@@ -77,6 +77,7 @@ var migrations = []Migration{
 	{Version: 59, Description: "coordinator: add conflict incidents table", Up: migrateV59},
 	{Version: 60, Description: "workspaces: add workspaces table (full phase-N schema)", Up: migrateV60},
 	{Version: 61, Description: "sessions: add work_dir and workspace_id columns", Up: migrateV61},
+	{Version: 62, Description: "sessions: add parent_session_id and spawned_by lineage columns", Up: migrateV62},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1663,6 +1664,19 @@ func migrateV61(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV61 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV62(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE sessions ADD COLUMN parent_session_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN spawned_by TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV62 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

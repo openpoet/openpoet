@@ -115,6 +115,10 @@ func (s *semanticSessionStore) GetTask(context.Context, int64) (*database.Projec
 func (s *semanticSessionStore) GetTaskForSession(context.Context, string) (*database.ProjectTask, error) {
 	return nil, sql.ErrNoRows
 }
+func (s *semanticSessionStore) UpdateSessionLineage(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
 func (s *semanticSessionStore) EndSession(_ context.Context, _ string, status string) error {
 	s.ended = status
 	return nil
