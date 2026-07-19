@@ -119,3 +119,55 @@ func TestProcessDriverSpawnAndKill(t *testing.T) {
 func pidAlive(pid int) bool {
 	return syscall.Kill(pid, syscall.Signal(0)) == nil
 }
+
+// TestProvisionReleasesPortOnFailure: a provision that allocates a port and
+// spawns a service which then FAILS its health check must release the port row
+// and kill the service — no leaked port, no orphan process (finding #1).
+func TestProvisionReleasesPortOnFailure(t *testing.T) {
+	db, err := database.New(filepath.Join(t.TempDir(), "p.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	// FK-satisfying rows: a project and a workspace the resources reference.
+	project := &database.Project{Name: "p", Path: t.TempDir(), Type: "local", Backend: "claude_code"}
+	if err := db.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	ws := &database.Workspace{ID: "ws-fail", ProjectID: project.ID, Name: "wf", Branch: "openpoet/wf", BaseRef: "main", Path: t.TempDir(), Status: "provisioning"}
+	if err := db.CreateWorkspace(ctx, ws, "test"); err != nil {
+		t.Fatal(err)
+	}
+	// A service that binds NOTHING (sleep) with a health check pointed at a
+	// definitely-closed port (127.0.0.1:1) so the check fails DETERMINISTICALLY,
+	// regardless of what else is listening on the freshly-allocated {{PORT}}.
+	manifest := []byte(`version: 1
+services:
+  web:
+    command: sleep 30
+    port: "{{PORT}}"
+    health: "http://127.0.0.1:1/"
+    scope: per-sandbox
+`)
+	// Approve it so provisioning proceeds to the service stage.
+	if err := db.ApproveManifest(ctx, project.ID, ".openpoet/environment.yaml", string(manifest), ManifestSHA256(manifest), "test"); err != nil {
+		t.Fatal(err)
+	}
+	prov := NewProvisioner(db)
+	prov.healthTimeout = 800 * time.Millisecond // fail fast
+	_, provErr := prov.Provision(ctx, project.ID, "ws-fail", t.TempDir(), manifest)
+	if provErr == nil {
+		t.Fatal("expected a health-check failure")
+	}
+	// The port row must be RELEASED (not leaked) — else the allocator range leaks.
+	rows, err := db.ListWorkspaceResources(ctx, "ws-fail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.Status != "released" {
+			t.Fatalf("resource %s/%s left live (status=%s) after failed provision — port leak", r.Kind, r.Value, r.Status)
+		}
+	}
+}

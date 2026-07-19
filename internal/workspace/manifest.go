@@ -10,10 +10,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// portTemplateRe matches {{PORT}} and {{PORT.<name>}} (with optional inner
+// whitespace). In this single-port MVP every named form renders to the same
+// allocated port.
+var portTemplateRe = regexp.MustCompile(`\{\{\s*PORT(\.[A-Za-z0-9_-]+)?\s*\}\}`)
 
 // Manifest is the parsed `.openpoet/environment.yaml`.
 type Manifest struct {
@@ -63,14 +69,12 @@ func ParseManifest(content []byte) (*Manifest, error) {
 	return &m, nil
 }
 
-// RenderTemplate substitutes {{PORT}} (and {{PORT.<name>}} for the same value in
-// this single-port MVP) with the allocated port.
+// RenderTemplate substitutes {{PORT}} and {{PORT.<name>}} (all rendering to the
+// same allocated port in this single-port MVP) — so a service whose command or
+// health URL uses the per-name form binds and health-checks the real port
+// instead of a literal placeholder.
 func RenderTemplate(s string, port int) string {
-	p := fmt.Sprintf("%d", port)
-	s = strings.ReplaceAll(s, "{{PORT}}", p)
-	// tolerate whitespace inside the braces
-	s = strings.ReplaceAll(s, "{{ PORT }}", p)
-	return s
+	return portTemplateRe.ReplaceAllString(s, fmt.Sprintf("%d", port))
 }
 
 // PortIsTemplated reports whether a service's port field asks the allocator for a
