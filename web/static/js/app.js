@@ -669,18 +669,52 @@ class OpenPoet {
                 </div>${coordLive ? `<span class="mv-cta">abrir ›</span>` : ''}
             </div>` : '';
 
+        const totalLive = liveCount + (coordLive ? 1 : 0);
+        const stopAllHTML = totalLive
+            ? `<button class="mv-stopall" onclick="app.stopAllMissionSessions()">Parar todas as sessões (${totalLive})</button>`
+            : '';
+
         c.innerHTML = `<div class="mv-grid">
             <div class="mv-card mv-full">
                 <h4>Missão #${esc(m.id)}</h4>
                 <div class="mv-goal">${esc(m.goal)}</div>
                 <div class="mv-meta">${badge(m.status)} · criada ${esc(m.created_at)}</div>
                 ${coordHTML}
+                ${stopAllHTML}
             </div>
             <div class="mv-card"><h4>${workersTitle}</h4>${workersHTML}</div>
             <div class="mv-card"><h4>Worktrees</h4>${wsHTML}</div>
             <div class="mv-card"><h4>Documentos</h4>${docsHTML}</div>
             <div class="mv-card mv-full"><h4>Timeline</h4>${tlHTML}</div>
         </div>`;
+    }
+
+    // Stop every LIVE session of the mission (coordinator + workers). This is a
+    // blunt halt of the fleet; the productive cleanup (merging lanes back,
+    // discarding worktrees, archiving) stays a coordinator-driven act — this
+    // button never touches worktrees.
+    async stopAllMissionSessions() {
+        const missionId = this._currentMission;
+        if (!missionId) return;
+        let panel;
+        try {
+            panel = await this.api('GET', `/missions/${missionId}/panel`);
+        } catch (e) { return; }
+        const live = (s) => s === 'running' || s === 'starting';
+        const ids = new Set();
+        if (panel.mission?.coordinator_session_id && live(panel.coordinator_status)) {
+            ids.add(panel.mission.coordinator_session_id);
+        }
+        (panel.workers || []).forEach(w => { if (live(w.session_status || w.status)) ids.add(w.session_id); });
+        const list = [...ids].filter(Boolean);
+        if (!list.length) { this.showToast?.('Nenhuma sessão ativa para parar.', 'info'); return; }
+        if (!window.confirm(`Parar ${list.length} sessão(ões) desta missão (coordenadora + trabalhadoras ativas)?\n\nAs sessões serão encerradas. Os worktrees NÃO são tocados — o merge/descarte continua sendo feito pela coordenadora.`)) return;
+        let ok = 0;
+        for (const sid of list) {
+            try { await this.api('DELETE', `/sessions/${sid}`); ok++; } catch (e) { /* keep going */ }
+        }
+        this.showToast?.(`${ok}/${list.length} sessão(ões) parada(s).`, ok === list.length ? 'success' : 'error');
+        this.loadMissionPanel(missionId);
     }
 
     // Shortcut: open a mission worker's live session in the terminal. Loads the
