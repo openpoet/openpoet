@@ -32,6 +32,10 @@ func (s *automationStartSessionStore) GetTaskForSession(context.Context, string)
 	return s.task, nil
 }
 
+func (s *automationStartSessionStore) UpdateSessionLineage(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
 func (s *automationStartSessionStore) EndSession(_ context.Context, _ string, status string) error {
 	if s.session != nil {
 		s.session.Status = status

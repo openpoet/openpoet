@@ -60,6 +60,20 @@ func (d *DB) GetAutomationClientByTokenPrefix(ctx context.Context, prefix string
 	return &client, nil
 }
 
+// GetAutomationClientByName returns the client with this exact name, or
+// (nil, nil) if none exists. Used for idempotent server-side provisioning.
+func (d *DB) GetAutomationClientByName(ctx context.Context, name string) (*AutomationClient, error) {
+	var client AutomationClient
+	err := d.GetContext(ctx, &client, "SELECT * FROM automation_clients WHERE name = ?", name)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &client, nil
+}
+
 func (d *DB) SetAutomationClientEnabled(ctx context.Context, id string, enabled bool) error {
 	_, err := d.ExecContext(ctx, "UPDATE automation_clients SET enabled = ? WHERE id = ?", enabled, id)
 	return err
@@ -171,7 +185,13 @@ func (d *DB) CompleteAutomationCommandWithEvent(
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if event != nil {
+		d.NotifyOutboxAppended()
+	}
+	return nil
 }
 
 func (d *DB) GetAutomationCommand(ctx context.Context, id string) (*AutomationCommand, error) {

@@ -62,6 +62,11 @@ func (c *Coordinator) flushOnce() {
 		log.Printf("[Coordinator] batched flush failed, retrying per item: %v", err)
 		c.persistPerItem(ctx, ledger, incidents, events)
 	}
+	// Wake long-poll awaiters: turn_completed / awaiting_input / conflict.detected
+	// are now committed and visible. Over-signaling is harmless (readers re-check).
+	if len(events) > 0 {
+		c.db.NotifyOutboxAppended()
+	}
 }
 
 // pruneMemoryLocked bounds long-lived maps: quiet incidents fall out of memory
@@ -217,8 +222,11 @@ func awaitingInputEvent(sessionID, kind, excerpt string, ts time.Time) database.
 	}
 }
 
-func turnCompletedEvent(sessionID string, ts time.Time) database.EventOutboxAppend {
-	payload, _ := json.Marshal(map[string]interface{}{"session_id": sessionID})
+func turnCompletedEvent(sessionID string, files []string, ts time.Time) database.EventOutboxAppend {
+	if files == nil {
+		files = []string{}
+	}
+	payload, _ := json.Marshal(map[string]interface{}{"session_id": sessionID, "files_touched": files})
 	return database.EventOutboxAppend{
 		EventID:       uuid.NewString(),
 		EventType:     "session.turn_completed",

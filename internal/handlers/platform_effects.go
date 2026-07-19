@@ -128,7 +128,9 @@ func (e *platformEffects) audit(ctx context.Context, domain, action, aggregateID
 	}
 	if err != nil {
 		log.Printf("[Automation] platform audit append failed domain=%s action=%s: %v", domain, action, err)
+		return
 	}
+	e.db.NotifyOutboxAppended()
 }
 
 func numericAggregateID(id int64) string {
