@@ -240,6 +240,9 @@ func tagPlatformDefinitions() []PlatformCapabilityDefinition {
 		writeConfigurationCapability("tags.update", "tags", "tags:write"),
 		destructiveConfigurationCapability("tags.delete", "tags", "tags:write"),
 		writeConfigurationCapability("tags.assign_project", "tags", "tags:write", "projects:write"),
+		// Coordination groups ARE tags (coordination=1). groups.list surfaces them
+		// as the group vocabulary a scoped coordinator queries.
+		readConfigurationCapability("groups.list", "tags", "groups:read"),
 	}
 }
 
@@ -273,6 +276,13 @@ func (e *tagPlatformExecutor) Validate(_ context.Context, input PlatformExecutio
 		}
 		return &configurationValidatedCommand{preview: configurationPreview(input.Handler, nil), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
 			return e.service.List(ctx)
+		}}, nil
+	case "groups.list":
+		if err := requireEmptyConfigurationPayload(input.Payload); err != nil {
+			return nil, err
+		}
+		return &configurationValidatedCommand{preview: configurationPreview(input.Handler, nil), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
+			return e.service.ListCoordination(ctx)
 		}}, nil
 	case "tags.list_project":
 		if err := requireEmptyConfigurationPayload(input.Payload); err != nil {
