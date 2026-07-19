@@ -124,6 +124,15 @@ func (a *commandAPI) executeCommand(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// Central project-scope enforcement for EVERY command (legacy + platform): a
+	// client provisioned with a project_filter may only target projects inside its
+	// group. A target that names a project outside the filter fails closed. This
+	// lives here (the single /commands entry) because legacy capabilities like
+	// tasks.create bypass DispatchPlatformCapability's own scope check.
+	if scope := resolveActorProjectScope(r.Context(), a.scopeStore, actor); !scope.Allows(commandTargetProjectID(command)) {
+		a.writeCommandError(w, command, &commandFailure{status: http.StatusForbidden, code: "project_out_of_scope", message: "the automation client is not scoped to this project"})
+		return
+	}
 	if command.ExpectedVersion != nil && !supportsExpectedVersion(capability.Handler) {
 		a.writeCommandError(w, command, &commandFailure{
 			status: http.StatusUnprocessableEntity, code: "expected_version_unsupported",
@@ -228,6 +237,26 @@ func decodeCommandEnvelope(r *http.Request) (*commandEnvelope, error) {
 		command.Payload = json.RawMessage(`{}`)
 	}
 	return &command, nil
+}
+
+// commandTargetProjectID extracts the project a command targets (0 when the
+// target does not name a project — e.g. a session/task/global target, which
+// project scoping does not generically restrict here).
+func commandTargetProjectID(command *commandEnvelope) int64 {
+	if command == nil {
+		return 0
+	}
+	t := command.Target
+	if t.ProjectID > 0 {
+		return t.ProjectID
+	}
+	if (t.Type == "project" || t.Kind == "project") && len(t.ID) > 0 {
+		var id int64
+		if err := json.Unmarshal(t.ID, &id); err == nil {
+			return id
+		}
+	}
+	return 0
 }
 
 func (a *commandAPI) writeCommandError(w http.ResponseWriter, command *commandEnvelope, err error) {
