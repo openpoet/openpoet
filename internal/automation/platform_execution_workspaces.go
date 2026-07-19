@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"openpoet/internal/application"
@@ -15,7 +16,22 @@ func workspacePlatformDefinitions() []PlatformCapabilityDefinition {
 		executionWriteCapability("workspaces.create", "workspaces", "workspaces:write"),
 		executionDestructiveCapability("workspaces.remove", "workspaces", "workspaces:write"),
 		executionDestructiveCapability("workspaces.merge", "workspaces", "workspaces:write"),
+		executionDestructiveCapability("workspaces.discard", "workspaces", "workspaces:write"),
 	}
+}
+
+// mapWorkspaceCreateError surfaces the Phase-6 environment-provision failures as
+// typed dispatch errors so the caller sees manifest_approval_required (with the
+// SHA to approve) or port_reserved instead of a redacted generic message.
+func mapWorkspaceCreateError(err error) error {
+	var approval *application.ManifestApprovalRequiredError
+	if errors.As(err, &approval) {
+		return platformFailure("manifest_approval_required", "content_sha256="+approval.SHA, false)
+	}
+	if strings.Contains(err.Error(), "port_reserved") {
+		return platformFailure("port_reserved", "the manifest demands a reserved port", false)
+	}
+	return err
 }
 
 type workspacePlatformExecutor struct {
@@ -100,7 +116,7 @@ func (e *workspacePlatformExecutor) Validate(_ context.Context, input PlatformEx
 				Authorization: authorization,
 			})
 			if err != nil {
-				return nil, err
+				return nil, mapWorkspaceCreateError(err)
 			}
 			return map[string]any{"workspace": workspaceView(*ws)}, nil
 		}}, nil
@@ -169,6 +185,24 @@ func (e *workspacePlatformExecutor) Validate(_ context.Context, input PlatformEx
 				return nil, err
 			}
 			return map[string]any{"workspace": workspaceView(*ws)}, nil
+		}}, nil
+	case "workspaces.discard":
+		if err := requireEmptyExecutionPayload(input.Payload); err != nil {
+			return nil, err
+		}
+		workspaceID, err := executionStringID(target, "workspace id")
+		if err != nil {
+			return nil, err
+		}
+		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"workspace_id": workspaceID}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+			ws, err := e.service.Discard(ctx, application.RemoveWorkspaceCommand{
+				WorkspaceID:   workspaceID,
+				Authorization: authorization,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"workspace": workspaceView(*ws), "discarded": true}, nil
 		}}, nil
 	case "workspaces.merge":
 		if err := requireEmptyExecutionPayload(input.Payload); err != nil {
