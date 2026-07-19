@@ -17,6 +17,20 @@ const (
 	flushInterval    = 2 * time.Second
 	resolveTimeout   = 5 * time.Second
 	hysteresisWindow = 5 * time.Minute
+	// sessionCacheTTL bounds how stale a cached session→project resolution may
+	// get: liveness and task links change mid-session (user stop, link-task),
+	// and a frozen snapshot turns into false conflicts.
+	sessionCacheTTL = 60 * time.Second
+	// resolveRetryBackoff: a failed resolution is NEVER cached as a permanent
+	// verdict (the hook token already proved the session exists) — only backed
+	// off, so a transient DB stall can't blind the radar to a session forever.
+	resolveRetryBackoff = 10 * time.Second
+	// maxPendingEvents bounds the event buffer during a persistent DB outage;
+	// oldest events are dropped (counted) rather than exhausting process memory.
+	maxPendingEvents = 4096
+	// incidentMemoryTTL prunes quiet incidents from the in-memory maps; the DB
+	// row remains the durable record.
+	incidentMemoryTTL = 24 * time.Hour
 )
 
 // sessionInfo caches the session→project resolution so the ingest hot path
@@ -31,6 +45,7 @@ type sessionInfo struct {
 	remote     bool
 	taskID     int64
 	live       bool
+	fetchedAt  time.Time
 }
 
 type ingestMsg struct {
@@ -73,13 +88,16 @@ type Coordinator struct {
 
 	mu             sync.Mutex
 	sessions       map[string]*sessionInfo
+	failedResolve  map[string]time.Time              // sessionID → do-not-retry-before
 	claims         map[claimKey]map[string]TouchKind // (projectKey,rel) → sessionID → strongest kind
 	incidents      map[string]*Incident              // rule|scope_key → incident
 	dirtyIncidents map[string]struct{}
 	dirtyLedger    map[ledgerKey]*ledgerDelta
 	pendingEvents  []database.EventOutboxAppend
 	lastEmit       map[string]time.Time // hysteresis per rule|scope_key
+	lastEscalate   map[int64]time.Time  // projectID → last human escalation
 	dropped        int64
+	droppedEvents  int64
 
 	resolveSession func(ctx context.Context, sessionID string) (*sessionInfo, error)
 	now            func() time.Time
@@ -95,22 +113,57 @@ func New(db *database.DB) *Coordinator {
 		ch:             make(chan ingestMsg, ingestBuffer),
 		quit:           make(chan struct{}),
 		sessions:       make(map[string]*sessionInfo),
+		failedResolve:  make(map[string]time.Time),
 		claims:         make(map[claimKey]map[string]TouchKind),
 		incidents:      make(map[string]*Incident),
 		dirtyIncidents: make(map[string]struct{}),
 		dirtyLedger:    make(map[ledgerKey]*ledgerDelta),
 		lastEmit:       make(map[string]time.Time),
+		lastEscalate:   make(map[int64]time.Time),
 		now:            time.Now,
 	}
 	c.resolveSession = c.resolveFromDB
 	return c
 }
 
-// Start spawns the indexer and flusher goroutines.
+// Start hydrates open incidents from the DB (so incident identity survives a
+// restart: no phantom ids in events, no duplicate escalation, no
+// evidence_count regression), then spawns the indexer and flusher goroutines.
 func (c *Coordinator) Start() {
+	c.hydrateIncidents()
 	c.wg.Add(2)
 	go func() { defer c.wg.Done(); c.indexLoop() }()
 	go func() { defer c.wg.Done(); c.flushLoop() }()
+}
+
+func (c *Coordinator) hydrateIncidents() {
+	if c.db == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), resolveTimeout)
+	defer cancel()
+	rows, err := c.db.ListCoordinatorIncidents(ctx, 0, "open", 500)
+	if err != nil {
+		log.Printf("[Coordinator] incident hydration failed (continuing cold): %v", err)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, row := range rows {
+		inc, err := incidentFromRow(row)
+		if err != nil {
+			log.Printf("[Coordinator] skipping malformed incident %s: %v", row.ID, err)
+			continue
+		}
+		key := inc.Rule + "|" + inc.ScopeKey
+		c.incidents[key] = inc
+		// Respect hysteresis across the restart: the last persisted evidence
+		// stamp is the best available proxy for the last emission.
+		c.lastEmit[key] = inc.LastEvidenceAt
+	}
+	if len(rows) > 0 {
+		log.Printf("[Coordinator] hydrated %d open incident(s)", len(rows))
+	}
 }
 
 // Stop drains the goroutines and performs a final flush.
@@ -127,7 +180,10 @@ func (c *Coordinator) OnHookEvent(sessionID, eventName string, hookEvent map[str
 	switch eventName {
 	case "Stop":
 		c.enqueue(ingestMsg{kind: "turn", sessionID: sessionID, ts: c.now()})
-	case "PreToolUse", "PostToolUse", "PostToolUseFailure":
+	case "PreToolUse":
+		// Claims come from PreToolUse ONLY: it is the earliest signal and the
+		// one phase every tool call emits exactly once. Counting PostToolUse
+		// too would double every touch_count and evidence_count.
 		tool, _ := hookEvent["tool_name"].(string)
 		toolInput, _ := hookEvent["tool_input"].(map[string]interface{})
 		touches := ExtractTouches(tool, toolInput)
@@ -144,20 +200,41 @@ func (c *Coordinator) OnHookEvent(sessionID, eventName string, hookEvent map[str
 func (c *Coordinator) RecordAttention(sessionID, kind, excerpt string) {
 	ev := awaitingInputEvent(sessionID, kind, excerpt, c.now())
 	c.mu.Lock()
-	c.pendingEvents = append(c.pendingEvents, ev)
+	c.queueEventLocked(ev)
 	c.mu.Unlock()
 }
 
-// ForgetSession drops a session's cache entry and live claims. Persisted
-// ledger rows survive (they are the audit trail, not the live index).
+// queueEventLocked appends a pending event under c.mu, bounded so a persistent
+// DB outage cannot grow the buffer without limit; oldest events are dropped
+// and counted (loudly) instead of exhausting host memory.
+func (c *Coordinator) queueEventLocked(ev database.EventOutboxAppend) {
+	if len(c.pendingEvents) >= maxPendingEvents {
+		c.pendingEvents = c.pendingEvents[1:]
+		c.droppedEvents++
+		if c.droppedEvents&(c.droppedEvents-1) == 0 {
+			log.Printf("[Coordinator] pending-event buffer full: %d event(s) dropped so far", c.droppedEvents)
+		}
+	}
+	c.pendingEvents = append(c.pendingEvents, ev)
+}
+
+// ForgetSession drops a session's cache entry, live claims, and any not-yet-
+// flushed ledger deltas (the session row may be gone — flushing them would
+// poison the batch on the foreign key). Persisted ledger rows survive.
 func (c *Coordinator) ForgetSession(sessionID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.sessions, sessionID)
+	delete(c.failedResolve, sessionID)
 	for key, set := range c.claims {
 		delete(set, sessionID)
 		if len(set) == 0 {
 			delete(c.claims, key)
+		}
+	}
+	for key := range c.dirtyLedger {
+		if key.sessionID == sessionID {
+			delete(c.dirtyLedger, key)
 		}
 	}
 }
@@ -168,17 +245,29 @@ func (c *Coordinator) enqueue(msg ingestMsg) {
 		return
 	default:
 	}
-	// Full: drop the oldest queued message, then retry once.
+	// Full: drop the oldest queued message, then retry once. Only actual
+	// discards are counted, and overload is surfaced in the log (throttled by
+	// the power-of-two check) instead of being silently invisible.
+	discarded := 0
 	select {
 	case <-c.ch:
+		discarded++
 	default:
 	}
-	c.mu.Lock()
-	c.dropped++
-	c.mu.Unlock()
 	select {
 	case c.ch <- msg:
 	default:
+		discarded++
+	}
+	if discarded == 0 {
+		return
+	}
+	c.mu.Lock()
+	c.dropped += int64(discarded)
+	total := c.dropped
+	c.mu.Unlock()
+	if total&(total-1) == 0 { // log at 1, 2, 4, 8, ... to avoid log storms
+		log.Printf("[Coordinator] ingest overload: %d touch message(s) dropped so far", total)
 	}
 }
 
@@ -201,7 +290,7 @@ func (c *Coordinator) process(msg ingestMsg) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if msg.kind == "turn" {
-		c.pendingEvents = append(c.pendingEvents, turnCompletedEvent(si.id, msg.ts))
+		c.queueEventLocked(turnCompletedEvent(si.id, msg.ts))
 		return
 	}
 	for _, t := range msg.touches {
@@ -219,25 +308,37 @@ func (c *Coordinator) process(msg ingestMsg) {
 	c.evalSameTask(si, msg.ts)
 }
 
-// session returns the cached resolution for sessionID, hitting the DB only on
-// first sight. Resolution happens outside c.mu (it does I/O).
+// session returns the cached resolution for sessionID, hitting the DB on
+// first sight and again once the TTL lapses (liveness and task links change
+// mid-session). A failed resolution is never a permanent verdict — the hook
+// token already proved the session exists — only a short retry backoff, so a
+// transient DB stall cannot blind the radar to a session for the process
+// lifetime. Resolution happens outside c.mu (it does I/O).
 func (c *Coordinator) session(id string) *sessionInfo {
+	nowTs := c.now()
 	c.mu.Lock()
 	si, seen := c.sessions[id]
+	retryAt, failing := c.failedResolve[id]
 	c.mu.Unlock()
-	if seen {
+	if seen && nowTs.Sub(si.fetchedAt) < sessionCacheTTL {
 		return si
+	}
+	if failing && nowTs.Before(retryAt) {
+		return si // nil on first sight; stale-but-usable during a blip
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), resolveTimeout)
 	defer cancel()
 	resolved, err := c.resolveSession(ctx, id)
-	if err != nil {
-		log.Printf("[Coordinator] cannot resolve session %s: %v", id, err)
-		resolved = nil
-	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err != nil {
+		log.Printf("[Coordinator] cannot resolve session %s (retrying in %s): %v", id, resolveRetryBackoff, err)
+		c.failedResolve[id] = nowTs.Add(resolveRetryBackoff)
+		return si // keep any stale entry rather than going blind
+	}
+	resolved.fetchedAt = nowTs
 	c.sessions[id] = resolved
-	c.mu.Unlock()
+	delete(c.failedResolve, id)
 	return resolved
 }
 

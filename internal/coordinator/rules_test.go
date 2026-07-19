@@ -1,6 +1,8 @@
 package coordinator
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -13,7 +15,14 @@ func testCoordinator(t *testing.T, sessions map[string]*sessionInfo) (*Coordinat
 	clock := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	c.now = func() time.Time { return clock }
 	for id, si := range sessions {
+		si.fetchedAt = clock
 		c.sessions[id] = si
+	}
+	c.resolveSession = func(_ context.Context, id string) (*sessionInfo, error) {
+		if si, ok := sessions[id]; ok {
+			return si, nil
+		}
+		return nil, errors.New("unknown session " + id)
 	}
 	return c, &clock
 }
@@ -207,6 +216,120 @@ func TestRemoteClaimsKeyedByHost(t *testing.T) {
 	c.process(touchMsg("sr", "Edit", "/remote-src/main.go", KindWrite, *clock))
 	if len(c.incidents) != 0 {
 		t.Fatalf("cross-host identically-named rel paths collided: %d incidents", len(c.incidents))
+	}
+}
+
+// TestTransientResolutionFailureIsRetried pins the fix for the review's major
+// finding: a failed session resolution must be a backoff, never a permanent
+// negative cache — otherwise one DB stall blinds the radar to a session for
+// the whole process lifetime.
+func TestTransientResolutionFailureIsRetried(t *testing.T) {
+	c, clock := testCoordinator(t, map[string]*sessionInfo{})
+	root := "/proj"
+	healthy := localSession("sa", 1, root, 0)
+	calls := 0
+	c.resolveSession = func(_ context.Context, id string) (*sessionInfo, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("transient db stall")
+		}
+		return healthy, nil
+	}
+	c.process(touchMsg("sa", "Edit", root+"/a.go", KindWrite, *clock))
+	if len(c.dirtyLedger) != 0 {
+		t.Fatal("failed resolution still produced ledger entries")
+	}
+	// Within the backoff window nothing is retried (no DB hammering)…
+	c.process(touchMsg("sa", "Edit", root+"/a.go", KindWrite, *clock))
+	if calls != 1 {
+		t.Fatalf("resolution retried inside backoff window (calls=%d)", calls)
+	}
+	// …and after it, the session becomes visible to the radar again.
+	*clock = clock.Add(resolveRetryBackoff + time.Second)
+	c.process(touchMsg("sa", "Edit", root+"/a.go", KindWrite, *clock))
+	if calls != 2 {
+		t.Fatalf("resolution not retried after backoff (calls=%d)", calls)
+	}
+	if len(c.dirtyLedger) != 1 {
+		t.Fatalf("recovered session produced %d ledger entries, want 1", len(c.dirtyLedger))
+	}
+}
+
+// TestForgetSessionDropsLiveStateEverywhere pins the fix for the critical
+// finding: ForgetSession must clear claims AND pending ledger deltas (a
+// deleted session row would poison the flush batch on the foreign key).
+func TestForgetSessionDropsLiveStateEverywhere(t *testing.T) {
+	root := "/proj"
+	c, clock := testCoordinator(t, map[string]*sessionInfo{
+		"sa": localSession("sa", 1, root, 0),
+		"sb": localSession("sb", 1, root, 0),
+	})
+	c.process(touchMsg("sa", "Edit", root+"/shared.go", KindWrite, *clock))
+	if len(c.dirtyLedger) != 1 || len(c.claims) != 1 {
+		t.Fatalf("setup: ledger=%d claims=%d", len(c.dirtyLedger), len(c.claims))
+	}
+	c.ForgetSession("sa")
+	if len(c.dirtyLedger) != 0 {
+		t.Fatal("ForgetSession left pending ledger deltas (FK poison risk)")
+	}
+	if len(c.claims) != 0 {
+		t.Fatal("ForgetSession left live claims (ghost-conflict risk)")
+	}
+	// A later writer must NOT conflict with the forgotten session.
+	c.process(touchMsg("sb", "Edit", root+"/shared.go", KindWrite, *clock))
+	if len(c.incidents) != 0 {
+		t.Fatalf("ghost claim fired %d incident(s) after ForgetSession", len(c.incidents))
+	}
+}
+
+// TestSessionCacheTTLRefreshesLiveness: a stopped peer stops firing conflicts
+// once its cache entry expires, even if ForgetSession was missed.
+func TestSessionCacheTTLRefreshesLiveness(t *testing.T) {
+	root := "/proj"
+	sa := localSession("sa", 1, root, 0)
+	c, clock := testCoordinator(t, map[string]*sessionInfo{
+		"sa": sa,
+		"sb": localSession("sb", 1, root, 0),
+	})
+	c.process(touchMsg("sa", "Edit", root+"/shared.go", KindWrite, *clock))
+	// sa "stops" out-of-band; its next resolution reports live=false.
+	stopped := *sa
+	stopped.live = false
+	*clock = clock.Add(sessionCacheTTL + time.Second)
+	c.resolveSession = func(_ context.Context, id string) (*sessionInfo, error) {
+		if id == "sa" {
+			return &stopped, nil
+		}
+		return localSession(id, 1, root, 0), nil
+	}
+	// sa's OWN next touch refreshes its cache entry to live=false…
+	c.process(touchMsg("sa", "Read", root+"/other.go", KindRead, *clock))
+	// …so sb writing the contested file no longer sees a live peer.
+	c.process(touchMsg("sb", "Edit", root+"/shared.go", KindWrite, *clock))
+	if len(c.incidents) != 0 {
+		t.Fatalf("stale-cached liveness fired %d incident(s) after TTL refresh", len(c.incidents))
+	}
+}
+
+func TestEscalationRateLimitedPerProject(t *testing.T) {
+	root := "/proj"
+	c, clock := testCoordinator(t, map[string]*sessionInfo{
+		"sa": localSession("sa", 1, root, 0),
+		"sb": localSession("sb", 1, root, 0),
+	})
+	escalations := make(chan Incident, 64)
+	c.OnEscalate = func(inc Incident) { escalations <- inc }
+	for i := 0; i < 10; i++ {
+		file := root + "/f" + string(rune('a'+i)) + ".go"
+		c.process(touchMsg("sa", "Edit", file, KindWrite, *clock))
+		c.process(touchMsg("sb", "Edit", file, KindWrite, *clock))
+	}
+	time.Sleep(50 * time.Millisecond) // escalations fire on goroutines
+	if got := len(escalations); got != 1 {
+		t.Fatalf("escalations = %d, want 1 (10 fresh criticals inside the cooldown are ONE situation)", got)
+	}
+	if len(c.incidents) != 10 {
+		t.Fatalf("incidents = %d, want 10 (rate limit must not suppress incident records)", len(c.incidents))
 	}
 }
 

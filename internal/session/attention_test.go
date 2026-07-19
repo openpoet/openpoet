@@ -83,3 +83,30 @@ func TestAttentionSentinelCooldownAndDedup(t *testing.T) {
 		t.Fatalf("second session detections = %d, want 1", len(got))
 	}
 }
+
+// TestAttentionSentinelDedupsVaryingCounters pins the review finding: a
+// sitting prompt whose only variation is a live counter must be ONE question,
+// not one durable event per cooldown window forever.
+func TestAttentionSentinelDedupsVaryingCounters(t *testing.T) {
+	s, clock := sentinelWithClock()
+	total := 0
+	for i := 0; i < 120; i++ {
+		total += len(s.Feed("s1", []byte("\rwaiting for your input ("+itoa(i)+"s)")))
+		*clock = clock.Add(time.Second)
+	}
+	if total != 1 {
+		t.Fatalf("varying-counter prompt emitted %d times over 120s, want 1", total)
+	}
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	digits := ""
+	for i > 0 {
+		digits = string(rune('0'+i%10)) + digits
+		i /= 10
+	}
+	return digits
+}
