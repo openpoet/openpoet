@@ -538,20 +538,34 @@
                 </div>
             </section>
             <style>
-                #view-missions .mv-content { padding: 20px 24px 60px; overflow-y: auto; }
+                #view-missions .mv-content { padding: 20px 24px 60px; overflow-y: auto; overflow-x: hidden; }
                 .mv-select { background: var(--color-surface); color: var(--color-text); border: 1px solid var(--color-border);
-                    border-radius: var(--border-radius); padding: 7px 12px; font: inherit; max-width: 460px; }
+                    border-radius: var(--border-radius); padding: 7px 12px; font: inherit; max-width: 100%; }
                 .mv-grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; max-width: 1100px; }
-                .mv-card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; padding: 15px 17px; }
+                .mv-card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; padding: 15px 17px; min-width: 0; }
                 .mv-card.mv-full { grid-column: 1 / -1; }
-                .mv-card h4 { margin: 0 0 11px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--color-text-muted); }
-                .mv-goal { font-size: 16px; margin: 2px 0 10px; color: var(--color-text); }
+                .mv-card h4 { margin: 0 0 11px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--color-text-muted);
+                    display: flex; align-items: center; gap: 8px; }
+                .mv-count { text-transform: none; letter-spacing: 0; font-size: 11px; color: var(--color-status-running);
+                    border: 1px solid currentColor; border-radius: 99px; padding: 1px 8px; }
+                .mv-goal { font-size: 16px; margin: 2px 0 10px; color: var(--color-text); overflow-wrap: anywhere; }
                 .mv-meta { color: var(--color-text-muted); font-size: 13px; }
                 .mv-mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
-                .mv-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-                .mv-table th, .mv-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--color-border); }
-                .mv-table th { color: var(--color-text-muted); font-weight: 500; }
-                .mv-status { display: inline-block; padding: 2px 9px; border-radius: 99px; font-size: 12px; border: 1px solid currentColor; }
+                .mv-break { overflow-wrap: anywhere; word-break: break-all; }
+                /* Linhas responsivas (substituem tabelas que estouravam no mobile) */
+                .mv-row { display: flex; align-items: center; justify-content: space-between; gap: 6px 14px; flex-wrap: wrap;
+                    padding: 10px 12px; border: 1px solid var(--color-border); border-radius: 9px; margin-top: 8px;
+                    background: var(--color-bg-secondary); }
+                .mv-row:first-of-type { margin-top: 0; }
+                .mv-row-main { display: flex; align-items: center; gap: 9px; min-width: 0; }
+                .mv-row-title { font-weight: 600; color: var(--color-text); overflow-wrap: anywhere; }
+                .mv-row-meta { color: var(--color-text-muted); font-size: 12.5px; overflow-wrap: anywhere; }
+                .mv-worker.mv-live { cursor: pointer; }
+                .mv-worker.mv-live:hover { border-color: var(--color-primary); background: var(--color-surface-hover); }
+                .mv-worker.mv-live:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
+                .mv-open { color: var(--color-primary); font-weight: 600; white-space: nowrap; }
+                button.mv-doc-open.mv-row-title { background: none; border: none; padding: 0; cursor: pointer; color: var(--color-primary); text-align: left; }
+                .mv-status { display: inline-block; padding: 2px 9px; border-radius: 99px; font-size: 12px; border: 1px solid currentColor; white-space: nowrap; }
                 .mv-running, .mv-active { color: var(--color-status-running); }
                 .mv-paused { color: var(--color-priority-medium); }
                 .mv-completed { color: var(--color-info); }
@@ -577,7 +591,16 @@
                 .mv-doc-body table { border-collapse: collapse; margin: 10px 0; }
                 .mv-doc-body th, .mv-doc-body td { border: 1px solid var(--color-border); padding: 5px 9px; text-align: left; font-size: 13px; }
                 .mv-doc-body hr { border: 0; border-top: 1px solid var(--color-border); margin: 18px 0; }
-                @media (max-width: 720px) { .mv-grid { grid-template-columns: 1fr; } }
+                @media (max-width: 720px) {
+                    .mv-grid { grid-template-columns: 1fr; gap: 12px; }
+                    #view-missions .mv-content { padding: 14px 14px 72px; }
+                    .mv-card { padding: 13px 14px; border-radius: 10px; }
+                    .mv-goal { font-size: 15px; }
+                    .mv-row { padding: 11px 12px; }
+                    .mv-modal.open { padding: 0; }
+                    .mv-modal-inner { border-radius: 0; min-height: 100%; }
+                    .mv-doc-body { padding: 8px 16px 40px; }
+                }
             </style>
 
             <!-- Config View -->
