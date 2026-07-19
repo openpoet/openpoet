@@ -132,6 +132,37 @@ func (d *DB) GetCoordinatorIncident(ctx context.Context, id string) (*Coordinato
 	return &inc, nil
 }
 
+// CoordinatorConsult is one brain consult (V63): the audit trail and the
+// per-day budget counter source.
+type CoordinatorConsult struct {
+	ID         int64     `db:"id" json:"id"`
+	IncidentID string    `db:"incident_id" json:"incident_id"`
+	ProjectID  int64     `db:"project_id" json:"project_id"`
+	Action     string    `db:"action" json:"action"`
+	Decision   string    `db:"decision" json:"decision"`
+	CostUSD    float64   `db:"cost_usd" json:"cost_usd"`
+	CreatedAt  time.Time `db:"created_at" json:"created_at"`
+}
+
+// RecordCoordinatorConsult persists one consult outcome.
+func (d *DB) RecordCoordinatorConsult(ctx context.Context, c CoordinatorConsult) error {
+	_, err := d.ExecContext(ctx,
+		`INSERT INTO coordinator_consults (incident_id, project_id, action, decision, cost_usd)
+		 VALUES (?, ?, ?, ?, ?)`,
+		c.IncidentID, c.ProjectID, c.Action, c.Decision, c.CostUSD)
+	return err
+}
+
+// CountCoordinatorConsultsToday returns how many EFFECTIVE consults (decision
+// not budget-blocked) happened today — the daily-budget denominator.
+func (d *DB) CountCoordinatorConsultsToday(ctx context.Context) (int, error) {
+	var n int
+	err := d.GetContext(ctx, &n,
+		`SELECT COUNT(*) FROM coordinator_consults
+		 WHERE date(created_at) = date('now') AND decision NOT LIKE '%budget%'`)
+	return n, err
+}
+
 // ListSessionFileActivity returns a session's claim ledger, most recent first.
 func (d *DB) ListSessionFileActivity(ctx context.Context, sessionID string, limit int) ([]SessionFileActivity, error) {
 	if limit < 1 {
