@@ -279,7 +279,7 @@ func (r *RemoteRunner) buildSSHConfig() (*ssh.ClientConfig, error) {
 	return &ssh.ClientConfig{
 		User:            user,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: Add proper host key verification
+		HostKeyCallback: sshauth.HostKeyCallback(), // TOFU ledger (V72): mismatch fails closed
 		Timeout:         30 * time.Second,
 	}, nil
 }

@@ -33,7 +33,9 @@ func (d *DB) ReadEventOutboxPage(ctx context.Context, afterSequence int64, limit
 	if limit > 1000 {
 		return nil, 0, errors.New("event outbox limit cannot exceed 1000")
 	}
-	tx, err := d.BeginTxx(ctx, nil)
+	// Pure read (page + committed-head snapshot): the WAL read pool serves it
+	// without queueing behind — or stalling — the single write connection.
+	tx, err := d.Reader().BeginTxx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -72,7 +74,9 @@ func (d *DB) ReadAutomationSnapshot(ctx context.Context, notificationLimit int) 
 	if notificationLimit > MaxAutomationSnapshotNotifications {
 		return nil, errors.New("automation snapshot notification limit cannot exceed 500")
 	}
-	tx, err := d.BeginTxx(ctx, &sql.TxOptions{ReadOnly: true})
+	// The system's longest read (projects/tasks/sessions/notifications/plans in
+	// one snapshot) — on the read pool it no longer freezes every writer.
+	tx, err := d.Reader().BeginTxx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}

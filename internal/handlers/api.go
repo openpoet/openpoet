@@ -1737,13 +1737,18 @@ func (a *API) AutoRestoreSession(ctx context.Context, sess *database.Session) er
 		laneRestore = true
 	}
 
-	// Sync config to project before restoring (lanes are materialize-only)
+	// Sync config to project before restoring (lanes are materialize-only).
+	// DETACHED context with a hard timeout: the restore loop's ctx must never
+	// cancel an in-flight SQLite query mid-SSH (the documented poisoning), and
+	// a hung remote host must not stall the whole restore pass.
+	syncCtx, cancelSync := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	defer cancelSync()
 	if a.configSync != nil {
 		var syncErr error
 		if laneRestore {
-			syncErr = a.configSync.MaterializeToWorkspace(ctx, project)
+			syncErr = a.configSync.MaterializeToWorkspace(syncCtx, project)
 		} else {
-			syncErr = a.configSync.SyncToProject(ctx, project)
+			syncErr = a.configSync.SyncToProject(syncCtx, project)
 		}
 		if syncErr != nil {
 			log.Printf("[AutoRestore] Warning: config sync failed for session %s: %v", sessionID, syncErr)
