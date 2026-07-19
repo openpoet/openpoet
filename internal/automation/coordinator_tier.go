@@ -123,6 +123,10 @@ func NewCoordinatorHandler(store CoordinatorStore, deps Dependencies) http.Handl
 	router.Post("/sessions/{id}/input", c.sendToWorker)
 	router.Get("/sessions/{id}/wait", c.waitForSession)
 	router.Get("/sessions/{id}/report", c.getWorkerReport)
+	router.Post("/missions", c.startMission)
+	router.Get("/missions/{id}", c.getMission)
+	router.Post("/missions/{id}/status", c.updateMissionStatus)
+	router.Post("/missions/workers/attach", c.attachWorker)
 	router.Get("/events/await", c.awaitEvents)
 	return router
 }
@@ -457,7 +461,11 @@ type coordinatorSpawnRequest struct {
 	WorkspaceID  string `json:"workspace_id"`
 	Isolation    string `json:"isolation"`
 	CustomPrompt string `json:"custom_prompt"`
-	DryRun       bool   `json:"dry_run"`
+	// MissionID/Role enroll the worker in a mission of the coordinated group
+	// (briefing injected server-side; roster row registered at create).
+	MissionID int64  `json:"mission_id"`
+	Role      string `json:"role"`
+	DryRun    bool   `json:"dry_run"`
 }
 
 // startWorker spawns a real worker session in any member project of the group —
@@ -479,7 +487,23 @@ func (c *coordinatorAPI) startWorker(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if req.MissionID != 0 {
+		store, storeOK := c.missions()
+		if !storeOK {
+			writeError(w, http.StatusServiceUnavailable, "mission_store_unavailable", "the mission store is unavailable", true)
+			return
+		}
+		if c.missionForGroup(w, r, store, req.MissionID, group) == nil {
+			return
+		}
+	}
 	payload := map[string]any{}
+	if req.MissionID != 0 {
+		payload["mission_id"] = req.MissionID
+		if strings.TrimSpace(req.Role) != "" {
+			payload["mission_role"] = strings.TrimSpace(req.Role)
+		}
+	}
 	if req.TaskID != nil {
 		payload["task_id"] = *req.TaskID
 	}
