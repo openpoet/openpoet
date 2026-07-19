@@ -49,6 +49,7 @@ type ExecutionPlatformServices struct {
 	Git            GitOperationalReadPort
 	Tunnel         TunnelOperationalReadPort
 	Updates        UpdateOperationalReadPort
+	Conflicts      ConflictReadPort
 }
 
 func RegisterExecutionPlatformCapabilities(registry *PlatformCapabilityRegistry, services ExecutionPlatformServices) error {
@@ -59,7 +60,8 @@ func RegisterExecutionPlatformCapabilities(registry *PlatformCapabilityRegistry,
 		services.FileMutations == nil || services.GitMutations == nil || services.HookResponses == nil ||
 		services.Voice == nil || services.TunnelMutations == nil || services.UpdateMutations == nil ||
 		services.SessionQueries == nil || services.SessionRuntime == nil || services.SessionEvents == nil ||
-		services.Files == nil || services.Git == nil || services.Tunnel == nil || services.Updates == nil {
+		services.Files == nil || services.Git == nil || services.Tunnel == nil || services.Updates == nil ||
+		services.Conflicts == nil {
 		return errors.New("all execution platform services and read ports are required")
 	}
 	groups := []struct {
@@ -75,6 +77,7 @@ func RegisterExecutionPlatformCapabilities(registry *PlatformCapabilityRegistry,
 		{voiceExecutionPlatformDefinitions(), &voiceExecutionPlatformExecutor{service: services.Voice}},
 		{tunnelExecutionPlatformDefinitions(), &tunnelExecutionPlatformExecutor{service: services.TunnelMutations, reader: services.Tunnel}},
 		{updateExecutionPlatformDefinitions(), &updateExecutionPlatformExecutor{service: services.UpdateMutations, reader: services.Updates}},
+		{conflictPlatformDefinitions(), &conflictPlatformExecutor{queries: services.Conflicts}},
 	}
 	for _, group := range groups {
 		for _, definition := range group.definitions {

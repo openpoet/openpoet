@@ -41,6 +41,8 @@ type executionPlatformFakePorts struct {
 	voiceCalls     int
 	voiceResult    *voice.TranscriptionResult
 	activeSessions map[string]bool
+	incidents      []database.CoordinatorIncident
+	fileActivity   []database.SessionFileActivity
 }
 
 func (f *executionPlatformFakePorts) ListSessions(context.Context) ([]database.Session, error) {
@@ -133,6 +135,27 @@ func (f *executionPlatformFakePorts) TranscribeAudio(context.Context, []byte, st
 	return f.voiceResult, nil
 }
 
+func (f *executionPlatformFakePorts) ListCoordinatorIncidents(context.Context, int64, string, int) ([]database.CoordinatorIncident, error) {
+	f.readCalls++
+	return append([]database.CoordinatorIncident(nil), f.incidents...), nil
+}
+
+func (f *executionPlatformFakePorts) GetCoordinatorIncident(_ context.Context, id string) (*database.CoordinatorIncident, error) {
+	f.readCalls++
+	for i := range f.incidents {
+		if f.incidents[i].ID == id {
+			incident := f.incidents[i]
+			return &incident, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *executionPlatformFakePorts) ListSessionFileActivity(context.Context, string, int) ([]database.SessionFileActivity, error) {
+	f.readCalls++
+	return append([]database.SessionFileActivity(nil), f.fileActivity...), nil
+}
+
 func executionPlatformTestServices(ports *executionPlatformFakePorts) ExecutionPlatformServices {
 	return ExecutionPlatformServices{
 		Sessions:           application.NewSessionService(nil, nil, nil, nil, nil, nil, nil, nil),
@@ -151,6 +174,7 @@ func executionPlatformTestServices(ports *executionPlatformFakePorts) ExecutionP
 		Git:                ports,
 		Tunnel:             ports,
 		Updates:            ports,
+		Conflicts:          ports,
 	}
 }
 
@@ -172,6 +196,7 @@ func executionPlatformDefinitionsForTest() []PlatformCapabilityDefinition {
 		sessionPlatformDefinitions(), sessionWatcherPlatformDefinitions(), sessionSuggestionPlatformDefinitions(),
 		fileExecutionPlatformDefinitions(), gitExecutionPlatformDefinitions(), hookExecutionPlatformDefinitions(),
 		voiceExecutionPlatformDefinitions(), tunnelExecutionPlatformDefinitions(), updateExecutionPlatformDefinitions(),
+		conflictPlatformDefinitions(),
 	}
 	var result []PlatformCapabilityDefinition
 	for _, group := range groups {
@@ -192,8 +217,8 @@ func executionPlatformActor(definitions []PlatformCapabilityDefinition) Actor {
 
 func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := executionPlatformDefinitionsForTest()
-	if len(definitions) != 44 {
-		t.Fatalf("execution surface has %d capabilities, want 44", len(definitions))
+	if len(definitions) != 47 {
+		t.Fatalf("execution surface has %d capabilities, want 47", len(definitions))
 	}
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -203,11 +228,11 @@ func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 		seen[definition.Name] = struct{}{}
 	}
 	capabilities, registry := executionPlatformTestRegistry(t, &executionPlatformFakePorts{})
-	if got := len(capabilities.List()); got != 44 {
-		t.Fatalf("application registry has %d execution capabilities, want 44", got)
+	if got := len(capabilities.List()); got != 47 {
+		t.Fatalf("application registry has %d execution capabilities, want 47", got)
 	}
-	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 44 {
-		t.Fatalf("platform discovery has %d execution capabilities, want 44", got)
+	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 47 {
+		t.Fatalf("platform discovery has %d execution capabilities, want 47", got)
 	}
 }
 
@@ -294,9 +319,10 @@ func TestExecutionPlatformMutationMetadataMatchesManifest(t *testing.T) {
 
 func TestExecutionPlatformReadSurfaceIsExplicit(t *testing.T) {
 	want := []string{
+		"conflicts.get", "conflicts.list",
 		"files.list", "files.preview_metadata", "files.read", "git.branches", "git.diff", "git.log", "git.show", "git.status",
-		"sessions.active", "sessions.events_status", "sessions.get", "sessions.history", "sessions.list", "tunnel.devices",
-		"tunnel.status", "update.check", "update.status",
+		"sessions.active", "sessions.events_status", "sessions.file_activity", "sessions.get", "sessions.history", "sessions.list",
+		"tunnel.devices", "tunnel.status", "update.check", "update.status",
 	}
 	var got []string
 	for _, definition := range executionPlatformDefinitionsForTest() {
@@ -388,6 +414,9 @@ func executionDryRunCases() []executionDryRunCase {
 		{name: "tunnel.confirm_pairing", target: `{}`, payload: `{"code":"123456"}`, secretText: []string{"123456"}},
 		{name: "update.status", target: `{}`, payload: `{}`},
 		{name: "update.check", target: `{}`, payload: `{}`},
+		{name: "conflicts.list", target: `{"project_id":1}`, payload: `{}`},
+		{name: "conflicts.get", target: `{"type":"conflict","id":"C-1"}`, payload: `{}`},
+		{name: "sessions.file_activity", target: `{"type":"session","id":"s1"}`, payload: `{}`},
 		{name: "update.apply", target: `{}`, payload: `{}`},
 	}
 }

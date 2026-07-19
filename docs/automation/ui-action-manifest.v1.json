@@ -152,6 +152,7 @@
     {"route":"/v1/logs","method":"POST","reason":"otel_ingest"},
     {"route":"/api/test/seed-token-usage","method":"POST","reason":"test_only"},
     {"route":"/api/test/sessions","method":"POST","reason":"test_only"},
+    {"route":"/api/test/sessions/{sessionID}/pty","method":"POST","reason":"test_only"},
     {"route":"/api/test/tunnel-jwt","method":"POST","reason":"test_only"}
   ]
 }
