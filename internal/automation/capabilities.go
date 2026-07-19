@@ -19,6 +19,7 @@ type commandAPI struct {
 	approvals    ApprovalGrantStore
 	waiter       OutboxWaiter
 	sessions     SessionStateStore
+	scopeStore   ProjectScopeStore
 	random       io.Reader
 	now          func() time.Time
 }

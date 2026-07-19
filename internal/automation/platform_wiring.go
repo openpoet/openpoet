@@ -63,6 +63,10 @@ type PlatformExecutionInput struct {
 	Target        json.RawMessage
 	Payload       json.RawMessage
 	Authorization application.ActionAuthorization
+	// ProjectScope is the acting client's resolved project_filter. Read-tier
+	// executors that list across projects (sessions.list) must intersect their
+	// results with it so a scoped client never sees another group's projects.
+	ProjectScope *ProjectScopeSet
 }
 
 type platformCapabilityService struct {
@@ -86,6 +90,25 @@ type PlatformCapabilityRegistry struct {
 	capabilities *application.CapabilityRegistry
 	mu           sync.RWMutex
 	bindings     map[application.CapabilityName]platformCapabilityBinding
+	scopeStore   ProjectScopeStore // resolves client project_filter tag membership (may be nil)
+}
+
+// SetProjectScopeStore wires the tag→projects resolver used to enforce a
+// client's project_filter centrally. Optional: a nil store means tag_ids in a
+// filter resolve to nothing (project_ids still apply).
+func (r *PlatformCapabilityRegistry) SetProjectScopeStore(store ProjectScopeStore) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.scopeStore = store
+	r.mu.Unlock()
+}
+
+func (r *PlatformCapabilityRegistry) projectScopeStore() ProjectScopeStore {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.scopeStore
 }
 
 func NewPlatformCapabilityRegistry(capabilities *application.CapabilityRegistry) (*PlatformCapabilityRegistry, error) {
@@ -241,10 +264,19 @@ func DispatchPlatformCapability(ctx context.Context, registry *PlatformCapabilit
 	if err != nil {
 		return PlatformDispatchResult{}, err
 	}
+	// Central project-scope enforcement: a client provisioned with a
+	// project_filter may only target projects inside its group. A target that
+	// names a project outside the filter fails closed with a typed out-of-scope
+	// error (list capabilities intersect their results downstream via ProjectScope).
+	scope := resolveActorProjectScope(ctx, registry.projectScopeStore(), request.Actor)
+	if pid := targetProjectID(target); !scope.Allows(pid) {
+		return PlatformDispatchResult{}, platformFailure("platform_project_out_of_scope", "the automation actor is not scoped to this project", false)
+	}
 	prepared, validateErr := binding.executor.Validate(ctx, PlatformExecutionInput{
 		Capability: request.Capability, Handler: binding.definition.Handler,
 		Scopes: append([]application.CapabilityScope(nil), binding.definition.Scopes...),
 		Target: target, Payload: payload, Authorization: authorization,
+		ProjectScope: scope,
 	})
 	if validateErr != nil {
 		return PlatformDispatchResult{}, redactPlatformExecutionError(validateErr)
