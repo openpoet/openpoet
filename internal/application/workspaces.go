@@ -222,9 +222,18 @@ func (s *WorkspaceService) Create(ctx context.Context, command CreateWorkspaceCo
 		if manifest, ok := readProjectManifest(project.Path); ok {
 			result, provErr := s.provisioner.Provision(ctx, project.ID, ws.ID, ws.Path, manifest)
 			if provErr != nil {
-				_ = s.db.SetWorkspaceStatus(ctx, ws.ID, "failed", "workspace.failed", actor)
+				// Tear down ANY partial provision before failing: an approval refusal
+				// executed nothing, but a setup/health failure may have allocated a
+				// port and spawned earlier services — Teardown kills those processes
+				// and releases their port rows so a failed provision never leaks a
+				// port (which would eventually exhaust the allocator range) or orphans
+				// a service.
 				var approval *workspace.ApprovalRequiredError
-				if errors.As(provErr, &approval) {
+				if !errors.As(provErr, &approval) {
+					_ = s.provisioner.Teardown(ctx, ws.ID)
+				}
+				_ = s.db.SetWorkspaceStatus(ctx, ws.ID, "failed", "workspace.failed", actor)
+				if approval != nil {
 					return nil, &ManifestApprovalRequiredError{SHA: approval.SHA}
 				}
 				return nil, fmt.Errorf("environment provision: %w", provErr)
@@ -271,6 +280,12 @@ func (s *WorkspaceService) ResolveAutoWorkspace(ctx context.Context, projectID i
 	if ws == nil {
 		return "", validationError("no_workspace_ready", "the main path is busy and no pooled workspace is ready — call workspaces.create and watch for workspace.ready")
 	}
+	// Best-effort pick: the atomic claim is the Reserve CAS in SessionService.Create.
+	// If two auto-creates race onto the same idle lane, the loser's Reserve fails
+	// and the create returns a retryable error — the client re-issues and this
+	// picker then hands out a different idle lane. (A single-shot atomic
+	// pick-and-reserve would avoid the retry; deferred as it needs a reservation
+	// token threaded through the create flow.)
 	return ws.ID, nil
 }
 
