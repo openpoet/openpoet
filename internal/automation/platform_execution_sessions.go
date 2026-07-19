@@ -165,6 +165,7 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if payload.Limit == 0 {
 			payload.Limit = 100
 		}
+		scope := input.ProjectScope // client project_filter: never leak other groups' sessions
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"limit": payload.Limit}), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
 			items, err := e.queries.ListSessions(ctx)
 			if err != nil {
@@ -174,6 +175,9 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 			for _, item := range items {
 				if payload.ProjectID > 0 && item.ProjectID != payload.ProjectID || payload.Status != "" && item.Status != payload.Status {
 					continue
+				}
+				if !scope.Allows(item.ProjectID) {
+					continue // outside the client's project_filter
 				}
 				views = append(views, sessionAutomationView(item, e.runtime))
 				if len(views) == payload.Limit {
@@ -239,6 +243,7 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if err := requireEmptyExecutionPayload(input.Payload); err != nil {
 			return nil, err
 		}
+		scope := input.ProjectScope
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, nil), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
 			items, err := e.queries.ListSessions(ctx)
 			if err != nil {
@@ -248,6 +253,9 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 			for _, item := range items {
 				if !e.runtime.IsSessionRunning(item.ID) {
 					continue
+				}
+				if !scope.Allows(item.ProjectID) {
+					continue // outside the client's project_filter
 				}
 				views = append(views, sessionAutomationView(item, e.runtime))
 				if len(views) == 500 {
