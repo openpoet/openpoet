@@ -36,10 +36,22 @@ var knownVerbs = map[string]struct{}{
 	verbMessage: {}, verbSetModel: {}, verbDismiss: {},
 }
 
-// destructiveVerbs may only be proposed under delegate mode; observe/assist
-// refuse-and-escalate them.
-var destructiveVerbs = map[string]struct{}{
-	verbStopSession: {}, verbSpawnSession: {},
+// verbAllowedInMode enforces the autonomy ladder:
+//
+//	observe  — advisory only: escalate to a human, or dismiss. NO session writes.
+//	assist   — + non-destructive session steering (message, set_model).
+//	delegate — + destructive verbs (stop, spawn), which STILL route through a
+//	           human grant at the dispatch layer.
+func verbAllowedInMode(verb, mode string) bool {
+	switch verb {
+	case verbEscalateHuman, verbDismiss:
+		return true // any non-off mode may escalate/dismiss
+	case verbMessage, verbSetModel:
+		return mode == "assist" || mode == "delegate"
+	case verbStopSession, verbSpawnSession:
+		return mode == "delegate"
+	}
+	return false
 }
 
 type action struct {
@@ -60,7 +72,9 @@ type Escalator func(ctx context.Context, incidentID, title, body string, extra m
 type Consultant struct {
 	db       *database.DB
 	registry *automation.PlatformCapabilityRegistry
-	provider func() llm.Provider // resolves the ai_coordinator slot (nil = unconfigured)
+	// provider resolves the ai_coordinator slot to (provider, model). A nil
+	// provider means the slot is UNASSIGNED — no consult, no spend.
+	provider func(ctx context.Context) (llm.Provider, string)
 	// mu serializes consults so the daily-budget check and the consult record
 	// are atomic across the concurrent per-incident goroutines — otherwise two
 	// consults both read count<cap before either records and both proceed.
@@ -74,7 +88,7 @@ type Consultant struct {
 	briefMaxLen int
 }
 
-func NewConsultant(db *database.DB, registry *automation.PlatformCapabilityRegistry, provider func() llm.Provider, persona func(ctx context.Context) string, escalate Escalator) *Consultant {
+func NewConsultant(db *database.DB, registry *automation.PlatformCapabilityRegistry, provider func(ctx context.Context) (llm.Provider, string), persona func(ctx context.Context) string, escalate Escalator) *Consultant {
 	return &Consultant{
 		db: db, registry: registry, provider: provider, personaFn: persona, escalate: escalate,
 		now: time.Now, budgetKey: "coordinator_daily_budget", defaultCap: 50, briefMaxLen: 4000,
@@ -115,9 +129,9 @@ func (c *Consultant) consult(ctx context.Context, inc coordinator.Incident) erro
 		return nil
 	}
 
-	provider := c.provider()
+	provider, model := c.provider(ctx)
 	if provider == nil {
-		// Unconfigured slot: no spend, no consult — just the existing escalation.
+		// Unassigned slot: no spend, no consult — just the existing escalation.
 		return nil
 	}
 
@@ -126,6 +140,7 @@ func (c *Consultant) consult(ctx context.Context, inc coordinator.Incident) erro
 		System:    c.personaFn(ctx),
 		Messages:  []llm.Message{{Role: "user", Content: []llm.ContentBlock{{Type: "text", Text: brief}}}},
 		MaxTokens: 512,
+		Model:     model, // pin the slot's model (e.g. haiku) so the consult is cheap
 	}
 	var text strings.Builder
 	resp, err := provider.StreamMessage(ctx, req, func(ev llm.StreamEvent) error {
@@ -182,8 +197,10 @@ func (c *Consultant) decideAndRecord(ctx context.Context, inc coordinator.Incide
 		c.escalateIncident(ctx, inc, "Coordinator: unknown action", fmt.Sprintf("The brain proposed an unrecognized action %q; escalating.", verb), "", cost)
 		return
 	}
-	// Dial gating: observe/assist may never DIRECTLY drive destructive verbs.
-	if _, destructive := destructiveVerbs[verb]; destructive && mode != "delegate" {
+	// Dial gating along the full ladder: observe is advisory-only (no session
+	// writes), assist adds non-destructive steering, delegate adds destructive
+	// verbs (still human-grant-gated downstream).
+	if !verbAllowedInMode(verb, mode) {
 		c.record(ctx, inc, verb, "refused_by_dial", cost)
 		c.escalateIncident(ctx, inc, "Coordinator action refused by policy", fmt.Sprintf("Action %q is not permitted in %q mode; escalating for a human.", verb, mode), "", cost)
 		return
@@ -200,16 +217,16 @@ func (c *Consultant) decideAndRecord(ctx context.Context, inc coordinator.Incide
 			c.escalateIncident(ctx, inc, "Coordinator escalation", strOr(act.Reason, "The coordinator escalated this conflict to a human."), "", cost)
 		}
 	case verbStopSession, verbMessage, verbSetModel:
-		if !c.sessionExists(ctx, act.SessionID) {
+		if !c.sessionExists(ctx, act.SessionID, inc.ProjectID) {
 			c.record(ctx, inc, verb, "invalid_session", cost)
-			c.escalateIncident(ctx, inc, "Coordinator: hallucinated session", fmt.Sprintf("Action %q named a non-existent session %q; escalating.", verb, act.SessionID), "", cost)
+			c.escalateIncident(ctx, inc, "Coordinator: hallucinated session", fmt.Sprintf("Action %q named a non-existent or cross-project session %q; escalating.", verb, act.SessionID), "", cost)
 			return
 		}
 		c.dispatchSessionVerb(ctx, inc, verb, act, cost)
 	case verbSpawnSession:
-		if act.TaskID != nil && *act.TaskID > 0 && !c.taskExists(ctx, *act.TaskID) {
+		if act.TaskID != nil && *act.TaskID > 0 && !c.taskExists(ctx, *act.TaskID, inc.ProjectID) {
 			c.record(ctx, inc, verb, "invalid_task", cost)
-			c.escalateIncident(ctx, inc, "Coordinator: hallucinated task", fmt.Sprintf("spawn_session named a non-existent task %d; escalating.", *act.TaskID), "", cost)
+			c.escalateIncident(ctx, inc, "Coordinator: hallucinated task", fmt.Sprintf("spawn_session named a non-existent or cross-project task %d; escalating.", *act.TaskID), "", cost)
 			return
 		}
 		c.dispatchSpawn(ctx, inc, act, cost)
