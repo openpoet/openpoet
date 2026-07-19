@@ -122,6 +122,7 @@ func NewCoordinatorHandler(store CoordinatorStore, deps Dependencies) http.Handl
 	router.Post("/sessions", c.startWorker)
 	router.Post("/sessions/{id}/input", c.sendToWorker)
 	router.Get("/sessions/{id}/wait", c.waitForSession)
+	router.Get("/sessions/{id}/report", c.getWorkerReport)
 	router.Get("/events/await", c.awaitEvents)
 	return router
 }
