@@ -908,7 +908,7 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		if role, _ := params["role"].(string); role != "" {
 			body["role"] = role
 		}
-		for _, key := range []string{"backend", "workspace_id", "isolation", "custom_prompt"} {
+		for _, key := range []string{"backend", "workspace_id", "isolation", "custom_prompt", "idempotency_key"} {
 			if v, _ := params[key].(string); v != "" {
 				body[key] = v
 			}

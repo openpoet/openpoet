@@ -109,6 +109,7 @@ func AppendEventOutbox(ctx context.Context, tx *sqlx.Tx, input EventOutboxAppend
 }
 
 func (d *DB) ListEventOutboxAfter(ctx context.Context, afterSequence int64, limit int) ([]EventOutboxEvent, error) {
+	// Pure read: served by the WAL read pool (long-poll scan hot path).
 	if afterSequence < 0 {
 		return nil, errors.New("event outbox cursor cannot be negative")
 	}
@@ -119,7 +120,7 @@ func (d *DB) ListEventOutboxAfter(ctx context.Context, afterSequence int64, limi
 		return nil, errors.New("event outbox limit cannot exceed 1000")
 	}
 	var events []EventOutboxEvent
-	if err := d.SelectContext(ctx, &events, `
+	if err := d.Reader().SelectContext(ctx, &events, `
 		SELECT * FROM event_outbox
 		WHERE sequence > ?
 		ORDER BY sequence ASC
