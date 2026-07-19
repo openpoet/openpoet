@@ -655,11 +655,22 @@ class OpenPoet {
             ? `Trabalhadoras <span class="mv-count">${liveCount} ativa${liveCount > 1 ? 's' : ''}</span>`
             : 'Trabalhadoras';
 
+        // A coordenadora (a sessão que rege a missão) — entrada de primeira classe.
+        const coordStatus = p.coordinator_status || '';
+        const coordLive = isLive(coordStatus);
+        const coordId = esc((m.coordinator_session_id || '').slice(0, 8));
+        const coordHTML = m.coordinator_session_id ? `
+            <div class="mv-row mv-coord${coordLive ? ' mv-worker mv-live' : ''}"${coordLive ? ` role="button" tabindex="0" onclick="app.openMissionSession('${esc(m.coordinator_session_id)}')"` : ''}>
+                <div class="mv-row-main">${coordStatus ? badge(coordStatus) : '<span class="mv-status mv-stopped">encerrada</span>'}<span class="mv-row-title">Coordenadora <span class="mv-tagword">maestro</span></span></div>
+                <div class="mv-row-meta"><span class="mv-mono mv-break">${coordId}</span>${coordLive ? ` · <span class="mv-open">abrir ›</span>` : ''}</div>
+            </div>` : '';
+
         c.innerHTML = `<div class="mv-grid">
             <div class="mv-card mv-full">
                 <h4>Missão #${esc(m.id)}</h4>
                 <div class="mv-goal">${esc(m.goal)}</div>
-                <div class="mv-meta">${badge(m.status)} · coordenadora <span class="mv-mono mv-break">${esc(m.coordinator_session_id)}</span> · criada ${esc(m.created_at)}</div>
+                <div class="mv-meta">${badge(m.status)} · criada ${esc(m.created_at)}</div>
+                ${coordHTML}
             </div>
             <div class="mv-card"><h4>${workersTitle}</h4>${workersHTML}</div>
             <div class="mv-card"><h4>Worktrees</h4>${wsHTML}</div>

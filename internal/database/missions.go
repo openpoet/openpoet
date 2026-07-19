@@ -312,6 +312,10 @@ type MissionPanel struct {
 	Workspaces []Workspace          `json:"workspaces"`
 	Documents  []TempDocument       `json:"documents"`
 	Timeline   []MissionPanelEvent  `json:"timeline"`
+	// CoordinatorStatus is the live session status of the elected coordinator
+	// (empty when the session row no longer exists) — the panel renders it as
+	// a first-class entry, not just a raw id.
+	CoordinatorStatus string `json:"coordinator_status"`
 }
 
 // GetMissionPanel aggregates the panel (nil when the mission does not exist).
@@ -327,6 +331,15 @@ func (d *DB) GetMissionPanel(ctx context.Context, missionID int64) (*MissionPane
 	panel := &MissionPanel{Mission: &mission,
 		Workers: []MissionPanelWorker{}, Workspaces: []Workspace{},
 		Documents: []TempDocument{}, Timeline: []MissionPanelEvent{}}
+
+	// Live status of the coordinator session (best-effort; the row may be gone).
+	if mission.CoordinatorSessionID != "" {
+		var coordStatus string
+		if err := d.Reader().GetContext(ctx, &coordStatus,
+			"SELECT status FROM sessions WHERE id = ?", mission.CoordinatorSessionID); err == nil {
+			panel.CoordinatorStatus = coordStatus
+		}
+	}
 
 	var workers []MissionWorker
 	if err := d.Reader().SelectContext(ctx, &workers,
