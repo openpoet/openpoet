@@ -75,6 +75,8 @@ var migrations = []Migration{
 	{Version: 57, Description: "sessions: add per-session MCP and hook token hashes", Up: migrateV57},
 	{Version: 58, Description: "coordinator: add session_file_activity claim ledger", Up: migrateV58},
 	{Version: 59, Description: "coordinator: add conflict incidents table", Up: migrateV59},
+	{Version: 60, Description: "workspaces: add workspaces table (full phase-N schema)", Up: migrateV60},
+	{Version: 61, Description: "sessions: add work_dir and workspace_id columns", Up: migrateV61},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1610,6 +1612,57 @@ func migrateV59(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV59 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV60(tx *sqlx.Tx) error {
+	// Full phase-N schema from day one: SQLite CHECK constraints cannot be
+	// widened additively, so the status/kind enums carry every future state
+	// now (Phase 2 uses provisioning→ready→leased→failed→removed only).
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS workspaces (
+			id TEXT PRIMARY KEY,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			kind TEXT NOT NULL DEFAULT 'worktree' CHECK(kind IN ('worktree', 'copy', 'external')),
+			name TEXT NOT NULL,
+			branch TEXT NOT NULL,
+			base_ref TEXT NOT NULL,
+			path TEXT NOT NULL,
+			task_id INTEGER REFERENCES project_tasks(id) ON DELETE SET NULL,
+			status TEXT NOT NULL DEFAULT 'provisioning' CHECK(status IN ('provisioning', 'ready', 'leased', 'dirty', 'tearing_down', 'failed', 'merged', 'removed')),
+			keep_on_exit INTEGER NOT NULL DEFAULT 0,
+			leased_by_session_id TEXT,
+			lease_expires_at TIMESTAMP,
+			manifest_sha256 TEXT,
+			resources_json TEXT CHECK(resources_json IS NULL OR json_valid(resources_json)),
+			last_summary_json TEXT CHECK(last_summary_json IS NULL OR json_valid(last_summary_json)),
+			version INTEGER NOT NULL DEFAULT 1,
+			created_by_actor TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_project_name_active ON workspaces(project_id, name) WHERE status NOT IN ('removed', 'failed')`,
+		`CREATE INDEX IF NOT EXISTS idx_workspaces_project_status ON workspaces(project_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_workspaces_lease ON workspaces(leased_by_session_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV60 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV61(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE sessions ADD COLUMN work_dir TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV61 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

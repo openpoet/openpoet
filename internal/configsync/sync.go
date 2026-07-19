@@ -78,10 +78,22 @@ func syncDirection(fileMtime, dbUpdatedAt time.Time) string {
 
 // syncMemoryDocLocal syncs a memory doc file (CLAUDE.md / AGENTS.md) bidirectionally
 // with the database, keeping the newest version based on timestamp comparison.
-func (cs *ConfigSyncer) syncMemoryDocLocal(ctx context.Context, project *database.Project, mdPath string) {
+// In materialize-only mode (workspace lanes) the DB is authoritative and the
+// file is never imported — a lane edit must not overwrite the shared memory doc.
+func (cs *ConfigSyncer) syncMemoryDocLocal(ctx context.Context, project *database.Project, mdPath string, materializeOnly bool) {
 	fileInfo, fileErr := os.Stat(mdPath)
 	dbDoc, dbErr := cs.db.GetMemoryDoc(ctx, project.ID)
 	baseName := filepath.Base(mdPath)
+
+	if materializeOnly {
+		if dbErr == nil {
+			os.WriteFile(mdPath, []byte(dbDoc.Content), 0644)
+			cs.reportProgress(project.ID, "memory_doc", "done", "Memory doc materialized to "+baseName)
+		} else {
+			cs.reportProgress(project.ID, "memory_doc", "done", "No memory doc to materialize")
+		}
+		return
+	}
 
 	switch {
 	case fileErr == nil && dbErr == nil:
@@ -169,20 +181,41 @@ func (cs *ConfigSyncer) SyncToProject(ctx context.Context, project *database.Pro
 	return cs.syncToRemote(ctx, project)
 }
 
+// MaterializeToWorkspace provisions a workspace lane's agent-config layer
+// (.claude/skills, hooks bridge, settings hooks block, CLAUDE.md) WITHOUT any
+// of the disk→DB write-back halves. N lanes syncing through here can never
+// ping-pong skills or memory docs through the database — the invariant is
+// ZERO database writes on this path. The caller passes a shallow Project copy
+// whose Path is the lane directory. Local claude-style projects only.
+func (cs *ConfigSyncer) MaterializeToWorkspace(ctx context.Context, project *database.Project) error {
+	if project.Type != "local" {
+		return fmt.Errorf("materialize-only sync supports local projects only")
+	}
+	return cs.syncToLocalMode(ctx, project, true)
+}
+
 func (cs *ConfigSyncer) syncToLocal(ctx context.Context, project *database.Project) error {
-	// Copilot projects use a different sync path
-	if project.Backend == "copilot" {
-		return cs.syncToLocalCopilot(ctx, project)
-	}
-	// ACP projects use .acp/ directory
-	if project.Backend == "acp" {
-		return cs.syncToLocalACP(ctx, project)
-	}
-	if project.Backend == "codex" {
-		return cs.syncToLocalCodex(ctx, project)
-	}
-	if project.Backend == "opencode" {
-		return cs.syncToLocalOpenCode(ctx, project)
+	return cs.syncToLocalMode(ctx, project, false)
+}
+
+func (cs *ConfigSyncer) syncToLocalMode(ctx context.Context, project *database.Project, materializeOnly bool) error {
+	// Backend-specific sync paths never run materialize-only (workspace lanes
+	// are claude-style only in the MVP; WorkspaceService enforces that).
+	if !materializeOnly {
+		// Copilot projects use a different sync path
+		if project.Backend == "copilot" {
+			return cs.syncToLocalCopilot(ctx, project)
+		}
+		// ACP projects use .acp/ directory
+		if project.Backend == "acp" {
+			return cs.syncToLocalACP(ctx, project)
+		}
+		if project.Backend == "codex" {
+			return cs.syncToLocalCodex(ctx, project)
+		}
+		if project.Backend == "opencode" {
+			return cs.syncToLocalOpenCode(ctx, project)
+		}
 	}
 
 	projectPath := project.Path
@@ -206,19 +239,25 @@ func (cs *ConfigSyncer) syncToLocal(ctx context.Context, project *database.Proje
 	}
 	cs.reportProgress(project.ID, "hooks", "done", "Hook scripts synced")
 
-	// Auto-detect: import skills from disk before pushing DB skills
-	cs.importSkillsFromDisk(ctx, skillsDir, project)
+	// Auto-detect: import skills from disk before pushing DB skills.
+	// WRITE-BACK half — never runs against a workspace lane.
+	if !materializeOnly {
+		cs.importSkillsFromDisk(ctx, skillsDir, project)
+	}
 
 	// Sync skills with smart tracking
 	cs.reportProgress(project.ID, "skills", "running", "Syncing skills...")
-	if err := cs.syncSkillsToLocal(ctx, skillsDir, project); err != nil {
+	if err := cs.syncSkillsToLocal(ctx, skillsDir, project, materializeOnly); err != nil {
 		cs.reportProgress(project.ID, "skills", "error", err.Error())
 		return fmt.Errorf("failed to sync skills: %w", err)
 	}
 	cs.reportProgress(project.ID, "skills", "done", "Skills synced")
 
-	// Auto-detect: import MCP servers from .mcp.json
-	cs.importMCPsFromDisk(ctx, projectPath, project)
+	// Auto-detect: import MCP servers from .mcp.json.
+	// WRITE-BACK half — never runs against a workspace lane.
+	if !materializeOnly {
+		cs.importMCPsFromDisk(ctx, projectPath, project)
+	}
 
 	// MCP servers are passed via --mcp-config CLI flag at session start.
 	cs.reportProgress(project.ID, "mcps", "done", "MCP servers configured via CLI flag at session start")
@@ -241,9 +280,9 @@ func (cs *ConfigSyncer) syncToLocal(ctx context.Context, project *database.Proje
 	}
 	cs.reportProgress(project.ID, "settings", "done", "Hooks synced")
 
-	// Sync CLAUDE.md ↔ memory doc (keep newest)
+	// Sync CLAUDE.md ↔ memory doc (keep newest; lanes get DB→file only)
 	cs.reportProgress(project.ID, "memory_doc", "running", "Syncing CLAUDE.md...")
-	cs.syncMemoryDocLocal(ctx, project, filepath.Join(projectPath, "CLAUDE.md"))
+	cs.syncMemoryDocLocal(ctx, project, filepath.Join(projectPath, "CLAUDE.md"), materializeOnly)
 
 	return nil
 }
@@ -297,7 +336,7 @@ func (cs *ConfigSyncer) syncToLocalCopilot(ctx context.Context, project *databas
 	if _, err := os.Stat(agentsMDPath); os.IsNotExist(err) {
 		mdPath = claudeMDPath
 	}
-	cs.syncMemoryDocLocal(ctx, project, mdPath)
+	cs.syncMemoryDocLocal(ctx, project, mdPath, false)
 
 	return nil
 }
@@ -579,7 +618,7 @@ func (cs *ConfigSyncer) getSkillsForProject(ctx context.Context, project *databa
 
 // syncSkillsToLocal syncs skills to a local project, tracking which files OpenPoet manages.
 // Skills are written as .claude/skills/<name>/SKILL.md with YAML frontmatter.
-func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string, project *database.Project) error {
+func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string, project *database.Project, materializeOnly bool) error {
 	projectID := project.ID
 
 	skills, err := cs.getSkillsForProject(ctx, project)
@@ -593,9 +632,11 @@ func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string,
 		expectedDirs[skill.Name] = true
 	}
 
-	// Get previously synced files for this project
+	// Get previously synced files for this project. Skipped in materialize-only
+	// mode: the tracking table is keyed by project ID and shared with the main
+	// checkout — a lane must neither read nor mutate it.
 	var syncedFiles []database.SyncedSkillFile
-	if projectID > 0 {
+	if projectID > 0 && !materializeOnly {
 		syncedFiles, _ = cs.db.ListSyncedSkillFiles(ctx, projectID)
 		// Clean up stale ones
 		for _, sf := range syncedFiles {
@@ -629,7 +670,7 @@ func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string,
 		shouldWriteFile := true // default for new skills or global skills
 
 		// For project skills: compare file mtime vs DB updated_at, keep newest
-		if skill.ProjectSkillID > 0 {
+		if skill.ProjectSkillID > 0 && !materializeOnly {
 			if info, err := os.Stat(skillFilePath); err == nil {
 				dir := syncDirection(info.ModTime(), skill.UpdatedAt)
 				if dir == "file" {
@@ -671,8 +712,8 @@ func (cs *ConfigSyncer) syncSkillsToLocal(ctx context.Context, skillsDir string,
 		legacyPath := filepath.Join(skillsDir, skill.Name+".md")
 		os.Remove(legacyPath)
 
-		// Track with new format
-		if projectID > 0 {
+		// Track with new format (zero DB writes in materialize-only mode)
+		if projectID > 0 && !materializeOnly {
 			if skill.GlobalSkillID > 0 {
 				cs.db.UpsertSyncedSkillFile(ctx, projectID, skill.GlobalSkillID, trackedName)
 				cs.db.IncrementSkillSyncCount(ctx, skill.GlobalSkillID)
@@ -1455,7 +1496,7 @@ func (cs *ConfigSyncer) syncToLocalACP(ctx context.Context, project *database.Pr
 	if _, err := os.Stat(agentsMDPath); os.IsNotExist(err) {
 		mdPath = claudeMDPath
 	}
-	cs.syncMemoryDocLocal(ctx, project, mdPath)
+	cs.syncMemoryDocLocal(ctx, project, mdPath, false)
 
 	return nil
 }
@@ -1477,7 +1518,7 @@ func (cs *ConfigSyncer) syncToLocalCodex(ctx context.Context, project *database.
 
 	cs.reportProgress(project.ID, "skills", "running", "Syncing skills to .agents/skills...")
 	cs.importSkillsFromDisk(ctx, agentsSkillsDir, project)
-	if err := cs.syncSkillsToLocal(ctx, agentsSkillsDir, project); err != nil {
+	if err := cs.syncSkillsToLocal(ctx, agentsSkillsDir, project, false); err != nil {
 		cs.reportProgress(project.ID, "skills", "error", err.Error())
 		return fmt.Errorf("failed to sync Codex skills: %w", err)
 	}
@@ -1530,7 +1571,7 @@ func (cs *ConfigSyncer) syncToLocalOpenCode(ctx context.Context, project *databa
 
 	cs.reportProgress(project.ID, "skills", "running", "Syncing skills to .opencode/skills...")
 	cs.importSkillsFromDisk(ctx, openCodeSkillsDir, project)
-	if err := cs.syncSkillsToLocal(ctx, openCodeSkillsDir, project); err != nil {
+	if err := cs.syncSkillsToLocal(ctx, openCodeSkillsDir, project, false); err != nil {
 		cs.reportProgress(project.ID, "skills", "error", err.Error())
 		return fmt.Errorf("failed to sync OpenCode skills: %w", err)
 	}
