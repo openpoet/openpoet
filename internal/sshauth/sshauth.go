@@ -11,7 +11,6 @@ import (
 	"os"
 	"strconv"
 	"sync"
-	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -92,14 +91,25 @@ func HostKeyCallback() ssh.HostKeyCallback {
 			port = 22
 		}
 		fingerprint := ssh.FingerprintSHA256(key)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+		// NO cancelable/timeout context here: a cancel mid-write on the single
+		// write connection is the documented poisoning class. Ledger ops are
+		// local SQLite and fast; hanging is not the realistic failure mode.
+		ctx := context.Background()
 		recorded, err := ledger.GetSSHKnownHost(ctx, host, port, key.Type())
 		if err != nil {
 			return fmt.Errorf("ssh known-host ledger read failed: %w", err)
 		}
 		if recorded == "" {
-			return ledger.RecordSSHKnownHost(ctx, host, port, key.Type(), fingerprint)
+			if err := ledger.RecordSSHKnownHost(ctx, host, port, key.Type(), fingerprint); err != nil {
+				return fmt.Errorf("ssh known-host ledger write failed: %w", err)
+			}
+			// Two concurrent FIRST contacts can race (INSERT is DO NOTHING):
+			// re-read and require OUR key to be the recorded one, so a diverging
+			// simultaneous first contact fails closed instead of slipping by.
+			recorded, err = ledger.GetSSHKnownHost(ctx, host, port, key.Type())
+			if err != nil {
+				return fmt.Errorf("ssh known-host ledger read failed: %w", err)
+			}
 		}
 		if recorded != fingerprint {
 			return fmt.Errorf("%w (host %s:%d, key %s)", ErrHostKeyMismatch, host, port, key.Type())
