@@ -78,6 +78,7 @@ var migrations = []Migration{
 	{Version: 60, Description: "workspaces: add workspaces table (full phase-N schema)", Up: migrateV60},
 	{Version: 61, Description: "sessions: add work_dir and workspace_id columns", Up: migrateV61},
 	{Version: 62, Description: "sessions: add parent_session_id and spawned_by lineage columns", Up: migrateV62},
+	{Version: 63, Description: "brain v1: coordinator_mode dial, ai_coordinator slot, Coordinator persona, coordinator_consults ledger", Up: migrateV63},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1677,6 +1678,40 @@ func migrateV62(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV62 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV63(tx *sqlx.Tx) error {
+	stmts := []string{
+		// Per-project autonomy dial for the coordinator brain (task_auto_approve
+		// precedent). 'off' = the brain never consults for this project.
+		`ALTER TABLE projects ADD COLUMN coordinator_mode TEXT NOT NULL DEFAULT 'off'
+			CHECK(coordinator_mode IN ('off', 'observe', 'assist', 'delegate'))`,
+		// The 4th provider slot for the one-shot consult brain.
+		`INSERT OR IGNORE INTO ai_config_assignments (slot, config_id) VALUES ('ai_coordinator', NULL)`,
+		// The Coordinator persona: the closed-vocabulary system prompt.
+		`INSERT OR IGNORE INTO ai_agents (name, system_prompt, tool_policy, project_filter, is_default, enabled)
+			VALUES ('Coordinator',
+				'You are OpenPoet''s fleet coordinator. When shown a conflict incident, respond with EXACTLY ONE JSON object choosing one action from this closed vocabulary: escalate_human, stop_session, spawn_session, message_session, set_model, dismiss. No prose, no markdown. Fields: {"action": <verb>, "reason": <string>, "session_id"?: <id>, "task_id"?: <int>, "brief"?: <string>, "model"?: <string>, "text"?: <string>}.',
+				'{}', '{}', 0, 1)`,
+		// Durable per-consult ledger: one row per brain consult, used for the
+		// daily budget counter and the audit trail.
+		`CREATE TABLE IF NOT EXISTS coordinator_consults (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			incident_id TEXT NOT NULL,
+			project_id INTEGER NOT NULL,
+			action TEXT NOT NULL DEFAULT '',
+			decision TEXT NOT NULL DEFAULT '',
+			cost_usd REAL NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_coordinator_consults_day ON coordinator_consults(project_id, created_at)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV63 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

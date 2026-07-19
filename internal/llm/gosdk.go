@@ -158,7 +158,8 @@ func (p *GoSDKProvider) buildMCPServer(convID int64) *claudecode.McpSdkServerCon
 	return claudecode.CreateSDKMcpServer("openpoet", "1.0.0", tools...)
 }
 
-// buildOneShotOptions creates SDK options for one-shot queries (no MCP, no budget).
+// buildOneShotOptions creates SDK options for one-shot queries (no MCP; a USD
+// budget cap is applied when one is configured).
 func (p *GoSDKProvider) buildOneShotOptions(req *Request) []claudecode.Option {
 	opts := []claudecode.Option{
 		claudecode.WithPermissionMode(claudecode.PermissionModeBypassPermissions),
@@ -179,6 +180,14 @@ func (p *GoSDKProvider) buildOneShotOptions(req *Request) []claudecode.Option {
 		model = DefaultModel
 	}
 	opts = append(opts, claudecode.WithModel(model))
+
+	// Defense-in-depth: cap one-shot spend at the same USD ceiling as interactive
+	// clients when a budget is configured. One-shot queries (e.g. the coordinator
+	// brain consult) are bounded by MaxTokens, but a hard USD cap prevents a
+	// runaway from ever exceeding the operator's budget.
+	if p.budgetUSD > 0 {
+		opts = append(opts, claudecode.WithMaxBudgetUSD(p.budgetUSD))
+	}
 
 	if req.System != "" {
 		opts = append(opts, claudecode.WithSystemPrompt(req.System))

@@ -74,9 +74,10 @@ func (d *DB) migrate() error {
 // Project operations
 func (d *DB) CreateProject(ctx context.Context, p *Project) error {
 	p.TaskAutoApproveVerification = normalizeTaskAutoApproveVerification(p.TaskAutoApproveVerification)
-	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv, tool_policy, skill_policy, backend, backend_config, task_auto_approve_verification)
-			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification)
+	p.CoordinatorMode = normalizeCoordinatorMode(p.CoordinatorMode)
+	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv, tool_policy, skill_policy, backend, backend_config, task_auto_approve_verification, coordinator_mode)
+			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification, p.CoordinatorMode)
 	if err != nil {
 		return err
 	}
@@ -116,8 +117,9 @@ func (d *DB) ListProjects(ctx context.Context) ([]Project, error) {
 
 func (d *DB) UpdateProject(ctx context.Context, p *Project) error {
 	p.TaskAutoApproveVerification = normalizeTaskAutoApproveVerification(p.TaskAutoApproveVerification)
-	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, tool_policy=?, skill_policy=?, dangerously_skip_permissions=?, backend=?, backend_config=?, task_auto_approve_verification=?, updated_at=? WHERE id=?`
-	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.DangerouslySkipPermissions, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification, time.Now(), p.ID)
+	p.CoordinatorMode = normalizeCoordinatorMode(p.CoordinatorMode)
+	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, tool_policy=?, skill_policy=?, dangerously_skip_permissions=?, backend=?, backend_config=?, task_auto_approve_verification=?, coordinator_mode=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.DangerouslySkipPermissions, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification, p.CoordinatorMode, time.Now(), p.ID)
 	return err
 }
 
@@ -127,6 +129,15 @@ func normalizeTaskAutoApproveVerification(value string) string {
 		return strings.TrimSpace(value)
 	default:
 		return "inherit"
+	}
+}
+
+func normalizeCoordinatorMode(value string) string {
+	switch strings.TrimSpace(value) {
+	case "observe", "assist", "delegate":
+		return strings.TrimSpace(value)
+	default:
+		return "off"
 	}
 }
 
@@ -1209,6 +1220,15 @@ func (d *DB) GetAIAgent(ctx context.Context, id int64) (*AIAgent, error) {
 	var a AIAgent
 	err := d.GetContext(ctx, &a, "SELECT * FROM ai_agents WHERE id = ?", id)
 	return &a, err
+}
+
+func (d *DB) GetAIAgentByName(ctx context.Context, name string) (*AIAgent, error) {
+	var a AIAgent
+	err := d.GetContext(ctx, &a, "SELECT * FROM ai_agents WHERE name = ?", name)
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
 }
 
 func (d *DB) GetDefaultAIAgent(ctx context.Context) (*AIAgent, error) {
