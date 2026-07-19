@@ -386,8 +386,10 @@ func main() {
 	hookHandler.OnToolEvent = coord.OnHookEvent
 	sessionMgr.OnSessionAttention = coord.RecordAttention
 	// Phase 3: the radar's first synchronous hand — deny a write permission
-	// when the file is contested by another live session.
+	// when the file is contested by another live session, and drop the denied
+	// session's claim so it cannot mutually lock out the real holder.
 	hookHandler.ConsultConflict = coord.ConsultWrite
+	hookHandler.ReleaseClaim = coord.ReleaseClaim
 
 	// Provision the built-in coordinator automation client (grant-gated: no
 	// approvals scopes) and drop its one-time token next to the DB.

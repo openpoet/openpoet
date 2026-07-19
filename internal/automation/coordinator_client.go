@@ -36,6 +36,7 @@ type coordinatorClientStore interface {
 	ClientProvisioner
 	GetAutomationClientByName(ctx context.Context, name string) (*database.AutomationClient, error)
 	SetAutomationClientEnabled(ctx context.Context, id string, enabled bool) error
+	DeleteAutomationClient(ctx context.Context, id string) error
 }
 
 // EnsureCoordinatorClient provisions the 'coordinator' automation client if it
@@ -52,7 +53,15 @@ func EnsureCoordinatorClient(ctx context.Context, store coordinatorClientStore, 
 		return fmt.Errorf("checking for coordinator client: %w", err)
 	}
 	if existing != nil {
-		return nil // already provisioned
+		if existing.Enabled {
+			return nil // already provisioned and usable
+		}
+		// A disabled row is the token-persist-failure marker: its plaintext
+		// token was never emitted, so it is unreachable. Delete and re-provision
+		// rather than short-circuiting every future boot into a bricked state.
+		if err := store.DeleteAutomationClient(ctx, existing.ID); err != nil {
+			return fmt.Errorf("removing bricked coordinator client: %w", err)
+		}
 	}
 	provisioned, err := ProvisionClient(ctx, store, CoordinatorClientName, coordinatorScopes, nil)
 	if err != nil {
