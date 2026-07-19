@@ -80,6 +80,9 @@ func (a *commandAPI) awaitEvents(w http.ResponseWriter, r *http.Request) {
 	filter := strings.TrimSpace(r.URL.Query().Get("filter"))
 	timeout := parseAwaitTimeout(r.URL.Query().Get("timeout"))
 	deadline := time.After(timeout)
+	// Honor project_filter on the long-poll path too (parity with GET /events and
+	// the SSE stream): a scoped client is never woken by another group's event.
+	scope := resolveActorProjectScope(r.Context(), a.scopeStore, actor)
 
 	for {
 		// Take the wake channel BEFORE reading, so a commit racing the read is
@@ -98,6 +101,7 @@ func (a *commandAPI) awaitEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		after = next
+		matched = filterEventsByScope(matched, scope)
 		if len(matched) > 0 {
 			cursor := strconv.FormatInt(next, 10)
 			writeJSON(w, http.StatusOK, eventPage{Events: matched, NextCursor: &cursor, HasMore: false})
