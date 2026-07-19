@@ -34,7 +34,9 @@ const (
 
 var (
 	workspaceNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-	workspaceRefRe  = regexp.MustCompile(`^[a-zA-Z0-9_./:~^{}\-@]+$`)
+	// No leading dash: a base_ref like "--lock" would otherwise be parsed by
+	// git as a FLAG on worktree add, not a commit-ish (option injection).
+	workspaceRefRe = regexp.MustCompile(`^[a-zA-Z0-9_./:~^{}@][a-zA-Z0-9_./:~^{}\-@]*$`)
 )
 
 // WorkspaceService owns the lane lifecycle for Phase 2: create (git worktree
@@ -144,9 +146,22 @@ func (s *WorkspaceService) Create(ctx context.Context, command CreateWorkspaceCo
 		_ = s.db.SetWorkspaceStatus(ctx, ws.ID, "failed", "workspace.failed", actor)
 		return nil, fmt.Errorf("preparing git exclude: %w", err)
 	}
-	if _, err := s.git.RunGit(ctx, project, "worktree", "add", "-b", ws.Branch, ws.Path, ws.BaseRef); err != nil {
+	// A previous lane with unmerged commits leaves its branch behind (branch -d
+	// refuses, by design — that IS the safety net). Recreating the name
+	// attaches to the surviving branch instead of failing forever on -b.
+	branchExists := false
+	if _, err := s.git.RunGit(ctx, project, "rev-parse", "--verify", "--quiet", "refs/heads/"+ws.Branch); err == nil {
+		branchExists = true
+	}
+	var addErr error
+	if branchExists {
+		_, addErr = s.git.RunGit(ctx, project, "worktree", "add", ws.Path, ws.Branch)
+	} else {
+		_, addErr = s.git.RunGit(ctx, project, "worktree", "add", "-b", ws.Branch, ws.Path, ws.BaseRef)
+	}
+	if addErr != nil {
 		_ = s.db.SetWorkspaceStatus(ctx, ws.ID, "failed", "workspace.failed", actor)
-		return nil, fmt.Errorf("git worktree add: %w", err)
+		return nil, fmt.Errorf("git worktree add: %w", addErr)
 	}
 
 	// Materialize the agent-config layer into the lane (zero DB writes).
@@ -233,14 +248,30 @@ func (s *WorkspaceService) Remove(ctx context.Context, command RemoveWorkspaceCo
 	if err != nil {
 		return nil, notFoundError("project_not_found", "Project not found", err)
 	}
+	// Confinement re-check before ANY destructive disk operation: the only
+	// paths this service ever deletes live under the managed root. A tampered
+	// or corrupted row must never point remove --force anywhere else.
+	managedRoot := filepath.Join(project.Path, filepath.FromSlash(workspaceRootRel)) + string(filepath.Separator)
+	if !strings.HasPrefix(ws.Path, managedRoot) {
+		return nil, validationError("workspace_path_unmanaged", "Workspace path is outside the managed root; refusing to remove")
+	}
 	actor := EventActorValue(command.Authorization.Actor)
 	if _, err := s.git.RunGit(ctx, project, "worktree", "remove", "--force", ws.Path); err != nil {
-		// The directory may already be gone (manual cleanup); prune metadata
-		// and continue if so, otherwise surface the failure.
-		if _, statErr := os.Stat(ws.Path); statErr == nil {
+		switch {
+		case !pathExists(ws.Path):
+			// Directory already gone (manual cleanup): prune stale metadata.
+			_, _ = s.git.RunGit(ctx, project, "worktree", "prune")
+		case !s.worktreeRegistered(ctx, project, ws.Path):
+			// Directory exists but git no longer tracks it (pruned metadata):
+			// confined manual delete, then prune. Without this the row could
+			// never reach 'removed'.
+			if rmErr := os.RemoveAll(ws.Path); rmErr != nil {
+				return nil, fmt.Errorf("removing unregistered lane dir: %w", rmErr)
+			}
+			_, _ = s.git.RunGit(ctx, project, "worktree", "prune")
+		default:
 			return nil, fmt.Errorf("git worktree remove: %w", err)
 		}
-		_, _ = s.git.RunGit(ctx, project, "worktree", "prune")
 	}
 	// Lowercase -d: git itself refuses to delete an unmerged branch — the free
 	// safety net for lanes that accumulated commits.
@@ -249,6 +280,19 @@ func (s *WorkspaceService) Remove(ctx context.Context, command RemoveWorkspaceCo
 		return nil, err
 	}
 	return s.db.GetWorkspace(ctx, ws.ID)
+}
+
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+func (s *WorkspaceService) worktreeRegistered(ctx context.Context, project *database.Project, path string) bool {
+	out, err := s.git.RunGit(ctx, project, "worktree", "list", "--porcelain")
+	if err != nil {
+		return true // uncertain: stay conservative, refuse the manual delete
+	}
+	return strings.Contains(out, "worktree "+path)
 }
 
 // ResolveForSession validates that a workspace can host a new session.
@@ -272,9 +316,38 @@ func (s *WorkspaceService) ResolveForSession(ctx context.Context, project *datab
 	return ws, nil
 }
 
-// Lease binds the workspace to a freshly-started session.
-func (s *WorkspaceService) Lease(ctx context.Context, workspaceID, sessionID string) error {
-	return s.db.LeaseWorkspace(ctx, workspaceID, sessionID)
+// Reserve atomically claims a ready workspace before the session exists —
+// concurrent creates race on one CAS instead of double-booking the lane.
+func (s *WorkspaceService) Reserve(ctx context.Context, workspaceID string) (string, error) {
+	token := randomWorkspaceSuffix() + randomWorkspaceSuffix()
+	if err := s.db.ReserveWorkspace(ctx, workspaceID, token); err != nil {
+		return "", conflictError("workspace_not_ready", "Workspace is not ready to be leased")
+	}
+	return token, nil
+}
+
+// Bind converts a reservation into the real session lease.
+func (s *WorkspaceService) Bind(ctx context.Context, workspaceID, token, sessionID string) error {
+	return s.db.BindWorkspaceLease(ctx, workspaceID, token, sessionID)
+}
+
+// ReleaseReservation frees a reservation whose session never started.
+func (s *WorkspaceService) ReleaseReservation(ctx context.Context, workspaceID, token string) error {
+	return s.db.ReleaseWorkspaceReservation(ctx, workspaceID, token)
+}
+
+// ReLease re-takes the lane for a reopened/restored session: a ready lane, or
+// one the session still holds from before a crash.
+func (s *WorkspaceService) ReLease(ctx context.Context, workspaceID, sessionID string) error {
+	if err := s.db.LeaseWorkspaceForSession(ctx, workspaceID, sessionID); err != nil {
+		return conflictError("workspace_leased", "Workspace is leased by another session")
+	}
+	return nil
+}
+
+// ReleaseForSession frees whatever lease a session holds (failed reopen path).
+func (s *WorkspaceService) ReleaseForSession(ctx context.Context, sessionID string) error {
+	return s.db.ReleaseWorkspaceLeaseBySession(ctx, sessionID)
 }
 
 func randomWorkspaceSuffix() string {

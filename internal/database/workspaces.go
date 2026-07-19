@@ -133,16 +133,58 @@ func (d *DB) SetWorkspaceStatus(ctx context.Context, id, status, eventType, acto
 	return tx.Commit()
 }
 
-// LeaseWorkspace binds a ready workspace to a session.
-func (d *DB) LeaseWorkspace(ctx context.Context, workspaceID, sessionID string) error {
+// ReserveWorkspace atomically claims a ready workspace with a pending token
+// BEFORE the session exists, closing the resolve→start→lease double-booking
+// window: two concurrent creates race here on one CAS, not on a log line.
+func (d *DB) ReserveWorkspace(ctx context.Context, workspaceID, token string) error {
 	res, err := d.ExecContext(ctx,
 		`UPDATE workspaces SET leased_by_session_id = ?, status = 'leased', updated_at = CURRENT_TIMESTAMP
-		 WHERE id = ? AND status = 'ready'`, sessionID, workspaceID)
+		 WHERE id = ? AND status = 'ready'`, "pending:"+token, workspaceID)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("workspace %s is not ready to be leased", workspaceID)
+	}
+	return nil
+}
+
+// BindWorkspaceLease converts a pending reservation into the real session lease.
+func (d *DB) BindWorkspaceLease(ctx context.Context, workspaceID, token, sessionID string) error {
+	res, err := d.ExecContext(ctx,
+		`UPDATE workspaces SET leased_by_session_id = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND leased_by_session_id = ?`, sessionID, workspaceID, "pending:"+token)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("workspace %s reservation is gone", workspaceID)
+	}
+	return nil
+}
+
+// ReleaseWorkspaceReservation frees a pending reservation whose session never
+// materialized.
+func (d *DB) ReleaseWorkspaceReservation(ctx context.Context, workspaceID, token string) error {
+	_, err := d.ExecContext(ctx,
+		`UPDATE workspaces SET leased_by_session_id = NULL, status = 'ready', updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND leased_by_session_id = ?`, workspaceID, "pending:"+token)
+	return err
+}
+
+// LeaseWorkspaceForSession takes (or re-takes) the lease for a session:
+// a ready lane, or one this session already holds — the reopen/auto-restore
+// path, where the row may still carry the lease from before a crash.
+func (d *DB) LeaseWorkspaceForSession(ctx context.Context, workspaceID, sessionID string) error {
+	res, err := d.ExecContext(ctx,
+		`UPDATE workspaces SET leased_by_session_id = ?, status = 'leased', updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND (status = 'ready' OR leased_by_session_id = ?)`,
+		sessionID, workspaceID, sessionID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("workspace %s is leased by another session", workspaceID)
 	}
 	return nil
 }
@@ -153,6 +195,24 @@ func (d *DB) ReleaseWorkspaceLeaseBySession(ctx context.Context, sessionID strin
 		`UPDATE workspaces SET leased_by_session_id = NULL, status = 'ready', updated_at = CURRENT_TIMESTAMP
 		 WHERE leased_by_session_id = ? AND status = 'leased'`, sessionID)
 	return err
+}
+
+// ReleaseOrphanWorkspaceLeases is the boot-time sweep: frees leases held by
+// sessions that are no longer alive (crash-time strands, failed restores) and
+// pending reservations older than ten minutes. Returns rows freed.
+func (d *DB) ReleaseOrphanWorkspaceLeases(ctx context.Context) (int64, error) {
+	res, err := d.ExecContext(ctx,
+		`UPDATE workspaces SET leased_by_session_id = NULL, status = 'ready', updated_at = CURRENT_TIMESTAMP
+		 WHERE status = 'leased' AND (
+			(leased_by_session_id LIKE 'pending:%' AND updated_at < datetime('now', '-10 minutes'))
+			OR (leased_by_session_id NOT LIKE 'pending:%' AND leased_by_session_id NOT IN
+				(SELECT id FROM sessions WHERE status IN ('starting', 'running')))
+		 )`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 func (d *DB) GetWorkspace(ctx context.Context, id string) (*Workspace, error) {
@@ -167,11 +227,13 @@ func (d *DB) GetWorkspace(ctx context.Context, id string) (*Workspace, error) {
 	return &ws, nil
 }
 
-// GetActiveWorkspaceByName finds the non-removed workspace with this name.
+// GetActiveWorkspaceByName finds the workspace occupying this name. Removed
+// AND failed rows do not occupy a name — a failed create must be retryable
+// without a destructive-tier cleanup.
 func (d *DB) GetActiveWorkspaceByName(ctx context.Context, projectID int64, name string) (*Workspace, error) {
 	var ws Workspace
 	err := d.GetContext(ctx, &ws,
-		`SELECT * FROM workspaces WHERE project_id = ? AND name = ? AND status != 'removed'`, projectID, name)
+		`SELECT * FROM workspaces WHERE project_id = ? AND name = ? AND status NOT IN ('removed', 'failed')`, projectID, name)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
