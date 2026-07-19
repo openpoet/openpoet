@@ -107,6 +107,12 @@ type Coordinator struct {
 	// OnEscalate fires asynchronously once per newly-opened critical incident.
 	// Wired in main.go to the proactive-notification machinery.
 	OnEscalate func(inc Incident)
+
+	// OnBrainConsult fires asynchronously ONCE per newly-opened critical
+	// incident (no per-project rate limit — that would suppress consults for
+	// concurrent incidents). Wired in main.go to the one-shot LLM brain, which
+	// re-validates the proposed action against the project dial/budget/policy.
+	OnBrainConsult func(inc Incident)
 }
 
 func New(db *database.DB) *Coordinator {
