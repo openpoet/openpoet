@@ -32,6 +32,10 @@ func (s *automationStartSessionStore) GetTaskForSession(context.Context, string)
 	return s.task, nil
 }
 
+func (s *automationStartSessionStore) ProjectIDsForTags(_ context.Context, _ []int64) ([]int64, error) {
+	return nil, nil
+}
+
 func (s *automationStartSessionStore) GetMission(_ context.Context, _ int64) (*database.Mission, error) {
 	return nil, nil
 }
