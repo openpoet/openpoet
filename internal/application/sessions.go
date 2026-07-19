@@ -475,10 +475,16 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 	s.recordLineageAndWorkRun(ctx, command, created)
 	if command.MissionID != nil && *command.MissionID > 0 {
 		// Best-effort roster row — a registry failure never fails the session.
+		// The lane id comes from the RESOLVED workspace (the returned session
+		// struct does not carry the persisted workspace column).
+		laneID := ""
+		if workspace != nil {
+			laneID = workspace.ID
+		}
 		if err := s.store.UpsertMissionWorker(ctx, &database.MissionWorker{
 			MissionID: *command.MissionID, ProjectID: created.ProjectID,
 			Backend: created.Backend, SessionID: created.ID,
-			WorkspaceID: created.WorkspaceID.String, Role: command.MissionRole, Status: "running",
+			WorkspaceID: laneID, Role: command.MissionRole, Status: "running",
 		}); err != nil {
 			log.Printf("[Sessions] mission worker registration failed for %s: %v", created.ID, err)
 		}
