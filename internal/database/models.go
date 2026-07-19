@@ -21,6 +21,7 @@ type Project struct {
 	SkillPolicy                 string         `db:"skill_policy" json:"skill_policy,omitempty"` // '' = inherit global, 'custom' = per-project
 	DangerouslySkipPermissions  bool           `db:"dangerously_skip_permissions" json:"dangerously_skip_permissions"`
 	TaskAutoApproveVerification string         `db:"task_auto_approve_verification" json:"task_auto_approve_verification"` // 'inherit', 'enabled', or 'disabled'
+	CoordinatorMode             string         `db:"coordinator_mode" json:"coordinator_mode"`                             // 'off', 'observe', 'assist', or 'delegate'
 	Backend                     string         `db:"backend" json:"backend"`                                               // 'claude_code', 'copilot', 'acp', 'codex', or 'opencode'
 	BackendConfig               string         `db:"backend_config" json:"backend_config"`                                 // JSON blob for backend-specific settings
 	ConfigSyncedAt              sql.NullTime   `db:"config_synced_at" json:"config_synced_at,omitempty"`
@@ -41,6 +42,7 @@ type ProjectInput struct {
 	SkillPolicy                 string `json:"skill_policy,omitempty"`
 	DangerouslySkipPermissions  bool   `json:"dangerously_skip_permissions"`
 	TaskAutoApproveVerification string `json:"task_auto_approve_verification,omitempty"`
+	CoordinatorMode             string `json:"coordinator_mode,omitempty"`
 	Backend                     string `json:"backend,omitempty"`
 	BackendConfig               string `json:"backend_config,omitempty"`
 }

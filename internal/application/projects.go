@@ -183,6 +183,12 @@ func (s *ProjectService) projectFromInput(ctx context.Context, input database.Pr
 	if project.TaskAutoApproveVerification == "" {
 		project.TaskAutoApproveVerification = "inherit"
 	}
+	if input.CoordinatorMode != "" || current == nil {
+		project.CoordinatorMode = strings.TrimSpace(input.CoordinatorMode)
+	}
+	if project.CoordinatorMode == "" {
+		project.CoordinatorMode = "off"
+	}
 	if input.Backend != "" || current == nil {
 		project.Backend = strings.TrimSpace(input.Backend)
 	}
@@ -306,6 +312,11 @@ func validateProject(project *database.Project) error {
 	case "inherit", "enabled", "disabled":
 	default:
 		return validationError("invalid_task_auto_approve_verification", "Task verification auto-approval must be inherit, enabled, or disabled")
+	}
+	switch project.CoordinatorMode {
+	case "", "off", "observe", "assist", "delegate":
+	default:
+		return validationError("invalid_coordinator_mode", "Coordinator mode must be off, observe, assist, or delegate")
 	}
 	return nil
 }
