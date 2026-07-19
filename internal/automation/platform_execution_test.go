@@ -175,6 +175,7 @@ func executionPlatformTestServices(ports *executionPlatformFakePorts) ExecutionP
 		Tunnel:             ports,
 		Updates:            ports,
 		Conflicts:          ports,
+		Workspaces:         application.NewWorkspaceService(nil, nil, nil),
 	}
 }
 
@@ -196,7 +197,7 @@ func executionPlatformDefinitionsForTest() []PlatformCapabilityDefinition {
 		sessionPlatformDefinitions(), sessionWatcherPlatformDefinitions(), sessionSuggestionPlatformDefinitions(),
 		fileExecutionPlatformDefinitions(), gitExecutionPlatformDefinitions(), hookExecutionPlatformDefinitions(),
 		voiceExecutionPlatformDefinitions(), tunnelExecutionPlatformDefinitions(), updateExecutionPlatformDefinitions(),
-		conflictPlatformDefinitions(),
+		conflictPlatformDefinitions(), workspacePlatformDefinitions(),
 	}
 	var result []PlatformCapabilityDefinition
 	for _, group := range groups {
@@ -217,8 +218,8 @@ func executionPlatformActor(definitions []PlatformCapabilityDefinition) Actor {
 
 func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := executionPlatformDefinitionsForTest()
-	if len(definitions) != 47 {
-		t.Fatalf("execution surface has %d capabilities, want 47", len(definitions))
+	if len(definitions) != 51 {
+		t.Fatalf("execution surface has %d capabilities, want 51", len(definitions))
 	}
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -228,11 +229,11 @@ func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 		seen[definition.Name] = struct{}{}
 	}
 	capabilities, registry := executionPlatformTestRegistry(t, &executionPlatformFakePorts{})
-	if got := len(capabilities.List()); got != 47 {
-		t.Fatalf("application registry has %d execution capabilities, want 47", got)
+	if got := len(capabilities.List()); got != 51 {
+		t.Fatalf("application registry has %d execution capabilities, want 51", got)
 	}
-	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 47 {
-		t.Fatalf("platform discovery has %d execution capabilities, want 47", got)
+	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 51 {
+		t.Fatalf("platform discovery has %d execution capabilities, want 51", got)
 	}
 }
 
@@ -323,6 +324,7 @@ func TestExecutionPlatformReadSurfaceIsExplicit(t *testing.T) {
 		"files.list", "files.preview_metadata", "files.read", "git.branches", "git.diff", "git.log", "git.show", "git.status",
 		"sessions.active", "sessions.events_status", "sessions.file_activity", "sessions.get", "sessions.history", "sessions.list",
 		"tunnel.devices", "tunnel.status", "update.check", "update.status",
+		"workspaces.get", "workspaces.list",
 	}
 	var got []string
 	for _, definition := range executionPlatformDefinitionsForTest() {
@@ -417,6 +419,10 @@ func executionDryRunCases() []executionDryRunCase {
 		{name: "conflicts.list", target: `{"project_id":1}`, payload: `{}`},
 		{name: "conflicts.get", target: `{"type":"conflict","id":"C-1"}`, payload: `{}`},
 		{name: "sessions.file_activity", target: `{"type":"session","id":"s1"}`, payload: `{}`},
+		{name: "workspaces.list", target: `{"project_id":1}`, payload: `{}`},
+		{name: "workspaces.get", target: `{"type":"workspace","id":"ws-1"}`, payload: `{}`},
+		{name: "workspaces.create", target: `{"project_id":1}`, payload: `{"name":"lane-a"}`},
+		{name: "workspaces.remove", target: `{"type":"workspace","id":"ws-1"}`, payload: `{}`},
 		{name: "update.apply", target: `{}`, payload: `{}`},
 	}
 }

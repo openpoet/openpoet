@@ -82,6 +82,37 @@ type Session struct {
 	// bearer and hook bridge token). Never serialized; cleared on EndSession.
 	McpTokenHash  sql.NullString `db:"mcp_token_hash" json:"-"`
 	HookTokenHash sql.NullString `db:"hook_token_hash" json:"-"`
+	// WorkDir is the directory the session's runner actually started in (a
+	// workspace lane when set); empty means project.Path. Survives restarts so
+	// reopen/auto-restore land back in the same lane.
+	WorkDir     string         `db:"work_dir" json:"work_dir,omitempty"`
+	WorkspaceID sql.NullString `db:"workspace_id" json:"workspace_id,omitempty"`
+}
+
+// Workspace is one isolated execution lane for a project (V60). In the MVP the
+// only kind is 'worktree': a git worktree on branch openpoet/<name> under the
+// project's managed root. The schema carries the full phase-N vocabulary
+// (leases, manifests, resources) so later phases never rebuild the table.
+type Workspace struct {
+	ID                string         `db:"id" json:"id"`
+	ProjectID         int64          `db:"project_id" json:"project_id"`
+	Kind              string         `db:"kind" json:"kind"`
+	Name              string         `db:"name" json:"name"`
+	Branch            string         `db:"branch" json:"branch"`
+	BaseRef           string         `db:"base_ref" json:"base_ref"`
+	Path              string         `db:"path" json:"path"`
+	TaskID            sql.NullInt64  `db:"task_id" json:"task_id,omitempty"`
+	Status            string         `db:"status" json:"status"`
+	KeepOnExit        bool           `db:"keep_on_exit" json:"keep_on_exit"`
+	LeasedBySessionID sql.NullString `db:"leased_by_session_id" json:"leased_by_session_id,omitempty"`
+	LeaseExpiresAt    sql.NullTime   `db:"lease_expires_at" json:"lease_expires_at,omitempty"`
+	ManifestSHA256    sql.NullString `db:"manifest_sha256" json:"manifest_sha256,omitempty"`
+	ResourcesJSON     sql.NullString `db:"resources_json" json:"resources_json,omitempty"`
+	LastSummaryJSON   sql.NullString `db:"last_summary_json" json:"last_summary_json,omitempty"`
+	Version           int64          `db:"version" json:"version"`
+	CreatedByActor    string         `db:"created_by_actor" json:"created_by_actor"`
+	CreatedAt         time.Time      `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time      `db:"updated_at" json:"updated_at"`
 }
 
 type CodexTranscriptEvent struct {

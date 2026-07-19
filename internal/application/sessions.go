@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -109,7 +110,15 @@ type SessionCreationCollaborators struct {
 	Input        SessionInputSubmitter
 	InitialInput SessionInitialPromptSubmitter
 	Settings     SessionRuntimeSettings
+	Workspaces   SessionWorkspaceProvider
 	Now          func() time.Time
+}
+
+// SessionWorkspaceProvider resolves and leases workspace lanes for sessions.
+// Implemented by *WorkspaceService.
+type SessionWorkspaceProvider interface {
+	ResolveForSession(ctx context.Context, project *database.Project, workspaceID string) (*database.Workspace, error)
+	Lease(ctx context.Context, workspaceID, sessionID string) error
 }
 
 type SessionChange struct {
@@ -167,7 +176,10 @@ type CreateSessionCommand struct {
 	AutoStartTaskPrompt        bool
 	PlanningMode               bool
 	CustomPrompt               string
-	Authorization              ActionAuthorization
+	// WorkspaceID runs the session inside an existing ready workspace lane
+	// (its git worktree becomes the runner cwd and sync target).
+	WorkspaceID   string
+	Authorization ActionAuthorization
 }
 
 // syncProjectConfiguration pushes OpenPoet configuration (skills, hooks,
@@ -197,6 +209,30 @@ func (s *SessionService) syncProjectConfiguration(ctx context.Context, project *
 	}
 }
 
+// syncWorkspaceConfiguration is syncProjectConfiguration's materialize-only
+// twin for workspace lanes: same detached-context, best-effort discipline, but
+// the sync never writes disk state back to the database.
+func (s *SessionService) syncWorkspaceConfiguration(ctx context.Context, laneProject *database.Project) {
+	materializer, ok := s.syncer.(WorkspaceSyncer)
+	if s.syncer == nil || !ok {
+		return
+	}
+	done := make(chan error, 1)
+	go func() {
+		syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionConfigSyncTimeout)
+		defer cancel()
+		done <- materializer.MaterializeToWorkspace(syncCtx, laneProject)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			log.Printf("[Session] workspace materialize sync failed for project %d (session will start anyway): %v", laneProject.ID, err)
+		}
+	case <-time.After(sessionConfigSyncWaitBudget):
+		log.Printf("[Session] workspace materialize sync for project %d exceeded %s; starting without waiting", laneProject.ID, sessionConfigSyncWaitBudget)
+	}
+}
+
 func (s *SessionService) Create(ctx context.Context, command CreateSessionCommand) (*database.Session, error) {
 	if err := requireActionActor(command.Authorization); err != nil {
 		return nil, err
@@ -207,6 +243,22 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 	project, err := s.store.GetProject(ctx, command.ProjectID)
 	if err != nil || project == nil {
 		return nil, notFoundError("project_not_found", "Project not found", err)
+	}
+	// Workspace threading: resolve the lane FIRST, then run the entire create
+	// flow against a shallow Project copy whose Path is the lane dir — the one
+	// string every subsystem (sync, runner cwd, transcript encoding) keys off.
+	var workspace *database.Workspace
+	if workspaceID := strings.TrimSpace(command.WorkspaceID); workspaceID != "" {
+		if s.creation.Workspaces == nil {
+			return nil, validationError("workspace_unsupported", "Workspace sessions are not available")
+		}
+		workspace, err = s.creation.Workspaces.ResolveForSession(ctx, project, workspaceID)
+		if err != nil {
+			return nil, err
+		}
+		laneProject := *project
+		laneProject.Path = workspace.Path
+		project = &laneProject
 	}
 	environment, err := normalizeSessionEnvironment(command.Environment, command.Authorization)
 	if err != nil {
@@ -245,7 +297,15 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 		}
 		environment["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"] = "true"
 	}
-	s.syncProjectConfiguration(ctx, project)
+	if workspace != nil {
+		environment["OPENPOET_WORKDIR"] = workspace.Path
+		environment["OPENPOET_WORKSPACE_ID"] = workspace.ID
+		// Lanes get materialize-only sync: N workspaces must never write
+		// skills or memory docs back into the shared database.
+		s.syncWorkspaceConfiguration(ctx, project)
+	} else {
+		s.syncProjectConfiguration(ctx, project)
+	}
 	if s.manager == nil {
 		return nil, validationError("session_manager_unavailable", "Session manager is unavailable")
 	}
@@ -293,6 +353,11 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 		if err := s.writeInitialPrompt(ctx, created.ID, initialPrompt); err != nil {
 			s.compensateFailedCreate(ctx, created.ID)
 			return nil, err
+		}
+	}
+	if workspace != nil {
+		if err := s.creation.Workspaces.Lease(ctx, workspace.ID, created.ID); err != nil {
+			log.Printf("[Sessions] workspace lease failed for %s → %s: %v", workspace.ID, created.ID, err)
 		}
 	}
 	s.publish(ctx, SessionChange{Action: "created", Session: created, ID: created.ID, Actor: command.Authorization.Actor})
@@ -385,6 +450,19 @@ func (s *SessionService) Reopen(ctx context.Context, command ReopenSessionComman
 	if err != nil || project == nil {
 		return nil, notFoundError("project_not_found", "Project not found", err)
 	}
+	// A workspace session reopens back into its lane — or fails loudly if the
+	// lane directory vanished; silently reopening in the main checkout would
+	// dump the session into the wrong working tree.
+	laneReopen := false
+	if session.WorkDir != "" && session.WorkDir != project.Path {
+		if _, statErr := os.Stat(session.WorkDir); statErr != nil {
+			return nil, conflictError("workspace_gone", "Session workspace directory no longer exists on disk")
+		}
+		laneProject := *project
+		laneProject.Path = session.WorkDir
+		project = &laneProject
+		laneReopen = true
+	}
 	environment := map[string]string{}
 	if linkedTask, _ := s.store.GetTaskForSession(ctx, session.ID); linkedTask != nil {
 		injectTaskEnvironment(environment, linkedTask, true)
@@ -398,7 +476,11 @@ func (s *SessionService) Reopen(ctx context.Context, command ReopenSessionComman
 		}
 		environment["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"] = "true"
 	}
-	s.syncProjectConfiguration(ctx, project)
+	if laneReopen {
+		s.syncWorkspaceConfiguration(ctx, project)
+	} else {
+		s.syncProjectConfiguration(ctx, project)
+	}
 	if project.Type == "remote" && s.decrypt == nil {
 		return nil, validationError("session_decryptor_unavailable", "Remote session decryptor is unavailable")
 	}

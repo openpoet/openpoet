@@ -239,6 +239,16 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 		m.db.UpdateSessionSkipPermissions(ctx, sessionID, true)
 		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
+	// Workspace lane markers: the runner cwd already comes from the (copied)
+	// project.Path; persisting work_dir/workspace_id is what lets reopen and
+	// auto-restore land back in the same lane after a restart (V36 precedent).
+	if workDir, ok := envVars["OPENPOET_WORKDIR"]; ok && workDir != "" {
+		if err := m.db.UpdateSessionWorkspace(ctx, sessionID, envVars["OPENPOET_WORKSPACE_ID"], workDir); err != nil {
+			log.Printf("[Session] failed to persist workspace for %s: %v", sessionID, err)
+		}
+		delete(envVars, "OPENPOET_WORKDIR")
+		delete(envVars, "OPENPOET_WORKSPACE_ID")
+	}
 
 	// Mint per-session credentials (opst1_ bearer + opht1_ hook token) and
 	// persist their digests before wiring them into the MCP config and env.
@@ -429,6 +439,9 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 		m.db.UpdateSessionSkipPermissions(ctx, sessionID, true)
 		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
+	// Lane markers never reach the child process environment.
+	delete(envVars, "OPENPOET_WORKDIR")
+	delete(envVars, "OPENPOET_WORKSPACE_ID")
 
 	// Mint fresh per-session credentials on reopen (the old ones were nulled
 	// at EndSession) and persist their digests before wiring them in.
@@ -1833,6 +1846,8 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 		cfg.DangerouslySkipPermissions = true
 		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
+	delete(envVars, "OPENPOET_WORKDIR")
+	delete(envVars, "OPENPOET_WORKSPACE_ID")
 
 	// Mint per-session credentials and persist their digests before wiring in.
 	m.mintSessionCredentials(ctx, sessionID, cfg)

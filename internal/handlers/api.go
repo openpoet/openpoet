@@ -1108,6 +1108,7 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		AutoStartTaskPrompt        bool              `json:"auto_start_task_prompt"`
 		PlanningMode               bool              `json:"planning_mode"`
 		CustomPrompt               string            `json:"custom_prompt"`
+		WorkspaceID                string            `json:"workspace_id,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
@@ -1123,6 +1124,7 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		AutoStartTaskPrompt:        input.AutoStartTaskPrompt,
 		PlanningMode:               input.PlanningMode,
 		CustomPrompt:               input.CustomPrompt,
+		WorkspaceID:                input.WorkspaceID,
 		Authorization:              authorization,
 	})
 	if err != nil {
@@ -1706,9 +1708,29 @@ func (a *API) AutoRestoreSession(ctx context.Context, sess *database.Session) er
 		return fmt.Errorf("backend %q does not support resume", sess.Backend)
 	}
 
-	// Sync config to project before restoring
+	// Workspace sessions restore back into their lane — never silently into
+	// the main checkout. A vanished lane fails the restore loudly.
+	laneRestore := false
+	if sess.WorkDir != "" && sess.WorkDir != project.Path {
+		if _, statErr := os.Stat(sess.WorkDir); statErr != nil {
+			a.db.EndSession(ctx, sessionID, "stopped")
+			return fmt.Errorf("workspace directory gone, not restoring session %s: %w", sessionID, statErr)
+		}
+		laneProject := *project
+		laneProject.Path = sess.WorkDir
+		project = &laneProject
+		laneRestore = true
+	}
+
+	// Sync config to project before restoring (lanes are materialize-only)
 	if a.configSync != nil {
-		if syncErr := a.configSync.SyncToProject(ctx, project); syncErr != nil {
+		var syncErr error
+		if laneRestore {
+			syncErr = a.configSync.MaterializeToWorkspace(ctx, project)
+		} else {
+			syncErr = a.configSync.SyncToProject(ctx, project)
+		}
+		if syncErr != nil {
 			log.Printf("[AutoRestore] Warning: config sync failed for session %s: %v", sessionID, syncErr)
 		}
 	}
