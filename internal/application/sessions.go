@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"openpoet/internal/database"
@@ -39,6 +41,11 @@ type SessionStore interface {
 	GetTask(context.Context, int64) (*database.ProjectTask, error)
 	GetTaskForSession(context.Context, string) (*database.ProjectTask, error)
 	EndSession(context.Context, string, string) error
+	UpdateSessionLineage(ctx context.Context, sessionID, parentSessionID, spawnedBy string) error
+	// Phase 7.3 mission enrollment.
+	GetMission(ctx context.Context, id int64) (*database.Mission, error)
+	UpsertMissionWorker(ctx context.Context, worker *database.MissionWorker) error
+	ProjectIDsForTags(ctx context.Context, tagIDs []int64) ([]int64, error)
 }
 
 type SessionManager interface {
@@ -102,6 +109,17 @@ type SessionRuntimeSettings interface {
 	SetSessionEffort(context.Context, string, string) (*database.Session, error)
 }
 
+// SessionSignalPort exposes hook-derived per-session signals to the
+// application layer: the prompt-accepted ack (UserPromptSubmit) and the
+// execution-mode tracker. Implemented by the HookHandler.
+type SessionSignalPort interface {
+	// RegisterPromptWaiter returns a channel that fires on the session's next
+	// UserPromptSubmit hook, plus a cancel func. Registration is synchronous so
+	// the caller can register BEFORE writing input (no lost-wakeup race).
+	RegisterPromptWaiter(sessionID string) (<-chan struct{}, func())
+	GetSessionMode(sessionID string) string
+}
+
 type SessionCreationCollaborators struct {
 	Environment  SessionEnvironmentProvider
 	Names        SessionNameStore
@@ -109,7 +127,32 @@ type SessionCreationCollaborators struct {
 	Input        SessionInputSubmitter
 	InitialInput SessionInitialPromptSubmitter
 	Settings     SessionRuntimeSettings
+	Workspaces   SessionWorkspaceProvider
+	Signals      SessionSignalPort
+	WorkRuns     WorkRunStarter
 	Now          func() time.Time
+}
+
+// WorkRunStarter records a durable work run for a programmatically-spawned
+// session (the dormant execution_target_type='session' slot). Implemented by
+// *WorkRunService.
+type WorkRunStarter interface {
+	Start(ctx context.Context, command StartWorkRunCommand) (*database.WorkRun, error)
+}
+
+// SessionWorkspaceProvider resolves and leases workspace lanes for sessions.
+// Implemented by *WorkspaceService.
+type SessionWorkspaceProvider interface {
+	ResolveForSession(ctx context.Context, project *database.Project, workspaceID string) (*database.Workspace, error)
+	Reserve(ctx context.Context, workspaceID string) (string, error)
+	Bind(ctx context.Context, workspaceID, token, sessionID string) error
+	ReleaseReservation(ctx context.Context, workspaceID, token string) error
+	ReLease(ctx context.Context, workspaceID, sessionID string) error
+	ReleaseForSession(ctx context.Context, sessionID string) error
+	// ResolveAutoWorkspace implements isolation:"auto": returns "" when the main
+	// path is free (use it), or an idle pooled workspace id to lease when it is
+	// busy; errors no_workspace_ready when busy with no pool available.
+	ResolveAutoWorkspace(ctx context.Context, projectID int64) (string, error)
 }
 
 type SessionChange struct {
@@ -167,7 +210,22 @@ type CreateSessionCommand struct {
 	AutoStartTaskPrompt        bool
 	PlanningMode               bool
 	CustomPrompt               string
-	Authorization              ActionAuthorization
+	// WorkspaceID runs the session inside an existing ready workspace lane
+	// (its git worktree becomes the runner cwd and sync target).
+	WorkspaceID string
+	// Isolation:"auto" leases an idle pooled workspace when the project's main
+	// path is already busy (Phase 6), so a second concurrent session lands in a
+	// sandbox instead of colliding on the main checkout.
+	Isolation string
+	// Backend overrides the project's backend for THIS session (Phase 7.3 —
+	// heterogeneous fan-out: e.g. a codex worker inside a claude_code project).
+	Backend string
+	// MissionID/MissionRole enroll the session as a mission worker: the server
+	// injects the mission briefing (OPENPOET_MISSION_ID + system-prompt) and
+	// registers the mission_workers row.
+	MissionID     *int64
+	MissionRole   string
+	Authorization ActionAuthorization
 }
 
 // syncProjectConfiguration pushes OpenPoet configuration (skills, hooks,
@@ -197,6 +255,30 @@ func (s *SessionService) syncProjectConfiguration(ctx context.Context, project *
 	}
 }
 
+// syncWorkspaceConfiguration is syncProjectConfiguration's materialize-only
+// twin for workspace lanes: same detached-context, best-effort discipline, but
+// the sync never writes disk state back to the database.
+func (s *SessionService) syncWorkspaceConfiguration(ctx context.Context, laneProject *database.Project) {
+	materializer, ok := s.syncer.(WorkspaceSyncer)
+	if s.syncer == nil || !ok {
+		return
+	}
+	done := make(chan error, 1)
+	go func() {
+		syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionConfigSyncTimeout)
+		defer cancel()
+		done <- materializer.MaterializeToWorkspace(syncCtx, laneProject)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			log.Printf("[Session] workspace materialize sync failed for project %d (session will start anyway): %v", laneProject.ID, err)
+		}
+	case <-time.After(sessionConfigSyncWaitBudget):
+		log.Printf("[Session] workspace materialize sync for project %d exceeded %s; starting without waiting", laneProject.ID, sessionConfigSyncWaitBudget)
+	}
+}
+
 func (s *SessionService) Create(ctx context.Context, command CreateSessionCommand) (*database.Session, error) {
 	if err := requireActionActor(command.Authorization); err != nil {
 		return nil, err
@@ -207,6 +289,51 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 	project, err := s.store.GetProject(ctx, command.ProjectID)
 	if err != nil || project == nil {
 		return nil, notFoundError("project_not_found", "Project not found", err)
+	}
+	// Per-session backend override (Phase 7.3): a shallow Project copy carries
+	// the override so every downstream consumer (config sync, runner selection,
+	// the persisted session row) sees the effective backend.
+	project, err = applySessionBackendOverride(project, command.Backend)
+	if err != nil {
+		return nil, err
+	}
+
+	// Workspace threading: resolve the lane FIRST, then run the entire create
+	// flow against a shallow Project copy whose Path is the lane dir — the one
+	// string every subsystem (sync, runner cwd, transcript encoding) keys off.
+	var workspace *database.Workspace
+	reservationToken := ""
+	// isolation:"auto" — if the main path is busy, lease an idle pooled workspace
+	// (Phase 6); resolve it into command.WorkspaceID so the normal lease path runs.
+	if strings.EqualFold(strings.TrimSpace(command.Isolation), "auto") && strings.TrimSpace(command.WorkspaceID) == "" && s.creation.Workspaces != nil {
+		autoID, autoErr := s.creation.Workspaces.ResolveAutoWorkspace(ctx, command.ProjectID)
+		if autoErr != nil {
+			return nil, autoErr
+		}
+		command.WorkspaceID = autoID // "" → main path is free, use it
+	}
+	if workspaceID := strings.TrimSpace(command.WorkspaceID); workspaceID != "" {
+		if s.creation.Workspaces == nil {
+			return nil, validationError("workspace_unsupported", "Workspace sessions are not available")
+		}
+		workspace, err = s.creation.Workspaces.ResolveForSession(ctx, project, workspaceID)
+		if err != nil {
+			return nil, err
+		}
+		// Atomic reservation BEFORE anything slow: two concurrent creates for
+		// the same lane race on this CAS, never on runner startup.
+		reservationToken, err = s.creation.Workspaces.Reserve(ctx, workspace.ID)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if reservationToken != "" {
+				_ = s.creation.Workspaces.ReleaseReservation(ctx, workspace.ID, reservationToken)
+			}
+		}()
+		laneProject := *project
+		laneProject.Path = workspace.Path
+		project = &laneProject
 	}
 	environment, err := normalizeSessionEnvironment(command.Environment, command.Authorization)
 	if err != nil {
@@ -222,6 +349,41 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 			return nil, validationError("task_project_mismatch", "Task does not belong to the project")
 		}
 		injectTaskEnvironment(environment, linkedTask, false)
+	}
+	var mission *database.Mission
+	if command.MissionID != nil {
+		if *command.MissionID <= 0 {
+			return nil, validationError("invalid_mission_id", "Mission ID must be positive")
+		}
+		mission, err = s.store.GetMission(ctx, *command.MissionID)
+		if err != nil {
+			return nil, err
+		}
+		if mission == nil {
+			return nil, validationError("mission_not_found", "Mission not found")
+		}
+		if mission.Status != "active" {
+			return nil, validationError("mission_not_active", "Mission is not active")
+		}
+		// The target project must belong to the mission's coordination group —
+		// otherwise any sessions:write client could enroll itself in a foreign
+		// mission, polluting the roster AND reading the goal through the
+		// project_filter isolation.
+		memberIDs, memberErr := s.store.ProjectIDsForTags(ctx, []int64{mission.GroupTagID})
+		if memberErr != nil {
+			return nil, memberErr
+		}
+		isMember := false
+		for _, id := range memberIDs {
+			if id == project.ID {
+				isMember = true
+				break
+			}
+		}
+		if !isMember {
+			return nil, validationError("mission_project_not_in_group", "The project is not a member of the mission's coordination group")
+		}
+		injectMissionEnvironment(environment, mission, command.MissionRole)
 	}
 	initialPrompt, err := resolveInitialSessionPrompt(command, linkedTask != nil)
 	if err != nil {
@@ -245,7 +407,15 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 		}
 		environment["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"] = "true"
 	}
-	s.syncProjectConfiguration(ctx, project)
+	if workspace != nil {
+		environment["OPENPOET_WORKDIR"] = workspace.Path
+		environment["OPENPOET_WORKSPACE_ID"] = workspace.ID
+		// Lanes get materialize-only sync: N workspaces must never write
+		// skills or memory docs back into the shared database.
+		s.syncWorkspaceConfiguration(ctx, project)
+	} else {
+		s.syncProjectConfiguration(ctx, project)
+	}
 	if s.manager == nil {
 		return nil, validationError("session_manager_unavailable", "Session manager is unavailable")
 	}
@@ -295,8 +465,76 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 			return nil, err
 		}
 	}
+	if workspace != nil {
+		if err := s.creation.Workspaces.Bind(ctx, workspace.ID, reservationToken, created.ID); err != nil {
+			log.Printf("[Sessions] workspace lease bind failed for %s → %s: %v", workspace.ID, created.ID, err)
+		} else {
+			reservationToken = "" // consumed — the deferred release must not fire
+		}
+	}
+	s.recordLineageAndWorkRun(ctx, command, created)
+	if command.MissionID != nil && *command.MissionID > 0 {
+		// Best-effort roster row — a registry failure never fails the session.
+		// The lane id comes from the RESOLVED workspace (the returned session
+		// struct does not carry the persisted workspace column).
+		laneID := ""
+		if workspace != nil {
+			laneID = workspace.ID
+		}
+		if err := s.store.UpsertMissionWorker(ctx, &database.MissionWorker{
+			MissionID: *command.MissionID, ProjectID: created.ProjectID,
+			Backend: created.Backend, SessionID: created.ID,
+			WorkspaceID: laneID, Role: command.MissionRole, Status: "running",
+		}); err != nil {
+			log.Printf("[Sessions] mission worker registration failed for %s: %v", created.ID, err)
+		}
+	}
 	s.publish(ctx, SessionChange{Action: "created", Session: created, ID: created.ID, Actor: command.Authorization.Actor})
 	return created, nil
+}
+
+// recordLineageAndWorkRun persists who spawned the session and, for
+// programmatic (non-UI) spawns, opens a durable work_run bound to the session —
+// the first consumer of execution_target_type='session'. Best-effort: a
+// lineage/work-run failure never fails the already-started session.
+func (s *SessionService) recordLineageAndWorkRun(ctx context.Context, command CreateSessionCommand, created *database.Session) {
+	actor := command.Authorization.Actor
+	spawnedBy := EventActorValue(actor)
+	parent := ""
+	if actor.Type == "session" {
+		parent = actor.ID
+	}
+	if err := s.store.UpdateSessionLineage(ctx, created.ID, parent, spawnedBy); err != nil {
+		log.Printf("[Sessions] lineage update failed for %s: %v", created.ID, err)
+	} else {
+		created.ParentSessionID = parent
+		created.SpawnedBy = spawnedBy
+	}
+	// Only programmatic spawns (automation clients or session actors) open a
+	// work run; interactive UI sessions do not need one.
+	if s.creation.WorkRuns == nil || (actor.Type != "automation_client" && actor.Type != "session") {
+		return
+	}
+	sid := created.ID
+	title := "Session " + created.Name
+	if title == "Session " {
+		title = "Spawned session"
+	}
+	correlation := ""
+	if command.MissionID != nil && *command.MissionID > 0 {
+		correlation = fmt.Sprintf("mission:%d", *command.MissionID)
+	}
+	if _, err := s.creation.WorkRuns.Start(ctx, StartWorkRunCommand{
+		Title:           title,
+		Source:          "coordinator",
+		ExpectedMinutes: 60,
+		SessionID:       &sid,
+		ExecutionTarget: &database.WorkRunExecutionTarget{Type: "session", ID: sid},
+		CorrelationID:   correlation,
+		Actor:           actor,
+	}); err != nil {
+		log.Printf("[Sessions] work_run for spawned session %s failed: %v", sid, err)
+	}
 }
 
 func resolveInitialSessionPrompt(command CreateSessionCommand, hasTask bool) (string, error) {
@@ -385,6 +623,31 @@ func (s *SessionService) Reopen(ctx context.Context, command ReopenSessionComman
 	if err != nil || project == nil {
 		return nil, notFoundError("project_not_found", "Project not found", err)
 	}
+	// A workspace session reopens back into its lane — or fails loudly if the
+	// lane directory vanished; silently reopening in the main checkout would
+	// dump the session into the wrong working tree.
+	laneReopen := false
+	if session.WorkDir != "" && session.WorkDir != project.Path {
+		// The local Stat only proves anything for local lanes; a remote lane's
+		// dir lives on the SSH host and is validated by the reopen itself.
+		if project.Type == "local" {
+			if _, statErr := os.Stat(session.WorkDir); statErr != nil {
+				return nil, conflictError("workspace_gone", "Session workspace directory no longer exists on disk")
+			}
+		}
+		// Re-take the lease BEFORE restarting the runner: a reopened session
+		// occupies its lane again, or the lane's remove/double-book guards
+		// are blind to it (review finding). Fails if another session holds it.
+		if session.WorkspaceID.Valid && session.WorkspaceID.String != "" && s.creation.Workspaces != nil {
+			if err := s.creation.Workspaces.ReLease(ctx, session.WorkspaceID.String, session.ID); err != nil {
+				return nil, err
+			}
+		}
+		laneProject := *project
+		laneProject.Path = session.WorkDir
+		project = &laneProject
+		laneReopen = true
+	}
 	environment := map[string]string{}
 	if linkedTask, _ := s.store.GetTaskForSession(ctx, session.ID); linkedTask != nil {
 		injectTaskEnvironment(environment, linkedTask, true)
@@ -398,11 +661,20 @@ func (s *SessionService) Reopen(ctx context.Context, command ReopenSessionComman
 		}
 		environment["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"] = "true"
 	}
-	s.syncProjectConfiguration(ctx, project)
+	if laneReopen {
+		s.syncWorkspaceConfiguration(ctx, project)
+	} else {
+		s.syncProjectConfiguration(ctx, project)
+	}
 	if project.Type == "remote" && s.decrypt == nil {
 		return nil, validationError("session_decryptor_unavailable", "Remote session decryptor is unavailable")
 	}
 	if err := s.manager.ReopenSession(ctx, session, project, environment, s.decrypt); err != nil {
+		if laneReopen && session.WorkspaceID.Valid && s.creation.Workspaces != nil {
+			// Runner never started: give the lease back so the lane isn't
+			// stranded 'leased' by a stopped session.
+			_ = s.creation.Workspaces.ReleaseForSession(ctx, session.ID)
+		}
 		return nil, err
 	}
 	stored, err := s.store.GetSession(ctx, session.ID)
@@ -417,27 +689,70 @@ type SendSessionInputCommand struct {
 	SessionID     string
 	Text          string
 	Authorization ActionAuthorization
+	// RejectIfBusy makes the send fail with session_busy when the session is
+	// mid-turn (executing). Opt-in: only coordinator/automation callers set it —
+	// the interactive UI must always be able to interrupt/queue.
+	RejectIfBusy bool
+	// AwaitAck blocks until the agent's UserPromptSubmit hook confirms the
+	// prompt was accepted (or a short timeout), reporting acknowledged.
+	AwaitAck bool
+}
+
+// SendInputResult reports whether the line reached the PTY and whether the
+// agent acknowledged it (UserPromptSubmit hook observed).
+type SendInputResult struct {
+	Submitted    bool
+	Acknowledged bool
 }
 
 func (s *SessionService) SendInput(ctx context.Context, command SendSessionInputCommand) error {
+	_, err := s.SendInputWithAck(ctx, command)
+	return err
+}
+
+const sessionAckTimeout = 8 * time.Second
+
+func (s *SessionService) SendInputWithAck(ctx context.Context, command SendSessionInputCommand) (SendInputResult, error) {
 	if err := requireActionActor(command.Authorization); err != nil {
-		return err
+		return SendInputResult{}, err
 	}
 	if _, err := s.requireRunningSession(ctx, command.SessionID); err != nil {
-		return err
+		return SendInputResult{}, err
 	}
 	text := strings.TrimSpace(command.Text)
 	if text == "" {
-		return validationError("session_input_required", "Session input is required")
+		return SendInputResult{}, validationError("session_input_required", "Session input is required")
 	}
 	if len([]byte(text)) > maxSessionInputBytes {
-		return validationError("session_input_too_large", "Session input exceeds 16 KiB")
+		return SendInputResult{}, validationError("session_input_too_large", "Session input exceeds 16 KiB")
+	}
+	if command.RejectIfBusy && s.creation.Signals != nil {
+		if s.creation.Signals.GetSessionMode(command.SessionID) == "executing" {
+			return SendInputResult{}, conflictError("session_busy", "Session is mid-turn; retry when it is idle or send with force")
+		}
+	}
+	// Register the ack waiter BEFORE writing, so a fast UserPromptSubmit can't
+	// slip between the write and the wait (lost-wakeup race).
+	var ackCh <-chan struct{}
+	if command.AwaitAck && s.creation.Signals != nil {
+		ch, cancel := s.creation.Signals.RegisterPromptWaiter(command.SessionID)
+		ackCh = ch
+		defer cancel()
 	}
 	if err := s.writeLine(ctx, command.SessionID, text); err != nil {
-		return err
+		return SendInputResult{}, err
 	}
 	s.publish(ctx, SessionChange{Action: "input_sent", ID: command.SessionID, Actor: command.Authorization.Actor})
-	return nil
+	result := SendInputResult{Submitted: true}
+	if ackCh != nil {
+		select {
+		case <-ackCh:
+			result.Acknowledged = true
+		case <-time.After(sessionAckTimeout):
+		case <-ctx.Done():
+		}
+	}
+	return result, nil
 }
 
 type SetSessionModelCommand struct {
@@ -693,6 +1008,67 @@ func trustedProviderEnvironmentKey(key string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// applySessionBackendOverride returns a shallow Project copy carrying a valid
+// per-session backend override (or the original project when no override).
+func applySessionBackendOverride(project *database.Project, backend string) (*database.Project, error) {
+	backendOverride := strings.TrimSpace(backend)
+	if backendOverride == "" || backendOverride == project.Backend {
+		return project, nil
+	}
+	if !knownSessionBackend(backendOverride) {
+		return nil, validationError("session_backend_invalid", "Unknown session backend override")
+	}
+	overridden := *project
+	overridden.Backend = backendOverride
+	return &overridden, nil
+}
+
+// sanitizeSingleLine flattens any control character (\n, \r, tabs, ...) to a
+// space — the briefing's single-line contract (Windows cmd quoting).
+func sanitizeSingleLine(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, value)
+}
+
+// knownSessionBackend mirrors the automation layer's backend vocabulary.
+func knownSessionBackend(backend string) bool {
+	switch backend {
+	case "claude_code", "copilot", "acp", "codex", "opencode":
+		return true
+	}
+	return false
+}
+
+// injectMissionEnvironment enrolls the session as a mission worker: the id
+// rides the environment and the briefing rides OPENPOET_APPEND_SYSTEM_PROMPT —
+// which reaches EVERY backend, local and remote (it becomes
+// --append-system-prompt / developerInstructions), so codex/opencode get the
+// docs steering here that their bidirectional AGENTS.md cannot carry.
+// Single-line by contract (Windows cmd quoting).
+func injectMissionEnvironment(environment map[string]string, mission *database.Mission, role string) {
+	environment["OPENPOET_MISSION_ID"] = fmt.Sprintf("%d", mission.ID)
+	role = strings.TrimSpace(role)
+	if role == "" {
+		role = "worker"
+	}
+	briefing := fmt.Sprintf(
+		"You are a worker of OpenPoet mission #%d (role: %s). Mission goal: %s. "+
+			"Protocol: (1) at every meaningful milestone call openpoet_emit_session_report with a DENSE report "+
+			"(objective, summary, decisions, files, verification, blockers, needs_from_coordinator, next) — the coordinator reads reports, not your transcript; "+
+			"(2) publish documentation as OpenPoet Docs via openpoet_create_document with mission_id=%d, never as harness-native artifacts; "+
+			"(3) stay inside your assigned scope and surface conflicts instead of resolving them unilaterally.",
+		mission.ID, role, sanitizeSingleLine(mission.Goal), mission.ID)
+	if existing := environment["OPENPOET_APPEND_SYSTEM_PROMPT"]; existing != "" {
+		environment["OPENPOET_APPEND_SYSTEM_PROMPT"] = existing + " " + briefing
+	} else {
+		environment["OPENPOET_APPEND_SYSTEM_PROMPT"] = briefing
 	}
 }
 

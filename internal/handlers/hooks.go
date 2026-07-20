@@ -18,6 +18,7 @@ import (
 	"openpoet/internal/application"
 	"openpoet/internal/notifications"
 	"openpoet/internal/session"
+	"openpoet/internal/sessiontoken"
 	"openpoet/internal/websocket"
 )
 
@@ -46,6 +47,25 @@ type permissionDecision struct {
 	Message            string                 `json:"message,omitempty"`
 	UpdatedInput       map[string]interface{} `json:"updatedInput,omitempty"`
 	UpdatedPermissions []interface{}          `json:"updatedPermissions,omitempty"`
+}
+
+// preToolUseGateOutput is Claude Code's NATIVE PreToolUse hook contract — note
+// this differs from the PermissionRequest shape above (hookSpecificOutput.decision
+// object): PreToolUse uses a string permissionDecision + permissionDecisionReason,
+// and it is honored even under dangerously_skip_permissions.
+type preToolUseGateOutput struct {
+	HookSpecificOutput preToolUseHookOutput `json:"hookSpecificOutput"`
+}
+
+type preToolUseHookOutput struct {
+	HookEventName string `json:"hookEventName"`
+	// PermissionDecision is set ONLY to "deny" (a conflict/substrate block). On
+	// allow it is OMITTED so Claude Code's normal flow proceeds — emitting an
+	// explicit "allow" would AUTO-APPROVE the tool and bypass OpenPoet's
+	// permission dialog for every non-opted project (the default is observe), so
+	// the gate must stay silent unless it is actively denying.
+	PermissionDecision       string `json:"permissionDecision,omitempty"`       // "" (neutral) | "deny"
+	PermissionDecisionReason string `json:"permissionDecisionReason,omitempty"` // model reads this on deny
 }
 
 // pendingPermission tracks a blocking permission request
@@ -86,6 +106,32 @@ type HookHandler struct {
 	// Claude turn so mid-session /model changes are reflected in session metadata.
 	OnReconcileEffectiveModel func(sessionID string)
 
+	// OnToolEvent taps the hook firehose for the conflict radar: fired for
+	// PreToolUse/PostToolUse/PostToolUseFailure (tool_input intact) and Stop.
+	// Implementations must only enqueue — this runs on the hook response path.
+	OnToolEvent func(sessionID, eventName string, hookEvent map[string]interface{})
+
+	// ConsultConflict is called SYNCHRONOUSLY in HandlePermission before parking
+	// a write permission. Returns (deny, reason) — a non-empty reason when
+	// another live session holds a write claim on the same path. Must not block
+	// on I/O beyond a bounded cache read. Set by main.go to the conflict radar.
+	ConsultConflict func(sessionID, toolName string, toolInput map[string]interface{}) (bool, string)
+
+	// ReleaseClaim drops a session's write claim for a path whose write was just
+	// denied (the write never happens), so a denied attempt cannot leave a
+	// residual claim that mutually locks out the legitimate claimant.
+	ReleaseClaim func(sessionID, toolName string, toolInput map[string]interface{})
+
+	// GatePreToolUse answers the SYNCHRONOUS PreToolUse gate (Phase 5, L2). Set by
+	// main.go: it resolves the project's conflict_policy + the global
+	// conflict_enforcement_enabled kill switch and, only for opted-in projects
+	// with the switch on, consults the conflict radar's atomic gate. Returns
+	// (deny, reason). A nil callback (or any non-opted path) means allow — the
+	// gate is strictly opt-in and fail-open. This is the ONLY control point that
+	// governs dangerously_skip_permissions sessions (they never fire
+	// PermissionRequest, but always fire PreToolUse).
+	GatePreToolUse func(ctx context.Context, sessionID, toolName string, toolInput map[string]interface{}) (bool, string)
+
 	// HasLinkedTask checks if a session has a linked task. Set by main.go.
 	HasLinkedTask func(sessionID string) bool
 
@@ -106,6 +152,7 @@ type HookHandler struct {
 	imagePromptMeta   map[string]string                 // sessionID -> user's text prompt when images were included
 	evalTimers        map[string]*time.Timer            // sessionID -> debounced evaluation timer
 	acpUsage          map[string]*ACPUsageInfo          // sessionID -> ACP usage tracking (model, premium requests)
+	promptWaiters     map[string][]chan struct{}        // sessionID -> awaiters woken by the next UserPromptSubmit (send ack)
 }
 
 // ACPUsageInfo holds Copilot ACP usage tracking data for a session.
@@ -142,6 +189,7 @@ func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, ses
 		imagePromptMeta:   make(map[string]string),
 		evalTimers:        make(map[string]*time.Timer),
 		acpUsage:          make(map[string]*ACPUsageInfo),
+		promptWaiters:     make(map[string][]chan struct{}),
 	}
 }
 
@@ -305,6 +353,10 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Missing X-Session-ID header")
 		return
 	}
+	if !h.hookTokenAllowed(r.Context(), sessionID, r.Header.Get("X-Hook-Token")) {
+		respondError(w, http.StatusUnauthorized, "invalid or missing hook token")
+		return
+	}
 
 	// Detect backend from header (both "copilot" and "acp" use non-Claude hook format)
 	backend := r.Header.Get("X-Backend")
@@ -371,6 +423,32 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	// Special tools with custom UI modals
 	isAskUser := toolName == "AskUserQuestion"
 	isExitPlan := toolName == "ExitPlanMode"
+
+	// Synchronous conflict veto (Phase 3, L1): consult the radar BEFORE the
+	// always-allow fast-path — a contested write must be denied even when the
+	// user clicked "always allow Edit", because the conflict is cross-session,
+	// orthogonal to the per-session allow. Runs only for write-class tools (the
+	// consult filters), never touches the DB, fails open when the radar is cold.
+	// On deny it releases the requesting session's just-registered claim so a
+	// denied write cannot mutually lock out the legitimate claimant.
+	if h.ConsultConflict != nil {
+		toolInput, _ := hookEvent["tool_input"].(map[string]interface{})
+		if deny, reason := h.ConsultConflict(sessionID, toolName, toolInput); deny {
+			log.Printf("[hooks] Conflict veto for session %s tool %s: %s", sessionID, toolName, reason)
+			if h.ReleaseClaim != nil {
+				h.ReleaseClaim(sessionID, toolName, toolInput)
+			}
+			output := hookPermissionOutput{
+				HookSpecificOutput: hookSpecificOutput{
+					HookEventName: "PermissionRequest",
+					Decision:      permissionDecision{Behavior: "deny", Message: reason},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(output)
+			return
+		}
+	}
 
 	// Check if this tool is "always allowed" for this session
 	h.mu.Lock()
@@ -763,12 +841,79 @@ func (h *HookHandler) HandlePermissionRespond(w http.ResponseWriter, r *http.Req
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// hookTokenAllowed verifies the X-Hook-Token against the session's stored hook
+// token hash. Enforcement is keyed on token presence: a session with no stored
+// hash (legacy/pre-Phase-0) fails open so running sessions never go dark; an
+// unknown session id is rejected. This closes the spoofable-X-Session-ID hole
+// without a bespoke auth path.
+func (h *HookHandler) hookTokenAllowed(ctx context.Context, sessionID, token string) bool {
+	if h.sessionMgr == nil {
+		return true // no session store wired (isolated handler tests)
+	}
+	_, hookHash, err := h.sessionMgr.SessionTokenHashes(ctx, sessionID)
+	if err != nil {
+		return false // unknown session id — reject spoofed identities
+	}
+	if hookHash == "" {
+		return true // legacy session without a minted token: fail open
+	}
+	return sessiontoken.EqualHash(token, hookHash)
+}
+
+// HandlePreToolUseGate handles POST /api/hooks/pretooluse — the SYNCHRONOUS
+// conflict gate (Phase 5, L2). The bridge calls this for write-class tools and
+// echoes the verdict to Claude Code. Because it answers the PreToolUse hook
+// (which fires in every permission mode), it is the only gate that governs
+// dangerously_skip_permissions sessions. Memory-only + fail-open: any error or
+// non-opted path returns allow so the gate can never brick a session; a missing
+// hook token is rejected 401 (a blocking gate over spoofable input would be a
+// denial-of-work weapon).
+func (h *HookHandler) HandlePreToolUseGate(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.Header.Get("X-Session-ID")
+	if sessionID == "" {
+		respondError(w, http.StatusBadRequest, "Missing X-Session-ID header")
+		return
+	}
+	if !h.hookTokenAllowed(r.Context(), sessionID, r.Header.Get("X-Hook-Token")) {
+		respondError(w, http.StatusUnauthorized, "invalid or missing hook token")
+		return
+	}
+	rawBody, _ := io.ReadAll(r.Body)
+	var hookEvent map[string]interface{}
+	_ = json.Unmarshal(normalizeUTF8Body(rawBody), &hookEvent)
+	toolName, _ := hookEvent["tool_name"].(string)
+	toolInput, _ := hookEvent["tool_input"].(map[string]interface{})
+
+	// The bridge routes PreToolUse HERE (synchronously) instead of the
+	// fire-and-forget /api/hooks/event, so feed the async conflict index / turn
+	// tracking exactly as HandleEvent's PreToolUse case would — the radar must
+	// still see every touch even though the verdict is now synchronous.
+	if h.OnToolEvent != nil {
+		h.OnToolEvent(sessionID, "PreToolUse", hookEvent)
+	}
+
+	deny, reason := false, ""
+	if h.GatePreToolUse != nil {
+		deny, reason = h.GatePreToolUse(r.Context(), sessionID, toolName, toolInput)
+	}
+	out := preToolUseHookOutput{HookEventName: "PreToolUse"}
+	if deny {
+		out.PermissionDecision = "deny" // allow stays neutral (omitted) — see the type
+		out.PermissionDecisionReason = reason
+	}
+	respondJSON(w, http.StatusOK, preToolUseGateOutput{HookSpecificOutput: out})
+}
+
 // HandleEvent handles POST /api/hooks/event
 // Non-blocking: broadcasts hook events to the browser
 func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.Header.Get("X-Session-ID")
 	if sessionID == "" {
 		respondError(w, http.StatusBadRequest, "Missing X-Session-ID header")
+		return
+	}
+	if !h.hookTokenAllowed(r.Context(), sessionID, r.Header.Get("X-Hook-Token")) {
+		respondError(w, http.StatusUnauthorized, "invalid or missing hook token")
 		return
 	}
 
@@ -836,6 +981,15 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 			"event":      hookEvent,
 		},
 	})
+
+	// Conflict-radar tap: tool phases carry tool_input (file paths), Stop
+	// marks a completed turn. The callback only enqueues — no I/O here.
+	if h.OnToolEvent != nil {
+		switch eventName {
+		case "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop":
+			h.OnToolEvent(sessionID, eventName, hookEvent)
+		}
+	}
 
 	// Debounced activity tracking (max once per 30 seconds per session)
 	if h.OnActivityTouch != nil {
@@ -946,9 +1100,64 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	// giving the evaluator richer context (especially for image inputs).
 	if eventName == "UserPromptSubmit" {
 		h.scheduleDebouncedEval(sessionID)
+		h.wakePromptWaiters(sessionID)
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// RegisterPromptWaiter returns a channel that fires when the session's next
+// UserPromptSubmit hook arrives — the reliable "the agent accepted the input"
+// signal for claude_code PTY sessions. The cancel func must be called to avoid
+// leaking the waiter if it is abandoned before firing.
+func (h *HookHandler) RegisterPromptWaiter(sessionID string) (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	h.mu.Lock()
+	h.promptWaiters[sessionID] = append(h.promptWaiters[sessionID], ch)
+	h.mu.Unlock()
+	cancel := func() {
+		h.mu.Lock()
+		waiters := h.promptWaiters[sessionID]
+		for i, w := range waiters {
+			if w == ch {
+				h.promptWaiters[sessionID] = append(waiters[:i], waiters[i+1:]...)
+				break
+			}
+		}
+		if len(h.promptWaiters[sessionID]) == 0 {
+			delete(h.promptWaiters, sessionID)
+		}
+		h.mu.Unlock()
+	}
+	return ch, cancel
+}
+
+func (h *HookHandler) wakePromptWaiters(sessionID string) {
+	h.mu.Lock()
+	waiters := h.promptWaiters[sessionID]
+	delete(h.promptWaiters, sessionID)
+	h.mu.Unlock()
+	for _, ch := range waiters {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// WaitForPromptSubmit blocks until the session's next UserPromptSubmit hook or
+// the deadline. Used by send-with-ack.
+func (h *HookHandler) WaitForPromptSubmit(ctx context.Context, sessionID string, timeout time.Duration) bool {
+	ch, cancel := h.RegisterPromptWaiter(sessionID)
+	defer cancel()
+	select {
+	case <-ch:
+		return true
+	case <-time.After(timeout):
+		return false
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // HasPendingPermission checks if a session has a pending permission request
@@ -1102,6 +1311,10 @@ func (h *HookHandler) ClearSession(sessionID string) {
 	delete(h.sessionMode, sessionID)
 	delete(h.imagePromptMeta, sessionID)
 	delete(h.acpUsage, sessionID)
+	// Drop any prompt waiters WITHOUT signaling them: a torn-down session never
+	// accepted the pending input, so the ack must time out to acknowledged=false
+	// rather than fabricate a true ack from teardown.
+	delete(h.promptWaiters, sessionID)
 	if t, ok := h.evalTimers[sessionID]; ok {
 		t.Stop()
 		delete(h.evalTimers, sessionID)

@@ -168,6 +168,7 @@ type CopilotAgent struct {
 
 	hookURL     string
 	hookSessID  string
+	hookToken   string
 	autoApprove bool
 
 	// Thinking state — accessed only from readLoop goroutine.
@@ -214,6 +215,7 @@ func Run(args []string) {
 	if hookSessID == "" {
 		hookSessID = sid
 	}
+	hookToken := os.Getenv("OPENPOET_HOOK_TOKEN")
 
 	// Resolve copilot binary
 	binPath := "copilot"
@@ -245,6 +247,7 @@ func Run(args []string) {
 		workDir:     workDir,
 		hookURL:     hookURL,
 		hookSessID:  hookSessID,
+		hookToken:   hookToken,
 		autoApprove: *autoApprove,
 		pending:     make(map[int]chan *jsonrpcMessage),
 		injectCh:    make(chan string, 1),
@@ -818,6 +821,9 @@ func (a *CopilotAgent) postHookPermission(toolName, title string, rawInput json.
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Session-ID", a.hookSessID)
+	if a.hookToken != "" {
+		req.Header.Set("X-Hook-Token", a.hookToken)
+	}
 	req.Header.Set("X-Backend", "acp")
 
 	// Use a long timeout — OpenPoet blocks up to 590s waiting for user response
@@ -942,6 +948,9 @@ func (a *CopilotAgent) postPlanApproval(planContent string) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Session-ID", a.hookSessID)
+	if a.hookToken != "" {
+		req.Header.Set("X-Hook-Token", a.hookToken)
+	}
 	req.Header.Set("X-Backend", "acp")
 
 	fmt.Printf("%s   (waiting for plan approval in OpenPoet UI...)%s\r\n", colorGray, colorReset)
@@ -1484,6 +1493,9 @@ func (a *CopilotAgent) postHookEvent(eventName string, data map[string]interface
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Session-ID", a.hookSessID)
+	if a.hookToken != "" {
+		req.Header.Set("X-Hook-Token", a.hookToken)
+	}
 	req.Header.Set("X-Backend", "acp")
 
 	client := &http.Client{Timeout: 5 * time.Second}

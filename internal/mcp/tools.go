@@ -14,6 +14,33 @@ import (
 // MCPTool is a type alias for llm.MCPToolDef — the unified tool definition for MCP protocol.
 type MCPTool = llm.MCPToolDef
 
+// toolNumber coerces a JSON tool argument (float64, string, or int) to int64.
+func toolNumber(value any) int64 {
+	switch v := value.(type) {
+	case float64:
+		return int64(v)
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case string:
+		var n int64
+		fmt.Sscanf(v, "%d", &n)
+		return n
+	}
+	return 0
+}
+
+// coordinatorResponse passes the coordinator surface's JSON straight through:
+// success bodies AND typed errors (coordinator_fence_stale,
+// platform_project_out_of_scope, ...) both reach the model verbatim.
+func coordinatorResponse(body []byte, err error) (string, error) {
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
 // AllTools returns all MCP tool definitions (with openpoet_ prefix).
 // Used by the API to expose tool metadata and by session manager for policy checks.
 func AllTools() []MCPTool {
@@ -818,6 +845,165 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return string(body), nil
 
+	// ---- Coordinator tier (Phase 7.1 — Maestro) ----
+	// Thin wrappers over the token-authed /api/coordinator surface; the
+	// APIClient carries the verified opst1_ session bearer, which is the
+	// coordinator's identity. Raw JSON is returned so the model sees the typed
+	// codes (coordinator_fence_stale, platform_project_out_of_scope, ...).
+
+	case "openpoet_coordinator_elect":
+		body := map[string]any{"group": toolNumber(params["group"])}
+		if ttl := toolNumber(params["ttl_seconds"]); ttl > 0 {
+			body["ttl_seconds"] = ttl
+		}
+		payload, _ := json.Marshal(body)
+		return coordinatorResponse(client.Post("/api/coordinator/elect", string(payload)))
+
+	case "openpoet_coordinator_status":
+		return coordinatorResponse(client.Get("/api/coordinator/status"))
+
+	case "openpoet_list_group_sessions":
+		path := "/api/coordinator/sessions"
+		if status, _ := params["status"].(string); status != "" {
+			path += "?status=" + url.QueryEscape(status)
+		}
+		return coordinatorResponse(client.Get(path))
+
+	case "openpoet_await_events":
+		q := url.Values{}
+		q.Set("after", fmt.Sprintf("%d", toolNumber(params["after"])))
+		if filter, _ := params["filter"].(string); filter != "" {
+			q.Set("filter", filter)
+		}
+		if timeout := toolNumber(params["timeout"]); timeout > 0 {
+			q.Set("timeout", fmt.Sprintf("%d", timeout))
+		}
+		if consumer, _ := params["consumer"].(string); consumer != "" {
+			q.Set("consumer", consumer)
+		}
+		return coordinatorResponse(client.Get("/api/coordinator/events/await?" + q.Encode()))
+
+	case "openpoet_wait_for_session":
+		sid, _ := params["session_id"].(string)
+		if sid == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		q := url.Values{}
+		if timeout := toolNumber(params["timeout"]); timeout > 0 {
+			q.Set("timeout", fmt.Sprintf("%d", timeout))
+		}
+		return coordinatorResponse(client.Get(fmt.Sprintf("/api/coordinator/sessions/%s/wait?%s", url.PathEscape(sid), q.Encode())))
+
+	case "openpoet_start_worker":
+		body := map[string]any{"project_id": toolNumber(params["project_id"])}
+		if fence, ok := params["fence_version"]; ok {
+			body["fence_version"] = toolNumber(fence)
+		}
+		if tid := toolNumber(params["task_id"]); tid > 0 {
+			body["task_id"] = tid
+		}
+		if mid := toolNumber(params["mission_id"]); mid > 0 {
+			body["mission_id"] = mid
+		}
+		if role, _ := params["role"].(string); role != "" {
+			body["role"] = role
+		}
+		for _, key := range []string{"backend", "workspace_id", "isolation", "custom_prompt", "idempotency_key"} {
+			if v, _ := params[key].(string); v != "" {
+				body[key] = v
+			}
+		}
+		if dry, _ := params["dry_run"].(bool); dry {
+			body["dry_run"] = true
+		}
+		payload, _ := json.Marshal(body)
+		return coordinatorResponse(client.Post("/api/coordinator/sessions", string(payload)))
+
+	case "openpoet_start_mission":
+		goal, _ := params["goal"].(string)
+		if goal == "" {
+			return "", fmt.Errorf("goal is required")
+		}
+		body := map[string]any{"goal": goal}
+		if fence, ok := params["fence_version"]; ok {
+			body["fence_version"] = toolNumber(fence)
+		}
+		payload, _ := json.Marshal(body)
+		return coordinatorResponse(client.Post("/api/coordinator/missions", string(payload)))
+
+	case "openpoet_get_mission":
+		return coordinatorResponse(client.Get(fmt.Sprintf("/api/coordinator/missions/%d", toolNumber(params["mission_id"]))))
+
+	case "openpoet_update_mission_status":
+		status, _ := params["status"].(string)
+		body := map[string]any{"status": status}
+		if fence, ok := params["fence_version"]; ok {
+			body["fence_version"] = toolNumber(fence)
+		}
+		payload, _ := json.Marshal(body)
+		return coordinatorResponse(client.Post(fmt.Sprintf("/api/coordinator/missions/%d/status", toolNumber(params["mission_id"])), string(payload)))
+
+	case "openpoet_attach_worker":
+		sid, _ := params["session_id"].(string)
+		if sid == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		body := map[string]any{"mission_id": toolNumber(params["mission_id"]), "session_id": sid}
+		if role, _ := params["role"].(string); role != "" {
+			body["role"] = role
+		}
+		if fence, ok := params["fence_version"]; ok {
+			body["fence_version"] = toolNumber(fence)
+		}
+		payload, _ := json.Marshal(body)
+		return coordinatorResponse(client.Post("/api/coordinator/missions/workers/attach", string(payload)))
+
+	case "openpoet_predict_merge":
+		wsid, _ := params["workspace_id"].(string)
+		if wsid == "" {
+			return "", fmt.Errorf("workspace_id is required")
+		}
+		return coordinatorResponse(client.Get(fmt.Sprintf("/api/coordinator/workspaces/%s/merge_preview", url.PathEscape(wsid))))
+
+	case "openpoet_merge_workspace":
+		wsid, _ := params["workspace_id"].(string)
+		if wsid == "" {
+			return "", fmt.Errorf("workspace_id is required")
+		}
+		body := map[string]any{"mission_id": toolNumber(params["mission_id"])}
+		if fence, ok := params["fence_version"]; ok {
+			body["fence_version"] = toolNumber(fence)
+		}
+		payload, _ := json.Marshal(body)
+		return coordinatorResponse(client.Post(fmt.Sprintf("/api/coordinator/workspaces/%s/merge", url.PathEscape(wsid)), string(payload)))
+
+	case "openpoet_emit_session_report":
+		payload, _ := json.Marshal(params)
+		return coordinatorResponse(client.Post("/api/session/report", string(payload)))
+
+	case "openpoet_get_session_report":
+		sid, _ := params["session_id"].(string)
+		if sid == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		return coordinatorResponse(client.Get(fmt.Sprintf("/api/coordinator/sessions/%s/report", url.PathEscape(sid))))
+
+	case "openpoet_send_to_worker":
+		sid, _ := params["session_id"].(string)
+		text, _ := params["text"].(string)
+		if sid == "" || text == "" {
+			return "", fmt.Errorf("session_id and text are required")
+		}
+		body := map[string]any{"text": text}
+		if fence, ok := params["fence_version"]; ok {
+			body["fence_version"] = toolNumber(fence)
+		}
+		if force, _ := params["force"].(bool); force {
+			body["force"] = true
+		}
+		payload, _ := json.Marshal(body)
+		return coordinatorResponse(client.Post(fmt.Sprintf("/api/coordinator/sessions/%s/input", url.PathEscape(sid)), string(payload)))
+
 	case "openpoet_stop_session":
 		sid, _ := params["session_id"].(string)
 		if sid == "" {
@@ -1034,6 +1220,18 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		if taskID, ok := params["task_id"].(string); ok && taskID != "" {
 			docPayload["task_id"] = taskID
+		}
+		// mission link (Phase 7.1): accept string or number, forward as string —
+		// the REST handler parses it like task_id/conversation_id.
+		switch mv := params["mission_id"].(type) {
+		case string:
+			if mv != "" {
+				docPayload["mission_id"] = mv
+			}
+		case float64:
+			if mv > 0 {
+				docPayload["mission_id"] = fmt.Sprintf("%.0f", mv)
+			}
 		}
 		payload, _ := json.Marshal(docPayload)
 		body, err := client.Post("/api/documents", string(payload))

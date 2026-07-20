@@ -100,6 +100,9 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			Scopes:   scopes,
 			ClientID: client.ID,
 		}
+		if client.ProjectFilter.Valid {
+			actor.ProjectFilter = strings.TrimSpace(client.ProjectFilter.String)
+		}
 		next.ServeHTTP(w, r.WithContext(WithActor(r.Context(), actor)))
 	})
 }

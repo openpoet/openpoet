@@ -21,6 +21,8 @@ type Project struct {
 	SkillPolicy                 string         `db:"skill_policy" json:"skill_policy,omitempty"` // '' = inherit global, 'custom' = per-project
 	DangerouslySkipPermissions  bool           `db:"dangerously_skip_permissions" json:"dangerously_skip_permissions"`
 	TaskAutoApproveVerification string         `db:"task_auto_approve_verification" json:"task_auto_approve_verification"` // 'inherit', 'enabled', or 'disabled'
+	CoordinatorMode             string         `db:"coordinator_mode" json:"coordinator_mode"`                             // 'off', 'observe', 'assist', or 'delegate'
+	ConflictPolicy              string         `db:"conflict_policy" json:"conflict_policy"`                               // 'observe', 'warn', 'gate', or 'enforce' — synchronous gate dial
 	Backend                     string         `db:"backend" json:"backend"`                                               // 'claude_code', 'copilot', 'acp', 'codex', or 'opencode'
 	BackendConfig               string         `db:"backend_config" json:"backend_config"`                                 // JSON blob for backend-specific settings
 	ConfigSyncedAt              sql.NullTime   `db:"config_synced_at" json:"config_synced_at,omitempty"`
@@ -41,15 +43,19 @@ type ProjectInput struct {
 	SkillPolicy                 string `json:"skill_policy,omitempty"`
 	DangerouslySkipPermissions  bool   `json:"dangerously_skip_permissions"`
 	TaskAutoApproveVerification string `json:"task_auto_approve_verification,omitempty"`
+	CoordinatorMode             string `json:"coordinator_mode,omitempty"`
+	ConflictPolicy              string `json:"conflict_policy,omitempty"`
 	Backend                     string `json:"backend,omitempty"`
 	BackendConfig               string `json:"backend_config,omitempty"`
 }
 
 type Tag struct {
-	ID        int64     `db:"id" json:"id"`
-	Name      string    `db:"name" json:"name"`
-	Color     string    `db:"color" json:"color"`
-	CreatedAt time.Time `db:"created_at" json:"created_at"`
+	ID           int64          `db:"id" json:"id"`
+	Name         string         `db:"name" json:"name"`
+	Color        string         `db:"color" json:"color"`
+	Coordination int            `db:"coordination" json:"coordination"` // 1 = coordination group (see project_filter tag_ids)
+	SettingsJSON sql.NullString `db:"settings_json" json:"settings_json,omitempty"`
+	CreatedAt    time.Time      `db:"created_at" json:"created_at"`
 }
 
 type ProjectTag struct {
@@ -78,6 +84,45 @@ type Session struct {
 	RequestedModel    string        `db:"requested_model" json:"requested_model"`
 	Effort            string        `db:"effort" json:"effort"`
 	Harness           string        `db:"harness" json:"harness"`
+	// SHA-256 hex digests of the per-session credentials (opst1_ MCP/REST
+	// bearer and hook bridge token). Never serialized; cleared on EndSession.
+	McpTokenHash  sql.NullString `db:"mcp_token_hash" json:"-"`
+	HookTokenHash sql.NullString `db:"hook_token_hash" json:"-"`
+	// WorkDir is the directory the session's runner actually started in (a
+	// workspace lane when set); empty means project.Path. Survives restarts so
+	// reopen/auto-restore land back in the same lane.
+	WorkDir     string         `db:"work_dir" json:"work_dir,omitempty"`
+	WorkspaceID sql.NullString `db:"workspace_id" json:"workspace_id,omitempty"`
+	// Lineage (V62): the session that spawned this one (when a session actor
+	// created it) and the audit identity of whoever created it.
+	ParentSessionID string `db:"parent_session_id" json:"parent_session_id,omitempty"`
+	SpawnedBy       string `db:"spawned_by" json:"spawned_by,omitempty"`
+}
+
+// Workspace is one isolated execution lane for a project (V60). In the MVP the
+// only kind is 'worktree': a git worktree on branch openpoet/<name> under the
+// project's managed root. The schema carries the full phase-N vocabulary
+// (leases, manifests, resources) so later phases never rebuild the table.
+type Workspace struct {
+	ID                string         `db:"id" json:"id"`
+	ProjectID         int64          `db:"project_id" json:"project_id"`
+	Kind              string         `db:"kind" json:"kind"`
+	Name              string         `db:"name" json:"name"`
+	Branch            string         `db:"branch" json:"branch"`
+	BaseRef           string         `db:"base_ref" json:"base_ref"`
+	Path              string         `db:"path" json:"path"`
+	TaskID            sql.NullInt64  `db:"task_id" json:"task_id,omitempty"`
+	Status            string         `db:"status" json:"status"`
+	KeepOnExit        bool           `db:"keep_on_exit" json:"keep_on_exit"`
+	LeasedBySessionID sql.NullString `db:"leased_by_session_id" json:"leased_by_session_id,omitempty"`
+	LeaseExpiresAt    sql.NullTime   `db:"lease_expires_at" json:"lease_expires_at,omitempty"`
+	ManifestSHA256    sql.NullString `db:"manifest_sha256" json:"manifest_sha256,omitempty"`
+	ResourcesJSON     sql.NullString `db:"resources_json" json:"resources_json,omitempty"`
+	LastSummaryJSON   sql.NullString `db:"last_summary_json" json:"last_summary_json,omitempty"`
+	Version           int64          `db:"version" json:"version"`
+	CreatedByActor    string         `db:"created_by_actor" json:"created_by_actor"`
+	CreatedAt         time.Time      `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time      `db:"updated_at" json:"updated_at"`
 }
 
 type CodexTranscriptEvent struct {
@@ -276,6 +321,7 @@ type TempDocument struct {
 	Content        string        `db:"content" json:"content"`
 	ConversationID sql.NullInt64 `db:"conversation_id" json:"conversation_id,omitempty"`
 	TaskID         sql.NullInt64 `db:"task_id" json:"task_id,omitempty"`
+	MissionID      sql.NullInt64 `db:"mission_id" json:"mission_id,omitempty"`
 	SessionID      string        `db:"session_id" json:"session_id,omitempty"`
 	Summary        string        `db:"summary" json:"summary"`
 	Status         string        `db:"status" json:"status"`

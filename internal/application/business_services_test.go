@@ -116,6 +116,16 @@ func (s *fakeTagStore) ListTags(context.Context) ([]database.Tag, error) {
 	return result, nil
 }
 
+func (s *fakeTagStore) ListCoordinationTags(context.Context) ([]database.Tag, error) {
+	result := make([]database.Tag, 0)
+	for _, tag := range s.tags {
+		if tag.Coordination == 1 {
+			result = append(result, *tag)
+		}
+	}
+	return result, nil
+}
+
 func (s *fakeTagStore) GetTag(_ context.Context, id int64) (*database.Tag, error) {
 	tag := s.tags[id]
 	if tag == nil {

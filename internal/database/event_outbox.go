@@ -109,6 +109,7 @@ func AppendEventOutbox(ctx context.Context, tx *sqlx.Tx, input EventOutboxAppend
 }
 
 func (d *DB) ListEventOutboxAfter(ctx context.Context, afterSequence int64, limit int) ([]EventOutboxEvent, error) {
+	// Pure read: served by the WAL read pool (long-poll scan hot path).
 	if afterSequence < 0 {
 		return nil, errors.New("event outbox cursor cannot be negative")
 	}
@@ -119,7 +120,7 @@ func (d *DB) ListEventOutboxAfter(ctx context.Context, afterSequence int64, limi
 		return nil, errors.New("event outbox limit cannot exceed 1000")
 	}
 	var events []EventOutboxEvent
-	if err := d.SelectContext(ctx, &events, `
+	if err := d.Reader().SelectContext(ctx, &events, `
 		SELECT * FROM event_outbox
 		WHERE sequence > ?
 		ORDER BY sequence ASC
@@ -146,10 +147,15 @@ func (d *DB) GetEventOutboxConsumerCursor(ctx context.Context, automationClientI
 	if automationClientID == "" || consumer == "" {
 		return nil, errors.New("automation_client_id and consumer are required")
 	}
+	// Register at zero on first sight; on every subsequent read, refresh
+	// updated_at so an actively-polling consumer that has nothing new to ack is
+	// still counted as live and is not wrongly evicted as stale.
 	if _, err := d.ExecContext(ctx, `
-		INSERT OR IGNORE INTO event_outbox_consumers
+		INSERT INTO event_outbox_consumers
 			(automation_client_id, consumer, cursor_sequence)
-		VALUES (?, ?, 0)`, automationClientID, consumer); err != nil {
+		VALUES (?, ?, 0)
+		ON CONFLICT(automation_client_id, consumer) DO UPDATE SET
+			updated_at = CURRENT_TIMESTAMP`, automationClientID, consumer); err != nil {
 		return nil, err
 	}
 	var cursor EventOutboxConsumerCursor
@@ -236,6 +242,26 @@ func (d *DB) PruneEventOutbox(ctx context.Context, occurredBefore time.Time, lim
 			ORDER BY event.sequence ASC
 			LIMIT ?
 		)`, occurredBefore.UTC(), limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// DefaultEventOutboxConsumerStaleAfter is how long a consumer cursor may go
+// without an ack (updated_at) before eviction removes it from the prune floor.
+const DefaultEventOutboxConsumerStaleAfter = 7 * 24 * time.Hour
+
+// EvictStaleEventOutboxConsumers deletes consumer cursors whose updated_at is
+// older than the cutoff. A dead consumer must not pin the prune floor forever;
+// an evicted consumer that returns simply re-registers at cursor zero.
+func (d *DB) EvictStaleEventOutboxConsumers(ctx context.Context, staleBefore time.Time) (int64, error) {
+	if staleBefore.IsZero() {
+		return 0, errors.New("event outbox consumer staleness cutoff is required")
+	}
+	result, err := d.ExecContext(ctx, `
+		DELETE FROM event_outbox_consumers
+		WHERE updated_at < ?`, staleBefore.UTC())
 	if err != nil {
 		return 0, err
 	}

@@ -37,6 +37,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	name := flags.String("name", "", "automation client name")
 	rawScopes := flags.String("scopes", "", "comma-separated automation scopes")
 	tokenFile := flags.String("token-file", "", "absolute path for the one-time token (created mode 0600)")
+	projectFilter := flags.String("project-filter", "", `scope the client to projects/tags, e.g. {"tag_ids":[2]} (empty = unrestricted)`)
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -77,6 +78,19 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		cleanupSecretFile(secretFile, *tokenFile)
 		return fmt.Errorf("provision automation client: %w", err)
+	}
+	if pf := strings.TrimSpace(*projectFilter); pf != "" {
+		var probe map[string]interface{}
+		if jsonErr := json.Unmarshal([]byte(pf), &probe); jsonErr != nil {
+			_ = db.SetAutomationClientEnabled(context.Background(), provisioned.Client.ID, false)
+			cleanupSecretFile(secretFile, *tokenFile)
+			return fmt.Errorf("--project-filter must be a JSON object: %w", jsonErr)
+		}
+		if err := db.SetAutomationClientProjectFilter(context.Background(), provisioned.Client.ID, pf); err != nil {
+			_ = db.SetAutomationClientEnabled(context.Background(), provisioned.Client.ID, false)
+			cleanupSecretFile(secretFile, *tokenFile)
+			return fmt.Errorf("set project filter: %w", err)
+		}
 	}
 	if secretFile != nil {
 		if _, err := io.WriteString(secretFile, provisioned.Token+"\n"); err != nil {

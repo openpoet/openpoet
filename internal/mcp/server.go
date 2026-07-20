@@ -223,7 +223,8 @@ func Serve(apiURL string) {
 	sessionID := os.Getenv("OPENPOET_SESSION_ID")
 	context := os.Getenv("OPENPOET_CONTEXT")
 	conversationID := os.Getenv("OPENPOET_CONVERSATION_ID")
-	client := NewAPIClient(apiURL)
+	sessionToken := os.Getenv("OPENPOET_SESSION_TOKEN")
+	client := NewAPIClientWithToken(apiURL, sessionToken)
 
 	// Start with deny_all as safe default. The handler dynamically fetches the
 	// current policy from the API on every tools/list and tools/call request,

@@ -11,6 +11,7 @@ import (
 	"openpoet/internal/mcp"
 	"openpoet/internal/secretvalue"
 	"openpoet/internal/sessionmeta"
+	"openpoet/internal/sessiontoken"
 	"openpoet/internal/websocket"
 	"os"
 	"path/filepath"
@@ -74,9 +75,20 @@ type Manager struct {
 	OnSessionEnd          func(sessionID string, output []byte)
 	OnUserPromptSubmitted func(sessionID string)
 	OnSessionFlush        func(sessionID string) // Always called on session end (even user-stopped) for OTEL flush
+	// OnRemoteSessionDropped (Phase 7.4): called when a REMOTE session's runner
+	// exits with an error that was not a user stop — usually a transport (SSH)
+	// drop, not a real process exit. Returning true means the handler took over
+	// (it will re-open the session); the manager then preserves the row as
+	// "running" instead of marking a terminal error.
+	OnRemoteSessionDropped func(sessionID string) bool
 	// OnProviderSessionIDChange is called when a native backend switches to a
 	// different transcript/thread, for example after Claude Code's /resume.
 	OnProviderSessionIDChange func(sessionID, providerSessionID string)
+
+	// OnSessionAttention surfaces PTY sentinel detections (a session waiting on
+	// a real question) without this package knowing who consumes them.
+	OnSessionAttention func(sessionID, kind, excerpt string)
+	attention          *AttentionSentinel
 }
 
 // OutputBuffer is a ring buffer for storing recent terminal output
@@ -134,6 +146,11 @@ type runningSession struct {
 	output       chan []byte
 	outputBuffer *OutputBuffer
 	userStopped  bool // set when user explicitly stops the session
+	remote       bool // remote (SSH) runner — transport drops get a reconnect shot
+	// inputMu serializes writes into this session's PTY so concurrent writers
+	// (WS client, hook automation, platform send_input) never interleave bytes
+	// mid-line. Only the input path takes it; runner internals are untouched.
+	inputMu sync.Mutex
 }
 
 func NewManager(db *database.DB, hub *websocket.Hub, serverAddr string) *Manager {
@@ -165,6 +182,7 @@ func NewManager(db *database.DB, hub *websocket.Hub, serverAddr string) *Manager
 		sessions:    make(map[string]*runningSession),
 		clientSizes: make(map[string]map[string]TermSize),
 		ptySizes:    make(map[string]TermSize),
+		attention:   NewAttentionSentinel(),
 	}
 }
 
@@ -228,9 +246,23 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 		m.db.UpdateSessionSkipPermissions(ctx, sessionID, true)
 		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
+	// Workspace lane markers: the runner cwd already comes from the (copied)
+	// project.Path; persisting work_dir/workspace_id is what lets reopen and
+	// auto-restore land back in the same lane after a restart (V36 precedent).
+	if workDir, ok := envVars["OPENPOET_WORKDIR"]; ok && workDir != "" {
+		if err := m.db.UpdateSessionWorkspace(ctx, sessionID, envVars["OPENPOET_WORKSPACE_ID"], workDir); err != nil {
+			log.Printf("[Session] failed to persist workspace for %s: %v", sessionID, err)
+		}
+		delete(envVars, "OPENPOET_WORKDIR")
+		delete(envVars, "OPENPOET_WORKSPACE_ID")
+	}
+
+	// Mint per-session credentials (opst1_ bearer + opht1_ hook token) and
+	// persist their digests before wiring them into the MCP config and env.
+	m.mintSessionCredentials(ctx, sessionID, cfg)
 
 	// Build MCP config
-	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID)
+	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID, cfg.MCPToken)
 	if configErr != nil {
 		_ = m.db.EndSession(ctx, sessionID, "error")
 		return nil, fmt.Errorf("build MCP configuration: %w", configErr)
@@ -414,9 +446,19 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 		m.db.UpdateSessionSkipPermissions(ctx, sessionID, true)
 		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
+	// Lane markers never reach the child process environment. For REMOTE lane
+	// sessions the lane still has to become the runner cwd — the persisted
+	// sess.WorkDir is applied to the runner's project copy further down (the
+	// local runner path already consumes sess.WorkDir directly).
+	delete(envVars, "OPENPOET_WORKDIR")
+	delete(envVars, "OPENPOET_WORKSPACE_ID")
+
+	// Mint fresh per-session credentials on reopen (the old ones were nulled
+	// at EndSession) and persist their digests before wiring them in.
+	m.mintSessionCredentials(ctx, sessionID, cfg)
 
 	// Build MCP config
-	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID)
+	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID, cfg.MCPToken)
 	if configErr != nil {
 		return fmt.Errorf("build MCP configuration: %w", configErr)
 	}
@@ -517,6 +559,7 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 		cancel:       cancel,
 		output:       make(chan []byte, 100),
 		outputBuffer: outputBuffer,
+		remote:       project.Type != "local",
 	}
 
 	m.mu.Lock()
@@ -850,6 +893,51 @@ func (m *Manager) WriteToSession(sessionID string, data []byte) error {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
+	rs.inputMu.Lock()
+	defer rs.inputMu.Unlock()
+	return m.writeToRunnerLocked(sessionID, rs, data)
+}
+
+// mintSessionCredentials generates the per-session opst1_ bearer and opht1_
+// hook token, persists only their SHA-256 digests, and stores the plaintext on
+// cfg for injection into the backend. Best-effort: on failure the session runs
+// without minted credentials (legacy behavior — enforcement is token-presence
+// keyed, so a session with no stored hash fails open).
+func (m *Manager) mintSessionCredentials(ctx context.Context, sessionID string, cfg *SessionConfig) {
+	if m.db == nil || cfg == nil {
+		return
+	}
+	mcpToken, mcpHash, err := sessiontoken.NewMCPToken(sessionID)
+	if err != nil {
+		log.Printf("[session] mint MCP token failed for %s: %v", sessionID, err)
+		return
+	}
+	hookToken, hookHash, err := sessiontoken.NewHookToken()
+	if err != nil {
+		log.Printf("[session] mint hook token failed for %s: %v", sessionID, err)
+		return
+	}
+	if err := m.db.UpdateSessionTokenHashes(ctx, sessionID, mcpHash, hookHash); err != nil {
+		log.Printf("[session] persist token hashes failed for %s: %v", sessionID, err)
+		return
+	}
+	cfg.MCPToken = mcpToken
+	cfg.HookToken = hookToken
+}
+
+// SessionTokenHashes returns the stored MCP and hook token hex digests for a
+// session (empty when unset). It is the read side of per-session credential
+// verification used by the hook ingestion path.
+func (m *Manager) SessionTokenHashes(ctx context.Context, sessionID string) (mcpTokenHash, hookTokenHash string, err error) {
+	if m.db == nil {
+		return "", "", fmt.Errorf("session store unavailable")
+	}
+	return m.db.GetSessionTokenHashes(ctx, sessionID)
+}
+
+// writeToRunnerLocked writes to the session's PTY. The caller MUST hold
+// rs.inputMu so concurrent writers cannot interleave bytes.
+func (m *Manager) writeToRunnerLocked(sessionID string, rs *runningSession, data []byte) error {
 	_, err := rs.runner.Write(data)
 	if err == nil && m.isCodexTerminalSubmit(rs, data) {
 		m.notifyUserPromptSubmitted(sessionID)
@@ -863,13 +951,23 @@ func (m *Manager) SubmitLineToSession(sessionID string, text string, textToEnter
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
-	if err := m.WriteToSession(sessionID, []byte(text)); err != nil {
+	m.mu.RLock()
+	rs, ok := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	// Hold the input lock across BOTH writes so no other writer can slip bytes
+	// into the text→Enter window (the time.Sleep below is exactly that gap).
+	rs.inputMu.Lock()
+	defer rs.inputMu.Unlock()
+	if err := m.writeToRunnerLocked(sessionID, rs, []byte(text)); err != nil {
 		return err
 	}
 	if textToEnterDelay > 0 {
 		time.Sleep(textToEnterDelay)
 	}
-	return m.WriteToSession(sessionID, []byte("\r"))
+	return m.writeToRunnerLocked(sessionID, rs, []byte("\r"))
 }
 
 // SetSessionModel changes the model used by future turns of an active session.
@@ -1453,6 +1551,9 @@ func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 	shuttingDown := m.shuttingDown
 	delete(m.sessions, sessionID)
 	m.mu.Unlock()
+	if m.attention != nil {
+		m.attention.Forget(sessionID)
+	}
 
 	if shuttingDown {
 		log.Printf("Session %s stopped for restart (preserving DB state)", sessionID)
@@ -1475,6 +1576,21 @@ func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 		status = "stopped"
 	} else if err != nil {
 		status = "error"
+	}
+
+	// Remote transport drop (Phase 7.4): a non-user error exit of a remote
+	// runner is far more often an SSH drop than a process death. Give the
+	// reconnect handler one shot BEFORE declaring the session dead — if it
+	// accepts, the row stays "running" for the re-open path (mirrors the
+	// shutdown-preserve branch above).
+	if status == "error" && rs.remote && m.OnRemoteSessionDropped != nil {
+		if m.OnRemoteSessionDropped(sessionID) {
+			log.Printf("Session %s: remote transport dropped — reconnect handler took over (row preserved)", sessionID)
+			if m.OnSessionFlush != nil {
+				m.OnSessionFlush(sessionID)
+			}
+			return
+		}
 	}
 
 	// Send exit message to terminal before cleaning up
@@ -1514,14 +1630,30 @@ func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 }
 
 func (m *Manager) checkForNotificationTriggers(sessionID string, data []byte) {
-	// This will be implemented to parse output for notification triggers
-	// For now, just a placeholder
+	m.ScanOutputForAttention(sessionID, data)
+}
+
+// ScanOutputForAttention runs the PTY attention sentinel over one output
+// chunk and forwards detections through OnSessionAttention. It is the live
+// implementation of the output-chain notification hook: every runner's
+// outputHandler funnels here, and test mode injects synthetic output through
+// the same entry point.
+func (m *Manager) ScanOutputForAttention(sessionID string, data []byte) {
+	callback := m.OnSessionAttention
+	if callback == nil || m.attention == nil {
+		return
+	}
+	for _, att := range m.attention.Feed(sessionID, data) {
+		callback(sessionID, att.Kind, att.Excerpt)
+	}
 }
 
 // buildMCPConfigJSON builds a JSON string for the --mcp-config CLI flag.
 // It includes user-configured MCP servers from the DB plus OpenPoet's own MCP server.
 // OpenPoet's MCP server is only included if the effective tool policy allows at least one tool.
-func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Project, sessionID string) (string, error) {
+// mcpToken, when non-empty, is passed to the injected mcp-serve subprocess so
+// its API calls carry verified session identity.
+func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Project, sessionID, mcpToken string) (string, error) {
 	mcpServers := make(map[string]interface{})
 	m.mu.RLock()
 	decrypt := m.secretDecrypt
@@ -1595,9 +1727,13 @@ func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Proj
 	}
 
 	if shouldInjectOpenPoet && m.execPath != "" {
+		args := []string{"mcp-serve", "--session-id", sessionID, "--api-url", "http://" + m.serverAddr}
+		if mcpToken != "" {
+			args = append(args, "--session-token", mcpToken)
+		}
 		mcpServers["openpoet"] = map[string]interface{}{
 			"command": m.execPath,
-			"args":    []string{"mcp-serve", "--session-id", sessionID, "--api-url", "http://" + m.serverAddr},
+			"args":    args,
 		}
 	}
 
@@ -1736,9 +1872,25 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 		cfg.DangerouslySkipPermissions = true
 		delete(envVars, "OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS")
 	}
+	// Remote lanes (Phase 7.3): persist the lane like the local path does, and
+	// run the session inside it by handing the runner a shallow project copy
+	// whose Path IS the lane (the runner cds to project.Path on the SSH host).
+	if workDir, ok := envVars["OPENPOET_WORKDIR"]; ok && workDir != "" {
+		if err := m.db.UpdateSessionWorkspace(ctx, sessionID, envVars["OPENPOET_WORKSPACE_ID"], workDir); err != nil {
+			log.Printf("[Session] failed to persist workspace for remote %s: %v", sessionID, err)
+		}
+		laneProject := *project
+		laneProject.Path = workDir
+		project = &laneProject
+	}
+	delete(envVars, "OPENPOET_WORKDIR")
+	delete(envVars, "OPENPOET_WORKSPACE_ID")
+
+	// Mint per-session credentials and persist their digests before wiring in.
+	m.mintSessionCredentials(ctx, sessionID, cfg)
 
 	// Build MCP config
-	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID)
+	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID, cfg.MCPToken)
 	if configErr != nil {
 		_ = m.db.EndSession(ctx, sessionID, "error")
 		return nil, fmt.Errorf("build MCP configuration: %w", configErr)
@@ -1785,6 +1937,7 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 		cancel:       cancel,
 		output:       make(chan []byte, 100),
 		outputBuffer: outputBuffer,
+		remote:       true,
 	}
 
 	m.mu.Lock()

@@ -56,6 +56,7 @@ type CreateTempDocumentCommand struct {
 	Summary        string
 	ConversationID *int64
 	TaskID         *int64
+	MissionID      *int64
 	SessionID      string
 	Authorization  ActionAuthorization
 }
@@ -151,6 +152,9 @@ func (s *DocumentService) CreateTemp(ctx context.Context, command CreateTempDocu
 	if command.TaskID != nil && *command.TaskID <= 0 {
 		return TempDocumentView{}, validationError("invalid_task_id", "Task ID must be positive")
 	}
+	if command.MissionID != nil && *command.MissionID <= 0 {
+		return TempDocumentView{}, validationError("invalid_mission_id", "Mission ID must be positive")
+	}
 	if len(command.SessionID) > 200 {
 		return TempDocumentView{}, validationError("invalid_session_id", "Session ID exceeds its bounded limit")
 	}
@@ -160,6 +164,9 @@ func (s *DocumentService) CreateTemp(ctx context.Context, command CreateTempDocu
 	}
 	if command.TaskID != nil {
 		doc.TaskID = sql.NullInt64{Int64: *command.TaskID, Valid: true}
+	}
+	if command.MissionID != nil {
+		doc.MissionID = sql.NullInt64{Int64: *command.MissionID, Valid: true}
 	}
 	if err = s.store.CreateTempDocument(ctx, doc); err != nil {
 		return TempDocumentView{}, err
