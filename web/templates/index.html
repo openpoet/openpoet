@@ -58,6 +58,12 @@
                     </svg>
                     <span>Tasks</span>
                 </a>
+                <a href="#" class="nav-item" data-view="missions">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 11l19-9-9 19-2-8-8-2z"></path>
+                    </svg>
+                    <span>Missions</span>
+                </a>
                 <a href="#" class="nav-item nav-notifications" id="nav-notifications" onclick="window.notifBadge?.toggle(); return false;">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
@@ -510,6 +516,178 @@
                 </div>
             </section>
 
+            <!-- Missions View (Fase 7.6 — painel central da missão, nativo no app) -->
+            <section id="view-missions" class="view">
+                <header class="view-header">
+                    <h2>Missões</h2>
+                </header>
+                <div class="mv-list-pane" id="mv-list-pane">
+                    <div class="mv-toolbar">
+                        <input id="mv-search" class="mv-search" type="search" autocomplete="off"
+                            placeholder="Buscar por objetivo, status ou #id…" oninput="app.onMissionSearch(this.value)">
+                        <button class="mv-newbtn" onclick="app.openCreateMission()">＋ Nova missão</button>
+                    </div>
+                    <div class="mv-list" id="mv-list"><div class="mv-empty">Carregando…</div></div>
+                    <div class="mv-pager" id="mv-pager"></div>
+                </div>
+                <div class="mv-modal" id="mv-create-modal">
+                    <div class="mv-modal-inner">
+                        <div class="mv-modal-head">
+                            <h3>Nova missão</h3>
+                            <button class="btn btn-sm btn-outline" onclick="app.closeCreateMission()">Fechar</button>
+                        </div>
+                        <div class="mv-create-body">
+                            <label class="mvc-label" for="mvc-goal">Objetivo</label>
+                            <textarea id="mvc-goal" class="mvc-input" rows="3" placeholder="O que a missão deve alcançar…"></textarea>
+                            <label class="mvc-label" for="mvc-group">Grupo de coordenação</label>
+                            <select id="mvc-group" class="mvc-input" onchange="app.onCreateGroupChange()"></select>
+                            <label class="mvc-check"><input type="checkbox" id="mvc-spawn" onchange="app.onCreateSpawnToggle()">
+                                <span>Iniciar com coordenadora agora <em>(sessão de IA real — custa tokens)</em></span></label>
+                            <div id="mvc-project-wrap" hidden>
+                                <label class="mvc-label" for="mvc-project">Projeto da coordenadora</label>
+                                <select id="mvc-project" class="mvc-input"></select>
+                            </div>
+                            <div id="mvc-msg" class="mvc-msg"></div>
+                            <div class="mv-create-actions">
+                                <button class="mv-endbtn" onclick="app.submitCreateMission()">Criar missão</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="mv-detail-pane" id="mv-detail-pane" hidden>
+                    <button class="mv-back" onclick="app.closeMissionDetail()">‹ Voltar para a lista</button>
+                    <div class="mv-content" id="mv-content"></div>
+                </div>
+                <div class="mv-modal" id="mv-modal">
+                    <div class="mv-modal-inner">
+                        <div class="mv-modal-head">
+                            <h3 id="mv-doc-title">Documento</h3>
+                            <button class="btn btn-sm btn-outline" onclick="app.closeMissionDoc()">Fechar</button>
+                        </div>
+                        <div class="mv-doc-body" id="mv-doc-body"></div>
+                    </div>
+                </div>
+            </section>
+            <style>
+                #view-missions .mv-list-pane, #view-missions .mv-detail-pane { padding: 18px 24px 60px; overflow-y: auto; overflow-x: hidden; }
+                #view-missions .mv-content { padding: 0; }
+                .mv-toolbar { margin-bottom: 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+                .mv-search { flex: 1; min-width: 200px; max-width: 520px; box-sizing: border-box; background: var(--color-surface); color: var(--color-text);
+                    border: 1px solid var(--color-border); border-radius: var(--border-radius); padding: 9px 14px; font: inherit; }
+                .mv-newbtn { flex-shrink: 0; background: var(--color-primary); color: #fff; border: 1px solid var(--color-primary);
+                    border-radius: 8px; padding: 9px 16px; font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; }
+                .mv-newbtn:hover { background: var(--color-primary-hover, var(--color-primary)); }
+                .mv-create-body { padding: 14px 24px 26px; display: flex; flex-direction: column; }
+                .mvc-label { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--color-text-muted); margin: 12px 0 5px; }
+                .mvc-input { width: 100%; box-sizing: border-box; background: var(--color-surface); color: var(--color-text);
+                    border: 1px solid var(--color-border); border-radius: var(--border-radius); padding: 9px 12px; font: inherit; }
+                textarea.mvc-input { resize: vertical; }
+                .mvc-check { display: flex; gap: 9px; align-items: flex-start; margin: 14px 0 2px; font-size: 14px; color: var(--color-text); cursor: pointer; }
+                .mvc-check em { color: var(--color-text-muted); font-style: normal; font-size: 12.5px; }
+                .mvc-check input { margin-top: 3px; }
+                .mvc-msg { color: var(--color-text-muted); font-size: 13px; min-height: 18px; margin-top: 10px; }
+                .mv-create-actions { margin-top: 16px; }
+                .mv-create-actions .mv-endbtn { width: 100%; }
+                .mv-list { display: flex; flex-direction: column; gap: 8px; }
+                .mv-mission-row { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+                    padding: 12px 14px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-surface); cursor: pointer;
+                    font: inherit; color: var(--color-text); }
+                .mv-mission-row:hover { border-color: var(--color-primary); background: var(--color-surface-hover); }
+                .mv-mission-row:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
+                .mv-mission-body { flex: 1; min-width: 0; }
+                .mv-mission-goal { display: block; font-weight: 600; color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+                .mv-mission-sub { display: block; color: var(--color-text-muted); font-size: 12.5px; margin-top: 2px; }
+                .mv-mission-chev { flex-shrink: 0; color: var(--color-text-muted); font-size: 18px; }
+                .mv-pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 16px; color: var(--color-text-muted); font-size: 13px; }
+                .mv-pager button { background: none; border: 1px solid var(--color-border); color: var(--color-text); border-radius: 8px; padding: 6px 12px; cursor: pointer; font: inherit; }
+                .mv-pager button:hover:not(:disabled) { border-color: var(--color-primary); }
+                .mv-pager button:disabled { opacity: .4; cursor: default; }
+                .mv-back { background: none; border: none; color: var(--color-primary); font: inherit; font-weight: 600; cursor: pointer; padding: 4px 0; margin-bottom: 14px; }
+                .mv-back:hover { text-decoration: underline; }
+                .mv-select { background: var(--color-surface); color: var(--color-text); border: 1px solid var(--color-border);
+                    border-radius: var(--border-radius); padding: 7px 12px; font: inherit; width: 100%; max-width: 520px; box-sizing: border-box;
+                    text-overflow: ellipsis; }
+                #view-missions .view-header-actions { min-width: 0; flex: 1; }
+                .mv-grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; max-width: 1100px; }
+                .mv-card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; padding: 15px 17px; min-width: 0; }
+                .mv-card.mv-full { grid-column: 1 / -1; }
+                .mv-card h4 { margin: 0 0 11px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--color-text-muted);
+                    display: flex; align-items: center; gap: 8px; }
+                .mv-count { text-transform: none; letter-spacing: 0; font-size: 11px; color: var(--color-status-running);
+                    border: 1px solid currentColor; border-radius: 99px; padding: 1px 8px; }
+                .mv-goal { font-size: 16px; margin: 2px 0 10px; color: var(--color-text); overflow-wrap: anywhere; }
+                .mv-meta { color: var(--color-text-muted); font-size: 13px; }
+                .mv-mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+                .mv-break { overflow-wrap: anywhere; word-break: break-all; }
+                /* Linhas responsivas (substituem tabelas que estouravam no mobile) */
+                .mv-row { display: flex; align-items: center; gap: 12px;
+                    padding: 11px 12px; border: 1px solid var(--color-border); border-radius: 9px; margin-top: 8px;
+                    background: var(--color-bg-secondary); }
+                .mv-row:first-of-type { margin-top: 0; }
+                .mv-row-body { flex: 1; min-width: 0; }
+                .mv-row-main { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+                .mv-row-title { font-weight: 600; color: var(--color-text); overflow-wrap: anywhere; }
+                .mv-row-meta { color: var(--color-text-muted); font-size: 12.5px; margin-top: 3px; overflow-wrap: anywhere; }
+                .mv-row-end { flex-shrink: 0; }
+                .mv-cta { flex-shrink: 0; color: var(--color-primary); font-weight: 600; font-size: 13px; white-space: nowrap;
+                    border: 1px solid currentColor; border-radius: 99px; padding: 5px 13px; }
+                .mv-worker.mv-live { cursor: pointer; }
+                .mv-worker.mv-live:hover { border-color: var(--color-primary); background: var(--color-surface-hover); }
+                .mv-worker.mv-live:hover .mv-cta { background: var(--color-primary); color: #fff; }
+                .mv-worker.mv-live:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
+                .mv-coord { margin-top: 12px; border-left: 3px solid var(--color-primary); }
+                .mv-tagword { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--color-primary);
+                    border: 1px solid currentColor; border-radius: 99px; padding: 1px 7px; margin-left: 7px; font-weight: 600; vertical-align: middle; }
+                .mv-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+                .mv-stopall { background: none; border: 1px solid var(--color-danger);
+                    color: var(--color-danger); border-radius: 8px; padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; }
+                .mv-stopall:hover { background: var(--color-danger); color: #fff; }
+                .mv-stopall:focus-visible { outline: 2px solid var(--color-danger); outline-offset: 2px; }
+                .mv-endbtn { background: none; border: 1px solid var(--color-primary); color: var(--color-primary);
+                    border-radius: 8px; padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; }
+                .mv-endbtn:hover { background: var(--color-primary); color: #fff; }
+                .mv-endbtn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+                button.mv-doc-open.mv-row-title { background: none; border: none; padding: 0; cursor: pointer; color: var(--color-primary); text-align: left; }
+                .mv-status { display: inline-block; padding: 2px 9px; border-radius: 99px; font-size: 12px; border: 1px solid currentColor; white-space: nowrap; }
+                .mv-running, .mv-active { color: var(--color-status-running); }
+                .mv-paused { color: var(--color-priority-medium); }
+                .mv-completed { color: var(--color-info); }
+                .mv-failed, .mv-error, .mv-stopped { color: var(--color-status-error); }
+                .mv-empty { color: var(--color-text-muted); font-style: italic; padding: 8px 2px; }
+                .mv-ev { list-style: none; margin: 0; padding: 0; }
+                .mv-ev li { padding: 4px 0; border-bottom: 1px dotted var(--color-border); font-size: 13px; }
+                .mv-ev .t { color: var(--color-primary); font-family: ui-monospace, monospace; margin-right: 8px; }
+                .mv-ev .d { color: var(--color-text-muted); }
+                .mv-doc-open { background: none; border: none; color: var(--color-primary); font: inherit; cursor: pointer; padding: 0; text-align: left; }
+                .mv-doc-open:hover { text-decoration: underline; }
+                .mv-modal { position: fixed; inset: 0; z-index: 3000; display: none; background: var(--color-overlay-bg, rgba(0,0,0,.55)); }
+                .mv-modal.open { display: flex; align-items: flex-start; justify-content: center; padding: 24px 16px; overflow: auto; }
+                .mv-modal-inner { background: var(--color-bg); border: 1px solid var(--color-border); border-radius: 12px; max-width: 820px; width: 100%; margin: auto; }
+                .mv-modal-head { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--color-border); position: sticky; top: 0; background: var(--color-bg); border-radius: 12px 12px 0 0; }
+                .mv-modal-head h3 { margin: 0; font-size: 16px; flex: 1; color: var(--color-text); }
+                .mv-doc-body { padding: 10px 24px 28px; color: var(--color-text); line-height: 1.6; }
+                .mv-doc-body h2, .mv-doc-body h3, .mv-doc-body h4 { color: var(--color-text); margin: 20px 0 8px; }
+                .mv-doc-body h2 { font-size: 20px; } .mv-doc-body h3 { font-size: 17px; } .mv-doc-body h4 { font-size: 15px; }
+                .mv-doc-body code { background: var(--color-bg-secondary); padding: 1px 6px; border-radius: 5px; font-family: ui-monospace, monospace; font-size: 12.5px; }
+                .mv-doc-body pre { background: var(--color-bg-secondary); border: 1px solid var(--color-border); border-radius: 8px; padding: 12px 14px; overflow-x: auto; }
+                .mv-doc-body pre code { background: none; padding: 0; }
+                .mv-doc-body table { border-collapse: collapse; margin: 10px 0; }
+                .mv-doc-body th, .mv-doc-body td { border: 1px solid var(--color-border); padding: 5px 9px; text-align: left; font-size: 13px; }
+                .mv-doc-body hr { border: 0; border-top: 1px solid var(--color-border); margin: 18px 0; }
+                @media (max-width: 720px) {
+                    .mv-grid { grid-template-columns: 1fr; gap: 12px; }
+                    #view-missions .mv-list-pane, #view-missions .mv-detail-pane { padding: 14px 14px 72px; }
+                    .mv-card { padding: 13px 14px; border-radius: 10px; }
+                    .mv-goal { font-size: 15px; }
+                    .mv-row { padding: 11px 12px; }
+                    .mv-actions { flex-direction: column; }
+                    .mv-stopall, .mv-endbtn { display: block; width: 100%; text-align: center; }
+                    .mv-modal.open { padding: 0; }
+                    .mv-modal-inner { border-radius: 0; min-height: 100%; }
+                    .mv-doc-body { padding: 8px 16px 40px; }
+                }
+            </style>
+
             <!-- Config View -->
             <section id="view-config" class="view">
                 <header class="view-header">
@@ -670,6 +848,12 @@
                     <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
                 </svg>
                 <span>Tasks</span>
+            </a>
+            <a href="#" class="mobile-nav-item" data-view="missions">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M3 11l19-9-9 19-2-8-8-2z"></path>
+                </svg>
+                <span>Missions</span>
             </a>
             <a href="#" class="mobile-nav-item" id="mobile-nav-notifications" onclick="window.notifBadge?.toggle(); return false;">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

@@ -20,12 +20,16 @@ const (
 	ScopeNotificationsRead  Scope = "notifications:read"
 	ScopeNotificationsAck   Scope = "notifications:ack"
 	ScopeEventsRead         Scope = "events:read"
+	ScopeConflictsRead      Scope = "conflicts:read"
+	ScopeWorkspacesRead     Scope = "workspaces:read"
+	ScopeWorkspacesWrite    Scope = "workspaces:write"
 	ScopeReportsRead        Scope = "reports:read"
 	ScopeWorkRunsRead       Scope = "work_runs:read"
 	ScopeWorkRunsWrite      Scope = "work_runs:write"
 	ScopePlansRead          Scope = "plans:read"
 	ScopePlansWrite         Scope = "plans:write"
 	ScopeApprovalsGrant     Scope = "approvals:grant"
+	ScopeApprovalsSelf      Scope = "approvals:self"
 	ScopeAgentsRead         Scope = "agents:read"
 	ScopeAgentsWrite        Scope = "agents:write"
 	ScopeAIUse              Scope = "ai:use"
@@ -53,6 +57,11 @@ const (
 	ScopeSkillsWrite        Scope = "skills:write"
 	ScopeTagsRead           Scope = "tags:read"
 	ScopeTagsWrite          Scope = "tags:write"
+	ScopeGroupsRead         Scope = "groups:read"
+	ScopeBlackboardRead     Scope = "blackboard:read"
+	ScopeBlackboardWrite    Scope = "blackboard:write"
+	ScopeEnvironmentsManage Scope = "environments:manage"
+	ScopeEnvironmentsRead   Scope = "environments:read"
 	ScopeTokenUsageRead     Scope = "token_usage:read"
 	ScopeTokenUsageWrite    Scope = "token_usage:write"
 	ScopeToolsExecute       Scope = "tools:execute"
@@ -78,12 +87,16 @@ var knownScopes = map[Scope]struct{}{
 	ScopeNotificationsRead:  {},
 	ScopeNotificationsAck:   {},
 	ScopeEventsRead:         {},
+	ScopeConflictsRead:      {},
+	ScopeWorkspacesRead:     {},
+	ScopeWorkspacesWrite:    {},
 	ScopeReportsRead:        {},
 	ScopeWorkRunsRead:       {},
 	ScopeWorkRunsWrite:      {},
 	ScopePlansRead:          {},
 	ScopePlansWrite:         {},
 	ScopeApprovalsGrant:     {},
+	ScopeApprovalsSelf:      {},
 	ScopeAgentsRead:         {},
 	ScopeAgentsWrite:        {},
 	ScopeAIUse:              {},
@@ -111,6 +124,11 @@ var knownScopes = map[Scope]struct{}{
 	ScopeSkillsWrite:        {},
 	ScopeTagsRead:           {},
 	ScopeTagsWrite:          {},
+	ScopeGroupsRead:         {},
+	ScopeBlackboardRead:     {},
+	ScopeBlackboardWrite:    {},
+	ScopeEnvironmentsManage: {},
+	ScopeEnvironmentsRead:   {},
 	ScopeTokenUsageRead:     {},
 	ScopeTokenUsageWrite:    {},
 	ScopeToolsExecute:       {},

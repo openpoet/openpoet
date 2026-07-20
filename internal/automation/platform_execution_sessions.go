@@ -108,6 +108,24 @@ type sessionCreatePayload struct {
 	AutoStartTaskPrompt        *bool             `json:"auto_start_task_prompt,omitempty"`
 	PlanningMode               bool              `json:"planning_mode,omitempty"`
 	CustomPrompt               string            `json:"custom_prompt,omitempty"`
+	WorkspaceID                string            `json:"workspace_id,omitempty"`
+	// Backend, when set, must name a known backend; the session runs with it
+	// even when it differs from the project's backend (Phase 7.3 heterogeneous
+	// fan-out).
+	Backend string `json:"backend,omitempty"`
+	// MissionID/MissionRole enroll the session as a mission worker (Phase 7.3):
+	// briefing injected server-side, mission_workers row registered.
+	MissionID   *int64 `json:"mission_id,omitempty"`
+	MissionRole string `json:"mission_role,omitempty"`
+	// Isolation:"auto" leases an idle pooled workspace when the project's main
+	// path is busy (Phase 6 pooling), instead of requiring an explicit workspace_id.
+	Isolation string `json:"isolation,omitempty"`
+}
+
+// knownSessionBackends mirrors internal/session BackendType constants (kept local
+// to avoid an import cycle from the automation package into session).
+var knownSessionBackends = map[string]struct{}{
+	"claude_code": {}, "copilot": {}, "acp": {}, "codex": {}, "opencode": {},
 }
 
 type sessionReopenPayload struct {
@@ -116,6 +134,10 @@ type sessionReopenPayload struct {
 
 type sessionInputPayload struct {
 	Text string `json:"text"`
+	// AwaitAck blocks for the agent's UserPromptSubmit ack (default true for
+	// coordinator send-with-ack); Force bypasses the mid-turn busy guard.
+	AwaitAck *bool `json:"await_ack,omitempty"`
+	Force    bool  `json:"force,omitempty"`
 }
 
 type sessionModelPayload struct {
@@ -160,6 +182,7 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if payload.Limit == 0 {
 			payload.Limit = 100
 		}
+		scope := input.ProjectScope // client project_filter: never leak other groups' sessions
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"limit": payload.Limit}), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
 			items, err := e.queries.ListSessions(ctx)
 			if err != nil {
@@ -169,6 +192,9 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 			for _, item := range items {
 				if payload.ProjectID > 0 && item.ProjectID != payload.ProjectID || payload.Status != "" && item.Status != payload.Status {
 					continue
+				}
+				if !scope.Allows(item.ProjectID) {
+					continue // outside the client's project_filter
 				}
 				views = append(views, sessionAutomationView(item, e.runtime))
 				if len(views) == payload.Limit {
@@ -234,6 +260,7 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if err := requireEmptyExecutionPayload(input.Payload); err != nil {
 			return nil, err
 		}
+		scope := input.ProjectScope
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, nil), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
 			items, err := e.queries.ListSessions(ctx)
 			if err != nil {
@@ -243,6 +270,9 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 			for _, item := range items {
 				if !e.runtime.IsSessionRunning(item.ID) {
 					continue
+				}
+				if !scope.Allows(item.ProjectID) {
+					continue // outside the client's project_filter
 				}
 				views = append(views, sessionAutomationView(item, e.runtime))
 				if len(views) == 500 {
@@ -277,6 +307,23 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if environmentBytes > 64<<10 {
 			return nil, platformFailure("platform_payload_invalid", "session environment exceeds 64 KiB", false)
 		}
+		payload.WorkspaceID = strings.TrimSpace(payload.WorkspaceID)
+		if len(payload.WorkspaceID) > 128 {
+			return nil, platformFailure("platform_payload_invalid", "workspace_id is too large", false)
+		}
+		payload.Backend = strings.TrimSpace(payload.Backend)
+		if payload.Backend != "" {
+			if _, ok := knownSessionBackends[payload.Backend]; !ok {
+				return nil, platformFailure("platform_payload_invalid", "backend must be one of claude_code, copilot, acp, codex, opencode", false)
+			}
+		}
+		if payload.MissionID != nil && *payload.MissionID <= 0 {
+			return nil, platformFailure("platform_payload_invalid", "mission_id must be positive", false)
+		}
+		payload.MissionRole = strings.TrimSpace(payload.MissionRole)
+		if len(payload.MissionRole) > 100 {
+			return nil, platformFailure("platform_payload_invalid", "mission_role is too large", false)
+		}
 		startMode := "default"
 		if payload.PlanningMode {
 			startMode = "planning"
@@ -286,6 +333,8 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{
 			"project_id": projectID, "has_task": payload.TaskID != nil, "environment_count": len(payload.Environment),
 			"unsafe_permissions": payload.DangerouslySkipPermissions, "start_mode": startMode,
+			"workspace_id": payload.WorkspaceID, "backend": payload.Backend,
+			"mission_id": payload.MissionID, "mission_role": payload.MissionRole,
 		}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
 			authorization.AllowEnvironment = len(payload.Environment) > 0
 			authorization.AllowUnsafePermissions = payload.DangerouslySkipPermissions
@@ -298,6 +347,11 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 				AutoStartTaskPrompt: true,
 				PlanningMode:        payload.PlanningMode,
 				CustomPrompt:        payload.CustomPrompt,
+				WorkspaceID:         payload.WorkspaceID,
+				Isolation:           payload.Isolation,
+				Backend:             payload.Backend,
+				MissionID:           payload.MissionID,
+				MissionRole:         payload.MissionRole,
 				Authorization:       authorization,
 			})
 			if err != nil {
@@ -343,11 +397,20 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if text == "" || len([]byte(text)) > 16<<10 {
 			return nil, platformFailure("platform_payload_invalid", "session input must contain between 1 byte and 16 KiB", false)
 		}
+		awaitAck := true
+		if payload.AwaitAck != nil {
+			awaitAck = *payload.AwaitAck
+		}
+		rejectIfBusy := !payload.Force
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"session_id": sessionID, "input_bytes": len([]byte(text))}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
-			if err := e.service.SendInput(ctx, application.SendSessionInputCommand{SessionID: sessionID, Text: text, Authorization: authorization}); err != nil {
+			result, err := e.service.SendInputWithAck(ctx, application.SendSessionInputCommand{
+				SessionID: sessionID, Text: text, Authorization: authorization,
+				RejectIfBusy: rejectIfBusy, AwaitAck: awaitAck,
+			})
+			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"sent": true, "session_id": sessionID}, nil
+			return map[string]any{"sent": result.Submitted, "acknowledged": result.Acknowledged, "session_id": sessionID}, nil
 		}}, nil
 	case "sessions.set_model":
 		sessionID, err := executionStringID(target, "session id")

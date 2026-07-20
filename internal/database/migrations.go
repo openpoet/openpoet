@@ -72,6 +72,23 @@ var migrations = []Migration{
 	{Version: 54, Description: "sessions: distinguish requested and effective runtime models", Up: migrateV54},
 	{Version: 55, Description: "projects: remove foreign backend settings from Claude Code", Up: migrateV55},
 	{Version: 56, Description: "tasks: add per-project verification auto-approval override", Up: migrateV56},
+	{Version: 57, Description: "sessions: add per-session MCP and hook token hashes", Up: migrateV57},
+	{Version: 58, Description: "coordinator: add session_file_activity claim ledger", Up: migrateV58},
+	{Version: 59, Description: "coordinator: add conflict incidents table", Up: migrateV59},
+	{Version: 60, Description: "workspaces: add workspaces table (full phase-N schema)", Up: migrateV60},
+	{Version: 61, Description: "sessions: add work_dir and workspace_id columns", Up: migrateV61},
+	{Version: 62, Description: "sessions: add parent_session_id and spawned_by lineage columns", Up: migrateV62},
+	{Version: 63, Description: "brain v1: coordinator_mode dial, ai_coordinator slot, Coordinator persona, coordinator_consults ledger", Up: migrateV63},
+	{Version: 64, Description: "conflict gate: per-project conflict_policy dial (observe|warn|gate|enforce)", Up: migrateV64},
+	{Version: 65, Description: "reach: tags coordination flag + settings_json; automation_clients project_filter scoping", Up: migrateV65},
+	{Version: 66, Description: "blackboard: shared CAS/TTL/fence key-value store (blackboard_entries)", Up: migrateV66},
+	{Version: 67, Description: "environments: manifest content-hash approval ledger (environment_manifests)", Up: migrateV67},
+	{Version: 68, Description: "environments: resource registry + port allocator (environment_resources) with reserved 8080/8081/8090", Up: migrateV68},
+	{Version: 69, Description: "maestro: temp_documents mission_id link (docs land attached to the mission that produced them)", Up: migrateV69},
+	{Version: 70, Description: "maestro: milestone report fields on structured_session_reports (next_step, needs_from_coordinator_json)", Up: migrateV70},
+	{Version: 71, Description: "maestro: missions + mission_workers (goal-driven orchestration registry; one active mission per coordination group)", Up: migrateV71},
+	{Version: 72, Description: "ssh hardening: ssh_known_hosts TOFU ledger (first contact records, later contacts verify, mismatch fails closed)", Up: migrateV72},
+	{Version: 73, Description: "maestro integration: mission_grants (multi-use, mission-scoped human authority for destructive capabilities like workspaces.merge)", Up: migrateV73},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1544,6 +1561,443 @@ func migrateV56(tx *sqlx.Tx) error {
 		CHECK(task_auto_approve_verification IN ('inherit', 'enabled', 'disabled'))`)
 	if err != nil {
 		return fmt.Errorf("migrateV56 failed: %w", err)
+	}
+	return nil
+}
+
+func migrateV57(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE sessions ADD COLUMN mcp_token_hash TEXT`,
+		`ALTER TABLE sessions ADD COLUMN hook_token_hash TEXT`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV57 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV58(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS session_file_activity (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			project_id INTEGER NOT NULL,
+			path TEXT NOT NULL,
+			kind TEXT NOT NULL CHECK(kind IN ('read', 'write', 'opaque')),
+			first_touch_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_touch_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			touch_count INTEGER NOT NULL DEFAULT 1,
+			last_tool TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT 'hook' CHECK(source IN ('hook', 'jsonl', 'acp', 'codex', 'git')),
+			UNIQUE(session_id, path, kind)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_file_activity_project_path ON session_file_activity(project_id, path)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV58 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV59(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS coordinator_incidents (
+			id TEXT PRIMARY KEY,
+			rule TEXT NOT NULL CHECK(rule IN ('file_overlap', 'scope_overlap', 'same_task', 'divergent_plans', 'shared_claude_dir', 'unattributed_dirt')),
+			severity TEXT NOT NULL CHECK(severity IN ('info', 'warn', 'critical')),
+			project_id INTEGER NOT NULL,
+			scope_key TEXT NOT NULL,
+			sessions_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(sessions_json)),
+			state TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open', 'acknowledged', 'resolved', 'expired')),
+			first_detected_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_evidence_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			evidence_count INTEGER NOT NULL DEFAULT 1,
+			details_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(details_json)),
+			UNIQUE(rule, scope_key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_coordinator_incidents_project_state ON coordinator_incidents(project_id, state)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV59 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV60(tx *sqlx.Tx) error {
+	// Full phase-N schema from day one: SQLite CHECK constraints cannot be
+	// widened additively, so the status/kind enums carry every future state
+	// now (Phase 2 uses provisioning→ready→leased→failed→removed only).
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS workspaces (
+			id TEXT PRIMARY KEY,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			kind TEXT NOT NULL DEFAULT 'worktree' CHECK(kind IN ('worktree', 'copy', 'external')),
+			name TEXT NOT NULL,
+			branch TEXT NOT NULL,
+			base_ref TEXT NOT NULL,
+			path TEXT NOT NULL,
+			task_id INTEGER REFERENCES project_tasks(id) ON DELETE SET NULL,
+			status TEXT NOT NULL DEFAULT 'provisioning' CHECK(status IN ('provisioning', 'ready', 'leased', 'dirty', 'tearing_down', 'failed', 'merged', 'removed')),
+			keep_on_exit INTEGER NOT NULL DEFAULT 0,
+			leased_by_session_id TEXT,
+			lease_expires_at TIMESTAMP,
+			manifest_sha256 TEXT,
+			resources_json TEXT CHECK(resources_json IS NULL OR json_valid(resources_json)),
+			last_summary_json TEXT CHECK(last_summary_json IS NULL OR json_valid(last_summary_json)),
+			version INTEGER NOT NULL DEFAULT 1,
+			created_by_actor TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_project_name_active ON workspaces(project_id, name) WHERE status NOT IN ('removed', 'failed')`,
+		`CREATE INDEX IF NOT EXISTS idx_workspaces_project_status ON workspaces(project_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_workspaces_lease ON workspaces(leased_by_session_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV60 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV61(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE sessions ADD COLUMN work_dir TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV61 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV62(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE sessions ADD COLUMN parent_session_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN spawned_by TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV62 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV63(tx *sqlx.Tx) error {
+	stmts := []string{
+		// Per-project autonomy dial for the coordinator brain (task_auto_approve
+		// precedent). 'off' = the brain never consults for this project.
+		`ALTER TABLE projects ADD COLUMN coordinator_mode TEXT NOT NULL DEFAULT 'off'
+			CHECK(coordinator_mode IN ('off', 'observe', 'assist', 'delegate'))`,
+		// The 4th provider slot for the one-shot consult brain.
+		`INSERT OR IGNORE INTO ai_config_assignments (slot, config_id) VALUES ('ai_coordinator', NULL)`,
+		// The Coordinator persona: the closed-vocabulary system prompt.
+		`INSERT OR IGNORE INTO ai_agents (name, system_prompt, tool_policy, project_filter, is_default, enabled)
+			VALUES ('Coordinator',
+				'You are OpenPoet''s fleet coordinator. When shown a conflict incident, respond with EXACTLY ONE JSON object choosing one action from this closed vocabulary: escalate_human, stop_session, spawn_session, message_session, set_model, dismiss. No prose, no markdown. Fields: {"action": <verb>, "reason": <string>, "session_id"?: <id>, "task_id"?: <int>, "brief"?: <string>, "model"?: <string>, "text"?: <string>}.',
+				'{}', '{}', 0, 1)`,
+		// Durable per-consult ledger: one row per brain consult, used for the
+		// daily budget counter and the audit trail.
+		`CREATE TABLE IF NOT EXISTS coordinator_consults (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			incident_id TEXT NOT NULL,
+			project_id INTEGER NOT NULL,
+			action TEXT NOT NULL DEFAULT '',
+			decision TEXT NOT NULL DEFAULT '',
+			cost_usd REAL NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_coordinator_consults_day ON coordinator_consults(project_id, created_at)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV63 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV64 — the conflict-enforcement dial, SEPARATE from coordinator_mode
+// (V63, the brain autonomy dial). This governs the synchronous PreToolUse gate:
+// observe/warn never block; gate denies contested write-class tool calls;
+// enforce additionally pauses the deterministic loser. Default 'observe' so the
+// gate is strictly opt-in per project — it can never block a project that did
+// not choose it.
+func migrateV64(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE projects ADD COLUMN conflict_policy TEXT NOT NULL DEFAULT 'observe'
+			CHECK(conflict_policy IN ('observe', 'warn', 'gate', 'enforce'))`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV64 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV65 — cross-project reach. A coordination GROUP is just a tag with
+// coordination=1 (membership stays project_tags), matching the ai_agents
+// project_filter {project_ids, tag_ids} convention — no second grouping
+// vocabulary. Automation clients gain an optional project_filter (same JSON
+// shape) so "coordinator for group X" is a provisioning decision enforced
+// centrally in DispatchPlatformCapability, not application logic.
+func migrateV65(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE tags ADD COLUMN coordination INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE tags ADD COLUMN settings_json TEXT
+			CHECK(settings_json IS NULL OR json_valid(settings_json))`,
+		`ALTER TABLE automation_clients ADD COLUMN project_filter TEXT
+			CHECK(project_filter IS NULL OR json_valid(project_filter))`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV65 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV66 — the blackboard: shared keyed memory + a lease/fence primitive in
+// one table. Optimistic CAS on `version` (work_runs precedent), optional TTL via
+// `expires_at`, and fencing = CAS on a lease key's version (a stale holder's
+// fenced mutation fails closed). Scope is (scope_type, scope_id) so a global,
+// per-group, or per-project board share one table. Written only through the
+// blackboard.put capability under the single SQLite conn.
+func migrateV66(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS blackboard_entries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			scope_type TEXT NOT NULL CHECK(scope_type IN ('global','group','project')),
+			scope_id INTEGER NOT NULL DEFAULT 0,
+			key TEXT NOT NULL,
+			value_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(value_json)),
+			version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+			updated_by_actor TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			expires_at TIMESTAMP NULL,
+			UNIQUE(scope_type, scope_id, key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_blackboard_scope ON blackboard_entries(scope_type, scope_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV66 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV67 — the manifest content-hash approval ledger. `.openpoet/environment.yaml`
+// turns repo content into commands OpenPoet runs as the server user, BEFORE any
+// human watches. The provisioner refuses to execute a manifest whose SHA-256 is
+// not recorded here as approved — the one load-bearing security gate of Phase 6.
+func migrateV67(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS environment_manifests (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			source_path TEXT NOT NULL DEFAULT '.openpoet/environment.yaml',
+			content TEXT NOT NULL DEFAULT '',
+			content_sha256 TEXT NOT NULL,
+			approved_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			approved_by TEXT NOT NULL DEFAULT '',
+			UNIQUE(project_id, content_sha256)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_env_manifests_project ON environment_manifests(project_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV67 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV68 — the resource registry + DB-backed port allocator. Live port/service
+// rows make allocation restart-safe (a partial-unique index forbids two live rows
+// on the same port), and RESERVED rows encode prose conventions as data: the port
+// allocator refuses to hand out 8080/8081 (user app / PRODUCTION) or 8090. A
+// manifest that explicitly demands a reserved port is refused. Turning "8081 is
+// production, never touch it" from prose into a row is the point.
+func migrateV68(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS environment_resources (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			workspace_id TEXT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			kind TEXT NOT NULL CHECK(kind IN ('port','service','database','url','volume')),
+			name TEXT NOT NULL DEFAULT '',
+			value TEXT NOT NULL DEFAULT '',
+			driver TEXT NOT NULL DEFAULT 'none' CHECK(driver IN ('none','process','compose')),
+			status TEXT NOT NULL DEFAULT 'allocating'
+				CHECK(status IN ('allocating','reserved','ready','unhealthy','released','failed')),
+			health_json TEXT NULL CHECK(health_json IS NULL OR json_valid(health_json)),
+			runtime_ref TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		// A live port row (anything but released) is unique on its value, so no two
+		// sandboxes ever claim the same port — including the reserved rows.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_env_resources_live_port
+			ON environment_resources(value) WHERE kind='port' AND status != 'released'`,
+		`CREATE INDEX IF NOT EXISTS idx_env_resources_ws ON environment_resources(workspace_id)`,
+		// Reserved-port rows: 8080 (user's bun app), 8081 (PRODUCTION), 8090 (other
+		// bun app). The allocator must never return these; a manifest demanding one
+		// is refused with port_reserved.
+		`INSERT OR IGNORE INTO environment_resources (project_id, workspace_id, kind, name, value, driver, status)
+			VALUES (0, NULL, 'port', 'reserved:8080', '8080', 'none', 'reserved'),
+			       (0, NULL, 'port', 'reserved:8081', '8081', 'none', 'reserved'),
+			       (0, NULL, 'port', 'reserved:8090', '8090', 'none', 'reserved')`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV68 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV69 — Phase 7.1 (Maestro): optional mission link on documents. Follows
+// the V25 task_id precedent exactly: nullable column, no FK (the missions table
+// lands in a later sub-phase; task_id has no declared FK either), plus an index
+// so the mission panel can list its documents cheaply.
+func migrateV69(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE temp_documents ADD COLUMN mission_id INTEGER`,
+		`CREATE INDEX IF NOT EXISTS idx_temp_documents_mission ON temp_documents(mission_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV69 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV70 — Phase 7.2 (Maestro): the dense per-milestone report gains the two
+// fields the coordinator actually routes on — "what I need from you" and "what
+// I do next" — extending the V51 schema additively.
+func migrateV70(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE structured_session_reports ADD COLUMN next_step TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE structured_session_reports ADD COLUMN needs_from_coordinator_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(needs_from_coordinator_json))`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV70 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV71 — Phase 7.3 (Maestro): the durable mission registry. A mission is a
+// goal bound to a coordination group (tag with coordination=1) and its elected
+// coordinator session; mission_workers is the rolling roster (one row per
+// worker session: project, backend, workspace lane, role, last dense report).
+// Everything the central mission panel (7.6) renders lives here — not in any
+// session's context window.
+func migrateV71(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS missions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			goal TEXT NOT NULL CHECK(length(goal) BETWEEN 1 AND 4000),
+			group_tag_id INTEGER NOT NULL,
+			coordinator_session_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'active'
+				CHECK(status IN ('active','paused','completed','failed','archived')),
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			completed_at TIMESTAMP NULL
+		)`,
+		// One ACTIVE mission per coordination group — mirrors "one coordinator
+		// lease per group": deterministic ownership, no ambient mission soup.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_missions_one_active_per_group
+			ON missions(group_tag_id) WHERE status = 'active'`,
+		`CREATE TABLE IF NOT EXISTS mission_workers (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			mission_id INTEGER NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			backend TEXT NOT NULL DEFAULT '',
+			session_id TEXT NOT NULL DEFAULT '',
+			workspace_id TEXT NOT NULL DEFAULT '',
+			role TEXT NOT NULL DEFAULT 'worker',
+			status TEXT NOT NULL DEFAULT 'spawned'
+				CHECK(status IN ('spawned','running','done','failed','stopped')),
+			last_report_ref TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(mission_id, session_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_mission_workers_mission ON mission_workers(mission_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_mission_workers_session ON mission_workers(session_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV71 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV72 — Phase 7.4 (SSH hardening): the trust-on-first-use host-key
+// ledger. Every SSH surface records the host key fingerprint on first contact
+// and fails CLOSED on later mismatch — replacing InsecureIgnoreHostKey on all
+// three dial paths (session runner, file manager, config syncer).
+func migrateV72(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS ssh_known_hosts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			host TEXT NOT NULL,
+			port INTEGER NOT NULL DEFAULT 22,
+			key_type TEXT NOT NULL DEFAULT '',
+			fingerprint_sha256 TEXT NOT NULL,
+			first_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(host, port, key_type)
+		)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV72 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV73 — Phase 7.5 (Maestro integration): mission-scoped multi-use
+// grants. The human pre-authorizes a capability (e.g. workspaces.merge) for a
+// mission with a bounded use count and TTL; the coordinator spends the uses
+// through the conversational merge gate instead of a per-command approval
+// token. "Pré-grant por missão" is the locked-in default; per-step negotiation
+// happens by granting fewer uses.
+func migrateV73(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS mission_grants (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			mission_id INTEGER NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+			capability TEXT NOT NULL CHECK(length(capability) BETWEEN 1 AND 200),
+			uses_remaining INTEGER NOT NULL CHECK(uses_remaining >= 0),
+			expires_at TIMESTAMP NOT NULL,
+			granted_by TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_mission_grants_mission ON mission_grants(mission_id, capability)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV73 failed: %w\nSQL: %s", err, s)
+		}
 	}
 	return nil
 }

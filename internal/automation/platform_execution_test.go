@@ -41,6 +41,8 @@ type executionPlatformFakePorts struct {
 	voiceCalls     int
 	voiceResult    *voice.TranscriptionResult
 	activeSessions map[string]bool
+	incidents      []database.CoordinatorIncident
+	fileActivity   []database.SessionFileActivity
 }
 
 func (f *executionPlatformFakePorts) ListSessions(context.Context) ([]database.Session, error) {
@@ -133,6 +135,27 @@ func (f *executionPlatformFakePorts) TranscribeAudio(context.Context, []byte, st
 	return f.voiceResult, nil
 }
 
+func (f *executionPlatformFakePorts) ListCoordinatorIncidents(context.Context, int64, string, int) ([]database.CoordinatorIncident, error) {
+	f.readCalls++
+	return append([]database.CoordinatorIncident(nil), f.incidents...), nil
+}
+
+func (f *executionPlatformFakePorts) GetCoordinatorIncident(_ context.Context, id string) (*database.CoordinatorIncident, error) {
+	f.readCalls++
+	for i := range f.incidents {
+		if f.incidents[i].ID == id {
+			incident := f.incidents[i]
+			return &incident, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *executionPlatformFakePorts) ListSessionFileActivity(context.Context, string, int) ([]database.SessionFileActivity, error) {
+	f.readCalls++
+	return append([]database.SessionFileActivity(nil), f.fileActivity...), nil
+}
+
 func executionPlatformTestServices(ports *executionPlatformFakePorts) ExecutionPlatformServices {
 	return ExecutionPlatformServices{
 		Sessions:           application.NewSessionService(nil, nil, nil, nil, nil, nil, nil, nil),
@@ -151,7 +174,23 @@ func executionPlatformTestServices(ports *executionPlatformFakePorts) ExecutionP
 		Git:                ports,
 		Tunnel:             ports,
 		Updates:            ports,
+		Conflicts:          ports,
+		Workspaces:         application.NewWorkspaceService(nil, nil, nil),
+		Blackboard:         ports,
+		Environments:       ports,
 	}
+}
+
+func (f *executionPlatformFakePorts) BlackboardGet(context.Context, string, int64, string) (*database.BlackboardEntry, error) {
+	return nil, nil
+}
+
+func (f *executionPlatformFakePorts) BlackboardPut(context.Context, database.BlackboardPutInput) (int64, error) {
+	return 1, nil
+}
+
+func (f *executionPlatformFakePorts) ApproveManifest(context.Context, int64, string, string) (map[string]any, error) {
+	return map[string]any{"approved": true}, nil
 }
 
 func executionPlatformTestRegistry(t *testing.T, ports *executionPlatformFakePorts) (*application.CapabilityRegistry, *PlatformCapabilityRegistry) {
@@ -172,6 +211,8 @@ func executionPlatformDefinitionsForTest() []PlatformCapabilityDefinition {
 		sessionPlatformDefinitions(), sessionWatcherPlatformDefinitions(), sessionSuggestionPlatformDefinitions(),
 		fileExecutionPlatformDefinitions(), gitExecutionPlatformDefinitions(), hookExecutionPlatformDefinitions(),
 		voiceExecutionPlatformDefinitions(), tunnelExecutionPlatformDefinitions(), updateExecutionPlatformDefinitions(),
+		conflictPlatformDefinitions(), workspacePlatformDefinitions(), blackboardPlatformDefinitions(),
+		environmentPlatformDefinitions(),
 	}
 	var result []PlatformCapabilityDefinition
 	for _, group := range groups {
@@ -192,8 +233,8 @@ func executionPlatformActor(definitions []PlatformCapabilityDefinition) Actor {
 
 func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := executionPlatformDefinitionsForTest()
-	if len(definitions) != 44 {
-		t.Fatalf("execution surface has %d capabilities, want 44", len(definitions))
+	if len(definitions) != 56 {
+		t.Fatalf("execution surface has %d capabilities, want 56", len(definitions))
 	}
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -203,11 +244,11 @@ func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 		seen[definition.Name] = struct{}{}
 	}
 	capabilities, registry := executionPlatformTestRegistry(t, &executionPlatformFakePorts{})
-	if got := len(capabilities.List()); got != 44 {
-		t.Fatalf("application registry has %d execution capabilities, want 44", got)
+	if got := len(capabilities.List()); got != 56 {
+		t.Fatalf("application registry has %d execution capabilities, want 56", got)
 	}
-	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 44 {
-		t.Fatalf("platform discovery has %d execution capabilities, want 44", got)
+	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 56 {
+		t.Fatalf("platform discovery has %d execution capabilities, want 56", got)
 	}
 }
 
@@ -294,9 +335,12 @@ func TestExecutionPlatformMutationMetadataMatchesManifest(t *testing.T) {
 
 func TestExecutionPlatformReadSurfaceIsExplicit(t *testing.T) {
 	want := []string{
+		"blackboard.get",
+		"conflicts.get", "conflicts.list",
 		"files.list", "files.preview_metadata", "files.read", "git.branches", "git.diff", "git.log", "git.show", "git.status",
-		"sessions.active", "sessions.events_status", "sessions.get", "sessions.history", "sessions.list", "tunnel.devices",
-		"tunnel.status", "update.check", "update.status",
+		"sessions.active", "sessions.events_status", "sessions.file_activity", "sessions.get", "sessions.history", "sessions.list",
+		"tunnel.devices", "tunnel.status", "update.check", "update.status",
+		"workspaces.get", "workspaces.list",
 	}
 	var got []string
 	for _, definition := range executionPlatformDefinitionsForTest() {
@@ -388,7 +432,19 @@ func executionDryRunCases() []executionDryRunCase {
 		{name: "tunnel.confirm_pairing", target: `{}`, payload: `{"code":"123456"}`, secretText: []string{"123456"}},
 		{name: "update.status", target: `{}`, payload: `{}`},
 		{name: "update.check", target: `{}`, payload: `{}`},
+		{name: "conflicts.list", target: `{"project_id":1}`, payload: `{}`},
+		{name: "conflicts.get", target: `{"type":"conflict","id":"C-1"}`, payload: `{}`},
+		{name: "sessions.file_activity", target: `{"type":"session","id":"s1"}`, payload: `{}`},
+		{name: "workspaces.list", target: `{"project_id":1}`, payload: `{}`},
+		{name: "workspaces.get", target: `{"type":"workspace","id":"ws-1"}`, payload: `{}`},
+		{name: "workspaces.create", target: `{"project_id":1}`, payload: `{"name":"lane-a"}`},
+		{name: "workspaces.remove", target: `{"type":"workspace","id":"ws-1"}`, payload: `{}`},
+		{name: "workspaces.merge", target: `{"type":"workspace","id":"ws-1"}`, payload: `{}`},
+		{name: "workspaces.discard", target: `{"type":"workspace","id":"ws-1"}`, payload: `{}`},
 		{name: "update.apply", target: `{}`, payload: `{}`},
+		{name: "blackboard.get", target: `{}`, payload: `{"scope":"global","key":"k"}`},
+		{name: "blackboard.put", target: `{}`, payload: `{"scope":"global","key":"k","value":{"n":1},"expected_version":0}`},
+		{name: "environments.approve_manifest", target: `{"type":"project","project_id":1}`, payload: `{"content_sha256":""}`},
 	}
 }
 

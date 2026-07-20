@@ -34,7 +34,7 @@ func platformUIContext(r *http.Request) context.Context {
 		correlationID = "ui:" + uuid.NewString()
 	}
 	return application.WithEventMetadata(ctx, application.EventMetadata{
-		Actor:         platformUIActor(),
+		Actor:         requestActor(r),
 		CorrelationID: correlationID,
 	})
 }
@@ -43,9 +43,25 @@ func platformUIActor() application.Actor {
 	return application.Actor{Type: "user", ID: platformUIActorID}
 }
 
-// platformUIAuthorization represents the user's direct interaction with a
-// local OpenPoet control. It satisfies Application Service boundaries without
-// accepting an approver or reason supplied by the browser payload.
+// requestActor returns the verified actor resolved by ResolveActorMiddleware
+// for this request, falling back to the local-UI actor when no credential was
+// resolved (loopback reads, tests calling handlers directly without the
+// middleware). This is what makes the audit trail attribute a mutation to the
+// session/automation/device that truly performed it.
+func requestActor(r *http.Request) application.Actor {
+	if r != nil {
+		if info, ok := resolvedActorFromContext(r.Context()); ok {
+			return info.actor
+		}
+	}
+	return platformUIActor()
+}
+
+// platformUIAuthorization represents the verified caller's direct interaction
+// with an OpenPoet control. Owner-tier actors (UI cookie, paired device,
+// automation bearer) are Approved so their click authorizes the action;
+// session-tier actors are NOT approved, so destructive/env-gated verbs fall
+// through to the approval broker with a structured approval_required error.
 func platformUIAuthorization(r *http.Request) application.ActionAuthorization {
 	reason := "OpenPoet UI request"
 	if r != nil {
@@ -58,12 +74,23 @@ func platformUIAuthorization(r *http.Request) application.ActionAuthorization {
 			reason = method + " " + path
 		}
 	}
-	return application.ActionAuthorization{
-		Actor:      platformUIActor(),
-		Reason:     reason,
-		Approved:   true,
-		ApprovedBy: "user:" + platformUIActorID,
+	actor := platformUIActor()
+	approved := true
+	if r != nil {
+		if info, ok := resolvedActorFromContext(r.Context()); ok {
+			actor = info.actor
+			approved = info.approved
+		}
 	}
+	authorization := application.ActionAuthorization{
+		Actor:  actor,
+		Reason: reason,
+	}
+	if approved {
+		authorization.Approved = true
+		authorization.ApprovedBy = application.EventActorValue(actor)
+	}
+	return authorization
 }
 
 func requirePlatformApplicationServices(a *API, w http.ResponseWriter) (*PlatformApplicationServices, bool) {

@@ -3,9 +3,11 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -14,6 +16,33 @@ import (
 
 type DB struct {
 	*sqlx.DB
+
+	// readDB is the WAL read pool (Phase 7.4): N read-only-purpose connections
+	// so long reads (snapshot, outbox scans) stop queueing behind the single
+	// serialized write connection — and writes stop stalling behind long reads.
+	// May be nil (tests constructing DB by hand); Reader() falls back to the
+	// write handle then.
+	readDB *sqlx.DB
+
+	outboxOnce sync.Once
+	outboxNtf  *OutboxNotifier
+}
+
+// Reader returns the read pool (or the write handle when no pool exists).
+// Route ONLY reads through it — it has no serialization guarantees.
+func (d *DB) Reader() *sqlx.DB {
+	if d.readDB != nil {
+		return d.readDB
+	}
+	return d.DB
+}
+
+// Close closes both handles.
+func (d *DB) Close() error {
+	if d.readDB != nil {
+		_ = d.readDB.Close()
+	}
+	return d.DB.Close()
 }
 
 const (
@@ -36,17 +65,32 @@ type MCPHTTPCleanupStats struct {
 }
 
 func New(path string) (*DB, error) {
-	db, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)")
+	// Write handle: ONE connection (SQLite has a single writer) and
+	// _txlock=immediate so every transaction takes the write lock at BEGIN —
+	// this kills the read→write upgrade-deadlock class (BlackboardPut,
+	// AckEventOutbox) at the root instead of relying on pool serialization.
+	db, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	db.SetMaxOpenConns(1) // SQLite doesn't support concurrent writes
+	db.SetMaxOpenConns(1) // single writer; reads go through the read pool
 
 	d := &DB{DB: db}
 	if err := d.migrate(); err != nil {
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
+
+	// Read pool (Phase 7.4): WAL readers never block the writer nor each other.
+	// The _pragma DSN params are re-applied by modernc on every pooled
+	// connection. Deliberately no _txlock: read transactions stay DEFERRED.
+	readDB, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_pragma=query_only(1)")
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to open read pool: %w", err)
+	}
+	readDB.SetMaxOpenConns(4)
+	d.readDB = readDB
 
 	return d, nil
 }
@@ -55,6 +99,9 @@ func New(path string) (*DB, error) {
 // migrations. Offline dry-run/cutover tools use it so inspection itself cannot
 // change production schema.
 func OpenExisting(path string) (*DB, error) {
+	// Deliberately NO journal_mode/_txlock here: this entry point is the
+	// inspect-only path (dry-run/cutover tooling) and must not convert a
+	// rollback-journal file to WAL nor grab write locks it does not need.
 	db, err := sqlx.Connect("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)")
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to existing database: %w", err)
@@ -70,9 +117,11 @@ func (d *DB) migrate() error {
 // Project operations
 func (d *DB) CreateProject(ctx context.Context, p *Project) error {
 	p.TaskAutoApproveVerification = normalizeTaskAutoApproveVerification(p.TaskAutoApproveVerification)
-	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv, tool_policy, skill_policy, backend, backend_config, task_auto_approve_verification)
-			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification)
+	p.CoordinatorMode = normalizeCoordinatorMode(p.CoordinatorMode)
+	p.ConflictPolicy = normalizeConflictPolicy(p.ConflictPolicy)
+	query := `INSERT INTO projects (name, path, type, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_credential_encrypted, ssh_credential_iv, tool_policy, skill_policy, backend, backend_config, task_auto_approve_verification, coordinator_mode, conflict_policy)
+			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification, p.CoordinatorMode, p.ConflictPolicy)
 	if err != nil {
 		return err
 	}
@@ -112,8 +161,10 @@ func (d *DB) ListProjects(ctx context.Context) ([]Project, error) {
 
 func (d *DB) UpdateProject(ctx context.Context, p *Project) error {
 	p.TaskAutoApproveVerification = normalizeTaskAutoApproveVerification(p.TaskAutoApproveVerification)
-	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, tool_policy=?, skill_policy=?, dangerously_skip_permissions=?, backend=?, backend_config=?, task_auto_approve_verification=?, updated_at=? WHERE id=?`
-	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.DangerouslySkipPermissions, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification, time.Now(), p.ID)
+	p.CoordinatorMode = normalizeCoordinatorMode(p.CoordinatorMode)
+	p.ConflictPolicy = normalizeConflictPolicy(p.ConflictPolicy)
+	query := `UPDATE projects SET name=?, path=?, type=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth_type=?, ssh_credential_encrypted=?, ssh_credential_iv=?, tool_policy=?, skill_policy=?, dangerously_skip_permissions=?, backend=?, backend_config=?, task_auto_approve_verification=?, coordinator_mode=?, conflict_policy=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, p.Name, p.Path, p.Type, p.SSHHost, p.SSHPort, p.SSHUser, p.SSHAuthType, p.SSHCredentialEncrypted, p.SSHCredentialIV, p.ToolPolicy, p.SkillPolicy, p.DangerouslySkipPermissions, p.Backend, p.BackendConfig, p.TaskAutoApproveVerification, p.CoordinatorMode, p.ConflictPolicy, time.Now(), p.ID)
 	return err
 }
 
@@ -123,6 +174,26 @@ func normalizeTaskAutoApproveVerification(value string) string {
 		return strings.TrimSpace(value)
 	default:
 		return "inherit"
+	}
+}
+
+func normalizeCoordinatorMode(value string) string {
+	switch strings.TrimSpace(value) {
+	case "observe", "assist", "delegate":
+		return strings.TrimSpace(value)
+	default:
+		return "off"
+	}
+}
+
+// normalizeConflictPolicy defaults the synchronous-gate dial to 'observe' (the
+// safe, non-blocking default — the gate is strictly opt-in per project).
+func normalizeConflictPolicy(value string) string {
+	switch strings.TrimSpace(value) {
+	case "warn", "gate", "enforce":
+		return strings.TrimSpace(value)
+	default:
+		return "observe"
 	}
 }
 
@@ -213,6 +284,31 @@ func (d *DB) DeleteTag(ctx context.Context, id int64) error {
 	return err
 }
 
+// ListCoordinationTags returns tags flagged as coordination groups (V65).
+func (d *DB) ListCoordinationTags(ctx context.Context) ([]Tag, error) {
+	var tags []Tag
+	err := d.SelectContext(ctx, &tags, "SELECT * FROM tags WHERE coordination = 1 ORDER BY name")
+	return tags, err
+}
+
+// ProjectIDsForTags resolves the set of project ids that belong to ANY of the
+// given tags (project_filter tag membership). Returns distinct ids.
+func (d *DB) ProjectIDsForTags(ctx context.Context, tagIDs []int64) ([]int64, error) {
+	if len(tagIDs) == 0 {
+		return nil, nil
+	}
+	query, args, err := sqlx.In("SELECT DISTINCT project_id FROM project_tags WHERE tag_id IN (?)", tagIDs)
+	if err != nil {
+		return nil, err
+	}
+	query = d.Rebind(query)
+	var ids []int64
+	if err := d.SelectContext(ctx, &ids, query, args...); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 // Project tag assignment operations
 
 type ProjectTagWithDetails struct {
@@ -272,8 +368,17 @@ func (d *DB) ReplaceProjectTagIDs(ctx context.Context, projectID int64, tagIDs [
 
 // Session operations
 func (d *DB) CreateSession(ctx context.Context, s *Session) error {
-	query := `INSERT INTO sessions (id, project_id, status, pid, name, task_id, start_time, backend, skip_permissions, model, requested_model, effort, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.ExecContext(ctx, query, s.ID, s.ProjectID, s.Status, s.PID, s.Name, s.TaskID, s.StartTime, s.Backend, s.SkipPermissions, s.Model, s.RequestedModel, s.Effort, s.Harness)
+	query := `INSERT INTO sessions (id, project_id, status, pid, name, task_id, start_time, backend, skip_permissions, model, requested_model, effort, harness, work_dir, workspace_id, parent_session_id, spawned_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.ExecContext(ctx, query, s.ID, s.ProjectID, s.Status, s.PID, s.Name, s.TaskID, s.StartTime, s.Backend, s.SkipPermissions, s.Model, s.RequestedModel, s.Effort, s.Harness, s.WorkDir, s.WorkspaceID, s.ParentSessionID, s.SpawnedBy)
+	return err
+}
+
+// UpdateSessionLineage records who spawned a session and its parent session
+// (when a session actor created it) — set post-create by the application layer.
+func (d *DB) UpdateSessionLineage(ctx context.Context, sessionID, parentSessionID, spawnedBy string) error {
+	_, err := d.ExecContext(ctx,
+		`UPDATE sessions SET parent_session_id = ?, spawned_by = ? WHERE id = ?`,
+		parentSessionID, spawnedBy, sessionID)
 	return err
 }
 
@@ -337,8 +442,33 @@ func (d *DB) UpdateSessionPID(ctx context.Context, id string, pid int) error {
 }
 
 func (d *DB) EndSession(ctx context.Context, id string, status string) error {
-	_, err := d.ExecContext(ctx, "UPDATE sessions SET status=?, end_time=? WHERE id=?", status, time.Now(), id)
+	// Per-session credentials die with the session; Reopen mints fresh ones.
+	_, err := d.ExecContext(ctx, "UPDATE sessions SET status=?, end_time=?, mcp_token_hash=NULL, hook_token_hash=NULL WHERE id=?", status, time.Now(), id)
 	return err
+}
+
+// UpdateSessionTokenHashes stores the SHA-256 hex digests of a session's
+// MCP/REST bearer and hook bridge tokens. Empty strings clear a hash.
+func (d *DB) UpdateSessionTokenHashes(ctx context.Context, id, mcpTokenHash, hookTokenHash string) error {
+	_, err := d.ExecContext(ctx,
+		"UPDATE sessions SET mcp_token_hash=NULLIF(?, ''), hook_token_hash=NULLIF(?, '') WHERE id=?",
+		mcpTokenHash, hookTokenHash, id)
+	return err
+}
+
+// GetSessionTokenHashes returns the stored MCP/REST and hook token hex digests
+// for a session. Empty strings mean the credential is unset (legacy session);
+// sql.ErrNoRows means the session id is unknown.
+func (d *DB) GetSessionTokenHashes(ctx context.Context, id string) (mcpTokenHash, hookTokenHash string, err error) {
+	var row struct {
+		Mcp  sql.NullString `db:"mcp_token_hash"`
+		Hook sql.NullString `db:"hook_token_hash"`
+	}
+	err = d.GetContext(ctx, &row, "SELECT mcp_token_hash, hook_token_hash FROM sessions WHERE id = ?", id)
+	if err != nil {
+		return "", "", err
+	}
+	return row.Mcp.String, row.Hook.String, nil
 }
 
 func (d *DB) TouchSessionActivity(ctx context.Context, id string) error {
@@ -1173,6 +1303,15 @@ func (d *DB) GetAIAgent(ctx context.Context, id int64) (*AIAgent, error) {
 	return &a, err
 }
 
+func (d *DB) GetAIAgentByName(ctx context.Context, name string) (*AIAgent, error) {
+	var a AIAgent
+	err := d.GetContext(ctx, &a, "SELECT * FROM ai_agents WHERE name = ?", name)
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
 func (d *DB) GetDefaultAIAgent(ctx context.Context) (*AIAgent, error) {
 	var a AIAgent
 	err := d.GetContext(ctx, &a, "SELECT * FROM ai_agents WHERE is_default = 1 LIMIT 1")
@@ -1330,8 +1469,8 @@ func (d *DB) CreateTempDocument(ctx context.Context, doc *TempDocument) error {
 	if doc.Status == "" {
 		doc.Status = "pending"
 	}
-	query := `INSERT INTO temp_documents (id, title, content, conversation_id, task_id, session_id, summary, status, message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.ExecContext(ctx, query, doc.ID, doc.Title, doc.Content, doc.ConversationID, doc.TaskID, doc.SessionID, doc.Summary, doc.Status, doc.MessageID)
+	query := `INSERT INTO temp_documents (id, title, content, conversation_id, task_id, mission_id, session_id, summary, status, message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.ExecContext(ctx, query, doc.ID, doc.Title, doc.Content, doc.ConversationID, doc.TaskID, doc.MissionID, doc.SessionID, doc.Summary, doc.Status, doc.MessageID)
 	return err
 }
 
@@ -2353,5 +2492,29 @@ func (d *DB) RevokePairedDevice(ctx context.Context, id string) error {
 
 func (d *DB) DeletePairedDevice(ctx context.Context, id string) error {
 	_, err := d.ExecContext(ctx, "DELETE FROM paired_devices WHERE id = ?", id)
+	return err
+}
+
+// SSH known hosts (Phase 7.4 TOFU) — see migrateV72.
+
+// GetSSHKnownHost returns the recorded fingerprint for (host, port, keyType),
+// "" when the host was never seen.
+func (d *DB) GetSSHKnownHost(ctx context.Context, host string, port int, keyType string) (string, error) {
+	var fingerprint string
+	err := d.Reader().GetContext(ctx, &fingerprint, `
+		SELECT fingerprint_sha256 FROM ssh_known_hosts
+		WHERE host = ? AND port = ? AND key_type = ?`, host, port, keyType)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return fingerprint, err
+}
+
+// RecordSSHKnownHost stores the first-seen fingerprint (no-op if present).
+func (d *DB) RecordSSHKnownHost(ctx context.Context, host string, port int, keyType, fingerprint string) error {
+	_, err := d.ExecContext(ctx, `
+		INSERT INTO ssh_known_hosts (host, port, key_type, fingerprint_sha256)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(host, port, key_type) DO NOTHING`, host, port, keyType, fingerprint)
 	return err
 }

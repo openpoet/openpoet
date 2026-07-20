@@ -17,6 +17,9 @@ type commandAPI struct {
 	events       EventStore
 	reports      DailyReportService
 	approvals    ApprovalGrantStore
+	waiter       OutboxWaiter
+	sessions     SessionStateStore
+	scopeStore   ProjectScopeStore
 	random       io.Reader
 	now          func() time.Time
 }
@@ -39,16 +42,11 @@ type capabilitiesResponse struct {
 	Capabilities []capabilityDescriptor `json:"capabilities"`
 }
 
-func (a *commandAPI) listCapabilities(w http.ResponseWriter, r *http.Request) {
-	if a == nil || (a.capabilities == nil && a.platform == nil) {
-		writeError(w, http.StatusServiceUnavailable, "capability_registry_unavailable", "the capability registry is unavailable", true)
-		return
-	}
-	actor, ok := ActorFromContext(r.Context())
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "authentication_required", "automation actor is missing", false)
-		return
-	}
+// mergedCapabilityDescriptors builds the full, sorted capability catalog for an
+// actor: legacy registry entries (minus platform mirrors) plus platform
+// capabilities (which win on name collision). Both /capabilities and /health
+// derive from this one source so their counts can never drift apart.
+func (a *commandAPI) mergedCapabilityDescriptors(actor Actor) []capabilityDescriptor {
 	merged := make(map[application.CapabilityName]capabilityDescriptor)
 	if a.capabilities != nil {
 		for _, capability := range a.capabilities.List() {
@@ -85,10 +83,24 @@ func (a *commandAPI) listCapabilities(w http.ResponseWriter, r *http.Request) {
 		names = append(names, name)
 	}
 	sort.Slice(names, func(i, j int) bool { return names[i] < names[j] })
-	response := capabilitiesResponse{APIVersion: APIVersion, Capabilities: make([]capabilityDescriptor, 0, len(names))}
+	descriptors := make([]capabilityDescriptor, 0, len(names))
 	for _, name := range names {
-		response.Capabilities = append(response.Capabilities, merged[name])
+		descriptors = append(descriptors, merged[name])
 	}
+	return descriptors
+}
+
+func (a *commandAPI) listCapabilities(w http.ResponseWriter, r *http.Request) {
+	if a == nil || (a.capabilities == nil && a.platform == nil) {
+		writeError(w, http.StatusServiceUnavailable, "capability_registry_unavailable", "the capability registry is unavailable", true)
+		return
+	}
+	actor, ok := ActorFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication_required", "automation actor is missing", false)
+		return
+	}
+	response := capabilitiesResponse{APIVersion: APIVersion, Capabilities: a.mergedCapabilityDescriptors(actor)}
 	writeJSON(w, http.StatusOK, response)
 }
 

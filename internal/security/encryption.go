@@ -84,6 +84,14 @@ func (e *Encryptor) Decrypt(ciphertext string, iv string) (string, error) {
 		return "", fmt.Errorf("failed to decode IV: %w", err)
 	}
 
+	// gcm.Open PANICS (not errors) on a wrong-size nonce — an empty/corrupt
+	// stored credential must surface as an error, never take the process down
+	// (a remote project with no credential used to crash the whole app at
+	// auto-restore).
+	if len(nonce) != gcm.NonceSize() {
+		return "", fmt.Errorf("invalid IV length %d (expected %d)", len(nonce), gcm.NonceSize())
+	}
+
 	decrypted, err := gcm.Open(nil, nonce, encryptedBytes, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to decrypt: %w", err)

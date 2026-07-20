@@ -68,8 +68,8 @@ func configurationPlatformActor(definitions []PlatformCapabilityDefinition) Acto
 
 func TestConfigurationPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := configurationPlatformDefinitionsForTest()
-	if len(definitions) != 63 {
-		t.Fatalf("configuration surface has %d capabilities, want 63", len(definitions))
+	if len(definitions) != 64 {
+		t.Fatalf("configuration surface has %d capabilities, want 64", len(definitions))
 	}
 
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
@@ -182,7 +182,7 @@ func TestConfigurationPlatformReadSurfaceIsExplicit(t *testing.T) {
 		"agents.list", "ai_configs.list", "ai_configs.list_assignments", "mcp.list", "mcp.list_project",
 		"mcp_api_key.status", "projects.get", "projects.get_shares", "projects.list", "settings.get",
 		"skills.list", "skills.list_project", "skills.list_project_config", "skills.list_versions", "tags.list",
-		"tags.list_project", "tools.get_policies", "tools.get_project_policy", "tools.list_project",
+		"groups.list", "tags.list_project", "tools.get_policies", "tools.get_project_policy", "tools.list_project",
 	}
 	var got []string
 	for _, definition := range configurationPlatformDefinitionsForTest() {
@@ -240,6 +240,7 @@ func configurationDryRunCases() []configurationDryRunCase {
 		{name: "projects.validate", target: `{"id":1}`, payload: `{}`},
 		{name: "projects.browse_remote", target: `{}`, payload: `{"ssh_host":"host","ssh_user":"user","ssh_credential":"browse-secret","path":"/srv"}`, secretText: []string{"browse-secret"}},
 		{name: "tags.list", target: `{}`, payload: `{}`},
+		{name: "groups.list", target: `{}`, payload: `{}`},
 		{name: "tags.list_project", target: `{"project_id":1}`, payload: `{}`},
 		{name: "tags.create", target: `{}`, payload: `{"name":"urgent","color":"red"}`},
 		{name: "tags.update", target: `{"id":1}`, payload: `{"name":"important"}`},

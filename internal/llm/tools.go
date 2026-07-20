@@ -443,6 +443,7 @@ func AllToolDefs() []ToolDef {
 					"content":         {Type: "string", Description: "Full markdown content of the document"},
 					"conversation_id": {Type: "string", Description: "Current conversation ID (if available)"},
 					"task_id":         {Type: "string", Description: "Optional task ID to link this document to a task"},
+					"mission_id":      {Type: "string", Description: "Optional mission ID to link this document to an orchestration mission (Maestro)"},
 				},
 				Required: []string{"content"},
 			},
@@ -798,6 +799,7 @@ func AllToolDefs() []ToolDef {
 					"auto_start_task_prompt":       {Type: "boolean", Description: "Legacy compatibility flag. MCP task-linked starts always begin immediately without UI confirmation."},
 					"planning_mode":                {Type: "boolean", Description: "Start immediately with a planning prompt instead of the default task prompt."},
 					"custom_prompt":                {Type: "string", Description: "Start immediately with this prompt instead of the default task prompt. Cannot be combined with planning_mode."},
+					"workspace_id":                 {Type: "string", Description: "Run the session inside an existing ready workspace (isolated git-worktree lane) instead of the project's main checkout."},
 				},
 				Required: []string{"project_id"},
 			},
@@ -919,6 +921,218 @@ func AllToolDefs() []ToolDef {
 				Required: []string{"session_id"},
 			},
 			Context: ToolContextBoth,
+		},
+		// ──── Coordinator tier (Phase 7.1 — Maestro) ────
+		// The session that starts a mission elects itself coordinator of a
+		// coordination group and gains scoped cross-project reach. Local and
+		// remote (SSH) projects participate identically.
+		{
+			Name:        "coordinator_elect",
+			Description: "Elect this session as the coordinator of a coordination group (or renew the lease it already holds). Returns the fence_version that MUST accompany every coordinator mutation.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"group":       {Type: "number", Description: "Coordination group (tag id with coordination=1). The session's project must be a member."},
+					"ttl_seconds": {Type: "number", Description: "Lease TTL in seconds (default 300). Renew before it lapses or another session can take over."},
+				},
+				Required: []string{"group"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "coordinator_status",
+			Description: "Report whether this session holds a coordinator lease, for which group, the current fence_version, and the member project ids.",
+			InputSchema: ToolDefinitionInput{Type: "object", Properties: map[string]ToolPropertySchema{}},
+			Context:     ToolContextSession,
+		},
+		{
+			Name:        "list_group_sessions",
+			Description: "List every session across ALL projects of the coordinated group (local and remote). Requires holding the coordinator lease.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"status": {Type: "string", Description: "Optional status filter (running, stopped, ...)"},
+				},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "await_events",
+			Description: "Long-poll the durable event outbox for the coordinated group (session.turn_completed, session.awaiting_input, workspace.*, ...). Returns matching events past the cursor or an empty page on timeout. Events from projects outside the group never appear.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"after":    {Type: "number", Description: "Cursor: only events with sequence > after. Use next_cursor from the previous call."},
+					"filter":   {Type: "string", Description: "Event type prefix filter, e.g. 'session.'"},
+					"timeout":  {Type: "number", Description: "Long-poll timeout in seconds (default 20, max 60)"},
+					"consumer": {Type: "string", Description: "Reserved for automation clients; coordinator sessions page with the explicit after cursor"},
+				},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "wait_for_session",
+			Description: "Block until a group session settles (turn_complete / awaiting_input / stopped) or the timeout. Reports signal_quality: exact (event-derived) vs heuristic (timeout fallback).",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"session_id": {Type: "string", Description: "Target session id (must belong to the coordinated group)"},
+					"timeout":    {Type: "number", Description: "Timeout in seconds (default 20, max 60)"},
+				},
+				Required: []string{"session_id"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "start_worker",
+			Description: "Start a worker session in any member project of the coordinated group — local or remote (SSH), any backend. Lineage records this session as parent. Requires the current fence_version.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id":      {Type: "number", Description: "Target project id (must be a group member)"},
+					"fence_version":   {Type: "number", Description: "Current fence token from coordinator_elect/status"},
+					"task_id":         {Type: "number", Description: "Optional task to bind the worker to"},
+					"backend":         {Type: "string", Description: "Optional backend override (claude_code, codex, copilot, acp, opencode); defaults to the project's backend"},
+					"workspace_id":    {Type: "string", Description: "Optional workspace (worktree lane) to run in"},
+					"isolation":       {Type: "string", Description: "Optional: 'auto' leases a pooled workspace"},
+					"custom_prompt":   {Type: "string", Description: "Optional initial brief for the worker"},
+					"mission_id":      {Type: "number", Description: "Enroll the worker in this mission (briefing injected server-side)"},
+					"role":            {Type: "string", Description: "Worker role label within the mission"},
+					"idempotency_key": {Type: "string", Description: "Optional spawn fence: retrying with the same key returns the SAME session instead of double-spawning"},
+					"dry_run":         {Type: "boolean", Description: "Validate without creating the session"},
+				},
+				Required: []string{"project_id", "fence_version"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "start_mission",
+			Description: "Start a goal-driven mission for the coordinated group (this session becomes the mission's coordinator). One active mission per group. Requires the current fence_version.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"goal":          {Type: "string", Description: "The mission goal (what done looks like)"},
+					"fence_version": {Type: "number", Description: "Current fence token from coordinator_elect/status"},
+				},
+				Required: []string{"goal", "fence_version"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "get_mission",
+			Description: "Read a mission of the coordinated group: goal, status, and the worker roster (session, project, backend, role, status, last_report_ref).",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"mission_id": {Type: "number", Description: "Mission id"},
+				},
+				Required: []string{"mission_id"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "update_mission_status",
+			Description: "Transition a mission of the coordinated group (active|paused|completed|failed|archived). Requires the current fence_version.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"mission_id":    {Type: "number", Description: "Mission id"},
+					"status":        {Type: "string", Description: "active, paused, completed, failed or archived"},
+					"fence_version": {Type: "number", Description: "Current fence token"},
+				},
+				Required: []string{"mission_id", "status", "fence_version"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "attach_worker",
+			Description: "Adopt an EXISTING group session into a mission's worker roster (workers spawned via start_worker enroll automatically). Backfills its last dense report.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"mission_id":    {Type: "number", Description: "Mission id"},
+					"session_id":    {Type: "string", Description: "Existing session to adopt (must belong to the group)"},
+					"role":          {Type: "string", Description: "Worker role label (e.g. impl, qa)"},
+					"fence_version": {Type: "number", Description: "Current fence token"},
+				},
+				Required: []string{"mission_id", "session_id", "fence_version"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "predict_merge",
+			Description: "Forecast a workspace lane's merge WITHOUT touching the tree (git merge-tree): clean:true means guaranteed clean; otherwise conflict_files lists the files touched on both sides. Free read — negotiate integrations with facts.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"workspace_id": {Type: "string", Description: "Workspace (lane) id — must belong to the coordinated group"},
+				},
+				Required: []string{"workspace_id"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "merge_workspace",
+			Description: "Merge a workspace lane back into the main tree, spending one use of the mission's merge grant (pre-issued by the user). No grant → mission_grant_required: ask the user to grant workspaces.merge for the mission. A conflict aborts safely, lists the files, and costs nothing.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"workspace_id":  {Type: "string", Description: "Workspace (lane) id to merge"},
+					"mission_id":    {Type: "number", Description: "Mission whose grant authorizes the merge"},
+					"fence_version": {Type: "number", Description: "Current fence token"},
+				},
+				Required: []string{"workspace_id", "mission_id", "fence_version"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "emit_session_report",
+			Description: "Emit THIS session's dense structured milestone report (condensed communication — the coordinator reads reports, not transcripts). Re-emitting the same turn_id updates the milestone; finalize:true closes it.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"turn_id":                {Type: "string", Description: "Stable milestone id (m1, m2, ...). Default: 'milestone'"},
+					"objective":              {Type: "string", Description: "What this milestone set out to do"},
+					"summary":                {Type: "string", Description: "Tight summary of what actually happened"},
+					"outcome":                {Type: "string", Description: "Optional outcome statement"},
+					"decisions":              {Type: "array", Description: "Key decisions made (strings)"},
+					"files":                  {Type: "array", Description: "Files changed (strings)"},
+					"verification":           {Type: "object", Description: "{status: passed|failed|partial|not_run, summary}"},
+					"blockers":               {Type: "array", Description: "Current blockers (marks the report incomplete)"},
+					"needs_from_coordinator": {Type: "array", Description: "What you need decided/unblocked by the coordinator"},
+					"next":                   {Type: "string", Description: "Next step you will take"},
+					"finalize":               {Type: "boolean", Description: "true on the last report of this milestone"},
+				},
+				Required: []string{"objective", "summary"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "get_session_report",
+			Description: "Read the latest dense structured report of a coordinated-group session (progressive disclosure — use read_session_history only to debug). Requires holding the coordinator lease.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"session_id": {Type: "string", Description: "Target session id (must belong to the coordinated group)"},
+				},
+				Required: []string{"session_id"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "send_to_worker",
+			Description: "Send steering input to a worker session of the coordinated group, awaiting the prompt ack. Requires the current fence_version.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"session_id":    {Type: "string", Description: "Target worker session id (must belong to the group)"},
+					"text":          {Type: "string", Description: "Text to send (Enter appended automatically)"},
+					"fence_version": {Type: "number", Description: "Current fence token from coordinator_elect/status"},
+					"force":         {Type: "boolean", Description: "Send even if the worker is mid-turn"},
+				},
+				Required: []string{"session_id", "text", "fence_version"},
+			},
+			Context: ToolContextSession,
 		},
 		{
 			Name:        "unlink_session_task",

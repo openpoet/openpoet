@@ -20,6 +20,13 @@ type SessionConfig struct {
 	ExecPath          string // Resolved path to the openpoet binary
 	IsReopen          bool   // true when resuming a previous session
 
+	// Per-session credentials (Phase 0 hardening). MCPToken is the opst1_
+	// bearer the injected MCP/CLI caller presents; HookToken is the opht1_
+	// value the hook bridge sends as X-Hook-Token. Both are minted at start
+	// and only their SHA-256 digests live in the sessions row.
+	MCPToken  string
+	HookToken string
+
 	// Env var passthrough from API handler
 	AppendSystemPrompt         string // task context prompt
 	DangerouslySkipPermissions bool   // whether to skip permission prompts
@@ -64,6 +71,22 @@ type BackendStrategy interface {
 
 	// NotFoundMessage returns the error message when binary is not in PATH.
 	NotFoundMessage() string
+}
+
+// applySessionTokenEnv injects the per-session credentials into a backend's
+// environment when present: OPENPOET_HOOK_TOKEN authenticates the hook bridge's
+// posts, OPENPOET_SESSION_TOKEN authenticates the CLI/MCP caller. Both are
+// harmless no-ops when unset (legacy path). Backends call this from BuildEnvVars.
+func applySessionTokenEnv(env map[string]string, cfg *SessionConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.HookToken != "" {
+		env["OPENPOET_HOOK_TOKEN"] = cfg.HookToken
+	}
+	if cfg.MCPToken != "" {
+		env["OPENPOET_SESSION_TOKEN"] = cfg.MCPToken
+	}
 }
 
 // GetBackend returns the strategy for the given backend type.
