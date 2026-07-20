@@ -14,12 +14,17 @@ import (
 	runtime "openpoet/internal/session"
 	"openpoet/internal/updater"
 	"openpoet/internal/websocket"
+	"openpoet/internal/workspace"
 )
 
 const (
-	expectedPlatformCapabilities = 155
-	expectedPlatformMutations    = 106
-	expectedPlatformReads        = 49
+	// Phase 5 added groups.list (config read), blackboard.get (exec read),
+	// blackboard.put (exec write): +3 capabilities, +1 mutation, +2 reads.
+	// Phase 6 added environments.approve_manifest (unsafe) + workspaces.discard
+	// (destructive): +2 capabilities, +2 mutations, +0 reads.
+	expectedPlatformCapabilities = 168
+	expectedPlatformMutations    = 112
+	expectedPlatformReads        = 56
 )
 
 // PlatformServices is the explicit runtime composition root for Automation.
@@ -84,6 +89,9 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		Configuration: application.NewConfigurationService(services.DB, services.Encryptor, effects, reinitializer, services.ConfigSync),
 	}
 
+	workspaceService := application.NewWorkspaceService(services.DB, NewGitCommandAdapter(services.GitHandler), services.ConfigSync)
+	workspaceService.SetEnvironmentProvisioner(workspace.NewProvisioner(services.DB)) // Phase 6: environment.yaml provisioning
+	workRunService := application.NewWorkRunService(services.DB)
 	sessionService := application.NewSessionService(
 		services.DB, services.SessionManager, services.ConfigSync, a.taskService,
 		services.HookHandler, services.HookHandler, a.DecryptFunc(), effects,
@@ -94,6 +102,9 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 			Input:        platformSessionInputSubmitter{api: a},
 			InitialInput: platformSessionInitialPromptSubmitter{api: a},
 			Settings:     platformSessionRuntimeSettings{api: a},
+			Workspaces:   workspaceService,
+			Signals:      services.HookHandler,
+			WorkRuns:     workRunService,
 		},
 	)
 	execution := automation.ExecutionPlatformServices{
@@ -113,6 +124,10 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		Git:                platformGitReader{handler: services.GitHandler},
 		Tunnel:             platformTunnelReader{api: a},
 		Updates:            services.Updater,
+		Conflicts:          services.DB,
+		Workspaces:         workspaceService,
+		Blackboard:         services.DB,
+		Environments:       application.NewEnvironmentService(services.DB),
 	}
 
 	collaboration := automation.CollaborationPlatformServices{
@@ -148,6 +163,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 	}
 	a.platformMu.Lock()
 	a.platformCapabilities = registry
+	a.workspaceService = workspaceService
 	a.platformServices = &PlatformApplicationServices{
 		Configuration: configuration,
 		Execution:     execution,

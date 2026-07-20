@@ -253,9 +253,15 @@ func rewriteCodexMCPConfigForRemote(cfg *SessionConfig, listener net.Listener) {
 	if cfg.SessionID != "" {
 		mcpURL += "?session_id=" + cfg.SessionID
 	}
-	config.MCPServers["openpoet"] = map[string]interface{}{
+	openpoetEntry := map[string]interface{}{
 		"url": mcpURL,
 	}
+	if cfg.MCPToken != "" {
+		openpoetEntry["headers"] = map[string]interface{}{
+			"Authorization": "Bearer " + cfg.MCPToken,
+		}
+	}
+	config.MCPServers["openpoet"] = openpoetEntry
 
 	out, err := json.Marshal(config)
 	if err != nil {

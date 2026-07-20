@@ -8,6 +8,11 @@ type Actor struct {
 	Name     string   `json:"name"`
 	Scopes   ScopeSet `json:"-"`
 	ClientID string   `json:"client_id"`
+	// ProjectFilter, when non-empty, scopes this actor to a set of projects. It
+	// is the raw JSON {"project_ids":[...],"tag_ids":[...]} from the client row
+	// (empty = unrestricted). Enforced centrally in DispatchPlatformCapability and
+	// on read/push surfaces (sessions.list, the SSE stream).
+	ProjectFilter string `json:"-"`
 }
 
 type actorContextKey struct{}

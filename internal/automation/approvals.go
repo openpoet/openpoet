@@ -80,6 +80,13 @@ func (a *commandAPI) issueApprovalGrant(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "approval_target_invalid", "target_client_id is required and bounded", false)
 		return
 	}
+	// deny_self_grant: a client cannot approve its own actions unless it was
+	// deliberately provisioned with approvals:self. This makes coordinator
+	// autonomy an explicit provisioning decision, not an accidental bypass.
+	if request.TargetClientID == actor.ClientID && !actor.Scopes.Has(ScopeApprovalsSelf) {
+		writeError(w, http.StatusForbidden, "approval_self_grant_forbidden", "a client cannot grant an approval to itself without the approvals:self scope", false)
+		return
+	}
 	if request.CommandID == "" || len(request.CommandID) > maxCommandFieldLength {
 		writeError(w, http.StatusBadRequest, "command_id_invalid", "command_id is required and bounded", false)
 		return

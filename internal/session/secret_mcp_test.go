@@ -43,7 +43,7 @@ func TestBuildMCPConfigResolvesEncryptedAndLegacyValues(t *testing.T) {
 
 	manager := &Manager{db: db}
 	manager.SetSecretDecryptor(encryptor.Decrypt)
-	raw, err := manager.buildMCPConfigJSON(ctx, project, "session-1")
+	raw, err := manager.buildMCPConfigJSON(ctx, project, "session-1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestBuildMCPConfigFailsClosedWithoutDecryptor(t *testing.T) {
 	if err := db.CreateMCPServer(ctx, &database.MCPServer{Name: "encrypted", Command: command, Args: `[]`, Env: `{}`, Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	_, err = (&Manager{db: db}).buildMCPConfigJSON(ctx, project, "session-1")
+	_, err = (&Manager{db: db}).buildMCPConfigJSON(ctx, project, "session-1", "")
 	if err == nil || strings.Contains(err.Error(), "private-command") || strings.Contains(err.Error(), command) {
 		t.Fatalf("unsafe missing-decryptor error: %v", err)
 	}

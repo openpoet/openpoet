@@ -88,6 +88,29 @@ func AuthMiddleware(db *database.DB, jwtSecret []byte) func(http.Handler) http.H
 	}
 }
 
+// AuthenticatedDevice validates the openpoet_session cookie on a request and
+// returns the paired device id when the JWT is valid and the device is not
+// revoked. It is the read-only counterpart to AuthMiddleware, used by the
+// REST actor resolver to recognize a paired/tunnel principal on any request.
+func AuthenticatedDevice(db *database.DB, jwtSecret []byte, r *http.Request) (deviceID string, ok bool) {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil || cookie.Value == "" {
+		return "", false
+	}
+	claims := &DeviceClaims{}
+	token, err := jwt.ParseWithClaims(cookie.Value, claims, func(token *jwt.Token) (interface{}, error) {
+		return jwtSecret, nil
+	})
+	if err != nil || !token.Valid {
+		return "", false
+	}
+	device, err := db.GetPairedDevice(r.Context(), claims.DeviceID)
+	if err != nil || device == nil || device.Revoked {
+		return "", false
+	}
+	return claims.DeviceID, true
+}
+
 // CreateSessionToken creates a JWT session token for a paired device.
 func CreateSessionToken(deviceID string, jwtSecret []byte) (string, error) {
 	claims := &DeviceClaims{

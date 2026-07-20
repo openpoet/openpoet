@@ -147,7 +147,11 @@ func (d *DB) WithWorkRunTx(ctx context.Context, fn func(*WorkRunTx) error) error
 	if err := fn(&WorkRunTx{tx: tx}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	d.NotifyOutboxAppended()
+	return nil
 }
 
 func (t *WorkRunTx) GetWorkRun(ctx context.Context, id string) (*WorkRun, error) {

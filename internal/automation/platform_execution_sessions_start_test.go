@@ -32,6 +32,22 @@ func (s *automationStartSessionStore) GetTaskForSession(context.Context, string)
 	return s.task, nil
 }
 
+func (s *automationStartSessionStore) ProjectIDsForTags(_ context.Context, _ []int64) ([]int64, error) {
+	return nil, nil
+}
+
+func (s *automationStartSessionStore) GetMission(_ context.Context, _ int64) (*database.Mission, error) {
+	return nil, nil
+}
+
+func (s *automationStartSessionStore) UpsertMissionWorker(_ context.Context, _ *database.MissionWorker) error {
+	return nil
+}
+
+func (s *automationStartSessionStore) UpdateSessionLineage(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
 func (s *automationStartSessionStore) EndSession(_ context.Context, _ string, status string) error {
 	if s.session != nil {
 		s.session.Status = status

@@ -3,6 +3,7 @@ package llm
 import (
 	"encoding/json"
 	"log"
+	"os"
 	"sync"
 )
 
@@ -10,9 +11,10 @@ import (
 type Slot string
 
 const (
-	SlotChat       Slot = "ai_chat"
-	SlotBackground Slot = "ai_background"
-	SlotSession    Slot = "claude_session"
+	SlotChat        Slot = "ai_chat"
+	SlotBackground  Slot = "ai_background"
+	SlotSession     Slot = "claude_session"
+	SlotCoordinator Slot = "ai_coordinator"
 )
 
 // ProviderConfig holds the decoded configuration needed to create a provider.
@@ -180,6 +182,15 @@ func (pm *ProviderManager) createProvider(config *ProviderConfig, slot Slot) Pro
 	}
 
 	switch config.ProviderType {
+	case "mock":
+		// Test-only canned provider (Phase 4 brain E2E). Inert outside test mode.
+		if os.Getenv("OPENPOET_TEST_MODE") != "1" {
+			log.Printf("[ProviderMgr] Slot %s: mock provider requested outside test mode, ignoring", slot)
+			return nil
+		}
+		log.Printf("[ProviderMgr] Slot %s: using MOCK provider (test mode)", slot)
+		return NewMockProvider()
+
 	case "apikey":
 		if config.APIKey == "" {
 			log.Printf("[ProviderMgr] Slot %s: apikey provider has no API key, falling back", slot)

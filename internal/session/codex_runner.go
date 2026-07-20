@@ -1964,6 +1964,9 @@ func (r *CodexRunner) postHook(kind string, event map[string]interface{}) (json.
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Session-ID", r.cfg.SessionID)
+	if r.cfg.HookToken != "" {
+		req.Header.Set("X-Hook-Token", r.cfg.HookToken)
+	}
 	req.Header.Set("X-Backend", "codex")
 
 	client := &http.Client{Timeout: 10 * time.Minute}
@@ -2223,6 +2226,12 @@ func (r *CodexRunner) writeItemStarted(params json.RawMessage) {
 			r.setCodexPhase("editing", path)
 			r.addCodexTranscriptBlock("file", path, "Editing file", "", "editing")
 			r.write([]byte(fmt.Sprintf("\r\n\x1b[90mEditing %s\x1b[0m\r\n", path)))
+			// Feed the conflict radar: synthesize a PreToolUse so a codex edit
+			// indexes through the SAME extractor as claude_code and ACP. Async +
+			// best-effort so it can never stall or fail the codex stream.
+			if ev, ok := codexPreToolUseEvent(CodexItem{Type: "file_change", Path: path}); ok {
+				go func() { _, _ = r.postHook("event", ev) }()
+			}
 		}
 	}
 }

@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,8 +24,10 @@ import (
 	"openpoet/internal/application"
 	"openpoet/internal/automation"
 	"openpoet/internal/benchmark"
+	"openpoet/internal/brain"
 	"openpoet/internal/config"
 	"openpoet/internal/configsync"
+	"openpoet/internal/coordinator"
 	"openpoet/internal/database"
 	"openpoet/internal/handlers"
 	"openpoet/internal/llm"
@@ -32,6 +36,7 @@ import (
 	"openpoet/internal/providerbridge"
 	"openpoet/internal/security"
 	"openpoet/internal/session"
+	"openpoet/internal/sshauth"
 	"openpoet/internal/tunnel"
 	"openpoet/internal/updater"
 	"openpoet/internal/voice"
@@ -104,6 +109,11 @@ func main() {
 			case "--api-url":
 				if i+1 < len(os.Args) {
 					os.Setenv("OPENPOET_API_URL", os.Args[i+1])
+					i++
+				}
+			case "--session-token":
+				if i+1 < len(os.Args) {
+					os.Setenv("OPENPOET_SESSION_TOKEN", os.Args[i+1])
 					i++
 				}
 			}
@@ -352,6 +362,155 @@ func main() {
 	// Initialize OTEL handler for Claude Code token tracking
 	otelHandler := handlers.NewOTELHandler(db)
 
+	// Conflict radar (Phase 1, observe-only): taps the hook firehose, keeps an
+	// in-memory claim index, and emits conflict.detected / session.awaiting_input
+	// / session.turn_completed to the durable outbox. It never denies anything.
+	coord := coordinator.New(db)
+	coord.OnEscalate = func(inc coordinator.Incident) {
+		ctx := context.Background()
+		sessionID := ""
+		if len(inc.Sessions) > 0 {
+			sessionID = inc.Sessions[0]
+		}
+		body := fmt.Sprintf("Incidente %s: %s (%s) — %s", inc.ID, inc.Rule, inc.Severity, inc.ScopeKey)
+		if err := notifService.Send(ctx, sessionID, "warning", "Conflito entre sessões detectado", body, ""); err != nil {
+			log.Printf("[Coordinator] escalation notification failed: %v", err)
+		}
+		if _, err := aiHandler.CreateProactiveNotification(ctx, "warning", "conflict", "Conflito entre sessões detectado", body, nil, map[string]interface{}{
+			"incident_id": inc.ID,
+			"rule":        inc.Rule,
+			"severity":    inc.Severity,
+			"sessions":    inc.Sessions,
+		}); err != nil {
+			log.Printf("[Coordinator] proactive escalation failed: %v", err)
+		}
+	}
+	// Phase 4: the pluggable brain. Fired once per critical incident; it
+	// re-validates the LLM's proposed action against the project dial, daily
+	// budget, and hallucination checks before executing as the coordinator
+	// client. The ai_coordinator slot (nil when unconfigured = no spend).
+	brainEscalator := func(ctx context.Context, incidentID, title, body string, extra map[string]interface{}) {
+		if _, err := aiHandler.CreateProactiveNotification(ctx, "warning", "conflict", title, body, nil, extra); err != nil {
+			log.Printf("[Brain] escalation failed: %v", err)
+		}
+	}
+	brainConsultant := brain.NewConsultant(
+		db,
+		api.PlatformCapabilityRegistry(),
+		// Resolve the ai_coordinator provider AND its model — but only if the
+		// slot is actually ASSIGNED. An unassigned slot must return nil (no
+		// spend): GetProvider(nil) would otherwise auto-detect a real provider
+		// and spend on every critical incident, violating no-spend-at-rest.
+		func(ctx context.Context) (llm.Provider, string) {
+			cfg, err := db.GetAIConfigForSlot(ctx, string(llm.SlotCoordinator))
+			if err != nil || cfg == nil {
+				return nil, ""
+			}
+			return providerMgr.GetProvider(llm.SlotCoordinator), cfg.Model
+		},
+		func(ctx context.Context) string {
+			if agent, err := db.GetAIAgentByName(ctx, "Coordinator"); err == nil && agent != nil {
+				return agent.SystemPrompt
+			}
+			return "You are OpenPoet's fleet coordinator. Respond with one JSON action."
+		},
+		brainEscalator,
+	)
+	coord.OnBrainConsult = brainConsultant.Consult
+
+	coord.Start()
+	hookHandler.OnToolEvent = coord.OnHookEvent
+	sessionMgr.OnSessionAttention = coord.RecordAttention
+	// Phase 3: the radar's first synchronous hand — deny a write permission
+	// when the file is contested by another live session, and drop the denied
+	// session's claim so it cannot mutually lock out the real holder.
+	hookHandler.ConsultConflict = coord.ConsultWrite
+	hookHandler.ReleaseClaim = coord.ReleaseClaim
+
+	// Phase 5: the synchronous PreToolUse gate (L2). Strictly opt-in per project
+	// (conflict_policy in {gate, enforce}) and globally kill-switchable — every
+	// non-opted path and every error fails OPEN so the gate can never brick a
+	// session. This is the only control point that reaches
+	// dangerously_skip_permissions sessions (they never fire PermissionRequest).
+	hookHandler.GatePreToolUse = func(ctx context.Context, sessionID, toolName string, toolInput map[string]interface{}) (bool, string) {
+		// Global kill switch: absent/anything-but-"false" = enabled.
+		if v, _ := db.GetSetting(ctx, "conflict_enforcement_enabled"); strings.EqualFold(strings.TrimSpace(v), "false") {
+			return false, ""
+		}
+		s, err := db.GetSession(ctx, sessionID)
+		if err != nil || s == nil {
+			return false, ""
+		}
+		p, err := db.GetProject(ctx, s.ProjectID)
+		if err != nil || p == nil {
+			return false, ""
+		}
+		switch p.ConflictPolicy {
+		case "gate", "enforce":
+			return coord.Gate(sessionID, toolName, toolInput)
+		default:
+			return false, "" // observe/warn never block — opt-in is real
+		}
+	}
+
+	// Provision the built-in coordinator automation client (grant-gated: no
+	// approvals scopes) and drop its one-time token next to the DB.
+	coordinatorTokenPath := filepath.Join(filepath.Dir(cfg.DBPath), "coordinator.token")
+	if err := automation.EnsureCoordinatorClient(context.Background(), db, coordinatorTokenPath); err != nil {
+		log.Printf("[Coordinator] ensure coordinator client: %v", err)
+	}
+
+	// Phase 7.2: worker-side milestone-report skill (materialized to every
+	// project by config sync; users may edit it — never overwritten).
+	if err := configsync.EnsureSessionReportSkill(context.Background(), db); err != nil {
+		log.Printf("[Coordinator] ensure session-report skill: %v", err)
+	}
+	if err := configsync.EnsureMissionCoordinatorSkill(context.Background(), db); err != nil {
+		log.Printf("[Coordinator] ensure mission-coordinator skill: %v", err)
+	}
+
+	// Phase 7.4: TOFU host-key ledger for every SSH surface.
+	sshauth.SetKnownHostStore(db)
+
+	// Phase 7.4: remote transport drops get ONE reconnect attempt (backoff 5s)
+	// through the same auto-restore path a daemon restart uses, instead of
+	// killing the session (and its mission worker) on a network blip.
+	remoteRetryMu := sync.Mutex{}
+	remoteLastRetry := map[string]time.Time{}
+	sessionMgr.OnRemoteSessionDropped = func(sessionID string) bool {
+		remoteRetryMu.Lock()
+		// One reconnect attempt per 10-minute window per session: a flapping
+		// host gets bounded retries (not a restore↔drop hot loop), and a
+		// session whose retry failed regains eligibility after the window.
+		if last, seen := remoteLastRetry[sessionID]; seen && time.Since(last) < 10*time.Minute {
+			remoteRetryMu.Unlock()
+			return false
+		}
+		remoteLastRetry[sessionID] = time.Now()
+		remoteRetryMu.Unlock()
+		go func() {
+			time.Sleep(5 * time.Second)
+			ctx := context.Background()
+			sess, err := db.GetSession(ctx, sessionID)
+			if err != nil || sess == nil {
+				return
+			}
+			// The user may have stopped/discarded the session during the
+			// backoff — a deliberate stop must never be resurrected.
+			if sess.Status != "running" && sess.Status != "starting" {
+				log.Printf("[RemoteReconnect] session %s is %s — not reconnecting", sessionID, sess.Status)
+				return
+			}
+			if err := api.AutoRestoreSession(ctx, sess); err != nil {
+				log.Printf("[RemoteReconnect] session %s reconnect failed: %v", sessionID, err)
+				_ = db.EndSession(ctx, sessionID, "error")
+			} else {
+				log.Printf("[RemoteReconnect] session %s reconnected after transport drop", sessionID)
+			}
+		}()
+		return true
+	}
+
 	// Wire AI evaluation callbacks into session manager
 	sessionMgr.OnSessionStart = func(sessionID string) {
 		log.Printf("[AI-Session] >>> OnSessionStart callback fired for session %s", sessionID[:8])
@@ -366,6 +525,15 @@ func main() {
 	sessionMgr.OnSessionFlush = func(sessionID string) {
 		log.Printf("[OTEL] >>> OnSessionFlush callback fired for session %s", sessionID[:8])
 		otelHandler.FlushSession(sessionID)
+		// Drop the session's live claims from the conflict radar. This MUST
+		// live on the flush callback (fired on every terminal path, including
+		// user-stop) — OnSessionEnd skips user-stopped sessions, and a ghost
+		// live claim would fire false critical conflicts against later peers.
+		coord.ForgetSession(sessionID)
+		// Free any workspace lane this session held (every terminal path).
+		if err := db.ReleaseWorkspaceLeaseBySession(context.Background(), sessionID); err != nil {
+			log.Printf("[Workspace] lease release failed for session %s: %v", sessionID, err)
+		}
 		// Expire all notifications for this session and clean up hook state
 		go notifService.MarkSessionRead(context.Background(), sessionID)
 		hookHandler.ClearSession(sessionID)
@@ -509,6 +677,13 @@ func main() {
 	// Tunnel auth middleware (only activates for tunnel-originated requests)
 	r.Use(tunnel.AuthMiddleware(db, []byte(jwtSecret)))
 
+	// Per-install UI credential: planted on page/asset loads, required (along
+	// with the opst1_/opav1_ bearers and paired-device cookie) to authorize a
+	// REST mutation. This closes the "unauthenticated localhost /api" hole.
+	uiCookieSecret := loadOrGenerateUICookieSecret(db)
+	r.Use(handlers.EnsureUICookieMiddleware(uiCookieSecret))
+	r.Use(handlers.ResolveActorMiddleware(db, []byte(jwtSecret), uiCookieSecret))
+
 	// MCP HTTP endpoint (always registered, auth-protected)
 	r.Handle("/mcp", mcpHandler)
 
@@ -518,11 +693,24 @@ func main() {
 		Capabilities:         api.CapabilityRegistry(),
 		PlatformCapabilities: api.PlatformCapabilityRegistry(),
 		Snapshot:             db,
+		Waiter:               db,
+		Sessions:             db,
+		ProjectScope:         db, // resolves client project_filter tag membership
 	}
 	if reportService != nil {
 		automationDeps.Reports = reportService
 	}
+	automationDeps.MergePredictor = api.WorkspaceService()
 	r.Mount("/api/automation/v1", automation.NewHandler(db, automationDeps))
+
+	// Coordinator tier (Phase 7.1 — Maestro): token-authed (opst1) surface that
+	// lets an ELECTED session coordinate a group cross-project. Reuses the same
+	// dependencies; authority never rests on the legacy localhost surface.
+	r.Mount("/api/coordinator", automation.NewCoordinatorHandler(db, automationDeps))
+
+	// Worker self-report surface (Phase 7.2): a session emits its own dense
+	// milestone report, authenticated by its opst1 bearer.
+	r.Mount("/api/session", automation.NewSessionReportHandler(db, reportService))
 
 	// API routes
 	// DEBUG: Client error reporting endpoint
@@ -845,11 +1033,18 @@ func main() {
 		r.Post("/hooks/permission", hookHandler.HandlePermission)
 		r.Post("/hooks/permission/{sessionId}/respond", hookHandler.HandlePermissionRespond)
 		r.Post("/hooks/event", hookHandler.HandleEvent)
+		r.Post("/hooks/pretooluse", hookHandler.HandlePreToolUseGate) // Phase 5 synchronous gate
 		r.Get("/hooks/pending/{sessionId}", hookHandler.HandleGetPending)
 		r.Post("/hooks/task-notification/{sessionId}/respond", hookHandler.HandleTaskNotificationRespond)
 
 		// Temp Documents
 		r.Post("/documents", api.CreateTempDocument)
+		r.Post("/missions", api.CreateMissionUI)
+		r.Get("/mission-groups", api.ListMissionGroups)
+		r.Post("/missions/{id}/grants", api.CreateMissionGrant)
+		r.Post("/missions/{id}/status", api.UpdateMissionStatusUI)
+		r.Get("/missions", api.ListMissions)
+		r.Get("/missions/{id}/panel", api.GetMissionPanel)
 		r.Get("/documents/{id}", api.GetTempDocument)
 
 		// AI
@@ -905,6 +1100,9 @@ func main() {
 	if os.Getenv("OPENPOET_TEST_MODE") == "1" {
 		log.Printf("[TEST] Test mode enabled — test endpoints available")
 		r.Post("/api/test/seed-token-usage", api.SeedTokenUsage)
+		r.Post("/api/test/sessions", testCreateSession(db))
+		r.Post("/api/test/sessions/{sessionID}/pty", testInjectSessionPTY(sessionMgr))
+		r.Post("/api/test/tunnel-jwt", testMintTunnelJWT(db, jwtSecret))
 	}
 
 	// OTLP endpoints (standard paths for OpenTelemetry HTTP/JSON)
@@ -977,6 +1175,13 @@ func main() {
 	codexCleanupCtx, stopCodexCleanup := context.WithCancel(context.Background())
 	go runCodexTranscriptCleanupLoop(codexCleanupCtx, db)
 
+	// Event-outbox janitor: evict stale consumer cursors and prune retained
+	// events. Runs once at boot then hourly. Evicting dead consumers is what
+	// keeps a single abandoned cursor from pinning the prune floor at zero.
+	outboxJanitorCtx, stopOutboxJanitor := context.WithCancel(context.Background())
+	runOutboxJanitor(outboxJanitorCtx, db)
+	go runOutboxJanitorLoop(outboxJanitorCtx, db)
+
 	// Create server
 	// WriteTimeout is 600s to support long-polling hook permission requests (up to 590s)
 	// ReadTimeout is 180s so large uploads (e.g. ~1MB voice recordings via the
@@ -1021,12 +1226,15 @@ func main() {
 		}
 	}()
 
-	// Auto-restore previously active sessions (non-blocking)
-	if len(sessionsToRestore) > 0 {
-		go func() {
-			time.Sleep(2 * time.Second) // let server start first
+	// Auto-restore previously active sessions, then sweep orphaned workspace
+	// leases (crash strands, failed restores). The sweep runs even with zero
+	// sessions to restore — that is exactly the case after a crash whose
+	// sessions all ended before the DB was preserved.
+	go func() {
+		time.Sleep(2 * time.Second) // let server start first
+		restoreCtx := context.Background()
+		if len(sessionsToRestore) > 0 {
 			log.Printf("[AutoRestore] Restoring %d active session(s) from before restart...", len(sessionsToRestore))
-			restoreCtx := context.Background()
 			restored := 0
 			for _, sess := range sessionsToRestore {
 				sess := sess // capture loop var
@@ -1038,8 +1246,43 @@ func main() {
 				}
 			}
 			log.Printf("[AutoRestore] Done: %d/%d sessions restored", restored, len(sessionsToRestore))
-		}()
-	}
+		}
+		if freed, err := db.ReleaseOrphanWorkspaceLeases(restoreCtx); err != nil {
+			log.Printf("[Workspace] orphan lease sweep failed: %v", err)
+		} else if freed > 0 {
+			log.Printf("[Workspace] freed %d orphaned workspace lease(s)", freed)
+		}
+		// Mission resume (Phase 7.3): missions are durable — after the session
+		// restore pass, announce every still-active mission on the outbox with
+		// its current roster. The coordinator session (restored or re-opened)
+		// wakes via await_events, re-elects its lease lazily and carries on.
+		if missions, err := db.ListActiveMissions(restoreCtx); err != nil {
+			log.Printf("[Mission] resume sweep failed: %v", err)
+		} else {
+			for _, mission := range missions {
+				workers, _ := db.ListMissionWorkers(restoreCtx, mission.ID)
+				roster := make([]map[string]any, 0, len(workers))
+				for _, worker := range workers {
+					status := worker.Status
+					if sess, sessErr := db.GetSession(restoreCtx, worker.SessionID); sessErr == nil && sess != nil {
+						status = sess.Status
+					}
+					roster = append(roster, map[string]any{
+						"session_id": worker.SessionID, "project_id": worker.ProjectID,
+						"role": worker.Role, "status": status,
+					})
+				}
+				if err := db.AppendMissionEvent(restoreCtx, "mission.resumed", mission.ID, map[string]any{
+					"mission_id": mission.ID, "goal": mission.Goal,
+					"coordinator_session_id": mission.CoordinatorSessionID, "workers": roster,
+				}); err != nil {
+					log.Printf("[Mission] resume event for mission %d failed: %v", mission.ID, err)
+				} else {
+					log.Printf("[Mission] mission %d resumed (%d workers announced)", mission.ID, len(roster))
+				}
+			}
+		}
+	}()
 
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
@@ -1048,6 +1291,8 @@ func main() {
 
 	log.Println("Shutting down...")
 	stopCodexCleanup()
+	stopOutboxJanitor()
+	coord.Stop()
 
 	// Disconnect tunnel
 	api.DisconnectTunnel()
@@ -1210,6 +1455,23 @@ func loadOrGenerateJWTSecret(db *database.DB) string {
 	return jwtSecret
 }
 
+// loadOrGenerateUICookieSecret loads the per-install UI cookie secret from DB
+// or generates a new one. Presenting this secret as the openpoet_ui cookie is
+// what authorizes a browser (same-origin) to perform REST mutations.
+func loadOrGenerateUICookieSecret(db *database.DB) string {
+	secret, _ := db.GetSetting(context.Background(), "ui_cookie_secret")
+	if secret == "" {
+		generatedKey, err := security.GenerateKey()
+		if err != nil {
+			log.Printf("[UI] Failed to generate UI cookie secret: %v", err)
+			return ""
+		}
+		secret = generatedKey
+		db.SetSetting(context.Background(), "ui_cookie_secret", secret)
+	}
+	return secret
+}
+
 // decryptSetting reads an encrypted setting, auto-migrating plaintext values.
 func decryptSetting(db *database.DB, enc *security.Encryptor, key string) string {
 	ctx := context.Background()
@@ -1252,7 +1514,7 @@ func initProviderManager(db *database.DB, enc *security.Encryptor, apiURL string
 	pm := llm.NewProviderManager(apiURL)
 	ctx := context.Background()
 
-	for _, slot := range []llm.Slot{llm.SlotChat, llm.SlotBackground, llm.SlotSession} {
+	for _, slot := range []llm.Slot{llm.SlotChat, llm.SlotBackground, llm.SlotSession, llm.SlotCoordinator} {
 		cfg, err := db.GetAIConfigForSlot(ctx, string(slot))
 		if err != nil || cfg == nil {
 			log.Printf("[AI] Slot %s: no config assigned (auto-detect)", slot)
@@ -1430,6 +1692,44 @@ func runCodexTranscriptCleanup(ctx context.Context, db *database.DB) {
 	}
 	if stats.ExpiredDeleted > 0 || stats.OverflowDeleted > 0 {
 		log.Printf("[Codex] transcript cleanup removed %d expired and %d overflow event(s)", stats.ExpiredDeleted, stats.OverflowDeleted)
+	}
+}
+
+// outboxRetention is how long an outbox event is kept before the janitor may
+// prune it. Pruning only removes events at or below the minimum LIVE consumer
+// cursor: a consumer that keeps polling or acking stays live and its unseen
+// events are protected. The one deliberate trade-off is a consumer that goes
+// silent past the staleness window — it is evicted first, so events it never
+// saw may then be pruned. That is the intended escape from a dead cursor
+// pinning the floor forever; a returning consumer simply re-registers at zero.
+const outboxRetention = 14 * 24 * time.Hour
+
+func runOutboxJanitorLoop(ctx context.Context, db *database.DB) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runOutboxJanitor(ctx, db)
+		}
+	}
+}
+
+func runOutboxJanitor(ctx context.Context, db *database.DB) {
+	// Evict dead consumer cursors first so they stop pinning the prune floor.
+	evicted, err := db.EvictStaleEventOutboxConsumers(ctx, time.Now().Add(-database.DefaultEventOutboxConsumerStaleAfter))
+	if err != nil {
+		log.Printf("[Outbox] stale consumer eviction failed: %v", err)
+	} else if evicted > 0 {
+		log.Printf("[Outbox] evicted %d stale consumer cursor(s)", evicted)
+	}
+	pruned, err := db.PruneEventOutbox(ctx, time.Now().Add(-outboxRetention), 10000)
+	if err != nil {
+		log.Printf("[Outbox] prune failed: %v", err)
+	} else if pruned > 0 {
+		log.Printf("[Outbox] pruned %d retained event(s)", pruned)
 	}
 }
 
