@@ -1039,6 +1039,8 @@ func main() {
 
 		// Temp Documents
 		r.Post("/documents", api.CreateTempDocument)
+		r.Post("/missions", api.CreateMissionUI)
+		r.Get("/mission-groups", api.ListMissionGroups)
 		r.Post("/missions/{id}/grants", api.CreateMissionGrant)
 		r.Post("/missions/{id}/status", api.UpdateMissionStatusUI)
 		r.Get("/missions", api.ListMissions)

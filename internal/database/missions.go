@@ -392,3 +392,10 @@ func (d *DB) ListMissions(ctx context.Context) ([]Mission, error) {
 	}
 	return missions, err
 }
+
+// UpdateMissionCoordinator sets the coordinator session (Phase 7.6 spawn).
+func (d *DB) UpdateMissionCoordinator(ctx context.Context, id int64, sessionID string) error {
+	_, err := d.ExecContext(ctx,
+		"UPDATE missions SET coordinator_session_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", sessionID, id)
+	return err
+}

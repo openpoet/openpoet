@@ -4974,3 +4974,104 @@ func (a *API) UpdateMissionStatusUI(w http.ResponseWriter, r *http.Request) {
 	})
 	respondJSON(w, http.StatusOK, map[string]any{"mission_id": missionID, "status": status})
 }
+
+// ListMissionGroups (Phase 7.6): coordination groups (tags with coordination=1)
+// the "New mission" form picks from. Read-only.
+func (a *API) ListMissionGroups(w http.ResponseWriter, r *http.Request) {
+	tags, err := a.db.ListCoordinationTags(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to list coordination groups")
+		return
+	}
+	out := make([]map[string]any, 0, len(tags))
+	for _, t := range tags {
+		pids, _ := a.db.ProjectIDsForTags(r.Context(), []int64{t.ID})
+		projects := make([]map[string]any, 0, len(pids))
+		for _, pid := range pids {
+			if p, err := a.db.GetProject(r.Context(), pid); err == nil && p != nil {
+				projects = append(projects, map[string]any{"id": p.ID, "name": p.Name})
+			}
+		}
+		out = append(out, map[string]any{"id": t.ID, "name": t.Name, "color": t.Color, "projects": projects})
+	}
+	respondJSON(w, http.StatusOK, out)
+}
+
+// CreateMissionUI (Phase 7.6): create a mission record for a coordination group
+// from the panel. Non-destructive; approved user credential only. The mission
+// starts without a coordinator session — elect/attach one to drive it. Honors
+// one-active-mission-per-group.
+func (a *API) CreateMissionUI(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Goal                 string `json:"goal"`
+		GroupTagID           int64  `json:"group_tag_id"`
+		SpawnCoordinator     bool   `json:"spawn_coordinator"`
+		CoordinatorProjectID int64  `json:"coordinator_project_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	goal := strings.TrimSpace(input.Goal)
+	if goal == "" || len(goal) > 4000 {
+		respondError(w, http.StatusBadRequest, "Goal is required (1-4000 characters)")
+		return
+	}
+	if input.GroupTagID <= 0 {
+		respondError(w, http.StatusBadRequest, "A coordination group is required")
+		return
+	}
+	authorization := platformUIAuthorization(r)
+	if !authorization.Approved || authorization.Actor.Type == "session" {
+		respondError(w, http.StatusForbidden, "Creating a mission requires an approved user credential")
+		return
+	}
+	tag, err := a.db.GetTag(r.Context(), input.GroupTagID)
+	if err != nil || tag == nil || tag.Coordination != 1 {
+		respondError(w, http.StatusBadRequest, "The chosen tag is not a coordination group")
+		return
+	}
+	mission, err := a.db.CreateMission(r.Context(), goal, input.GroupTagID, "")
+	if err != nil {
+		if errors.Is(err, database.ErrMissionActiveExists) {
+			respondError(w, http.StatusConflict, "This group already has an active mission — end it before starting another")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, "Failed to create mission")
+		return
+	}
+	_ = a.db.AppendMissionEvent(r.Context(), "mission.created", mission.ID, map[string]any{
+		"mission_id": mission.ID, "goal": goal, "group_tag_id": input.GroupTagID,
+		"by_actor": application.EventActorValue(authorization.Actor),
+	})
+	resp := map[string]any{"mission_id": mission.ID, "goal": goal, "status": mission.Status}
+
+	// Optional: spawn a REAL coordinator session (the maestro) that elects
+	// itself and drives the mission. The coordinator's project must be a member
+	// of the group (elect requires membership). A spawn failure never fails the
+	// already-created mission — it is reported alongside it.
+	if input.SpawnCoordinator {
+		memberIDs, _ := a.db.ProjectIDsForTags(r.Context(), []int64{input.GroupTagID})
+		inGroup := false
+		for _, id := range memberIDs {
+			if id == input.CoordinatorProjectID {
+				inGroup = true
+				break
+			}
+		}
+		if input.CoordinatorProjectID <= 0 || !inGroup {
+			resp["coordinator_error"] = "the coordinator project must be a member of the group — mission created without a coordinator"
+		} else {
+			briefing := fmt.Sprintf("Você é a COORDENADORA (maestro) da missão #%d. Objetivo: %s. Passos: (1) eleja-se coordenadora do grupo %d com openpoet_coordinator_elect e guarde o fence_version; (2) decomponha o objetivo e inicie trabalhadoras (openpoet_start_worker, passando mission_id=%d); (3) acompanhe por relatórios de marco (openpoet_await_events / openpoet_get_session_report) e integre com predição+grant (openpoet_predict_merge / openpoet_merge_workspace). Comece elegendo-se e confirmando o status.",
+				mission.ID, goal, input.GroupTagID, mission.ID)
+			sess, serr := a.startManagedSession(r.Context(), startSessionInput{ProjectID: input.CoordinatorProjectID, CustomPrompt: briefing})
+			if serr != nil {
+				resp["coordinator_error"] = "mission created, but the coordinator session failed to start: " + serr.Error()
+			} else {
+				_ = a.db.UpdateMissionCoordinator(r.Context(), mission.ID, sess.ID)
+				resp["coordinator_session_id"] = sess.ID
+			}
+		}
+	}
+	respondJSON(w, http.StatusCreated, resp)
+}
