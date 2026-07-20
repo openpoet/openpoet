@@ -525,9 +525,34 @@
                     <div class="mv-toolbar">
                         <input id="mv-search" class="mv-search" type="search" autocomplete="off"
                             placeholder="Buscar por objetivo, status ou #id…" oninput="app.onMissionSearch(this.value)">
+                        <button class="mv-newbtn" onclick="app.openCreateMission()">＋ Nova missão</button>
                     </div>
                     <div class="mv-list" id="mv-list"><div class="mv-empty">Carregando…</div></div>
                     <div class="mv-pager" id="mv-pager"></div>
+                </div>
+                <div class="mv-modal" id="mv-create-modal">
+                    <div class="mv-modal-inner">
+                        <div class="mv-modal-head">
+                            <h3>Nova missão</h3>
+                            <button class="btn btn-sm btn-outline" onclick="app.closeCreateMission()">Fechar</button>
+                        </div>
+                        <div class="mv-create-body">
+                            <label class="mvc-label" for="mvc-goal">Objetivo</label>
+                            <textarea id="mvc-goal" class="mvc-input" rows="3" placeholder="O que a missão deve alcançar…"></textarea>
+                            <label class="mvc-label" for="mvc-group">Grupo de coordenação</label>
+                            <select id="mvc-group" class="mvc-input" onchange="app.onCreateGroupChange()"></select>
+                            <label class="mvc-check"><input type="checkbox" id="mvc-spawn" onchange="app.onCreateSpawnToggle()">
+                                <span>Iniciar com coordenadora agora <em>(sessão de IA real — custa tokens)</em></span></label>
+                            <div id="mvc-project-wrap" hidden>
+                                <label class="mvc-label" for="mvc-project">Projeto da coordenadora</label>
+                                <select id="mvc-project" class="mvc-input"></select>
+                            </div>
+                            <div id="mvc-msg" class="mvc-msg"></div>
+                            <div class="mv-create-actions">
+                                <button class="mv-endbtn" onclick="app.submitCreateMission()">Criar missão</button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 <div class="mv-detail-pane" id="mv-detail-pane" hidden>
                     <button class="mv-back" onclick="app.closeMissionDetail()">‹ Voltar para a lista</button>
@@ -546,9 +571,23 @@
             <style>
                 #view-missions .mv-list-pane, #view-missions .mv-detail-pane { padding: 18px 24px 60px; overflow-y: auto; overflow-x: hidden; }
                 #view-missions .mv-content { padding: 0; }
-                .mv-toolbar { margin-bottom: 14px; }
-                .mv-search { width: 100%; max-width: 520px; box-sizing: border-box; background: var(--color-surface); color: var(--color-text);
+                .mv-toolbar { margin-bottom: 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+                .mv-search { flex: 1; min-width: 200px; max-width: 520px; box-sizing: border-box; background: var(--color-surface); color: var(--color-text);
                     border: 1px solid var(--color-border); border-radius: var(--border-radius); padding: 9px 14px; font: inherit; }
+                .mv-newbtn { flex-shrink: 0; background: var(--color-primary); color: #fff; border: 1px solid var(--color-primary);
+                    border-radius: 8px; padding: 9px 16px; font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; }
+                .mv-newbtn:hover { background: var(--color-primary-hover, var(--color-primary)); }
+                .mv-create-body { padding: 14px 24px 26px; display: flex; flex-direction: column; }
+                .mvc-label { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--color-text-muted); margin: 12px 0 5px; }
+                .mvc-input { width: 100%; box-sizing: border-box; background: var(--color-surface); color: var(--color-text);
+                    border: 1px solid var(--color-border); border-radius: var(--border-radius); padding: 9px 12px; font: inherit; }
+                textarea.mvc-input { resize: vertical; }
+                .mvc-check { display: flex; gap: 9px; align-items: flex-start; margin: 14px 0 2px; font-size: 14px; color: var(--color-text); cursor: pointer; }
+                .mvc-check em { color: var(--color-text-muted); font-style: normal; font-size: 12.5px; }
+                .mvc-check input { margin-top: 3px; }
+                .mvc-msg { color: var(--color-text-muted); font-size: 13px; min-height: 18px; margin-top: 10px; }
+                .mv-create-actions { margin-top: 16px; }
+                .mv-create-actions .mv-endbtn { width: 100%; }
                 .mv-list { display: flex; flex-direction: column; gap: 8px; }
                 .mv-mission-row { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
                     padding: 12px 14px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-surface); cursor: pointer;
