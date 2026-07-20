@@ -593,6 +593,80 @@ class OpenPoet {
         }
     }
 
+    // ── Criar missão (Fase 7.6): registro leve + opção de spawnar a coordenadora
+    async openCreateMission() {
+        const modal = document.getElementById('mv-create-modal');
+        document.getElementById('mvc-goal').value = '';
+        document.getElementById('mvc-spawn').checked = false;
+        document.getElementById('mvc-project-wrap').hidden = true;
+        document.getElementById('mvc-msg').textContent = '';
+        const groupSel = document.getElementById('mvc-group');
+        groupSel.innerHTML = '<option value="">Carregando…</option>';
+        modal.classList.add('open');
+        try {
+            this._missionGroups = await this.api('GET', '/mission-groups') || [];
+        } catch (e) {
+            this._missionGroups = [];
+        }
+        if (!this._missionGroups.length) {
+            groupSel.innerHTML = '<option value="">— nenhum grupo —</option>';
+            document.getElementById('mvc-msg').textContent = 'Crie um grupo de coordenação (uma tag com coordination=1, com projetos) antes de abrir uma missão.';
+            return;
+        }
+        groupSel.innerHTML = this._missionGroups.map(g => `<option value="${g.id}">${this.escapeHtml(g.name)}</option>`).join('');
+        this.onCreateGroupChange();
+    }
+
+    onCreateGroupChange() {
+        const gid = document.getElementById('mvc-group').value;
+        const group = (this._missionGroups || []).find(g => String(g.id) === String(gid));
+        const projSel = document.getElementById('mvc-project');
+        const projects = (group && group.projects) || [];
+        projSel.innerHTML = projects.length
+            ? projects.map(p => `<option value="${p.id}">${this.escapeHtml(p.name)}</option>`).join('')
+            : '<option value="">— o grupo não tem projetos —</option>';
+    }
+
+    onCreateSpawnToggle() {
+        document.getElementById('mvc-project-wrap').hidden = !document.getElementById('mvc-spawn').checked;
+    }
+
+    closeCreateMission() { document.getElementById('mv-create-modal').classList.remove('open'); }
+
+    async submitCreateMission() {
+        const goal = document.getElementById('mvc-goal').value.trim();
+        const groupTagId = parseInt(document.getElementById('mvc-group').value, 10);
+        const spawn = document.getElementById('mvc-spawn').checked;
+        const projectId = parseInt(document.getElementById('mvc-project').value, 10);
+        const msg = document.getElementById('mvc-msg');
+        if (!goal) { msg.textContent = 'Informe o objetivo da missão.'; return; }
+        if (!groupTagId) { msg.textContent = 'Escolha o grupo de coordenação.'; return; }
+        const body = { goal, group_tag_id: groupTagId };
+        if (spawn) {
+            if (!projectId) { msg.textContent = 'Escolha o projeto da coordenadora.'; return; }
+            body.spawn_coordinator = true;
+            body.coordinator_project_id = projectId;
+        }
+        msg.textContent = 'Criando…';
+        let res;
+        try {
+            res = await this.api('POST', '/missions', body);
+        } catch (e) {
+            msg.textContent = (e && e.message) ? e.message : 'Não foi possível criar a missão.';
+            return;
+        }
+        this.closeCreateMission();
+        if (res.coordinator_error) {
+            this.showToast?.('Missão criada. ' + res.coordinator_error, 'error');
+        } else if (res.coordinator_session_id) {
+            this.showToast?.('Missão criada e coordenadora iniciada.', 'success');
+        } else {
+            this.showToast?.('Missão criada.', 'success');
+        }
+        await this.loadMissions();
+        if (res.mission_id) this.openMissionDetail(String(res.mission_id));
+    }
+
     showMissionList() {
         this._missionMode = 'list';
         const listPane = document.getElementById('mv-list-pane');
