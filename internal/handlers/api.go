@@ -721,7 +721,7 @@ func (a *API) ListProjects(w http.ResponseWriter, r *http.Request) {
 	allPT, _ := a.db.ListAllProjectTagDetails(r.Context())
 	tagMap := make(map[int64][]tagInfo)
 	for _, t := range allPT {
-		tagMap[t.ProjectID] = append(tagMap[t.ProjectID], tagInfo{ID: t.TagID, Name: t.Name, Color: t.Color})
+		tagMap[t.ProjectID] = append(tagMap[t.ProjectID], tagInfo{ID: t.TagID, Name: t.Name, Color: t.Color, Coordination: t.Coordination})
 	}
 
 	type projectWithTags struct {
@@ -3641,9 +3641,10 @@ func (a *API) UpdateProjectShares(w http.ResponseWriter, r *http.Request) {
 // --- Tags ---
 
 type tagInfo struct {
-	ID    int64  `json:"id"`
-	Name  string `json:"name"`
-	Color string `json:"color"`
+	ID           int64  `json:"id"`
+	Name         string `json:"name"`
+	Color        string `json:"color"`
+	Coordination int    `json:"coordination"`
 }
 
 // Tag CRUD
@@ -3660,7 +3661,7 @@ func (a *API) ListAllTags(w http.ResponseWriter, r *http.Request) {
 	}
 	result := make([]tagInfo, len(tags))
 	for i, t := range tags {
-		result[i] = tagInfo{ID: t.ID, Name: t.Name, Color: t.Color}
+		result[i] = tagInfo{ID: t.ID, Name: t.Name, Color: t.Color, Coordination: t.Coordination}
 	}
 	respondJSON(w, http.StatusOK, result)
 }
@@ -3671,19 +3672,20 @@ func (a *API) CreateTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Name  string `json:"name"`
-		Color string `json:"color"`
+		Name         string `json:"name"`
+		Color        string `json:"color"`
+		Coordination bool   `json:"coordination"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-	tag, err := services.Configuration.Tags.Create(platformUIContext(r), input.Name, input.Color)
+	tag, err := services.Configuration.Tags.Create(platformUIContext(r), input.Name, input.Color, input.Coordination)
 	if err != nil {
 		respondApplicationError(w, err)
 		return
 	}
-	respondJSON(w, http.StatusCreated, tagInfo{ID: tag.ID, Name: tag.Name, Color: tag.Color})
+	respondJSON(w, http.StatusCreated, tagInfo{ID: tag.ID, Name: tag.Name, Color: tag.Color, Coordination: tag.Coordination})
 }
 
 func (a *API) UpdateTag(w http.ResponseWriter, r *http.Request) {
@@ -3698,19 +3700,20 @@ func (a *API) UpdateTag(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var input struct {
-		Name  *string `json:"name"`
-		Color *string `json:"color"`
+		Name         *string `json:"name"`
+		Color        *string `json:"color"`
+		Coordination *bool   `json:"coordination"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-	tag, err := services.Configuration.Tags.Update(platformUIContext(r), application.UpdateTagCommand{ID: id, Name: input.Name, Color: input.Color})
+	tag, err := services.Configuration.Tags.Update(platformUIContext(r), application.UpdateTagCommand{ID: id, Name: input.Name, Color: input.Color, Coordination: input.Coordination})
 	if err != nil {
 		respondApplicationError(w, err)
 		return
 	}
-	respondJSON(w, http.StatusOK, tagInfo{ID: tag.ID, Name: tag.Name, Color: tag.Color})
+	respondJSON(w, http.StatusOK, tagInfo{ID: tag.ID, Name: tag.Name, Color: tag.Color, Coordination: tag.Coordination})
 }
 
 func (a *API) DeleteTagHandler(w http.ResponseWriter, r *http.Request) {
@@ -3749,7 +3752,7 @@ func (a *API) GetProjectTags(w http.ResponseWriter, r *http.Request) {
 	}
 	result := make([]tagInfo, len(tags))
 	for i, t := range tags {
-		result[i] = tagInfo{ID: t.TagID, Name: t.Name, Color: t.Color}
+		result[i] = tagInfo{ID: t.TagID, Name: t.Name, Color: t.Color, Coordination: t.Coordination}
 	}
 	respondJSON(w, http.StatusOK, result)
 }
