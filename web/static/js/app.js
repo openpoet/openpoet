@@ -610,7 +610,7 @@ class OpenPoet {
         }
         if (!this._missionGroups.length) {
             groupSel.innerHTML = '<option value="">— nenhum grupo —</option>';
-            document.getElementById('mvc-msg').textContent = 'Crie um grupo de coordenação (uma tag com coordination=1, com projetos) antes de abrir uma missão.';
+            document.getElementById('mvc-msg').textContent = 'Crie um grupo de coordenação antes de abrir uma missão: em Manage Tags, marque "Grupo de coordenação" numa tag e atribua-a aos projetos-membro.';
             return;
         }
         groupSel.innerHTML = this._missionGroups.map(g => `<option value="${g.id}">${this.escapeHtml(g.name)}</option>`).join('');
@@ -6972,6 +6972,7 @@ class OpenPoet {
             list.innerHTML = tags.map(t => `
                 <div class="manage-tag-row" data-tag-id="${t.id}">
                     <span class="tag-chip" style="background:${t.color}22;color:${t.color}">${this.escapeHtml(t.name)}</span>
+                    ${t.coordination === 1 ? '<span class="tag-coord-badge" title="Grupo de coordenação: as sessões coordenadoras e missões atuam sobre os projetos com esta tag" style="font-size:11px;padding:1px 6px;border-radius:8px;border:1px solid var(--color-border);color:var(--color-text-muted);margin-left:6px;white-space:nowrap;">grupo</span>' : ''}
                     <div style="display:flex;gap:4px;margin-left:auto;">
                         <button class="btn btn-secondary btn-sm" onclick="app._editTag(${t.id})" title="Edit">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
@@ -6997,6 +6998,11 @@ class OpenPoet {
                         `<span class="tag-color-dot ${i === 0 ? 'active' : ''}" style="background:${c}" data-color="${c}" onclick="app._selectNewTagColor(this)"></span>`
                     ).join('')}
                 </div>
+                <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;cursor:pointer;">
+                    <input type="checkbox" id="new-tag-coordination">
+                    <span>Grupo de coordenação</span>
+                </label>
+                <div style="font-size:12px;color:var(--color-text-muted);margin-top:4px;">Grupos de coordenação definem o escopo de missões e coordenadoras: os projetos com esta tag viram membros do grupo.</div>
             </div>
         `;
 
@@ -7017,8 +7023,10 @@ class OpenPoet {
         const name = input?.value?.trim();
         if (!name) return;
 
+        const coordination = !!document.getElementById('new-tag-coordination')?.checked;
+
         try {
-            const tag = await this.api('POST', '/tags', { name, color: this._newTagColor });
+            const tag = await this.api('POST', '/tags', { name, color: this._newTagColor, coordination });
             this._allTags.push(tag);
             input.value = '';
             this.showManageTagsModal();
@@ -7045,6 +7053,13 @@ class OpenPoet {
                         `<span class="tag-color-dot ${c === tag.color ? 'active' : ''}" style="background:${c}" data-color="${c}" onclick="app._selectEditTagColor(this)"></span>`
                     ).join('')}
                 </div>
+            </div>
+            <div class="form-group">
+                <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                    <input type="checkbox" id="edit-tag-coordination" ${tag.coordination === 1 ? 'checked' : ''}>
+                    <span>Grupo de coordenação</span>
+                </label>
+                <div style="font-size:12px;color:var(--color-text-muted);margin-top:4px;">Grupos de coordenação definem o escopo de missões e coordenadoras: os projetos com esta tag viram membros do grupo.</div>
             </div>
             <div style="margin-top:12px;">
                 <span>Preview: </span><span class="tag-chip" id="edit-tag-preview" style="background:${tag.color}22;color:${tag.color}">${this.escapeHtml(tag.name)}</span>
@@ -7083,8 +7098,10 @@ class OpenPoet {
         const name = document.getElementById('edit-tag-name')?.value?.trim();
         if (!name) return;
 
+        const coordination = !!document.getElementById('edit-tag-coordination')?.checked;
+
         try {
-            const updated = await this.api('PUT', `/tags/${tagId}`, { name, color: this._editTagColor });
+            const updated = await this.api('PUT', `/tags/${tagId}`, { name, color: this._editTagColor, coordination });
             const idx = this._allTags.findIndex(t => t.id === tagId);
             if (idx >= 0) this._allTags[idx] = updated;
             this.showManageTagsModal();

@@ -265,7 +265,7 @@ func (d *DB) GetTag(ctx context.Context, id int64) (*Tag, error) {
 
 func (d *DB) CreateTag(ctx context.Context, tag *Tag) error {
 	result, err := d.ExecContext(ctx,
-		"INSERT INTO tags (name, color) VALUES (?, ?)", tag.Name, tag.Color)
+		"INSERT INTO tags (name, color, coordination) VALUES (?, ?, ?)", tag.Name, tag.Color, tag.Coordination)
 	if err != nil {
 		return err
 	}
@@ -275,7 +275,7 @@ func (d *DB) CreateTag(ctx context.Context, tag *Tag) error {
 
 func (d *DB) UpdateTag(ctx context.Context, tag *Tag) error {
 	_, err := d.ExecContext(ctx,
-		"UPDATE tags SET name = ?, color = ? WHERE id = ?", tag.Name, tag.Color, tag.ID)
+		"UPDATE tags SET name = ?, color = ?, coordination = ? WHERE id = ?", tag.Name, tag.Color, tag.Coordination, tag.ID)
 	return err
 }
 
@@ -312,34 +312,37 @@ func (d *DB) ProjectIDsForTags(ctx context.Context, tagIDs []int64) ([]int64, er
 // Project tag assignment operations
 
 type ProjectTagWithDetails struct {
-	TagID int64  `db:"tag_id" json:"tag_id"`
-	Name  string `db:"name" json:"name"`
-	Color string `db:"color" json:"color"`
+	TagID        int64  `db:"tag_id" json:"tag_id"`
+	Name         string `db:"name" json:"name"`
+	Color        string `db:"color" json:"color"`
+	Coordination int    `db:"coordination" json:"coordination"`
 }
 
 func (d *DB) ListProjectTagDetails(ctx context.Context, projectID int64) ([]ProjectTagWithDetails, error) {
 	var tags []ProjectTagWithDetails
 	err := d.SelectContext(ctx, &tags,
-		`SELECT t.id as tag_id, t.name, t.color FROM project_tags pt
+		`SELECT t.id as tag_id, t.name, t.color, t.coordination FROM project_tags pt
 		 JOIN tags t ON pt.tag_id = t.id
 		 WHERE pt.project_id = ? ORDER BY t.name`, projectID)
 	return tags, err
 }
 
 func (d *DB) ListAllProjectTagDetails(ctx context.Context) ([]struct {
-	ProjectID int64  `db:"project_id"`
-	TagID     int64  `db:"tag_id"`
-	Name      string `db:"name"`
-	Color     string `db:"color"`
+	ProjectID    int64  `db:"project_id"`
+	TagID        int64  `db:"tag_id"`
+	Name         string `db:"name"`
+	Color        string `db:"color"`
+	Coordination int    `db:"coordination"`
 }, error) {
 	var tags []struct {
-		ProjectID int64  `db:"project_id"`
-		TagID     int64  `db:"tag_id"`
-		Name      string `db:"name"`
-		Color     string `db:"color"`
+		ProjectID    int64  `db:"project_id"`
+		TagID        int64  `db:"tag_id"`
+		Name         string `db:"name"`
+		Color        string `db:"color"`
+		Coordination int    `db:"coordination"`
 	}
 	err := d.SelectContext(ctx, &tags,
-		`SELECT pt.project_id, t.id as tag_id, t.name, t.color FROM project_tags pt
+		`SELECT pt.project_id, t.id as tag_id, t.name, t.color, t.coordination FROM project_tags pt
 		 JOIN tags t ON pt.tag_id = t.id ORDER BY t.name`)
 	return tags, err
 }

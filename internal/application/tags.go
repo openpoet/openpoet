@@ -49,13 +49,13 @@ func (s *TagService) ListCoordination(ctx context.Context) ([]database.Tag, erro
 	return tags, err
 }
 
-func (s *TagService) Create(ctx context.Context, name, color string) (*database.Tag, error) {
+func (s *TagService) Create(ctx context.Context, name, color string, coordination bool) (*database.Tag, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, validationError("tag_name_required", "Tag name is required")
 	}
 	color = normalizeTagColor(color)
-	tag := &database.Tag{Name: name, Color: color}
+	tag := &database.Tag{Name: name, Color: color, Coordination: boolToInt(coordination)}
 	if err := s.store.CreateTag(ctx, tag); err != nil {
 		if strings.Contains(strings.ToUpper(err.Error()), "UNIQUE") {
 			return nil, conflictError("tag_name_conflict", "A tag with this name already exists")
@@ -66,9 +66,10 @@ func (s *TagService) Create(ctx context.Context, name, color string) (*database.
 }
 
 type UpdateTagCommand struct {
-	ID    int64
-	Name  *string
-	Color *string
+	ID           int64
+	Name         *string
+	Color        *string
+	Coordination *bool
 }
 
 func (s *TagService) Update(ctx context.Context, command UpdateTagCommand) (*database.Tag, error) {
@@ -88,6 +89,9 @@ func (s *TagService) Update(ctx context.Context, command UpdateTagCommand) (*dat
 	}
 	if command.Color != nil {
 		tag.Color = normalizeTagColor(*command.Color)
+	}
+	if command.Coordination != nil {
+		tag.Coordination = boolToInt(*command.Coordination)
 	}
 	if err := s.store.UpdateTag(ctx, tag); err != nil {
 		if strings.Contains(strings.ToUpper(err.Error()), "UNIQUE") {
@@ -136,6 +140,13 @@ func (s *TagService) ReplaceProject(ctx context.Context, projectID int64, tagIDs
 		unique = append(unique, id)
 	}
 	return s.store.ReplaceProjectTagIDs(ctx, projectID, unique)
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func normalizeTagColor(color string) string {

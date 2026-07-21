@@ -166,12 +166,27 @@ func (s *fakeTagStore) ReplaceProjectTagIDs(_ context.Context, _ int64, ids []in
 func TestTagServiceNormalizesAndDeduplicatesAssignments(t *testing.T) {
 	store := newFakeTagStore()
 	service := NewTagService(store)
-	tag, err := service.Create(context.Background(), " Backend ", "")
+	tag, err := service.Create(context.Background(), " Backend ", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tag.Name != "Backend" || tag.Color != defaultTagColor {
+	if tag.Name != "Backend" || tag.Color != defaultTagColor || tag.Coordination != 0 {
 		t.Fatalf("unexpected tag: %+v", tag)
+	}
+	group, err := service.Create(context.Background(), "Squad", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group.Coordination != 1 {
+		t.Fatalf("expected coordination group, got: %+v", group)
+	}
+	off := false
+	updated, err := service.Update(context.Background(), UpdateTagCommand{ID: group.ID, Coordination: &off})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Coordination != 0 {
+		t.Fatalf("expected coordination cleared, got: %+v", updated)
 	}
 	if err := service.ReplaceProject(context.Background(), 9, []int64{tag.ID, tag.ID, 2}); err != nil {
 		t.Fatal(err)

@@ -249,14 +249,16 @@ func tagPlatformDefinitions() []PlatformCapabilityDefinition {
 type tagPlatformExecutor struct{ service *application.TagService }
 
 type tagCreatePayload struct {
-	Name  string `json:"name"`
-	Color string `json:"color,omitempty"`
+	Name         string `json:"name"`
+	Color        string `json:"color,omitempty"`
+	Coordination bool   `json:"coordination,omitempty"`
 }
 
 type tagUpdatePayload struct {
-	ID    int64   `json:"id,omitempty"`
-	Name  *string `json:"name,omitempty"`
-	Color *string `json:"color,omitempty"`
+	ID           int64   `json:"id,omitempty"`
+	Name         *string `json:"name,omitempty"`
+	Color        *string `json:"color,omitempty"`
+	Coordination *bool   `json:"coordination,omitempty"`
 }
 
 type tagIDsPayload struct {
@@ -301,7 +303,7 @@ func (e *tagPlatformExecutor) Validate(_ context.Context, input PlatformExecutio
 			return nil, err
 		}
 		return &configurationValidatedCommand{preview: configurationPreview(input.Handler, nil), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
-			return e.service.Create(ctx, payload.Name, payload.Color)
+			return e.service.Create(ctx, payload.Name, payload.Color, payload.Coordination)
 		}}, nil
 	case "tags.update":
 		var payload tagUpdatePayload
@@ -313,7 +315,7 @@ func (e *tagPlatformExecutor) Validate(_ context.Context, input PlatformExecutio
 			return nil, err
 		}
 		return &configurationValidatedCommand{preview: configurationPreview(input.Handler, map[string]any{"tag_id": id}), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
-			return e.service.Update(ctx, application.UpdateTagCommand{ID: id, Name: payload.Name, Color: payload.Color})
+			return e.service.Update(ctx, application.UpdateTagCommand{ID: id, Name: payload.Name, Color: payload.Color, Coordination: payload.Coordination})
 		}}, nil
 	case "tags.delete":
 		if err := requireEmptyConfigurationPayload(input.Payload); err != nil {
