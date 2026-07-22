@@ -118,4 +118,36 @@ func TestRemoteRunnerInjectsCodexOpenPoetMCPThroughTunnel(t *testing.T) {
 	if !strings.Contains(got, "/mcp?session_id=session-1") {
 		t.Fatalf("expected session-scoped MCP URL, got %#v", runner.cliArgs)
 	}
+	if strings.Contains(got, "bearer_token_env_var") {
+		t.Fatalf("bearer override should be omitted when no session token is present, got %#v", runner.cliArgs)
+	}
+}
+
+func TestRemoteRunnerInjectsCodexBearerEnvVarWhenTokenPresent(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	runner := &RemoteRunner{
+		backend:        &CodexBackend{},
+		tunnelListener: listener,
+		envVars: map[string]string{
+			"OPENPOET_SESSION_ID":      "session-1",
+			"OPENPOET_SESSION_TOKEN":   "opst1_session-1.secret",
+			"OPENPOET_MCP_CONFIG_JSON": `{"mcpServers":{"openpoet":{"command":"openpoet"}}}`,
+		},
+		cliArgs: []string{"--no-alt-screen"},
+	}
+
+	runner.rewriteMCPConfigForRemote()
+
+	got := strings.Join(runner.cliArgs, " ")
+	if !strings.Contains(got, `-c mcp_servers.openpoet.bearer_token_env_var="OPENPOET_SESSION_TOKEN"`) {
+		t.Fatalf("expected bearer_token_env_var override pointing at the env var name, got %#v", runner.cliArgs)
+	}
+	if strings.Contains(got, "opst1_session-1.secret") {
+		t.Fatalf("the token value itself must never appear in CLI args, got %#v", runner.cliArgs)
+	}
 }

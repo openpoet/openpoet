@@ -656,14 +656,16 @@ func (r *RemoteRunner) injectCodexOpenPoetMCPForRemote() {
 		mcpURL += "?session_id=" + sessionID
 	}
 	r.insertCodexConfigOverride("mcp_servers.openpoet.url", mcpURL, providerSessionID)
-	// NOTE (remote codex hardening, deferred): the per-session opst1_ bearer is
-	// present in the remote env as OPENPOET_SESSION_TOKEN but is NOT yet attached
-	// to this HTTP MCP entry, because the codex app-server TOML key for MCP HTTP
-	// auth headers must be pinned against the codex version in use before shipping
-	// it. Until then, remote-codex mutating MCP tools authenticate only by the
-	// (spoofable) query param — acceptable since the local path is the tested one
-	// and remote identity is explicitly tunnel-strength (see mcp-critique.md).
-	log.Printf("[remote] Codex MCP inject: openpoet -> HTTP %s", mcpURL)
+	// Carry the per-session opst1_ bearer so remote-codex MCP calls authenticate
+	// as the verified session instead of relying on the spoofable query param
+	// (mirrors the OpenCode headers injection below). bearer_token_env_var is
+	// supported by codex-cli >= 0.144 (validated via `codex mcp list`); older
+	// versions that reject the key would fail config parse, so the token stays
+	// in the env and only the key name is shipped here.
+	if strings.TrimSpace(r.envVars["OPENPOET_SESSION_TOKEN"]) != "" {
+		r.insertCodexConfigOverride("mcp_servers.openpoet.bearer_token_env_var", "OPENPOET_SESSION_TOKEN", providerSessionID)
+	}
+	log.Printf("[remote] Codex MCP inject: openpoet -> HTTP %s (bearer=%v)", mcpURL, strings.TrimSpace(r.envVars["OPENPOET_SESSION_TOKEN"]) != "")
 }
 
 func (r *RemoteRunner) injectOpenCodeOpenPoetMCPForRemote() {
