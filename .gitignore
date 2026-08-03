@@ -38,6 +38,10 @@ CLAUDE.md
 # Run configs
 .run/
 
+# Scratch dir of the isolation E2E harness (ops/lanes/e2e.sh): throwaway git
+# repos, a sandbox DB and server logs. Never part of the tree.
+.sandbox/
+
 # OpenPoet config
 .openpoet/
 

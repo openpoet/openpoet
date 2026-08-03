@@ -27,6 +27,11 @@ func testCreateSession(db *database.DB) http.HandlerFunc {
 			ProjectID       int64  `json:"project_id"`
 			TaskID          *int64 `json:"task_id"`
 			SkipPermissions bool   `json:"skip_permissions"`
+			// WorkspaceID/WorkDir mint a synthetic LANE session, so the harness can
+			// exercise the tree-scoped conflict rules (same-tree collision vs
+			// cross-tree divergence) without provisioning a runner per tree.
+			WorkspaceID string `json:"workspace_id"`
+			WorkDir     string `json:"work_dir"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ProjectID <= 0 {
 			http.Error(w, `{"error":"project_id is required"}`, http.StatusBadRequest)
@@ -48,6 +53,13 @@ func testCreateSession(db *database.DB) http.HandlerFunc {
 		if body.TaskID != nil {
 			session.TaskID.Int64 = *body.TaskID
 			session.TaskID.Valid = true
+		}
+		if body.WorkDir != "" {
+			session.WorkDir = body.WorkDir
+		}
+		if body.WorkspaceID != "" {
+			session.WorkspaceID.String = body.WorkspaceID
+			session.WorkspaceID.Valid = true
 		}
 		if err := db.CreateSession(ctx, session); err != nil {
 			http.Error(w, `{"error":"create session failed"}`, http.StatusInternalServerError)

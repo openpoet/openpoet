@@ -1,7 +1,5 @@
 package coordinator
 
-import "fmt"
-
 // ConsultWrite is the conflict radar's first synchronous "hand" (Phase 3, L1):
 // called INLINE from HandlePermission before a write permission parks, it
 // returns a deny + explanatory reason when another LIVE session already holds a
@@ -29,22 +27,31 @@ func (c *Coordinator) ConsultWrite(sessionID, tool string, toolInput map[string]
 		if t.Kind != KindWrite || t.Path == "" || t.Scope {
 			continue
 		}
-		rel, inProject := si.relativize(t.Path) // syscall I/O only, no DB
+		physical, inProject := si.relativize(t.Path) // syscall I/O only, no DB
 		if !inProject {
 			continue
 		}
-		rel = LogicalRel(rel) // lanes share the logical conflict namespace
+		// (tree, logical path): every tree of the project shares one comparison
+		// namespace, and only a peer in the SAME tree is an immediate hazard.
+		tree, rel := SplitLane(physical)
 		// .claude/** contention is the shared-config hazard (R5 warn), never a
 		// hard code-collision VETO — do not deny configsync-managed writes.
 		if IsClaudeDirPath(rel) {
 			continue
 		}
 		key := claimKey{projectKey: si.projectKey, rel: rel}
+		now := c.now()
 		c.mu.Lock()
 		var peer string
-		for otherID, kind := range c.claims[key] {
-			if otherID == sessionID || kind != KindWrite {
+		for otherID, held := range c.claims[key] {
+			if otherID == sessionID || held.kind != KindWrite {
 				continue
+			}
+			if held.tree != tree {
+				continue // divergence across trees: git arbitrates at merge time
+			}
+			if now.Sub(held.at) >= claimTTL {
+				continue // stale claim, not live contention
 			}
 			if other := c.sessions[otherID]; other != nil && other.live {
 				peer = otherID
@@ -53,9 +60,7 @@ func (c *Coordinator) ConsultWrite(sessionID, tool string, toolInput map[string]
 		}
 		c.mu.Unlock()
 		if peer != "" {
-			return true, fmt.Sprintf(
-				"Conflict: %s is currently being edited by another live session (%s). "+
-					"Coordinate before writing, or work on a different file.", rel, peer)
+			return true, conflictDenyReason(rel, tree, peer)
 		}
 	}
 	return false, ""

@@ -143,16 +143,19 @@ type WorkRunStarter interface {
 // SessionWorkspaceProvider resolves and leases workspace lanes for sessions.
 // Implemented by *WorkspaceService.
 type SessionWorkspaceProvider interface {
-	ResolveForSession(ctx context.Context, project *database.Project, workspaceID string) (*database.Workspace, error)
+	// ResolveForSession validates a lane can host a new session. A non-empty
+	// reservationToken means the lane arrives already claimed by that token
+	// (the isolation path), so 'leased' is the expected status rather than 'ready'.
+	ResolveForSession(ctx context.Context, project *database.Project, workspaceID, reservationToken string) (*database.Workspace, error)
 	Reserve(ctx context.Context, workspaceID string) (string, error)
 	Bind(ctx context.Context, workspaceID, token, sessionID string) error
 	ReleaseReservation(ctx context.Context, workspaceID, token string) error
 	ReLease(ctx context.Context, workspaceID, sessionID string) error
 	ReleaseForSession(ctx context.Context, sessionID string) error
-	// ResolveAutoWorkspace implements isolation:"auto": returns "" when the main
-	// path is free (use it), or an idle pooled workspace id to lease when it is
-	// busy; errors no_workspace_ready when busy with no pool available.
-	ResolveAutoWorkspace(ctx context.Context, projectID int64) (string, error)
+	// ResolveIsolation implements isolation:"auto"/"always": returns "" to use the
+	// project's main checkout, or a lane id — leased from the pool or provisioned
+	// on demand — together with the reservation token already claiming it.
+	ResolveIsolation(ctx context.Context, projectID int64, mode string, authorization ActionAuthorization) (IsolationDecision, error)
 }
 
 type SessionChange struct {
@@ -303,34 +306,50 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 	// string every subsystem (sync, runner cwd, transcript encoding) keys off.
 	var workspace *database.Workspace
 	reservationToken := ""
-	// isolation:"auto" — if the main path is busy, lease an idle pooled workspace
-	// (Phase 6); resolve it into command.WorkspaceID so the normal lease path runs.
-	if strings.EqualFold(strings.TrimSpace(command.Isolation), "auto") && strings.TrimSpace(command.WorkspaceID) == "" && s.creation.Workspaces != nil {
-		autoID, autoErr := s.creation.Workspaces.ResolveAutoWorkspace(ctx, command.ProjectID)
-		if autoErr != nil {
-			return nil, autoErr
+	// Isolation ("auto"/"always") decides the working tree before anything slow.
+	// It may lease a pooled lane or provision a fresh one, and hands back a lane
+	// that is ALREADY reserved: the claim has to happen inside the decision, or a
+	// peer create can take the lane in the gap.
+	if strings.TrimSpace(command.Isolation) != "" && strings.TrimSpace(command.WorkspaceID) == "" && s.creation.Workspaces != nil {
+		decision, isoErr := s.creation.Workspaces.ResolveIsolation(ctx, command.ProjectID, command.Isolation, command.Authorization)
+		if isoErr != nil {
+			return nil, isoErr
 		}
-		command.WorkspaceID = autoID // "" → main path is free, use it
+		command.WorkspaceID = decision.WorkspaceID // "" → main checkout is free, use it
+		reservationToken = decision.ReservationToken
+		if reservationToken != "" {
+			// Register the release BEFORE the validations below: an isolation
+			// decision that reserved a lane and then failed validation would
+			// otherwise strand that lane in 'leased' forever.
+			laneID := decision.WorkspaceID
+			defer func() {
+				if reservationToken != "" {
+					_ = s.creation.Workspaces.ReleaseReservation(ctx, laneID, reservationToken)
+				}
+			}()
+		}
 	}
 	if workspaceID := strings.TrimSpace(command.WorkspaceID); workspaceID != "" {
 		if s.creation.Workspaces == nil {
 			return nil, validationError("workspace_unsupported", "Workspace sessions are not available")
 		}
-		workspace, err = s.creation.Workspaces.ResolveForSession(ctx, project, workspaceID)
+		workspace, err = s.creation.Workspaces.ResolveForSession(ctx, project, workspaceID, reservationToken)
 		if err != nil {
 			return nil, err
 		}
-		// Atomic reservation BEFORE anything slow: two concurrent creates for
-		// the same lane race on this CAS, never on runner startup.
-		reservationToken, err = s.creation.Workspaces.Reserve(ctx, workspace.ID)
-		if err != nil {
-			return nil, err
-		}
-		defer func() {
-			if reservationToken != "" {
-				_ = s.creation.Workspaces.ReleaseReservation(ctx, workspace.ID, reservationToken)
+		if reservationToken == "" {
+			// An explicitly requested lane is reserved here: two concurrent creates
+			// for the same lane race on this CAS, never on runner startup.
+			reservationToken, err = s.creation.Workspaces.Reserve(ctx, workspace.ID)
+			if err != nil {
+				return nil, err
 			}
-		}()
+			defer func() {
+				if reservationToken != "" {
+					_ = s.creation.Workspaces.ReleaseReservation(ctx, workspace.ID, reservationToken)
+				}
+			}()
+		}
 		laneProject := *project
 		laneProject.Path = workspace.Path
 		project = &laneProject
