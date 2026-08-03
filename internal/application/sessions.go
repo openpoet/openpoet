@@ -42,6 +42,11 @@ type SessionStore interface {
 	GetTaskForSession(context.Context, string) (*database.ProjectTask, error)
 	EndSession(context.Context, string, string) error
 	UpdateSessionLineage(ctx context.Context, sessionID, parentSessionID, spawnedBy string) error
+	// UpdateSessionWorkspace repoints a session at a working tree; SessionWriteFootprint
+	// lists what it has written. Both serve Isolate, which moves a live session
+	// into its own lane.
+	UpdateSessionWorkspace(ctx context.Context, sessionID, workspaceID, workDir string) error
+	SessionWriteFootprint(ctx context.Context, sessionID string) ([]string, error)
 	// Phase 7.3 mission enrollment.
 	GetMission(ctx context.Context, id int64) (*database.Mission, error)
 	UpsertMissionWorker(ctx context.Context, worker *database.MissionWorker) error
@@ -156,6 +161,10 @@ type SessionWorkspaceProvider interface {
 	// project's main checkout, or a lane id — leased from the pool or provisioned
 	// on demand — together with the reservation token already claiming it.
 	ResolveIsolation(ctx context.Context, projectID int64, mode string, authorization ActionAuthorization) (IsolationDecision, error)
+	// Get loads a lane; DirtyPaths reports which of the given project-relative
+	// paths carry uncommitted changes. Both serve Isolate.
+	Get(ctx context.Context, id string) (*database.Workspace, error)
+	DirtyPaths(ctx context.Context, project *database.Project, candidates []string) ([]string, error)
 }
 
 type SessionChange struct {
@@ -702,6 +711,160 @@ func (s *SessionService) Reopen(ctx context.Context, command ReopenSessionComman
 	}
 	s.publish(ctx, SessionChange{Action: "reopened", Session: stored, ID: stored.ID, Actor: command.Authorization.Actor})
 	return stored, nil
+}
+
+// IsolateSessionCommand moves a LIVE session out of the working tree it shares
+// with someone else and into a git worktree lane of its own.
+type IsolateSessionCommand struct {
+	SessionID string
+	// Reason is shown to the agent in its continuity briefing ("conflicts with
+	// session X on internal/foo.go"). Free text; empty is allowed.
+	Reason string
+	// Briefing carries the objective forward. The reopened session does NOT
+	// inherit its conversation, so whatever the work still needs must be here.
+	Briefing      string
+	Authorization ActionAuthorization
+}
+
+// IsolateSessionResult reports where the session ended up.
+type IsolateSessionResult struct {
+	Session   *database.Session
+	Workspace *database.Workspace
+}
+
+// Isolate is the reactive half of automatic worktree isolation. The conflict
+// gate can only REFUSE a contested write, which leaves the losing session stuck
+// with nothing to do; this actually moves it into its own lane so both sides can
+// work and be merged afterwards.
+//
+// A live PTY cannot chdir, so the move is: stop → repoint the session row at the
+// lane → reopen. Two consequences the caller has to understand — both enforced
+// by typed refusals below rather than papered over:
+//
+//   - THE CONVERSATION DOES NOT CARRY OVER. Claude Code indexes its transcript by
+//     the encoded working directory, so --resume cannot cross a cwd change. The
+//     reopened session gets Briefing, not its history. Isolating a session that is
+//     deep into a task is a real loss; it is cheapest immediately after a gate
+//     denial, when the losing session has usually written nothing yet.
+//   - UNCOMMITTED WORK WOULD BE LEFT BEHIND. A lane branches from HEAD, so
+//     anything this session wrote but did not commit stays in the old tree.
+//     Silently abandoning it would be data loss and moving it is destructive
+//     surgery that belongs behind its own approval, so this refuses and names the
+//     files instead.
+func (s *SessionService) Isolate(ctx context.Context, command IsolateSessionCommand) (*IsolateSessionResult, error) {
+	// Stopping and restarting somebody's live session is destructive.
+	if err := requireExplicitActionApproval(command.Authorization); err != nil {
+		return nil, err
+	}
+	if s.creation.Workspaces == nil {
+		return nil, validationError("workspace_unsupported", "Workspace sessions are not available")
+	}
+	if s.manager == nil {
+		return nil, validationError("session_manager_unavailable", "Session manager is unavailable")
+	}
+	session, err := s.getSession(ctx, command.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session.Status != "running" && session.Status != "starting" {
+		return nil, conflictError("session_not_live", "Only a live session can be isolated")
+	}
+	if session.WorkspaceID.Valid && session.WorkspaceID.String != "" {
+		return nil, conflictError("session_already_isolated", "Session already runs in its own workspace lane")
+	}
+	project, err := s.store.GetProject(ctx, session.ProjectID)
+	if err != nil || project == nil {
+		return nil, notFoundError("project_not_found", "Project not found", err)
+	}
+
+	// Refuse while this session still holds uncommitted work in the shared tree.
+	footprint, err := s.store.SessionWriteFootprint(ctx, session.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(footprint) > 0 {
+		dirty, err := s.creation.Workspaces.DirtyPaths(ctx, project, footprint)
+		if err != nil {
+			return nil, err
+		}
+		if len(dirty) > 0 {
+			return nil, conflictError("session_has_uncommitted_work",
+				"Session has uncommitted changes in the shared tree ("+strings.Join(dirty, ", ")+
+					"); commit them first so the lane branches with the work included")
+		}
+	}
+
+	decision, err := s.creation.Workspaces.ResolveIsolation(ctx, session.ProjectID, IsolationAlways, command.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	if decision.WorkspaceID == "" {
+		return nil, conflictError("isolation_unavailable", "No workspace lane could be provisioned for this project")
+	}
+	// Convert the reservation into this session's real lease BEFORE the restart:
+	// while the runner is down the lane must not look free to anybody else.
+	if err := s.creation.Workspaces.Bind(ctx, decision.WorkspaceID, decision.ReservationToken, session.ID); err != nil {
+		_ = s.creation.Workspaces.ReleaseReservation(ctx, decision.WorkspaceID, decision.ReservationToken)
+		return nil, err
+	}
+	workspace, err := s.creation.Workspaces.Get(ctx, decision.WorkspaceID)
+	if err != nil {
+		_ = s.creation.Workspaces.ReleaseForSession(ctx, session.ID)
+		return nil, err
+	}
+
+	if err := s.manager.StopSession(ctx, session.ID); err != nil {
+		_ = s.creation.Workspaces.ReleaseForSession(ctx, session.ID)
+		return nil, err
+	}
+	_ = s.store.EndSession(ctx, session.ID, "stopped")
+
+	// From here the session is DOWN. Repointing the row is what makes the reopen
+	// land in the lane (Reopen reads work_dir/workspace_id), so a failure after
+	// this point leaves a stopped session the user can simply reopen — into the
+	// lane, which is where it was headed anyway.
+	if err := s.store.UpdateSessionWorkspace(ctx, session.ID, workspace.ID, workspace.Path); err != nil {
+		_ = s.creation.Workspaces.ReleaseForSession(ctx, session.ID)
+		return nil, err
+	}
+
+	reopened, err := s.Reopen(ctx, ReopenSessionCommand{
+		SessionID:     session.ID,
+		Authorization: command.Authorization,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if brief := isolationBriefing(workspace, command); brief != "" {
+		// Best-effort: the session is already in its lane, and a briefing that
+		// failed to land is a message the user can resend — not a reason to
+		// unwind a completed move.
+		if err := s.writeInitialPrompt(ctx, session.ID, brief); err != nil {
+			log.Printf("[isolate] briefing not delivered to session %s: %v", session.ID, err)
+		}
+	}
+	s.publish(ctx, SessionChange{Action: "isolated", Session: reopened, ID: reopened.ID, Actor: command.Authorization.Actor})
+	return &IsolateSessionResult{Session: reopened, Workspace: workspace}, nil
+}
+
+// isolationBriefing is what the moved session reads first. It has to be
+// self-contained: this is a fresh transcript, so the agent knows nothing about
+// what it was doing a moment ago.
+func isolationBriefing(workspace *database.Workspace, command IsolateSessionCommand) string {
+	var b strings.Builder
+	b.WriteString("Your work has been moved into an isolated git worktree.\n\n")
+	b.WriteString("- Working directory: " + workspace.Path + "\n")
+	b.WriteString("- Branch: " + workspace.Branch + " (branched from " + workspace.BaseRef + ")\n")
+	if reason := strings.TrimSpace(command.Reason); reason != "" {
+		b.WriteString("- Why: " + reason + "\n")
+	}
+	b.WriteString("\nThis is a separate checkout, so you can edit the same files another " +
+		"session is working on — git reconciles the two when this branch is merged back. " +
+		"Commit your work on this branch; do not reach outside this directory.\n")
+	if briefing := strings.TrimSpace(command.Briefing); briefing != "" {
+		b.WriteString("\nYour objective:\n" + briefing + "\n")
+	}
+	return b.String()
 }
 
 type SendSessionInputCommand struct {

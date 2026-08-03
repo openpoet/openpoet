@@ -233,8 +233,8 @@ func executionPlatformActor(definitions []PlatformCapabilityDefinition) Actor {
 
 func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := executionPlatformDefinitionsForTest()
-	if len(definitions) != 56 {
-		t.Fatalf("execution surface has %d capabilities, want 56", len(definitions))
+	if len(definitions) != 57 {
+		t.Fatalf("execution surface has %d capabilities, want 57", len(definitions))
 	}
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -244,11 +244,11 @@ func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 		seen[definition.Name] = struct{}{}
 	}
 	capabilities, registry := executionPlatformTestRegistry(t, &executionPlatformFakePorts{})
-	if got := len(capabilities.List()); got != 56 {
-		t.Fatalf("application registry has %d execution capabilities, want 56", got)
+	if got := len(capabilities.List()); got != 57 {
+		t.Fatalf("application registry has %d execution capabilities, want 57", got)
 	}
-	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 56 {
-		t.Fatalf("platform discovery has %d execution capabilities, want 56", got)
+	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 57 {
+		t.Fatalf("platform discovery has %d execution capabilities, want 57", got)
 	}
 }
 
@@ -395,6 +395,7 @@ func executionDryRunCases() []executionDryRunCase {
 		{name: "sessions.active", target: `{}`, payload: `{}`},
 		{name: "sessions.create", target: `{"project_id":1}`, payload: `{"environment":{"API_KEY":"session-secret"}}`, secretText: []string{"session-secret"}},
 		{name: "sessions.stop", target: `{"id":"s1"}`, payload: `{}`},
+		{name: "sessions.isolate", target: `{"id":"s1"}`, payload: `{"reason":"contested write","briefing":"brief-secret"}`, secretText: []string{"brief-secret"}},
 		{name: "sessions.reopen", target: `{"id":"s1"}`, payload: `{}`},
 		{name: "sessions.send_input", target: `{"id":"s1"}`, payload: `{"text":"input-secret"}`, secretText: []string{"input-secret"}},
 		{name: "sessions.set_model", target: `{"id":"s1"}`, payload: `{"model":"gpt-test"}`},
