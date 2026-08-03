@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -83,6 +84,21 @@ func (c *Coordinator) pruneMemoryLocked() {
 	for key, ts := range c.lastEmit {
 		if _, live := c.incidents[key]; !live && ts.Before(emitCutoff) {
 			delete(c.lastEmit, key)
+		}
+	}
+	// Sweep expired write claims on the SAME TTL the readers enforce, so a stale
+	// claim both stops vetoing (the readers check the stamp directly) and stops
+	// costing memory. Without this sweep a claim survived for the whole process
+	// lifetime: a file written once at 09:00 still blocked a peer at 17:00.
+	claimCutoff := c.now().Add(-claimTTL)
+	for key, set := range c.claims {
+		for sessionID, held := range set {
+			if held.at.Before(claimCutoff) {
+				delete(set, sessionID)
+			}
+		}
+		if len(set) == 0 {
+			delete(c.claims, key)
 		}
 	}
 }
@@ -197,6 +213,32 @@ func conflictDetectedEvent(inc Incident, ts time.Time) database.EventOutboxAppen
 		EventType:     "conflict.detected",
 		AggregateType: "conflict",
 		AggregateID:   inc.ID,
+		Actor:         "coordinator",
+		SchemaVersion: 1,
+		PayloadJSON:   string(payload),
+		OccurredAt:    ts.UTC(),
+	}
+}
+
+// divergenceEvent reports that two live sessions are editing the same logical
+// project file in two DIFFERENT working trees. It is NOT a conflict: nothing can
+// be lost, and git decides the outcome at merge time. It exists so an
+// orchestrator can sequence integrations (merge the clean lanes first, negotiate
+// the overlapping ones) instead of discovering the overlap only when a merge
+// aborts. `trees` is sorted so the payload is stable regardless of which side
+// wrote last.
+func divergenceEvent(projectID int64, rel string, sessions, trees []string, ts time.Time) database.EventOutboxAppend {
+	payload, _ := json.Marshal(map[string]interface{}{
+		"project_id": projectID,
+		"path":       rel,
+		"sessions":   sessions,
+		"trees":      trees,
+	})
+	return database.EventOutboxAppend{
+		EventID:       uuid.NewString(),
+		EventType:     "conflict.divergence",
+		AggregateType: "project",
+		AggregateID:   fmt.Sprintf("%d", projectID),
 		Actor:         "coordinator",
 		SchemaVersion: 1,
 		PayloadJSON:   string(payload),

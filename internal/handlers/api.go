@@ -1121,6 +1121,9 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		PlanningMode               bool              `json:"planning_mode"`
 		CustomPrompt               string            `json:"custom_prompt"`
 		WorkspaceID                string            `json:"workspace_id,omitempty"`
+		// Isolation delegates the working-tree choice ("auto"/"always"/"never")
+		// instead of naming a lane the caller would have to provision itself.
+		Isolation string `json:"isolation,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
@@ -1137,6 +1140,7 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		PlanningMode:               input.PlanningMode,
 		CustomPrompt:               input.CustomPrompt,
 		WorkspaceID:                input.WorkspaceID,
+		Isolation:                  input.Isolation,
 		Authorization:              authorization,
 	})
 	if err != nil {

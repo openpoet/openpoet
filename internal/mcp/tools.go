@@ -836,12 +836,20 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 			return "", err
 		}
 		var sess struct {
-			ID        string `json:"id"`
-			ProjectID int64  `json:"project_id"`
-			Status    string `json:"status"`
+			ID          string `json:"id"`
+			ProjectID   int64  `json:"project_id"`
+			Status      string `json:"status"`
+			WorkspaceID string `json:"workspace_id"`
+			WorkDir     string `json:"work_dir"`
 		}
 		if json.Unmarshal(body, &sess) == nil {
-			return fmt.Sprintf("Session started: %s (project: %d, status: %s)", sess.ID, sess.ProjectID, sess.Status), nil
+			line := fmt.Sprintf("Session started: %s (project: %d, status: %s)", sess.ID, sess.ProjectID, sess.Status)
+			if sess.WorkspaceID != "" {
+				// Report the isolated lane: the caller needs its id to merge the work
+				// later, and needs to know the edits land in a separate tree.
+				line += fmt.Sprintf(", isolated in workspace %s at %s", sess.WorkspaceID, sess.WorkDir)
+			}
+			return line, nil
 		}
 		return string(body), nil
 

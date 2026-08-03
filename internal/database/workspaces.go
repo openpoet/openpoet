@@ -159,6 +159,35 @@ func (d *DB) ReserveWorkspace(ctx context.Context, workspaceID, token string) er
 	return nil
 }
 
+// ReserveIdleWorkspace picks ONE idle ready lane of a project AND reserves it in
+// a single statement, returning its id ("" when the project has no idle lane).
+//
+// Picking and reserving used to be two round-trips, so concurrent session creates
+// routinely selected the same lane and all but one failed with a retryable error.
+// Under orchestrator fan-out — N workers started at once on one project, which is
+// exactly when isolation matters — that was the common case, not the rare one.
+// The statement runs on the serialized write handle, so the SELECT and the UPDATE
+// cannot interleave with another writer.
+func (d *DB) ReserveIdleWorkspace(ctx context.Context, projectID int64, token string) (string, error) {
+	var id string
+	err := d.GetContext(ctx, &id, `
+		UPDATE workspaces SET leased_by_session_id = ?, status = 'leased', updated_at = CURRENT_TIMESTAMP
+		WHERE id = (
+			SELECT id FROM workspaces
+			WHERE project_id = ? AND status = 'ready'
+			  AND (leased_by_session_id IS NULL OR leased_by_session_id = '')
+			ORDER BY updated_at ASC LIMIT 1
+		)
+		RETURNING id`, "pending:"+token, projectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 // BindWorkspaceLease converts a pending reservation into the real session lease.
 func (d *DB) BindWorkspaceLease(ctx context.Context, workspaceID, token, sessionID string) error {
 	res, err := d.ExecContext(ctx,

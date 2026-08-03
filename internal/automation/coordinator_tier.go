@@ -575,13 +575,15 @@ func (c *coordinatorAPI) startWorker(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"dry_run": true, "project_id": req.ProjectID, "preview": result.Result})
 		return
 	}
-	sessionID := ""
+	sessionID, workspaceID, workDir := "", "", ""
 	if encoded, marshalErr := json.Marshal(result.Result); marshalErr == nil {
 		var view struct {
-			ID string `json:"id"`
+			ID          string `json:"id"`
+			WorkspaceID string `json:"workspace_id"`
+			WorkDir     string `json:"work_dir"`
 		}
 		if json.Unmarshal(encoded, &view) == nil {
-			sessionID = view.ID
+			sessionID, workspaceID, workDir = view.ID, view.WorkspaceID, view.WorkDir
 		}
 	}
 	if reservedVersion > 0 && sessionID != "" {
@@ -589,6 +591,15 @@ func (c *coordinatorAPI) startWorker(w http.ResponseWriter, r *http.Request) {
 	}
 	response := map[string]any{
 		"session_id": sessionID, "project_id": req.ProjectID, "status": "created", "result": result.Result,
+	}
+	if workspaceID != "" {
+		// Surface the lane the isolation decision produced. Without it the
+		// coordinator holds no handle on the tree it just opened and cannot later
+		// predict_merge / merge_workspace the work — the isolate→work→merge loop
+		// would dead-end at step one.
+		response["workspace_id"] = workspaceID
+		response["work_dir"] = workDir
+		response["isolated"] = true
 	}
 	if c.fenceLostDuringAction(r.Context(), cs, group, *req.FenceVersion) {
 		response["fence_lost_during_action"] = true
