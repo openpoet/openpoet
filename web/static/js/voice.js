@@ -24,6 +24,7 @@ class VoiceInput {
         this.recordingSeconds = 0;
         // Held between attempts so retries don't lose the recording.
         this.pendingAudioBlob = null;
+        this.pendingTargetCallback = null; // destination bound to the in-flight upload
         this.pendingSubmit = false;
         this.uploadAttemptCount = 0;
         this.maxSingleUploadBytes = 20 * 1024 * 1024;
@@ -201,6 +202,11 @@ class VoiceInput {
         this.pendingAudioBlob = new Blob(this.audioChunks, { type: this.getSupportedMimeType() });
         this.pendingSubmit = this.submitAfterTranscribe;
         this.uploadAttemptCount = 0;
+        // Bind the destination to THIS recording. targetCallback is read at
+        // delivery time, seconds later; a recording started meanwhile would
+        // otherwise steal this transcript — or, if none is registered by then,
+        // it would fall through to insertText() and type into the terminal.
+        this.pendingTargetCallback = this.targetCallback;
 
         await this.uploadWithRetry();
     }
@@ -215,10 +221,12 @@ class VoiceInput {
             // Success: clear pending state, deliver text.
             this.hideUploading();
             this.pendingAudioBlob = null;
+            const deliver = this.pendingTargetCallback;
+            this.pendingTargetCallback = null;
+            if (this.targetCallback === deliver) this.targetCallback = null;
             if (result && result.text) {
-                if (this.targetCallback) {
-                    this.targetCallback(result.text);
-                    this.targetCallback = null;
+                if (deliver) {
+                    deliver(result.text);
                 } else {
                     this.insertText(result.text, this.pendingSubmit);
                 }
@@ -510,6 +518,7 @@ class VoiceInput {
         this.pendingAudioBlob = null;
         this.pendingSubmit = false;
         this.targetCallback = null;
+        this.pendingTargetCallback = null;
         this.hideUploading();
     }
 
