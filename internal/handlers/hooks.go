@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -664,32 +665,50 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		} else if isExitPlan && resp.Behavior == "allow" {
 			// ExitPlanMode allow without specific choice
 			decision.Behavior = "allow"
-		} else if isAskUser && len(resp.Answers) > 0 {
-			decision.Behavior = "allow"
-			// Build updatedInput with original tool_input + answers
+		} else if isAskUser && resp.Message == askUserClarifySentinel {
+			// "Chat about this" — deny carrying Claude Code's own clarification
+			// request, so the agent asks what the user wants to discuss instead of
+			// treating any option as chosen.
 			toolInput, _ := hookEvent["tool_input"].(map[string]interface{})
-			updatedInput := make(map[string]interface{})
-			for k, v := range toolInput {
-				updatedInput[k] = v
-			}
-			// Claude Code matches answers to questions by the question TEXT, not by
-			// position. Older (and stale-in-memory) web clients keyed answers by
-			// index ("0","1",…); those keys never match a question, so Claude Code
-			// silently drops the answer — most visibly the free-text "Other" answer,
-			// which has no option label to fall back on. Remap any numeric-index key
-			// to its question text so answers from any client version are honored.
-			questionTexts := extractQuestionTexts(toolInput)
-			answersMap := make(map[string]interface{})
-			for k, v := range resp.Answers {
-				key := k
-				if idx, err := strconv.Atoi(k); err == nil && idx >= 0 && idx < len(questionTexts) && questionTexts[idx] != "" {
-					key = questionTexts[idx]
+			questions := extractAskUserQuestions(toolInput)
+			answers, _ := reconcileAskUserAnswers(questions, resp.Answers, sessionID)
+			flat := make(map[string]string, len(answers))
+			for k, v := range answers {
+				if s, ok := v.(string); ok {
+					flat[k] = s
 				}
-				answersMap[key] = v
 			}
-			updatedInput["answers"] = answersMap
-			decision.UpdatedInput = updatedInput
-			log.Printf("[hooks] AskUserQuestion answered for session %s: %v", sessionID, answersMap)
+			decision.Behavior = "deny"
+			decision.Message = askUserClarifyMessage(questions, flat)
+			log.Printf("[hooks] AskUserQuestion clarification requested for session %s", sessionID)
+		} else if isAskUser && resp.Behavior == "allow" && len(resp.Answers) > 0 {
+			decision.Behavior = "allow"
+			toolInput, _ := hookEvent["tool_input"].(map[string]interface{})
+			questions := extractAskUserQuestions(toolInput)
+			if len(questions) == 0 {
+				// No questions to key the answers against. Claude Code hard-validates
+				// updatedInput against the tool's schema right before the call, and a
+				// payload without a valid `questions` array kills the tool with an
+				// InputValidationError — strictly worse than a plain allow.
+				log.Printf("[hooks] AskUserQuestion for session %s has no parsable questions; allowing without answers", sessionID)
+			} else {
+				// Build updatedInput with original tool_input + answers
+				updatedInput := make(map[string]interface{})
+				for k, v := range toolInput {
+					updatedInput[k] = v
+				}
+				// Claude Code looks answers up by the exact question text and checks
+				// the value against the exact option labels; anything else is dropped
+				// and the agent is told the user did not answer. reconcileAskUserAnswers
+				// repairs the ways a client can mangle those strings.
+				answersMap, annotations := reconcileAskUserAnswers(questions, resp.Answers, sessionID)
+				updatedInput["answers"] = answersMap
+				if len(annotations) > 0 {
+					updatedInput["annotations"] = annotations
+				}
+				decision.UpdatedInput = updatedInput
+				log.Printf("[hooks] AskUserQuestion answered for session %s: %v", sessionID, answersMap)
+			}
 		} else if resp.Behavior == "allowAlways" {
 			decision.Behavior = "allow"
 			// Pass permission suggestions as updatedPermissions to Claude Code
@@ -779,24 +798,270 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// extractQuestionTexts pulls the ordered question texts out of an AskUserQuestion
-// tool_input (shape: {"questions": [{"question": "..."}, ...]}). Used to remap
-// index-keyed answers from older web clients onto the question text that Claude
-// Code matches against. Returns nil when the shape doesn't match.
-func extractQuestionTexts(toolInput map[string]interface{}) []string {
-	questions, ok := toolInput["questions"].([]interface{})
+// askUserClarifySentinel is the deny message the web client sends when the user
+// picks "Chat about this" in the AskUserQuestion modal. The server swaps it for
+// Claude Code's own clarification wording (see askUserClarifyMessage) so the
+// text stays correct no matter which client version produced the request.
+const askUserClarifySentinel = "__openpoet_ask_user_clarify__"
+
+// askUserQuestion is one entry of an AskUserQuestion tool_input, reduced to what
+// answer reconciliation needs.
+type askUserQuestion struct {
+	text     string
+	labels   []string
+	previews map[string]string // option label -> preview, for annotations
+}
+
+// extractAskUserQuestions pulls the ordered questions out of an AskUserQuestion
+// tool_input (shape: {"questions": [{"question": "...", "options": [{"label": …,
+// "preview": …}]}]}). Returns nil when the shape doesn't match.
+func extractAskUserQuestions(toolInput map[string]interface{}) []askUserQuestion {
+	raw, ok := toolInput["questions"].([]interface{})
 	if !ok {
 		return nil
 	}
-	texts := make([]string, len(questions))
-	for i, q := range questions {
-		if qm, ok := q.(map[string]interface{}); ok {
-			if qt, ok := qm["question"].(string); ok {
-				texts[i] = qt
+	out := make([]askUserQuestion, len(raw))
+	for i, q := range raw {
+		qm, ok := q.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if qt, ok := qm["question"].(string); ok {
+			out[i].text = qt
+		}
+		opts, ok := qm["options"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, o := range opts {
+			om, ok := o.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			label, ok := om["label"].(string)
+			if !ok || label == "" {
+				continue
+			}
+			out[i].labels = append(out[i].labels, label)
+			if preview, ok := om["preview"].(string); ok && preview != "" {
+				if out[i].previews == nil {
+					out[i].previews = make(map[string]string)
+				}
+				out[i].previews[label] = preview
 			}
 		}
 	}
-	return texts
+	return out
+}
+
+// repairQuoteTruncation recovers a string that was cut short at a double quote.
+//
+// A web client that interpolates a question text or an option label into an HTML
+// attribute loses everything from the first `"` onward, because the attribute
+// ends there. The damage is recognisable: the surviving text is a proper prefix
+// of exactly one candidate, and the very next character of that candidate is the
+// `"` that ended the attribute. Only that exact shape is repaired, so a genuine
+// free-text ("Other") answer — which has no reason to stop right before a quote
+// in some option label — is never rewritten.
+func repairQuoteTruncation(value string, candidates []string) (string, bool) {
+	if value == "" {
+		return value, false
+	}
+	for _, c := range candidates {
+		if c == value {
+			return value, false // exact match — nothing to repair
+		}
+	}
+	repaired := ""
+	matches := 0
+	for _, c := range candidates {
+		if len(c) > len(value) && strings.HasPrefix(c, value) && c[len(value)] == '"' {
+			repaired = c
+			matches++
+		}
+	}
+	if matches != 1 {
+		return value, false
+	}
+	return repaired, true
+}
+
+// reconcileAskUserAnswers maps the browser's answers onto the exact question
+// texts and option labels Claude Code will look them up by.
+//
+// Claude Code matches answers to questions by the question TEXT and checks the
+// answer against the option LABELS, both by exact string equality. A key that
+// matches no question is silently dropped, and if nothing matches the tool
+// result becomes "The user did not answer the questions." — the agent then
+// proceeds with its own pick, which reads as it having ignored the user.
+//
+// Three client-side mistakes are corrected here so answers survive regardless of
+// which client version sent them (a PWA tab can run weeks-old JS):
+//   - numeric-index keys ("0", "1", …) from clients before 2899f17;
+//   - keys and values truncated at a double quote by HTML attribute
+//     interpolation (see repairQuoteTruncation);
+//   - a single unmatched answer to a single-question prompt.
+//
+// It also rebuilds the `annotations` map the terminal UI sends, so a chosen
+// option's preview is echoed back to the model the same way.
+func reconcileAskUserAnswers(questions []askUserQuestion, answers map[string]string, sessionID string) (map[string]interface{}, map[string]interface{}) {
+	texts := make([]string, len(questions))
+	for i, q := range questions {
+		texts[i] = q.text
+	}
+
+	resolved := make(map[string]interface{}, len(answers))
+	annotations := make(map[string]interface{})
+
+	// Exact matches claim their question first, and the remaining keys are
+	// walked in sorted order: two keys can resolve to the same question (say an
+	// index key alongside the literal text), and Go's randomized map iteration
+	// would otherwise make the survivor a coin flip.
+	claimed := make([]bool, len(texts))
+	var fuzzy []string
+	for key := range answers {
+		matched := false
+		for i, t := range texts {
+			if t != "" && t == key {
+				claimed[i] = true
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			fuzzy = append(fuzzy, key)
+		}
+	}
+	sort.Strings(fuzzy)
+
+	keys := make([]string, 0, len(answers))
+	for i, t := range texts {
+		if claimed[i] {
+			keys = append(keys, t)
+		}
+	}
+	keys = append(keys, fuzzy...)
+
+	for _, key := range keys {
+		value := answers[key]
+		idx := -1
+
+		// 1. Exact question text.
+		for i, t := range texts {
+			if t != "" && t == key {
+				idx = i
+				break
+			}
+		}
+		// 2. Numeric index key from a pre-2899f17 client.
+		if idx < 0 {
+			if n, err := strconv.Atoi(key); err == nil && n >= 0 && n < len(texts) && texts[n] != "" && !claimed[n] {
+				idx = n
+				log.Printf("[hooks] AskUserQuestion answer key remapped from index %d for session %s", n, sessionID)
+			}
+		}
+		// 3. Key truncated at a double quote by HTML attribute interpolation.
+		if idx < 0 {
+			if repaired, ok := repairQuoteTruncation(key, texts); ok {
+				for i, t := range texts {
+					if t == repaired && !claimed[i] {
+						idx = i
+						break
+					}
+				}
+				if idx >= 0 {
+					log.Printf("[hooks] AskUserQuestion answer key repaired (quote-truncated) for session %s: %q -> %q", sessionID, key, repaired)
+				}
+			}
+		}
+		// 4. Single question, single unmatched answer — it can only belong there.
+		if idx < 0 && len(texts) == 1 && len(answers) == 1 && texts[0] != "" {
+			idx = 0
+			log.Printf("[hooks] AskUserQuestion answer key %q matched the only question for session %s", key, sessionID)
+		}
+
+		if idx < 0 {
+			log.Printf("[hooks] AskUserQuestion answer key %q matches no question for session %s — Claude Code will drop it", key, sessionID)
+			resolved[key] = value
+			continue
+		}
+		claimed[idx] = true
+
+		question := questions[idx]
+		repairedValue, repaired := repairQuoteTruncation(value, question.labels)
+		if !repaired && strings.Contains(value, ", ") {
+			// Multi-select answers arrive joined with ", "; repair each part.
+			parts := strings.Split(value, ", ")
+			changed := false
+			for i, part := range parts {
+				if fixed, ok := repairQuoteTruncation(part, question.labels); ok {
+					parts[i] = fixed
+					changed = true
+				}
+			}
+			if changed {
+				repairedValue = strings.Join(parts, ", ")
+				repaired = true
+			}
+		}
+		if repaired {
+			log.Printf("[hooks] AskUserQuestion answer value repaired (quote-truncated) for session %s: %q -> %q", sessionID, value, repairedValue)
+		}
+
+		resolved[question.text] = repairedValue
+
+		// Echo the selected option's preview, matching the terminal UI.
+		if preview, ok := question.previews[repairedValue]; ok {
+			annotations[question.text] = map[string]interface{}{"preview": preview}
+		}
+	}
+
+	// Mark the questions the user left blank. Claude Code treats a missing key
+	// as "nothing to report" and filters it out, so a partly answered prompt
+	// would otherwise be summarised to the agent as "Your questions have been
+	// answered" with the skipped ones invisible. A note flips it to the careful
+	// wording and renders the question as "(no option selected)".
+	if len(resolved) > 0 {
+		for _, q := range questions {
+			if q.text == "" {
+				continue
+			}
+			if _, answered := resolved[q.text]; answered {
+				continue
+			}
+			annotations[q.text] = map[string]interface{}{
+				"notes": "The user did not answer this question.",
+			}
+			log.Printf("[hooks] AskUserQuestion question left unanswered for session %s: %q", sessionID, q.text)
+		}
+	}
+
+	return resolved, annotations
+}
+
+// askUserClarifyMessage reproduces Claude Code's "Chat about this" text: a
+// denial that asks the agent to find out what the user wants to clarify instead
+// of treating any option as chosen. Any options already selected ride along.
+func askUserClarifyMessage(questions []askUserQuestion, answers map[string]string) string {
+	var b strings.Builder
+	b.WriteString("The user wants to clarify these questions.\n")
+	b.WriteString("    This means they may have additional information, context or questions for you.\n")
+	b.WriteString("    Take their response into account and then reformulate the questions if appropriate.\n")
+	b.WriteString("    Start by asking them what they would like to clarify.\n")
+	b.WriteString("    Questions asked:\n")
+	for i, q := range questions {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		// Raw quotes, matching Claude Code's own rendering of this list.
+		fmt.Fprintf(&b, "- \"%s\"\n", q.text)
+		if answer, ok := answers[q.text]; ok && answer != "" {
+			fmt.Fprintf(&b, "  Answer: %s", answer)
+		} else {
+			b.WriteString("  (No answer provided)")
+		}
+	}
+	return b.String()
 }
 
 // HandlePermissionRespond handles POST /api/hooks/permission/{sessionId}/respond

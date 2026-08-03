@@ -1831,17 +1831,56 @@ class StructuredViewManager {
      * highlight the option that matches each answer; if the answer doesn't
      * match any option label, render it as a free-text answer below.
      */
-    _applyAskUserAnswers(meta, content) {
-        if (!content || !meta?.cardEl) return;
+    /**
+     * Split an AskUserQuestion tool_result into {q, a} pairs.
+     *
+     * Claude Code renders each pair as `"<question>"="<answer>"` joined with
+     * ", " and escapes nothing, so a question or label containing a double
+     * quote makes the shape ambiguous. Locating the known question texts turns
+     * it back into an unambiguous parse: each answer is whatever sits between
+     * its own `"=` and the start of the next pair.
+     */
+    _parseAskUserPairs(content, questions) {
+        const anchors = [];
+        for (const q of (Array.isArray(questions) ? questions : [])) {
+            const text = q && q.question;
+            if (typeof text !== 'string' || text === '') continue;
+            const marker = `"${text}"="`;
+            const at = content.indexOf(marker);
+            if (at >= 0) anchors.push({ q: text, start: at, valueAt: at + marker.length });
+        }
 
-        // Format: User has answered your questions: "Q1"="A1", "Q2"="A2", ...
-        // Extract Q/A pairs with a regex that handles escaped quotes loosely.
+        if (anchors.length > 0) {
+            anchors.sort((a, b) => a.start - b.start);
+            return anchors.map((anchor, i) => {
+                const next = anchors[i + 1];
+                // The answer ends at the closing quote before the ", " that
+                // introduces the next pair — or the last quote of the run.
+                const slice = content.slice(anchor.valueAt, next ? next.start : undefined);
+                const end = next ? slice.lastIndexOf('", ') : slice.lastIndexOf('"');
+                return { q: anchor.q, a: end >= 0 ? slice.slice(0, end) : slice };
+            });
+        }
+
+        // No known question matched (older transcript, truncated result, …).
         const pairs = [];
         const re = /"([^"]+)"\s*=\s*"((?:[^"\\]|\\.)*)"/g;
         let m;
         while ((m = re.exec(content)) !== null) {
             pairs.push({ q: m[1], a: m[2] });
         }
+        return pairs;
+    }
+
+    _applyAskUserAnswers(meta, content) {
+        if (!content || !meta?.cardEl) return;
+
+        // Format: ...answered: "Q1"="A1", "Q2"="A2". ...
+        // Neither the question nor the answer is escaped, so a quote inside
+        // either one derails a generic regex. Anchor on the question texts we
+        // already know from the tool_use block instead, and only fall back to
+        // the regex when none of them appear.
+        const pairs = this._parseAskUserPairs(content, meta.questions);
         if (pairs.length === 0) return;
 
         const qNodes = Array.from(meta.cardEl.querySelectorAll('.sv-ask-question'));
@@ -1858,9 +1897,24 @@ class StructuredViewManager {
             if (!qNode) continue;
 
             const optionEls = Array.from(qNode.querySelectorAll('.sv-ask-option'));
+            const labels = optionEls.map(el => (el.dataset.label || '').trim());
+
+            // Multi-select answers arrive as one ", "-joined string. Split them
+            // only when every part is a real option label, so a free-text answer
+            // that happens to contain ", " is left whole.
+            const expanded = [];
+            for (const answer of answers) {
+                const parts = answer.split(', ');
+                if (parts.length > 1 && !labels.includes(answer.trim()) && parts.every(p => labels.includes(p.trim()))) {
+                    expanded.push(...parts);
+                } else {
+                    expanded.push(answer);
+                }
+            }
+
             const unmatched = [];
 
-            for (const answer of answers) {
+            for (const answer of expanded) {
                 // Strip the " (Recommended)" suffix the platform appends to the
                 // first option's label when echoing the answer back.
                 const cleaned = answer.replace(/\s*\(Recommended\)\s*$/, '').trim();
@@ -2016,11 +2070,17 @@ class StructuredViewManager {
         return n.toLocaleString();
     }
 
+    // Escape for BOTH text and attribute contexts: the textContent -> innerHTML
+    // trick this used to do does NOT escape the double quote, so interpolating
+    // into an attribute truncated the value at the first `"` it contained.
     _escapeHtml(str) {
-        if (!str) return '';
-        const div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
+        if (str === null || str === undefined) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
     /**

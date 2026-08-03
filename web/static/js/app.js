@@ -3376,8 +3376,6 @@ class OpenPoet {
                     <button class="btn btn-sm btn-secondary" onclick="app.showSharesModal(${projectId})" title="Configure shared file access">Configure</button>
                 `;
             }
-
-            this._pruneVisibleTaskApprovalSelection(tasks);
         } catch (e) {
             container.innerHTML = '<div class="meta-empty">Failed to load shared projects.</div>';
         }
@@ -7651,10 +7649,17 @@ class OpenPoet {
     }
 
     // Utility
+    // Escape for BOTH text and attribute contexts: the textContent -> innerHTML
+    // trick this used to do does NOT escape the double quote, so interpolating
+    // into an attribute truncated the value at the first `"` it contained.
     escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text || '';
-        return div.innerHTML;
+        if (text === null || text === undefined) return '';
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
     formatTime(timestamp) {
@@ -9354,6 +9359,7 @@ class OpenPoet {
                 this.api('GET', `/projects/${projectId}/tasks`),
                 this.api('GET', `/projects/${projectId}/tasks/session-summary`).catch(() => [])
             ]);
+            this._pruneVisibleTaskApprovalSelection(tasks);
             // Build lookup: taskID -> {session_count, active_count, latest_session}
             this._taskSessionSummary = {};
             (sessionSummaryRaw || []).forEach(s => { this._taskSessionSummary[s.task_id] = s; });

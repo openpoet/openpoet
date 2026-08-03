@@ -235,6 +235,9 @@ class HookManager {
         document.getElementById('hook-ask-user-submit')?.addEventListener('click', () => {
             this.submitAskUserAnswers();
         });
+        document.getElementById('hook-ask-user-chat')?.addEventListener('click', () => {
+            this.clarifyAskUser();
+        });
         document.getElementById('hook-ask-user-dismiss')?.addEventListener('click', () => {
             this.dismissDialog('askUser');
         });
@@ -297,13 +300,52 @@ class HookManager {
                 return;
             }
             buttonEl.classList.add('recording');
+            // Track the dictation so a Submit tapped mid-recording (or mid-
+            // upload) waits for the text instead of collecting an empty field
+            // and telling the agent the question went unanswered.
+            let settle;
+            this._voiceSettled = new Promise(resolve => { settle = resolve; });
             window.voiceInput.startRecordingWithCallback((text) => {
                 buttonEl.classList.remove('recording');
                 inputEl.value = (inputEl.value ? inputEl.value + ' ' : '') + text;
                 inputEl.focus();
                 inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+                settle();
             });
         });
+    }
+
+    /**
+     * Resolve any dictation still in flight before the answers are read.
+     * Stops an active recording (transcribing it, not discarding it) and waits
+     * for the transcript to land in its field. Bounded so a failed upload can
+     * never wedge the Submit button.
+     */
+    async _settleVoiceInput(timeoutMs = 20000) {
+        const voice = window.voiceInput;
+        if (!voice) return;
+        if (!voice.isRecording && !voice.pendingAudioBlob && !this._voiceSettled) return;
+
+        if (voice.isRecording) {
+            voice.stopRecording(false); // false = transcribe, don't discard
+        }
+        const pending = this._voiceSettled;
+        if (!pending) return;
+
+        // Tell the user why the click didn't act immediately.
+        const buttons = ['hook-ask-user-submit', 'hook-ask-user-chat']
+            .map(id => document.getElementById(id)).filter(Boolean);
+        const labels = buttons.map(b => b.textContent);
+        buttons.forEach((b, i) => {
+            b.disabled = true;
+            if (i === 0) b.textContent = 'Transcribing…';
+        });
+        try {
+            await Promise.race([pending, new Promise(resolve => setTimeout(resolve, timeoutMs))]);
+        } finally {
+            buttons.forEach((b, i) => { b.disabled = false; b.textContent = labels[i]; });
+            this._voiceSettled = null;
+        }
     }
 
     // Cancel any active voice recording in hook modals
@@ -311,6 +353,9 @@ class HookManager {
         if (window.voiceInput?.isRecording) {
             window.voiceInput.cancelRecording();
         }
+        // Drop the settle promise too: a cancelled dictation never calls back,
+        // so leaving it would make the next submit wait out its whole timeout.
+        this._voiceSettled = null;
         document.querySelectorAll('.hook-voice-btn.recording').forEach(b => b.classList.remove('recording'));
     }
 
@@ -933,8 +978,21 @@ class HookManager {
 
         const event = data.event || {};
         const toolInput = event.tool_input || {};
-        const questions = toolInput.questions || [];
+        const questions = Array.isArray(toolInput.questions) ? toolInput.questions : [];
         const agentName = this._getAgentName(event);
+
+        // Authoritative copy of the questions, straight off the hook event.
+        // Claude Code matches answers to questions by the EXACT question text and
+        // to options by the EXACT option label, so those strings must never make a
+        // round trip through HTML: an attribute value silently truncates at the
+        // first `"` the string contains, and the answer then matches nothing
+        // (Claude Code reports "The user did not answer the questions." and the
+        // agent proceeds with its own pick). The DOM below therefore carries only
+        // numeric indices; every semantic string is resolved from here at submit
+        // time. See collectAskUserAnswers().
+        this._askUserQuestions = questions;
+        this._askUserConfirmedPartial = false;
+        document.getElementById('hook-ask-user-warning')?.classList.add('hidden');
 
         this.pendingPermission = {
             sessionId: data.session_id,
@@ -953,9 +1011,9 @@ class HookManager {
         container.innerHTML = questions.map((q, qIdx) => {
             const isMulti = q.multiSelect === true;
             const inputType = isMulti ? 'checkbox' : 'radio';
-            const options = q.options || [];
+            const options = Array.isArray(q.options) ? q.options : [];
 
-            let html = `<div class="ask-user-question" data-question-idx="${qIdx}" data-question-text="${this.escapeHtml(q.question || '')}">`;
+            let html = `<div class="ask-user-question" data-question-idx="${qIdx}">`;
             if (q.header) {
                 html += `<div class="ask-user-header">${this.escapeHtml(q.header)}</div>`;
             }
@@ -965,12 +1023,15 @@ class HookManager {
             options.forEach((opt, oIdx) => {
                 const id = `ask-q${qIdx}-o${oIdx}`;
                 const name = `ask-q${qIdx}`;
+                // value carries the option INDEX; the label is resolved from
+                // this._askUserQuestions at submit time (see the note above).
                 html += `
                     <label class="ask-user-option" for="${id}">
-                        <input type="${inputType}" id="${id}" name="${name}" value="${this.escapeHtml(opt.label)}" />
+                        <input type="${inputType}" id="${id}" name="${name}" value="${oIdx}" />
                         <div class="ask-user-option-content">
                             <span class="ask-user-option-label">${this.escapeHtml(opt.label)}</span>
                             ${opt.description ? `<span class="ask-user-option-desc">${this.escapeHtml(opt.description)}</span>` : ''}
+                            ${opt.preview ? `<pre class="ask-user-option-preview">${this.escapeHtml(opt.preview)}</pre>` : ''}
                         </div>
                     </label>`;
             });
@@ -1043,14 +1104,21 @@ class HookManager {
         const container = document.getElementById('hook-ask-user-questions');
         if (!container) return {};
 
+        // Claude Code expects answers keyed by the question's TEXT (the literal
+        // `question` field), with values being the chosen option label(s), and it
+        // matches both by exact string equality. Resolve them from the questions
+        // captured off the hook event — the DOM only ever holds indices, so no
+        // string can be mangled by HTML attribute parsing on the way back.
+        const source = Array.isArray(this._askUserQuestions) ? this._askUserQuestions : [];
         const answers = {};
-        const questions = container.querySelectorAll('.ask-user-question');
 
-        questions.forEach((qEl) => {
-            // Claude Code expects answers keyed by the question's TEXT (the literal
-            // `question` field), with values being the chosen option label(s).
-            // Multi-select labels join with ", ".
-            const key = qEl.dataset.questionText || qEl.dataset.questionIdx;
+        container.querySelectorAll('.ask-user-question').forEach((qEl) => {
+            const qIdx = parseInt(qEl.dataset.questionIdx, 10);
+            const question = source[qIdx];
+            const key = question && question.question;
+            if (typeof key !== 'string' || key === '') return;
+
+            const options = Array.isArray(question.options) ? question.options : [];
             const checked = qEl.querySelectorAll('input[type="radio"]:checked, input[type="checkbox"]:checked');
             const values = [];
 
@@ -1060,11 +1128,16 @@ class HookManager {
                     if (textInput && textInput.value.trim()) {
                         values.push(textInput.value.trim());
                     }
-                } else {
-                    values.push(input.value);
+                    return;
+                }
+                const opt = options[parseInt(input.value, 10)];
+                if (opt && typeof opt.label === 'string' && opt.label !== '') {
+                    values.push(opt.label);
                 }
             });
 
+            // Multi-select labels join with ", " — the same separator Claude Code
+            // splits on when it checks the answer against the option labels.
             if (values.length > 0) {
                 answers[key] = values.join(', ');
             }
@@ -1077,26 +1150,121 @@ class HookManager {
         if (!this.pendingPermission) return;
 
         const sessionId = this.pendingPermission.sessionId;
+        await this._settleVoiceInput();
+        if (!this.pendingPermission) return; // resolved while we waited
         const answers = this.collectAskUserAnswers();
 
-        try {
-            await fetch(`/api/hooks/permission/${sessionId}/respond`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    behavior: 'allow',
-                    tool_name: 'AskUserQuestion',
-                    answers: answers
-                })
-            });
-        } catch (err) {
-            console.error('Failed to submit answers:', err);
+        // Warn once before sending a partly answered prompt — the terminal UI
+        // does the same ("You have not answered all questions") rather than
+        // letting the agent receive a silent gap.
+        if (!this._askUserConfirmedPartial && this._warnUnansweredQuestions(answers)) {
+            this._askUserConfirmedPartial = true;
+            return;
         }
+
+        // Keep the dialog open on failure: a lost answer is exactly the failure
+        // mode this whole path exists to prevent, so it must never be silent.
+        if (!await this._postAskUserResponse(sessionId, {
+            behavior: 'allow',
+            tool_name: 'AskUserQuestion',
+            answers: answers
+        }, 'Failed to submit answers')) return;
 
         this.hideAskUserDialog();
         if (this.pendingPermission) {
             this.hidePendingBadge(this.pendingPermission.sessionId);
         }
+        this.pendingPermission = null;
+    }
+
+    /**
+     * POST an AskUserQuestion response. Returns true on success; on failure it
+     * surfaces the error and leaves the dialog open so the answer can be resent
+     * rather than vanishing.
+     */
+    async _postAskUserResponse(sessionId, payload, failureLabel) {
+        try {
+            const res = await fetch(`/api/hooks/permission/${sessionId}/respond`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            if (!res.ok) {
+                let detail = `HTTP ${res.status}`;
+                try {
+                    const body = await res.json();
+                    if (body && body.error) detail = body.error;
+                } catch (_) { /* non-JSON error body */ }
+                console.error(`${failureLabel}: ${detail}`);
+                window.app?.showToast?.('Error', `${failureLabel}: ${detail}`, 'error');
+                return false;
+            }
+            return true;
+        } catch (err) {
+            console.error(`${failureLabel}:`, err);
+            window.app?.showToast?.('Error', `${failureLabel} — check your connection and try again`, 'error');
+            return false;
+        }
+    }
+
+    /**
+     * Flag questions with no answer. Returns true when at least one is blank
+     * (and renders the warning), false when everything is answered.
+     */
+    _warnUnansweredQuestions(answers) {
+        const source = Array.isArray(this._askUserQuestions) ? this._askUserQuestions : [];
+        const missing = source.filter(q => q && typeof q.question === 'string' && !answers[q.question]);
+        if (missing.length === 0) return false;
+
+        const container = document.getElementById('hook-ask-user-questions');
+        if (!container) return false;
+        container.querySelectorAll('.ask-user-question').forEach((qEl) => {
+            const q = source[parseInt(qEl.dataset.questionIdx, 10)];
+            qEl.classList.toggle('ask-user-question--unanswered', !!q && !answers[q.question]);
+        });
+
+        let warn = document.getElementById('hook-ask-user-warning');
+        if (!warn) {
+            warn = document.createElement('div');
+            warn.id = 'hook-ask-user-warning';
+            warn.className = 'ask-user-warning';
+            container.parentElement.insertBefore(warn, container);
+        }
+        warn.textContent = missing.length === 1
+            ? 'One question is unanswered. Submit again to send it as skipped.'
+            : (missing.length === source.length
+                ? 'No question is answered yet. Submit again to skip them all.'
+                : `${missing.length} questions are unanswered. Submit again to send them as skipped.`);
+        warn.classList.remove('hidden');
+        return true;
+    }
+
+    /**
+     * "Chat about this" — the terminal UI offers this alongside the options, so
+     * the modal must too. Claude Code implements it as a DENIAL carrying a
+     * clarification request, which makes the agent stop and ask the user what
+     * they want to discuss instead of picking an option. The message is built
+     * server-side from the pending hook event (see askUserClarifySentinel in
+     * internal/handlers/hooks.go) so the wording stays right even for a stale
+     * client; any options already selected ride along as context.
+     */
+    async clarifyAskUser() {
+        if (!this.pendingPermission) return;
+
+        const sessionId = this.pendingPermission.sessionId;
+        await this._settleVoiceInput();
+        if (!this.pendingPermission) return; // resolved while we waited
+        const answers = this.collectAskUserAnswers();
+
+        if (!await this._postAskUserResponse(sessionId, {
+            behavior: 'deny',
+            tool_name: 'AskUserQuestion',
+            message: HookManager.ASK_USER_CLARIFY_SENTINEL,
+            answers: answers
+        }, 'Failed to send clarification request')) return;
+
+        this.hideAskUserDialog();
+        this.hidePendingBadge(sessionId);
         this.pendingPermission = null;
     }
 
@@ -1725,9 +1893,7 @@ class HookManager {
     }
 
     _escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text || '';
-        return div.innerHTML;
+        return this.escapeHtml(text); // attribute-safe, see escapeHtml()
     }
 
     _updateDocsButton() {
@@ -1847,12 +2013,26 @@ class HookManager {
         }
     }
 
+    /**
+     * Escape for BOTH text and attribute contexts. The old implementation
+     * (textContent -> innerHTML) escaped & < > but NOT the double quote, so any
+     * interpolation into an attribute truncated at the first `"` in the value
+     * and parsed the remainder as stray attributes. Rendering is unchanged —
+     * &quot;/&#39; display as " and '.
+     */
     escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text || '';
-        return div.innerHTML;
+        if (text === null || text === undefined) return '';
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 }
+
+// Sentinel the server swaps for Claude Code's own "Chat about this" wording.
+HookManager.ASK_USER_CLARIFY_SENTINEL = '__openpoet_ask_user_clarify__';
 
 // Initialize globally
 window.hookManager = new HookManager();
