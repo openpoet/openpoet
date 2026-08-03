@@ -65,6 +65,34 @@ OpenPoet is a web application that orchestrates Claude Code sessions across mult
 - Service Worker cache management could be improved (manual clear-cache.html workaround)
 - No automated tests yet (Playwright framework prepared but not in use)
 
+## Automatic worktree isolation (conflict semantics)
+
+The conflict radar distinguishes two different hazards. Do not collapse them back
+into one — that was the bug that made isolation useless.
+
+- **Tree collision** — two live sessions writing the same file in the **same**
+  working tree. One silently loses its work, so the gate **denies** (unchanged
+  behaviour, `internal/coordinator/gate.go`).
+- **Lane divergence** — the same logical file in **different** trees (main
+  checkout vs a `.openpoet/worktrees/<lane>` worktree, or two lanes). Each side
+  owns its own checkout, nothing can be lost, and git arbitrates at merge time,
+  so this is **never denied**: it emits a `conflict.divergence` event for merge
+  sequencing and opens no incident. `workspaces.PredictMerge` is the
+  authoritative merge-risk check.
+
+Claims expire (`claimTTL`, 30 min from the last write to that path) — a claim is
+evidence of live contention, not a permanent lock.
+
+Sessions choose their tree with `isolation` on `sessions.create` / `start_worker`
+/ `POST /api/sessions`: `never` (default, main checkout), `auto` (main checkout
+while free, an isolated lane once busy), `always` (its own lane unconditionally).
+Lanes are **provisioned on demand** — nothing needs pre-provisioning — and the
+create response carries `workspace_id`/`work_dir` so the caller can later
+`predict_merge` and `merge_workspace` that lane.
+
+E2E harness: `ops/lanes/e2e.sh` (real server + real git repos + fresh DB on port
+8793; $0 — synthetic sessions via the `OPENPOET_TEST_MODE` endpoint).
+
 ## Guidelines & Constraints
 
 - **Port 8081 is PRODUCTION** — never use for testing or debugging

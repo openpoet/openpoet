@@ -32,6 +32,13 @@ const (
 	// incidentMemoryTTL prunes quiet incidents from the in-memory maps; the DB
 	// row remains the durable record.
 	incidentMemoryTTL = 24 * time.Hour
+	// claimTTL bounds how long a write claim keeps vetoing peers after the LAST
+	// write to that path. Claims used to live for the whole session lifetime, so a
+	// file written at 09:00 still blocked a peer at 17:00 — sticky evidence that
+	// would make automatic isolation fire on sessions which merely coincided
+	// historically. Every new write to the path refreshes the stamp, so a file
+	// that is actually being worked on never expires out from under its holder.
+	claimTTL = 30 * time.Minute
 )
 
 // sessionInfo caches the session→project resolution so the ingest hot path
@@ -47,6 +54,18 @@ type sessionInfo struct {
 	taskID     int64
 	live       bool
 	fetchedAt  time.Time
+	// workDir is the directory the session's runner actually started in — the
+	// lane path for a workspace session, the project path otherwise. It is the
+	// base a RELATIVE tool path resolves against: a lane session reporting
+	// "src/a.go" means its own lane copy, not the main checkout's file. Without
+	// it, relative paths resolved against the project root and silently produced
+	// cross-tree claims.
+	workDir string
+	// tree is the working tree the session itself runs in ("" = main checkout),
+	// derived from workDir. Claims are keyed by the tree of the PATH written, not
+	// this one (a session can write an absolute path into another tree), but this
+	// is what event payloads report and what the isolation advice keys off.
+	tree string
 }
 
 type ingestMsg struct {
@@ -71,9 +90,45 @@ type ledgerDelta struct {
 	lastTool  string
 }
 
+// claimKey identifies a contended LOGICAL project path. It is deliberately
+// tree-agnostic: main-checkout and lane writes of the same file share one key, so
+// the radar sees them together and can then classify the relationship.
 type claimKey struct {
 	projectKey string
 	rel        string
+}
+
+// claimHolder is one session's write claim on a logical path.
+//
+// tree names the physical working tree the write landed in — "" for the
+// project's main checkout, or the workspace name for a git-worktree lane. That
+// one field separates the two genuinely different hazards the radar used to
+// conflate:
+//
+//   - SAME tree  → immediate hazard. Two sessions write the very same file on
+//     disk and one silently loses its work. Hard veto.
+//   - OTHER tree → divergence only. Each side owns its own checkout of the file,
+//     nothing can be lost right now, and git arbitrates at merge time (merge
+//     --no-ff aborts safely). Informational, never a veto.
+//
+// Before this distinction existed, moving a session into a worktree resolved
+// nothing: the gate kept denying because both trees normalized to the same
+// logical path. Isolation only becomes a real remedy once divergence stops being
+// treated as collision.
+//
+// at is the last-write stamp claimTTL sweeps against.
+type claimHolder struct {
+	kind TouchKind
+	tree string
+	at   time.Time
+}
+
+// treeLabel renders a tree key for humans and event payloads.
+func treeLabel(tree string) string {
+	if tree == "" {
+		return "main"
+	}
+	return tree
 }
 
 // Coordinator is the observe-only conflict radar. A single indexer goroutine
@@ -89,10 +144,10 @@ type Coordinator struct {
 
 	mu             sync.Mutex
 	sessions       map[string]*sessionInfo
-	failedResolve  map[string]time.Time              // sessionID → do-not-retry-before
-	claims         map[claimKey]map[string]TouchKind // (projectKey,rel) → sessionID → strongest kind
-	turnTouched    map[string]map[string]struct{}    // sessionID → rel paths touched this turn
-	incidents      map[string]*Incident              // rule|scope_key → incident
+	failedResolve  map[string]time.Time                // sessionID → do-not-retry-before
+	claims         map[claimKey]map[string]claimHolder // (projectKey,logicalRel) → sessionID → claim
+	turnTouched    map[string]map[string]struct{}      // sessionID → rel paths touched this turn
+	incidents      map[string]*Incident                // rule|scope_key → incident
 	dirtyIncidents map[string]struct{}
 	dirtyLedger    map[ledgerKey]*ledgerDelta
 	pendingEvents  []database.EventOutboxAppend
@@ -122,7 +177,7 @@ func New(db *database.DB) *Coordinator {
 		quit:           make(chan struct{}),
 		sessions:       make(map[string]*sessionInfo),
 		failedResolve:  make(map[string]time.Time),
-		claims:         make(map[claimKey]map[string]TouchKind),
+		claims:         make(map[claimKey]map[string]claimHolder),
 		turnTouched:    make(map[string]map[string]struct{}),
 		incidents:      make(map[string]*Incident),
 		dirtyIncidents: make(map[string]struct{}),
@@ -330,13 +385,19 @@ func (c *Coordinator) process(msg ingestMsg) {
 			// guessing paths out of shell commands is how false denials start.
 			continue
 		}
-		rel, inProject := si.relativize(t.Path)
-		c.bumpLedger(si, rel, t.Kind, msg.tool, msg.ts)
-		if inProject {
-			c.recordTurnTouchLocked(si.id, rel)
+		physical, inProject := si.relativize(t.Path)
+		// The ledger stays PHYSICAL — it is the audit trail of what was written
+		// where, and a lane's own history must remain distinguishable. Conflict
+		// rules and the turn payload speak the LOGICAL path so a lane edit is
+		// comparable with a main-tree edit of the same file.
+		c.bumpLedger(si, physical, t.Kind, msg.tool, msg.ts)
+		if !inProject {
+			continue
 		}
-		if t.Kind == KindWrite && inProject {
-			c.noteWriteClaim(si, rel, msg.tool, msg.ts)
+		tree, logical := SplitLane(physical)
+		c.recordTurnTouchLocked(si.id, logical)
+		if t.Kind == KindWrite {
+			c.noteWriteClaim(si, tree, logical, msg.tool, msg.ts)
 		}
 	}
 	c.evalSameTask(si, msg.ts)
@@ -418,6 +479,15 @@ func (c *Coordinator) resolveFromDB(ctx context.Context, sessionID string) (*ses
 	}
 	root := filepath.Clean(p.Path)
 	si.rootRaw = root
+	// The runner's actual cwd — a lane path for workspace sessions. Relative tool
+	// paths resolve against THIS, and it tells us which tree the session lives in.
+	si.workDir = root
+	if wd := strings.TrimSpace(s.WorkDir); wd != "" {
+		si.workDir = filepath.Clean(wd)
+	}
+	if rel, ok := underRoot(si.workDir, root); ok {
+		si.tree, _ = SplitLane(rel)
+	}
 	if p.Type == "remote" {
 		// Remote claims are keyed by (ssh_host, path) so a local checkout and
 		// a remote checkout of an identically-named tree never falsely collide.
@@ -443,6 +513,19 @@ func (c *Coordinator) resolveFromDB(ctx context.Context, sessionID string) (*ses
 // critical conflicts.
 func (si *sessionInfo) relativize(p string) (string, bool) {
 	clean := filepath.Clean(strings.TrimSpace(p))
+	// A relative tool path is relative to the RUNNER's cwd. Resolving it against
+	// the project root instead would attribute a lane session's "src/a.go" to the
+	// main checkout — a phantom cross-tree claim (and, before workDir existed,
+	// relative paths were dropped from the index entirely).
+	if clean != "." && !filepath.IsAbs(clean) {
+		base := si.workDir
+		if base == "" {
+			base = si.rootRaw
+		}
+		if base != "" {
+			clean = filepath.Join(base, clean)
+		}
+	}
 	if si.remote {
 		if rel, ok := underRoot(clean, si.rootRaw); ok {
 			return rel, true

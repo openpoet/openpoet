@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"openpoet/internal/database"
 	"openpoet/internal/workspace"
@@ -50,6 +51,9 @@ type WorkspaceService struct {
 	git         WorkspaceGitPort
 	syncer      WorkspaceSyncer
 	provisioner EnvironmentProvisioner
+	// provisionLocks serializes lane resolution per project id (see
+	// lockProjectProvision). The zero sync.Map is ready to use.
+	provisionLocks sync.Map
 }
 
 // EnvironmentProvisioner runs a project's `.openpoet/environment.yaml` for a
@@ -260,33 +264,110 @@ func readProjectManifest(projectPath string) ([]byte, bool) {
 	return b, true
 }
 
-// ResolveAutoWorkspace implements sessions.create isolation:"auto": when the
-// project's main checkout is free it returns "" (use the main path, zero
-// regression); when the main path is busy it leases an idle POOLED workspace
-// (fast second concurrent session, no re-provision); if none is ready it fails
-// with no_workspace_ready pointing the caller at the async provision flow.
-func (s *WorkspaceService) ResolveAutoWorkspace(ctx context.Context, projectID int64) (string, error) {
-	busy, err := s.db.ProjectMainPathBusy(ctx, projectID)
+// Isolation modes accepted by sessions.create / start_worker.
+const (
+	// IsolationNever always runs in the project's main checkout (the default).
+	IsolationNever = "never"
+	// IsolationAuto uses the main checkout while it is free, and an isolated lane
+	// once a live session already holds it.
+	IsolationAuto = "auto"
+	// IsolationAlways always runs in an isolated lane, even when the main checkout
+	// is free — what an orchestrator picks when it already knows two workstreams
+	// will overlap.
+	IsolationAlways = "always"
+)
+
+// IsolationDecision is the outcome of resolving a session's isolation mode.
+// ReservationToken is non-empty whenever a lane was claimed as part of the
+// decision: the caller must NOT reserve it again, and must release the token if
+// the session then fails to start.
+type IsolationDecision struct {
+	WorkspaceID      string
+	ReservationToken string
+}
+
+// ResolveIsolation decides which working tree a new session runs in.
+//
+// Before this, isolation:"auto" only ever LEASED a pre-existing pooled lane, and
+// failed with no_workspace_ready whenever the main path was busy and the pool
+// happened to be empty. That made automatic isolation unusable in practice: an
+// orchestrator had to pre-provision lanes it could not know it would need, and
+// the outcome of "two sessions want one project" was an error rather than two
+// trees. Both modes now provision on demand.
+//
+// The whole decision is serialized per project, for two reasons: concurrent
+// `git worktree add` in one repository contends on .git metadata, and an unlocked
+// pick-then-provision leaves a window in which a peer leases the lane we just
+// created. The cost is that N simultaneous workers provision their lanes in
+// sequence rather than in parallel.
+//
+// Known limit of "auto": the busy check reads persisted sessions, so two creates
+// racing on a FREE main checkout both see it free and both use it. The conflict
+// gate is what catches that; "always" is the deterministic choice for fan-out.
+func (s *WorkspaceService) ResolveIsolation(ctx context.Context, projectID int64, mode string, authorization ActionAuthorization) (IsolationDecision, error) {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	switch normalized {
+	case "", IsolationNever:
+		return IsolationDecision{}, nil
+	case IsolationAuto, IsolationAlways:
+	default:
+		return IsolationDecision{}, validationError("invalid_isolation",
+			`Isolation must be "auto" (a lane only when the main checkout is busy), "always" or "never"`)
+	}
+
+	unlock := s.lockProjectProvision(projectID)
+	defer unlock()
+
+	if normalized == IsolationAuto {
+		busy, err := s.db.ProjectMainPathBusy(ctx, projectID)
+		if err != nil {
+			return IsolationDecision{}, err
+		}
+		if !busy {
+			return IsolationDecision{}, nil // main checkout free → zero-overhead default
+		}
+	}
+
+	// Prefer an already-provisioned idle lane: leasing one is instant, while
+	// provisioning runs git and, when the project ships a manifest, its whole
+	// environment. Pick-and-reserve is a single atomic statement.
+	token := randomWorkspaceSuffix() + randomWorkspaceSuffix()
+	laneID, err := s.db.ReserveIdleWorkspace(ctx, projectID, token)
 	if err != nil {
-		return "", err
+		return IsolationDecision{}, err
 	}
-	if !busy {
-		return "", nil // main path free → use it
+	if laneID != "" {
+		return IsolationDecision{WorkspaceID: laneID, ReservationToken: token}, nil
 	}
-	ws, err := s.db.PickIdleWorkspace(ctx, projectID)
+
+	created, err := s.Create(ctx, CreateWorkspaceCommand{
+		ProjectID:     projectID,
+		Name:          autoLaneName(),
+		Authorization: authorization,
+	})
 	if err != nil {
-		return "", err
+		return IsolationDecision{}, err
 	}
-	if ws == nil {
-		return "", validationError("no_workspace_ready", "the main path is busy and no pooled workspace is ready — call workspaces.create and watch for workspace.ready")
+	if err := s.db.ReserveWorkspace(ctx, created.ID, token); err != nil {
+		return IsolationDecision{}, conflictError("workspace_not_ready",
+			"the freshly provisioned lane could not be reserved")
 	}
-	// Best-effort pick: the atomic claim is the Reserve CAS in SessionService.Create.
-	// If two auto-creates race onto the same idle lane, the loser's Reserve fails
-	// and the create returns a retryable error — the client re-issues and this
-	// picker then hands out a different idle lane. (A single-shot atomic
-	// pick-and-reserve would avoid the retry; deferred as it needs a reservation
-	// token threaded through the create flow.)
-	return ws.ID, nil
+	return IsolationDecision{WorkspaceID: created.ID, ReservationToken: token}, nil
+}
+
+// autoLaneName marks lanes the platform opened by itself, keeping them
+// distinguishable from lanes a human named and expects to find again later.
+func autoLaneName() string {
+	return "auto-" + randomWorkspaceSuffix()
+}
+
+// lockProjectProvision serializes lane resolution for one project. Per-project
+// rather than global: two different repositories never contend with each other.
+func (s *WorkspaceService) lockProjectProvision(projectID int64) func() {
+	actual, _ := s.provisionLocks.LoadOrStore(projectID, &sync.Mutex{})
+	mu := actual.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // Discard tears down a workspace's environment (kills services, releases ports)
@@ -504,8 +585,11 @@ func (s *WorkspaceService) worktreeRegistered(ctx context.Context, project *data
 	return strings.Contains(out, "worktree "+path)
 }
 
-// ResolveForSession validates that a workspace can host a new session.
-func (s *WorkspaceService) ResolveForSession(ctx context.Context, project *database.Project, workspaceID string) (*database.Workspace, error) {
+// ResolveForSession validates that a workspace can host a new session. A
+// non-empty reservationToken means the caller already claimed this lane inside
+// ResolveIsolation, so 'leased'-with-our-token is the expected state; an empty
+// token means the lane must still be idle and ready.
+func (s *WorkspaceService) ResolveForSession(ctx context.Context, project *database.Project, workspaceID, reservationToken string) (*database.Workspace, error) {
 	ws, err := s.db.GetWorkspace(ctx, strings.TrimSpace(workspaceID))
 	if err != nil {
 		return nil, err
@@ -516,7 +600,12 @@ func (s *WorkspaceService) ResolveForSession(ctx context.Context, project *datab
 	if ws.ProjectID != project.ID {
 		return nil, validationError("workspace_project_mismatch", "Workspace belongs to a different project")
 	}
-	if ws.Status != "ready" {
+	if reservationToken != "" {
+		if ws.Status != "leased" || ws.LeasedBySessionID.String != "pending:"+reservationToken {
+			return nil, conflictError("workspace_reservation_lost",
+				"the reserved lane is no longer held by this create")
+		}
+	} else if ws.Status != "ready" {
 		return nil, conflictError("workspace_not_ready", fmt.Sprintf("Workspace is %s, not ready", ws.Status))
 	}
 	if project.Type == "local" {

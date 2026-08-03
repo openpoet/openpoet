@@ -95,36 +95,73 @@ func (i Incident) toRow() database.CoordinatorIncident {
 	}
 }
 
-// noteWriteClaim registers a write claim and evaluates R1/R5 against every
-// other live writer of the same (projectKey, rel). Precedence: a path under
-// .claude/ is the configsync shared-state hazard (R5, warn), never a code
-// conflict (R1, critical) — shared config contention must not read as a
-// critical code collision.
-func (c *Coordinator) noteWriteClaim(si *sessionInfo, rel, tool string, ts time.Time) {
-	rel = LogicalRel(rel) // lanes claim the logical project path (Phase 7.4)
+// noteWriteClaim registers a write claim on (projectKey, logical rel) in `tree`
+// and classifies every other live writer of the same logical path:
+//
+//   - same tree  → R1 file_overlap (critical) — two sessions writing one file on
+//     disk. A path under .claude/ is instead the configsync shared-state hazard
+//     (R5, warn), so shared config contention never reads as a code collision.
+//   - other tree → DIVERGENCE. Each side has its own checkout; nothing is at risk
+//     right now and git arbitrates at merge time. Emits an informational event
+//     for merge sequencing and opens NO incident: parallel lanes legitimately
+//     touch shared files (go.mod, a shared header) on nearly every turn, and
+//     filing those as conflicts would bury the real ones.
+//
+// Stale claims (older than claimTTL) are skipped so historical coincidence never
+// reads as live contention.
+func (c *Coordinator) noteWriteClaim(si *sessionInfo, tree, rel, tool string, ts time.Time) {
 	key := claimKey{projectKey: si.projectKey, rel: rel}
 	set := c.claims[key]
 	if set == nil {
-		set = make(map[string]TouchKind)
+		set = make(map[string]claimHolder)
 		c.claims[key] = set
 	}
-	for otherID, kind := range set {
-		if otherID == si.id || kind != KindWrite {
+	for otherID, held := range set {
+		if otherID == si.id || held.kind != KindWrite {
+			continue
+		}
+		if ts.Sub(held.at) >= claimTTL {
 			continue
 		}
 		other := c.sessions[otherID]
 		if other == nil || !other.live {
 			continue
 		}
+		if held.tree != tree {
+			c.noteDivergenceLocked(si, tree, held.tree, rel, otherID, ts)
+			continue
+		}
 		rule, severity := RuleFileOverlap, SeverityCritical
 		if IsClaudeDirPath(rel) {
 			rule, severity = RuleSharedClaudeDir, SeverityWarn
 		}
+		// Main-tree scope keys keep their pre-lane shape so incident identity
+		// (and hysteresis, and open rows hydrated from the DB) survives the
+		// upgrade unchanged; only lane collisions get the extra segment.
 		scope := si.projectKey + "|" + rel + "|" + pairKey(si.id, otherID)
+		if tree != "" {
+			scope = si.projectKey + "|lane:" + tree + "|" + rel + "|" + pairKey(si.id, otherID)
+		}
 		c.recordIncident(rule, severity, si.projectID, scope, sortedPair(si.id, otherID),
-			map[string]interface{}{"path": rel, "tool": tool}, ts)
+			map[string]interface{}{"path": rel, "tool": tool, "tree": treeLabel(tree)}, ts)
 	}
-	set[si.id] = KindWrite
+	set[si.id] = claimHolder{kind: KindWrite, tree: tree, at: ts}
+}
+
+// noteDivergenceLocked queues one conflict.divergence event for two live sessions
+// editing the same logical file in DIFFERENT working trees. Throttled by the same
+// hysteresis window incidents use — this is a standing fact about parallel work,
+// not an event stream. The authoritative merge-risk answer is still
+// workspaces.PredictMerge at integration time; this only tells the orchestrator
+// where to look. Caller holds c.mu.
+func (c *Coordinator) noteDivergenceLocked(si *sessionInfo, tree, otherTree, rel, otherID string, ts time.Time) {
+	key := "divergence|" + si.projectKey + "|" + rel + "|" + pairKey(si.id, otherID)
+	if last, seen := c.lastEmit[key]; seen && ts.Sub(last) < hysteresisWindow {
+		return
+	}
+	c.lastEmit[key] = ts
+	c.queueEventLocked(divergenceEvent(si.projectID, rel, sortedPair(si.id, otherID),
+		sortedPair(treeLabel(tree), treeLabel(otherTree)), ts))
 }
 
 // evalSameTask fires R3 whenever two live sessions share a task link — the
