@@ -24,10 +24,11 @@ func phase3Approval() ActionAuthorization {
 }
 
 type phase3Store struct {
-	project *database.Project
-	session *database.Session
-	task    *database.ProjectTask
-	endErr  error
+	project   *database.Project
+	session   *database.Session
+	task      *database.ProjectTask
+	endErr    error
+	footprint []string
 }
 
 func (s *phase3Store) GetProject(context.Context, int64) (*database.Project, error) {
@@ -75,6 +76,18 @@ func (s *phase3Store) UpsertMissionWorker(_ context.Context, _ *database.Mission
 }
 
 func (s *phase3Store) UpdateSessionLineage(_ context.Context, _, _, _ string) error { return nil }
+
+func (s *phase3Store) UpdateSessionWorkspace(_ context.Context, _, workspaceID, workDir string) error {
+	if s.session != nil {
+		s.session.WorkspaceID = sql.NullString{String: workspaceID, Valid: workspaceID != ""}
+		s.session.WorkDir = workDir
+	}
+	return nil
+}
+
+func (s *phase3Store) SessionWriteFootprint(_ context.Context, _ string) ([]string, error) {
+	return s.footprint, nil
+}
 
 func (s *phase3Store) EndSession(_ context.Context, _ string, status string) error {
 	if s.endErr != nil {

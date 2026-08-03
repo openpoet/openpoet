@@ -44,6 +44,14 @@ func (s *automationStartSessionStore) UpsertMissionWorker(_ context.Context, _ *
 	return nil
 }
 
+func (s *automationStartSessionStore) UpdateSessionWorkspace(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
+func (s *automationStartSessionStore) SessionWriteFootprint(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
 func (s *automationStartSessionStore) UpdateSessionLineage(_ context.Context, _, _, _ string) error {
 	return nil
 }

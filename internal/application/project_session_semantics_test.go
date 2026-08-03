@@ -127,6 +127,14 @@ func (s *semanticSessionStore) UpsertMissionWorker(_ context.Context, _ *databas
 	return nil
 }
 
+func (s *semanticSessionStore) UpdateSessionWorkspace(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
+func (s *semanticSessionStore) SessionWriteFootprint(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
 func (s *semanticSessionStore) UpdateSessionLineage(_ context.Context, _, _, _ string) error {
 	return nil
 }

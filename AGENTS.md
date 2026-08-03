@@ -90,6 +90,17 @@ Lanes are **provisioned on demand** — nothing needs pre-provisioning — and t
 create response carries `workspace_id`/`work_dir` so the caller can later
 `predict_merge` and `merge_workspace` that lane.
 
+A session that is ALREADY running can be moved into a lane with the
+`sessions.isolate` capability (destructive tier). A runner cannot change working
+directory in place, so the move is stop → repoint the row → reopen, with two
+consequences enforced as typed refusals rather than hidden: the session's
+**conversation does not carry over** (Claude Code indexes its transcript by the
+encoded cwd, so `--resume` cannot cross the change — the caller supplies a
+`briefing`), and a session holding **uncommitted work** in the shared tree is
+refused (`session_has_uncommitted_work`), because a lane branches from HEAD and
+would leave that work behind. It is cheapest right after a gate denial, when the
+losing session has usually written nothing yet.
+
 E2E harness: `ops/lanes/e2e.sh` (real server + real git repos + fresh DB on port
 8793; $0 — synthetic sessions via the `OPENPOET_TEST_MODE` endpoint).
 

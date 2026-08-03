@@ -223,6 +223,17 @@ func (d *DB) ProjectMainPathBusy(ctx context.Context, projectID int64) (bool, er
 	return n > 0, err
 }
 
+// SessionWriteFootprint lists the distinct paths a session has WRITTEN, as
+// recorded by the conflict radar's ledger. Used before moving a session to a new
+// working tree: whatever it wrote and has not committed would be left behind.
+func (d *DB) SessionWriteFootprint(ctx context.Context, sessionID string) ([]string, error) {
+	var paths []string
+	err := d.Reader().SelectContext(ctx, &paths,
+		`SELECT DISTINCT path FROM session_file_activity WHERE session_id = ? AND kind = 'write' ORDER BY path`,
+		sessionID)
+	return paths, err
+}
+
 // SetWorkspaceResources snapshots the rendered environment (ports/env) and the
 // approved manifest hash onto the workspace row, so a reopened session inherits
 // identical coordinates.
