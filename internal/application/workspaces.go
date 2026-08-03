@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -353,6 +354,43 @@ func (s *WorkspaceService) ResolveIsolation(ctx context.Context, projectID int64
 			"the freshly provisioned lane could not be reserved")
 	}
 	return IsolationDecision{WorkspaceID: created.ID, ReservationToken: token}, nil
+}
+
+// DirtyPaths reports which of the candidate project-relative paths currently
+// carry uncommitted changes in the project's working tree.
+//
+// It is the safety check before moving a live session to another tree: a lane
+// branches from HEAD, so anything written but not committed would silently stay
+// behind in the old checkout.
+func (s *WorkspaceService) DirtyPaths(ctx context.Context, project *database.Project, candidates []string) ([]string, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	out, err := s.git.RunGit(ctx, project, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return nil, fmt.Errorf("reading working tree status: %w", err)
+	}
+	dirty := make(map[string]bool)
+	for _, line := range splitLines(out) {
+		if len(line) < 4 {
+			continue
+		}
+		// Porcelain v1: two status chars, a space, then the path. A rename is
+		// "R  old -> new"; the destination is the one that exists now.
+		path := strings.TrimSpace(line[3:])
+		if idx := strings.Index(path, " -> "); idx >= 0 {
+			path = path[idx+4:]
+		}
+		dirty[strings.Trim(strings.TrimSpace(path), `"`)] = true
+	}
+	var hits []string
+	for _, candidate := range candidates {
+		if dirty[candidate] {
+			hits = append(hits, candidate)
+		}
+	}
+	sort.Strings(hits)
+	return hits, nil
 }
 
 // autoLaneName marks lanes the platform opened by itself, keeping them

@@ -79,6 +79,9 @@ func sessionPlatformDefinitions() []PlatformCapabilityDefinition {
 		executionReadCapability("sessions.active", "sessions", "sessions:read"),
 		executionPayloadLimit(executionWriteCapability("sessions.create", "sessions", "sessions:write"), 128<<10),
 		executionDestructiveCapability("sessions.stop", "sessions", "sessions:write"),
+		// Destructive: isolating restarts a live session, which discards its
+		// conversation (a runner cannot change working directory in place).
+		executionDestructiveCapability("sessions.isolate", "sessions", "sessions:write"),
 		executionWriteCapability("sessions.reopen", "sessions", "sessions:write"),
 		executionPayloadLimit(executionWriteCapability("sessions.send_input", "sessions", "sessions:write"), 20<<10),
 		executionWriteCapability("sessions.set_model", "sessions", "sessions:write"),
@@ -130,6 +133,14 @@ var knownSessionBackends = map[string]struct{}{
 
 type sessionReopenPayload struct {
 	DangerouslySkipPermissions bool `json:"dangerously_skip_permissions,omitempty"`
+}
+
+// sessionIsolatePayload carries the two things the moved session cannot know on
+// its own: why it was moved, and what it was doing (its transcript does not
+// survive the restart).
+type sessionIsolatePayload struct {
+	Reason   string `json:"reason,omitempty"`
+	Briefing string `json:"briefing,omitempty"`
 }
 
 type sessionInputPayload struct {
@@ -367,6 +378,32 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 			}
 			return sessionAutomationView(*item, e.runtime), nil
 		})
+	case "sessions.isolate":
+		sessionID, err := executionStringID(target, "session id")
+		if err != nil {
+			return nil, err
+		}
+		var payload sessionIsolatePayload
+		if err := decodeExecutionPayload(input.Payload, &payload); err != nil {
+			return nil, err
+		}
+		return &executionValidatedCommand{
+			preview: executionPreview(input.Handler, map[string]any{"session_id": sessionID, "reason": payload.Reason}),
+			execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+				result, err := e.service.Isolate(ctx, application.IsolateSessionCommand{
+					SessionID: sessionID, Reason: payload.Reason, Briefing: payload.Briefing,
+					Authorization: authorization,
+				})
+				if err != nil {
+					return nil, err
+				}
+				return map[string]any{
+					"session":      sessionAutomationView(*result.Session, e.runtime),
+					"workspace_id": result.Workspace.ID,
+					"work_dir":     result.Workspace.Path,
+					"branch":       result.Workspace.Branch,
+				}, nil
+			}}, nil
 	case "sessions.reopen":
 		sessionID, err := executionStringID(target, "session id")
 		if err != nil {
