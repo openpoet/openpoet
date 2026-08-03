@@ -243,10 +243,17 @@ class NotifBadge {
         return icons[type] || '<span style="color:var(--color-primary)">&#128276;</span>';
     }
 
+    // Escape for BOTH text and attribute contexts: the textContent -> innerHTML
+    // trick this used to do does NOT escape the double quote, so interpolating
+    // into an attribute truncated the value at the first `"` it contained.
     _escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text || '';
-        return div.innerHTML;
+        if (text === null || text === undefined) return '';
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
     _relativeTime(dateStr) {

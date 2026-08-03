@@ -632,10 +632,17 @@ ${clone.innerHTML}
         return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
     }
 
+    // Escape for BOTH text and attribute contexts: the textContent -> innerHTML
+    // trick this used to do does NOT escape the double quote, so interpolating
+    // into an attribute truncated the value at the first `"` it contained.
     escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text || '';
-        return div.innerHTML;
+        if (text === null || text === undefined) return '';
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 }
 
