@@ -757,3 +757,169 @@ func (s *WorkspaceService) PredictMerge(ctx context.Context, workspaceID string)
 	}
 	return &MergePrediction{Clean: false, ConflictFiles: overlap}, nil
 }
+
+// laneChangedFiles lists the files a lane changed since it diverged from the
+// main line — the lane's own contribution, which is what two lanes have to be
+// compared on. Read-only, and works for local and remote projects alike.
+func (s *WorkspaceService) laneChangedFiles(ctx context.Context, project *database.Project, branch string) ([]string, error) {
+	base, err := s.git.RunGit(ctx, project, "merge-base", "HEAD", branch)
+	if err != nil {
+		return nil, fmt.Errorf("merge-base: %w", err)
+	}
+	out, err := s.git.RunGit(ctx, project, "diff", "--name-only", strings.TrimSpace(base)+".."+branch)
+	if err != nil {
+		return nil, fmt.Errorf("diff lane side: %w", err)
+	}
+	return splitLines(out), nil
+}
+
+// LaneCollision names another lane this one shares changed files with.
+type LaneCollision struct {
+	WorkspaceID string   `json:"workspace_id"`
+	Name        string   `json:"name"`
+	Files       []string `json:"files"`
+}
+
+// MergePlanEntry is one lane's place in the integration order.
+type MergePlanEntry struct {
+	Order         int             `json:"order"`
+	WorkspaceID   string          `json:"workspace_id"`
+	Name          string          `json:"name"`
+	Branch        string          `json:"branch"`
+	ChangedFiles  []string        `json:"changed_files"`
+	Clean         bool            `json:"clean"`
+	ConflictFiles []string        `json:"conflict_files"`
+	CollidesWith  []LaneCollision `json:"collides_with"`
+}
+
+// MergePlan is a proposed integration ORDER for a project's open lanes.
+//
+// It answers the question a merge storm makes expensive to answer by trial:
+// which of these branches can go in untouched, and which two are about to fight
+// over the same file. PredictMerge alone cannot say — it compares each lane
+// against main, so two lanes that both rewrote util.go each predict "clean"
+// while being guaranteed to collide with each other.
+type MergePlan struct {
+	ProjectID int64            `json:"project_id"`
+	Entries   []MergePlanEntry `json:"entries"`
+	// Independent is the count of lanes that touch no other lane's files: they
+	// can be merged in any order, in parallel with each other.
+	Independent int `json:"independent"`
+	// RevalidateBeforeEachMerge is always true and says so out loud: every merge
+	// moves HEAD, which invalidates the `clean` verdict of every lane still
+	// queued. The ORDER stays valid (it comes from lane-vs-lane comparison, not
+	// from HEAD), but the caller must re-run PredictMerge before each merge.
+	RevalidateBeforeEachMerge bool `json:"revalidate_before_each_merge"`
+}
+
+// PlanMerges orders a project's mergeable lanes least-entangled first.
+//
+// The ordering rule is "merge what nobody else is touching, then the lanes with
+// the fewest partners". Merging an entangled lane early forces every later lane
+// to rebase around it; going in the other direction keeps the surprise
+// concentrated in the lanes that were always going to need a human.
+//
+// Everything here is read-only git — no tree is touched and nothing is merged.
+func (s *WorkspaceService) PlanMerges(ctx context.Context, projectID int64) (*MergePlan, error) {
+	project, err := s.db.GetProject(ctx, projectID)
+	if err != nil {
+		return nil, notFoundError("project_not_found", "Project not found", err)
+	}
+	lanes, err := s.db.ListWorkspaces(ctx, projectID, "", 200)
+	if err != nil {
+		return nil, err
+	}
+	plan := &MergePlan{ProjectID: projectID, Entries: []MergePlanEntry{}, RevalidateBeforeEachMerge: true}
+
+	type candidate struct {
+		lane    database.Workspace
+		changed []string
+		clean   bool
+		vsMain  []string
+	}
+	var candidates []candidate
+	for _, lane := range lanes {
+		// Only lanes that still exist and could be merged. A removed or merged
+		// lane has nothing left to integrate.
+		if lane.Status == "removed" || lane.Status == "merged" || lane.Status == "failed" {
+			continue
+		}
+		changed, err := s.laneChangedFiles(ctx, project, lane.Branch)
+		if err != nil {
+			// A lane whose branch git cannot read (pruned, mid-provision) is
+			// skipped rather than failing the whole plan — a partial order beats
+			// no answer at all.
+			continue
+		}
+		if len(changed) == 0 {
+			continue // nothing to merge
+		}
+		prediction, err := s.PredictMerge(ctx, lane.ID)
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, candidate{
+			lane: lane, changed: changed, clean: prediction.Clean, vsMain: prediction.ConflictFiles,
+		})
+	}
+
+	// Pairwise file intersection: the lane-vs-lane signal PredictMerge cannot give.
+	collisions := make(map[string][]LaneCollision, len(candidates))
+	for i := range candidates {
+		for j := range candidates {
+			if i == j {
+				continue
+			}
+			shared := intersectSorted(candidates[i].changed, candidates[j].changed)
+			if len(shared) == 0 {
+				continue
+			}
+			collisions[candidates[i].lane.ID] = append(collisions[candidates[i].lane.ID], LaneCollision{
+				WorkspaceID: candidates[j].lane.ID, Name: candidates[j].lane.Name, Files: shared,
+			})
+		}
+	}
+
+	// Least entangled first; ties broken by name so the plan is reproducible.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		di, dj := len(collisions[candidates[i].lane.ID]), len(collisions[candidates[j].lane.ID])
+		if di != dj {
+			return di < dj
+		}
+		return candidates[i].lane.Name < candidates[j].lane.Name
+	})
+
+	for idx, c := range candidates {
+		partners := collisions[c.lane.ID]
+		if partners == nil {
+			partners = []LaneCollision{}
+			plan.Independent++
+		}
+		sort.Slice(partners, func(a, b int) bool { return partners[a].Name < partners[b].Name })
+		conflicts := c.vsMain
+		if conflicts == nil {
+			conflicts = []string{}
+		}
+		plan.Entries = append(plan.Entries, MergePlanEntry{
+			Order: idx + 1, WorkspaceID: c.lane.ID, Name: c.lane.Name, Branch: c.lane.Branch,
+			ChangedFiles: c.changed, Clean: c.clean, ConflictFiles: conflicts, CollidesWith: partners,
+		})
+	}
+	return plan, nil
+}
+
+// intersectSorted returns the sorted common elements of two file lists.
+func intersectSorted(a, b []string) []string {
+	inB := make(map[string]struct{}, len(b))
+	for _, item := range b {
+		inB[item] = struct{}{}
+	}
+	var shared []string
+	for _, item := range a {
+		if _, ok := inB[item]; ok {
+			shared = append(shared, item)
+		}
+	}
+	sort.Strings(shared)
+	return shared
+}

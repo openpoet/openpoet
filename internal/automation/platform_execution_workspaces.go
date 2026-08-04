@@ -13,6 +13,9 @@ func workspacePlatformDefinitions() []PlatformCapabilityDefinition {
 	return []PlatformCapabilityDefinition{
 		executionReadCapability("workspaces.list", "workspaces", "workspaces:read"),
 		executionReadCapability("workspaces.get", "workspaces", "workspaces:read"),
+		// Read-only: plans an integration ORDER for a project's open lanes without
+		// touching any tree.
+		executionReadCapability("workspaces.plan_merges", "workspaces", "workspaces:read"),
 		executionWriteCapability("workspaces.create", "workspaces", "workspaces:write"),
 		executionDestructiveCapability("workspaces.remove", "workspaces", "workspaces:write"),
 		executionDestructiveCapability("workspaces.merge", "workspaces", "workspaces:write"),
@@ -152,6 +155,17 @@ func (e *workspacePlatformExecutor) Validate(_ context.Context, input PlatformEx
 				views = append(views, workspaceView(ws))
 			}
 			return map[string]any{"workspaces": views}, nil
+		}}, nil
+	case "workspaces.plan_merges":
+		if err := requireEmptyExecutionPayload(input.Payload); err != nil {
+			return nil, err
+		}
+		projectID := target.ProjectID
+		if projectID <= 0 {
+			return nil, platformFailure("platform_target_invalid", "project_id must be positive", false)
+		}
+		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"project_id": projectID}), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
+			return e.service.PlanMerges(ctx, projectID)
 		}}, nil
 	case "workspaces.get":
 		if err := requireEmptyExecutionPayload(input.Payload); err != nil {

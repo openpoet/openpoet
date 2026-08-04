@@ -973,6 +973,13 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return coordinatorResponse(client.Get(fmt.Sprintf("/api/coordinator/workspaces/%s/merge_preview", url.PathEscape(wsid))))
 
+	case "openpoet_plan_merges":
+		projectID := toolNumber(params["project_id"])
+		if projectID <= 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		return coordinatorResponse(client.Get(fmt.Sprintf("/api/coordinator/projects/%d/merge_plan", projectID)))
+
 	case "openpoet_merge_workspace":
 		wsid, _ := params["workspace_id"].(string)
 		if wsid == "" {

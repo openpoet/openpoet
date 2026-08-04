@@ -22,9 +22,9 @@ const (
 	// blackboard.put (exec write): +3 capabilities, +1 mutation, +2 reads.
 	// Phase 6 added environments.approve_manifest (unsafe) + workspaces.discard
 	// (destructive): +2 capabilities, +2 mutations, +0 reads.
-	expectedPlatformCapabilities = 169
+	expectedPlatformCapabilities = 170
 	expectedPlatformMutations    = 113
-	expectedPlatformReads        = 56
+	expectedPlatformReads        = 57
 )
 
 // PlatformServices is the explicit runtime composition root for Automation.
