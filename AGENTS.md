@@ -101,6 +101,14 @@ refused (`session_has_uncommitted_work`), because a lane branches from HEAD and
 would leave that work behind. It is cheapest right after a gate denial, when the
 losing session has usually written nothing yet.
 
+Integration is ordered by `workspaces.plan_merges` (read-only; MCP `plan_merges`,
+coordinator route `GET /api/coordinator/projects/{id}/merge_plan`). It exists
+because per-lane prediction cannot see lane-vs-lane: two lanes that each rewrote
+`util.go` both predict clean against main while being guaranteed to collide. The
+plan compares lanes to EACH OTHER, schedules the ones touching nobody else's
+files first, and sets `revalidate_before_each_merge` — the ORDER stays valid, but
+every merge moves HEAD, so `predict_merge` must be re-run before each one.
+
 E2E harness: `ops/lanes/e2e.sh` (real server + real git repos + fresh DB on port
 8793; $0 — synthetic sessions via the `OPENPOET_TEST_MODE` endpoint).
 

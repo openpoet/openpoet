@@ -1073,6 +1073,18 @@ func AllToolDefs() []ToolDef {
 			Context: ToolContextSession,
 		},
 		{
+			Name:        "plan_merges",
+			Description: "Order a project's open worktree lanes for integration WITHOUT touching any tree. Returns each lane with its changed_files, its prediction against main, and — the part predict_merge cannot tell you — collides_with: the other lanes that changed the SAME files. Two lanes that both rewrote util.go each predict clean against main while being guaranteed to fight each other. Lanes touching nobody else's files come first and can be merged in any order; re-run predict_merge before each actual merge, because every merge moves HEAD.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "number", Description: "Project id — must be a member of the coordinated group"},
+				},
+				Required: []string{"project_id"},
+			},
+			Context: ToolContextSession,
+		},
+		{
 			Name:        "merge_workspace",
 			Description: "Merge a workspace lane back into the main tree, spending one use of the mission's merge grant (pre-issued by the user). No grant → mission_grant_required: ask the user to grant workspaces.merge for the mission. A conflict aborts safely, lists the files, and costs nothing.",
 			InputSchema: ToolDefinitionInput{

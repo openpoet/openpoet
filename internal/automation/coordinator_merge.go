@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -80,6 +81,46 @@ func (c *coordinatorAPI) predictMerge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"workspace_id": workspaceID, "clean": prediction.Clean, "conflict_files": prediction.ConflictFiles})
+}
+
+// MergePlanner is the integration-ordering slice of the workspace service.
+type MergePlanner interface {
+	PlanMerges(ctx context.Context, projectID int64) (*application.MergePlan, error)
+}
+
+// planMerges orders a project's open lanes for integration. Free read: it runs
+// only read-only git and touches no tree. It answers what per-lane prediction
+// cannot — two lanes that each rewrote the same file both predict clean against
+// main while being guaranteed to collide with each other.
+func (c *coordinatorAPI) planMerges(w http.ResponseWriter, r *http.Request) {
+	cs, group, ok := c.requireCoordinator(w, r, nil)
+	if !ok {
+		return
+	}
+	planner, ok := c.predictor.(MergePlanner)
+	if !ok || c.predictor == nil {
+		writeError(w, http.StatusServiceUnavailable, "merge_planner_unavailable", "merge planning is unavailable", true)
+		return
+	}
+	projectID, err := strconv.ParseInt(strings.TrimSpace(chi.URLParam(r, "projectID")), 10, 64)
+	if err != nil || projectID <= 0 {
+		writeError(w, http.StatusBadRequest, "project_id_required", "a positive project id is required", false)
+		return
+	}
+	// Fail closed outside the coordinated group, exactly like every other
+	// project-scoped coordinator read.
+	actor := coordinatorSessionActor(cs.SessionID, group)
+	scope := resolveActorProjectScope(r.Context(), c.api.scopeStore, actor)
+	if scope.Restricted() && !scope.Allowed[projectID] {
+		writeError(w, http.StatusForbidden, "platform_project_out_of_scope", "the project is outside the coordinated group", false)
+		return
+	}
+	plan, err := planner.PlanMerges(r.Context(), projectID)
+	if err != nil {
+		writeApplicationReportError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
 }
 
 type mergeWorkspaceRequest struct {
