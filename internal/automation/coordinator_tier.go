@@ -130,6 +130,7 @@ func NewCoordinatorHandler(store CoordinatorStore, deps Dependencies) http.Handl
 	router.Post("/missions/{id}/status", c.updateMissionStatus)
 	router.Post("/missions/workers/attach", c.attachWorker)
 	router.Get("/workspaces/{id}/merge_preview", c.predictMerge)
+	router.Get("/projects/{projectID}/merge_plan", c.planMerges)
 	router.Post("/workspaces/{id}/merge", c.mergeWorkspace)
 	router.Get("/events/await", c.awaitEvents)
 	return router
