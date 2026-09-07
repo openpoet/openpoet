@@ -910,12 +910,6 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		if tid := toolNumber(params["task_id"]); tid > 0 {
 			body["task_id"] = tid
 		}
-		if mid := toolNumber(params["mission_id"]); mid > 0 {
-			body["mission_id"] = mid
-		}
-		if role, _ := params["role"].(string); role != "" {
-			body["role"] = role
-		}
 		for _, key := range []string{"backend", "workspace_id", "isolation", "custom_prompt", "idempotency_key"} {
 			if v, _ := params[key].(string); v != "" {
 				body[key] = v
@@ -926,45 +920,6 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		payload, _ := json.Marshal(body)
 		return coordinatorResponse(client.Post("/api/coordinator/sessions", string(payload)))
-
-	case "openpoet_start_mission":
-		goal, _ := params["goal"].(string)
-		if goal == "" {
-			return "", fmt.Errorf("goal is required")
-		}
-		body := map[string]any{"goal": goal}
-		if fence, ok := params["fence_version"]; ok {
-			body["fence_version"] = toolNumber(fence)
-		}
-		payload, _ := json.Marshal(body)
-		return coordinatorResponse(client.Post("/api/coordinator/missions", string(payload)))
-
-	case "openpoet_get_mission":
-		return coordinatorResponse(client.Get(fmt.Sprintf("/api/coordinator/missions/%d", toolNumber(params["mission_id"]))))
-
-	case "openpoet_update_mission_status":
-		status, _ := params["status"].(string)
-		body := map[string]any{"status": status}
-		if fence, ok := params["fence_version"]; ok {
-			body["fence_version"] = toolNumber(fence)
-		}
-		payload, _ := json.Marshal(body)
-		return coordinatorResponse(client.Post(fmt.Sprintf("/api/coordinator/missions/%d/status", toolNumber(params["mission_id"])), string(payload)))
-
-	case "openpoet_attach_worker":
-		sid, _ := params["session_id"].(string)
-		if sid == "" {
-			return "", fmt.Errorf("session_id is required")
-		}
-		body := map[string]any{"mission_id": toolNumber(params["mission_id"]), "session_id": sid}
-		if role, _ := params["role"].(string); role != "" {
-			body["role"] = role
-		}
-		if fence, ok := params["fence_version"]; ok {
-			body["fence_version"] = toolNumber(fence)
-		}
-		payload, _ := json.Marshal(body)
-		return coordinatorResponse(client.Post("/api/coordinator/missions/workers/attach", string(payload)))
 
 	case "openpoet_predict_merge":
 		wsid, _ := params["workspace_id"].(string)
@@ -979,18 +934,6 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 			return "", fmt.Errorf("project_id is required")
 		}
 		return coordinatorResponse(client.Get(fmt.Sprintf("/api/coordinator/projects/%d/merge_plan", projectID)))
-
-	case "openpoet_merge_workspace":
-		wsid, _ := params["workspace_id"].(string)
-		if wsid == "" {
-			return "", fmt.Errorf("workspace_id is required")
-		}
-		body := map[string]any{"mission_id": toolNumber(params["mission_id"])}
-		if fence, ok := params["fence_version"]; ok {
-			body["fence_version"] = toolNumber(fence)
-		}
-		payload, _ := json.Marshal(body)
-		return coordinatorResponse(client.Post(fmt.Sprintf("/api/coordinator/workspaces/%s/merge", url.PathEscape(wsid)), string(payload)))
 
 	case "openpoet_emit_session_report":
 		payload, _ := json.Marshal(params)
@@ -1235,18 +1178,6 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		if taskID, ok := params["task_id"].(string); ok && taskID != "" {
 			docPayload["task_id"] = taskID
-		}
-		// mission link (Phase 7.1): accept string or number, forward as string —
-		// the REST handler parses it like task_id/conversation_id.
-		switch mv := params["mission_id"].(type) {
-		case string:
-			if mv != "" {
-				docPayload["mission_id"] = mv
-			}
-		case float64:
-			if mv > 0 {
-				docPayload["mission_id"] = fmt.Sprintf("%.0f", mv)
-			}
 		}
 		payload, _ := json.Marshal(docPayload)
 		body, err := client.Post("/api/documents", string(payload))

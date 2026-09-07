@@ -119,14 +119,6 @@ func (s *semanticSessionStore) ProjectIDsForTags(_ context.Context, _ []int64) (
 	return nil, nil
 }
 
-func (s *semanticSessionStore) GetMission(_ context.Context, _ int64) (*database.Mission, error) {
-	return nil, nil
-}
-
-func (s *semanticSessionStore) UpsertMissionWorker(_ context.Context, _ *database.MissionWorker) error {
-	return nil
-}
-
 func (s *semanticSessionStore) UpdateSessionWorkspace(_ context.Context, _, _, _ string) error {
 	return nil
 }

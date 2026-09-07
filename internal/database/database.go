@@ -309,6 +309,22 @@ func (d *DB) ProjectIDsForTags(ctx context.Context, tagIDs []int64) ([]int64, er
 	return ids, nil
 }
 
+// CountActiveSessionsInProjects counts live (starting|running) sessions across
+// a set of projects — the coordinator parallelism cap's input.
+func (d *DB) CountActiveSessionsInProjects(ctx context.Context, projectIDs []int64) (int, error) {
+	if len(projectIDs) == 0 {
+		return 0, nil
+	}
+	query, args, err := sqlx.In(
+		"SELECT COUNT(*) FROM sessions WHERE status IN ('starting','running') AND project_id IN (?)", projectIDs)
+	if err != nil {
+		return 0, err
+	}
+	var count int
+	err = d.Reader().GetContext(ctx, &count, d.Rebind(query), args...)
+	return count, err
+}
+
 // Project tag assignment operations
 
 type ProjectTagWithDetails struct {

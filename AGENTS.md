@@ -88,7 +88,8 @@ Sessions choose their tree with `isolation` on `sessions.create` / `start_worker
 while free, an isolated lane once busy), `always` (its own lane unconditionally).
 Lanes are **provisioned on demand** — nothing needs pre-provisioning — and the
 create response carries `workspace_id`/`work_dir` so the caller can later
-`predict_merge` and `merge_workspace` that lane.
+`predict_merge` that lane. Merging it back is a human-approved
+`workspaces.merge` from the UI, not a session-initiated act.
 
 A session that is ALREADY running can be moved into a lane with the
 `sessions.isolate` capability (destructive tier). A runner cannot change working

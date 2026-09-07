@@ -116,10 +116,6 @@ type sessionCreatePayload struct {
 	// even when it differs from the project's backend (Phase 7.3 heterogeneous
 	// fan-out).
 	Backend string `json:"backend,omitempty"`
-	// MissionID/MissionRole enroll the session as a mission worker (Phase 7.3):
-	// briefing injected server-side, mission_workers row registered.
-	MissionID   *int64 `json:"mission_id,omitempty"`
-	MissionRole string `json:"mission_role,omitempty"`
 	// Isolation:"auto" leases an idle pooled workspace when the project's main
 	// path is busy (Phase 6 pooling), instead of requiring an explicit workspace_id.
 	Isolation string `json:"isolation,omitempty"`
@@ -328,13 +324,6 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 				return nil, platformFailure("platform_payload_invalid", "backend must be one of claude_code, copilot, acp, codex, opencode", false)
 			}
 		}
-		if payload.MissionID != nil && *payload.MissionID <= 0 {
-			return nil, platformFailure("platform_payload_invalid", "mission_id must be positive", false)
-		}
-		payload.MissionRole = strings.TrimSpace(payload.MissionRole)
-		if len(payload.MissionRole) > 100 {
-			return nil, platformFailure("platform_payload_invalid", "mission_role is too large", false)
-		}
 		startMode := "default"
 		if payload.PlanningMode {
 			startMode = "planning"
@@ -345,7 +334,6 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 			"project_id": projectID, "has_task": payload.TaskID != nil, "environment_count": len(payload.Environment),
 			"unsafe_permissions": payload.DangerouslySkipPermissions, "start_mode": startMode,
 			"workspace_id": payload.WorkspaceID, "backend": payload.Backend,
-			"mission_id": payload.MissionID, "mission_role": payload.MissionRole,
 		}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
 			authorization.AllowEnvironment = len(payload.Environment) > 0
 			authorization.AllowUnsafePermissions = payload.DangerouslySkipPermissions
@@ -361,8 +349,6 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 				WorkspaceID:         payload.WorkspaceID,
 				Isolation:           payload.Isolation,
 				Backend:             payload.Backend,
-				MissionID:           payload.MissionID,
-				MissionRole:         payload.MissionRole,
 				Authorization:       authorization,
 			})
 			if err != nil {

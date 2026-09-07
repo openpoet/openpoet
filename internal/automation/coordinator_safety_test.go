@@ -3,15 +3,12 @@ package automation
 import (
 	"context"
 	"testing"
-	"time"
-
-	"openpoet/internal/database"
 )
 
-// TestMissionParallelCapAndBudget: the parallelism cap counts live sessions in
-// the group's projects; the mission budget trips on wall clock; defaults apply
-// when settings_json is absent.
-func TestMissionParallelCapAndBudget(t *testing.T) {
+// TestCoordinatorParallelCap: the parallelism cap counts live sessions in the
+// group's projects; the default applies when settings_json is absent, and
+// raising max_parallel releases it.
+func TestCoordinatorParallelCap(t *testing.T) {
 	f := newCoordinatorFixture(t)
 	ctx := context.Background()
 	api := &coordinatorAPI{store: f.db}
@@ -19,55 +16,23 @@ func TestMissionParallelCapAndBudget(t *testing.T) {
 	// No settings: default max_parallel=3; two live sessions → under cap.
 	f.mintSession(t, f.memberProjectID)
 	f.mintSession(t, f.memberProjectID)
-	violation, err := api.checkSpawnSafety(ctx, f.tagID, nil, time.Now().UTC())
+	violation, err := api.checkSpawnSafety(ctx, f.tagID)
 	if err != nil || violation != nil {
 		t.Fatalf("2 live sessions must pass the default cap: v=%v err=%v", violation, err)
 	}
 	// Third live session hits the default cap.
 	f.mintSession(t, f.memberProjectID)
-	violation, err = api.checkSpawnSafety(ctx, f.tagID, nil, time.Now().UTC())
-	if err != nil || violation == nil || violation.Code != "mission_parallel_cap" {
+	violation, err = api.checkSpawnSafety(ctx, f.tagID)
+	if err != nil || violation == nil || violation.Code != "coordinator_parallel_cap" {
 		t.Fatalf("default cap (3) must trip: v=%v err=%v", violation, err)
 	}
 	// Raising max_parallel releases it.
 	if _, err := f.db.Exec(`UPDATE tags SET settings_json='{"max_parallel":10}' WHERE id=?`, f.tagID); err != nil {
 		t.Fatal(err)
 	}
-	violation, err = api.checkSpawnSafety(ctx, f.tagID, nil, time.Now().UTC())
+	violation, err = api.checkSpawnSafety(ctx, f.tagID)
 	if err != nil || violation != nil {
 		t.Fatalf("raised cap must pass: v=%v err=%v", violation, err)
-	}
-
-	// Wall-clock budget: 0 minutes → any mission age exceeds it.
-	if _, err := f.db.Exec(`UPDATE tags SET settings_json='{"max_parallel":10,"wall_clock_minutes":-1}' WHERE id=?`, f.tagID); err != nil {
-		t.Fatal(err)
-	}
-	mission, err := f.db.CreateMission(ctx, "goal", f.tagID, "sess-c")
-	if err != nil {
-		t.Fatal(err)
-	}
-	violation, err = api.checkSpawnSafety(ctx, f.tagID, mission, time.Now().UTC().Add(time.Minute))
-	if err != nil || violation == nil || violation.Code != "mission_budget_exceeded" {
-		t.Fatalf("wall-clock budget must trip: v=%v err=%v", violation, err)
-	}
-
-	// Token budget: roster session with recorded usage above the budget.
-	if _, err := f.db.Exec(`UPDATE tags SET settings_json='{"max_parallel":10,"token_budget":10}' WHERE id=?`, f.tagID); err != nil {
-		t.Fatal(err)
-	}
-	workerID, _ := f.mintSession(t, f.memberProjectID)
-	if err := f.db.UpsertMissionWorker(ctx, &database.MissionWorker{
-		MissionID: mission.ID, ProjectID: f.memberProjectID, SessionID: workerID,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.db.Exec(`INSERT INTO token_usage (session_id, project_id, model, source, input_tokens, output_tokens)
-		VALUES (?, ?, 'test', 'claude_code', 100, 100)`, workerID, f.memberProjectID); err != nil {
-		t.Fatal(err)
-	}
-	violation, err = api.checkSpawnSafety(ctx, f.tagID, mission, time.Now().UTC())
-	if err != nil || violation == nil || violation.Code != "mission_budget_exceeded" {
-		t.Fatalf("token budget must trip: v=%v err=%v", violation, err)
 	}
 }
 
