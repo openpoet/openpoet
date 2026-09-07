@@ -47,9 +47,6 @@ type SessionStore interface {
 	// into its own lane.
 	UpdateSessionWorkspace(ctx context.Context, sessionID, workspaceID, workDir string) error
 	SessionWriteFootprint(ctx context.Context, sessionID string) ([]string, error)
-	// Phase 7.3 mission enrollment.
-	GetMission(ctx context.Context, id int64) (*database.Mission, error)
-	UpsertMissionWorker(ctx context.Context, worker *database.MissionWorker) error
 	ProjectIDsForTags(ctx context.Context, tagIDs []int64) ([]int64, error)
 }
 
@@ -231,12 +228,7 @@ type CreateSessionCommand struct {
 	Isolation string
 	// Backend overrides the project's backend for THIS session (Phase 7.3 —
 	// heterogeneous fan-out: e.g. a codex worker inside a claude_code project).
-	Backend string
-	// MissionID/MissionRole enroll the session as a mission worker: the server
-	// injects the mission briefing (OPENPOET_MISSION_ID + system-prompt) and
-	// registers the mission_workers row.
-	MissionID     *int64
-	MissionRole   string
+	Backend       string
 	Authorization ActionAuthorization
 }
 
@@ -378,41 +370,6 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 		}
 		injectTaskEnvironment(environment, linkedTask, false)
 	}
-	var mission *database.Mission
-	if command.MissionID != nil {
-		if *command.MissionID <= 0 {
-			return nil, validationError("invalid_mission_id", "Mission ID must be positive")
-		}
-		mission, err = s.store.GetMission(ctx, *command.MissionID)
-		if err != nil {
-			return nil, err
-		}
-		if mission == nil {
-			return nil, validationError("mission_not_found", "Mission not found")
-		}
-		if mission.Status != "active" {
-			return nil, validationError("mission_not_active", "Mission is not active")
-		}
-		// The target project must belong to the mission's coordination group —
-		// otherwise any sessions:write client could enroll itself in a foreign
-		// mission, polluting the roster AND reading the goal through the
-		// project_filter isolation.
-		memberIDs, memberErr := s.store.ProjectIDsForTags(ctx, []int64{mission.GroupTagID})
-		if memberErr != nil {
-			return nil, memberErr
-		}
-		isMember := false
-		for _, id := range memberIDs {
-			if id == project.ID {
-				isMember = true
-				break
-			}
-		}
-		if !isMember {
-			return nil, validationError("mission_project_not_in_group", "The project is not a member of the mission's coordination group")
-		}
-		injectMissionEnvironment(environment, mission, command.MissionRole)
-	}
 	initialPrompt, err := resolveInitialSessionPrompt(command, linkedTask != nil)
 	if err != nil {
 		return nil, err
@@ -501,22 +458,6 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 		}
 	}
 	s.recordLineageAndWorkRun(ctx, command, created)
-	if command.MissionID != nil && *command.MissionID > 0 {
-		// Best-effort roster row — a registry failure never fails the session.
-		// The lane id comes from the RESOLVED workspace (the returned session
-		// struct does not carry the persisted workspace column).
-		laneID := ""
-		if workspace != nil {
-			laneID = workspace.ID
-		}
-		if err := s.store.UpsertMissionWorker(ctx, &database.MissionWorker{
-			MissionID: *command.MissionID, ProjectID: created.ProjectID,
-			Backend: created.Backend, SessionID: created.ID,
-			WorkspaceID: laneID, Role: command.MissionRole, Status: "running",
-		}); err != nil {
-			log.Printf("[Sessions] mission worker registration failed for %s: %v", created.ID, err)
-		}
-	}
 	s.publish(ctx, SessionChange{Action: "created", Session: created, ID: created.ID, Actor: command.Authorization.Actor})
 	return created, nil
 }
@@ -548,17 +489,12 @@ func (s *SessionService) recordLineageAndWorkRun(ctx context.Context, command Cr
 	if title == "Session " {
 		title = "Spawned session"
 	}
-	correlation := ""
-	if command.MissionID != nil && *command.MissionID > 0 {
-		correlation = fmt.Sprintf("mission:%d", *command.MissionID)
-	}
 	if _, err := s.creation.WorkRuns.Start(ctx, StartWorkRunCommand{
 		Title:           title,
 		Source:          "coordinator",
 		ExpectedMinutes: 60,
 		SessionID:       &sid,
 		ExecutionTarget: &database.WorkRunExecutionTarget{Type: "session", ID: sid},
-		CorrelationID:   correlation,
 		Actor:           actor,
 	}); err != nil {
 		log.Printf("[Sessions] work_run for spawned session %s failed: %v", sid, err)
@@ -1226,32 +1162,6 @@ func knownSessionBackend(backend string) bool {
 		return true
 	}
 	return false
-}
-
-// injectMissionEnvironment enrolls the session as a mission worker: the id
-// rides the environment and the briefing rides OPENPOET_APPEND_SYSTEM_PROMPT —
-// which reaches EVERY backend, local and remote (it becomes
-// --append-system-prompt / developerInstructions), so codex/opencode get the
-// docs steering here that their bidirectional AGENTS.md cannot carry.
-// Single-line by contract (Windows cmd quoting).
-func injectMissionEnvironment(environment map[string]string, mission *database.Mission, role string) {
-	environment["OPENPOET_MISSION_ID"] = fmt.Sprintf("%d", mission.ID)
-	role = strings.TrimSpace(role)
-	if role == "" {
-		role = "worker"
-	}
-	briefing := fmt.Sprintf(
-		"You are a worker of OpenPoet mission #%d (role: %s). Mission goal: %s. "+
-			"Protocol: (1) at every meaningful milestone call openpoet_emit_session_report with a DENSE report "+
-			"(objective, summary, decisions, files, verification, blockers, needs_from_coordinator, next) — the coordinator reads reports, not your transcript; "+
-			"(2) publish documentation as OpenPoet Docs via openpoet_create_document with mission_id=%d, never as harness-native artifacts; "+
-			"(3) stay inside your assigned scope and surface conflicts instead of resolving them unilaterally.",
-		mission.ID, role, sanitizeSingleLine(mission.Goal), mission.ID)
-	if existing := environment["OPENPOET_APPEND_SYSTEM_PROMPT"]; existing != "" {
-		environment["OPENPOET_APPEND_SYSTEM_PROMPT"] = existing + " " + briefing
-	} else {
-		environment["OPENPOET_APPEND_SYSTEM_PROMPT"] = briefing
-	}
 }
 
 func injectTaskEnvironment(environment map[string]string, task *database.ProjectTask, resumed bool) {

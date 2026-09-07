@@ -465,16 +465,13 @@ func main() {
 	if err := configsync.EnsureSessionReportSkill(context.Background(), db); err != nil {
 		log.Printf("[Coordinator] ensure session-report skill: %v", err)
 	}
-	if err := configsync.EnsureMissionCoordinatorSkill(context.Background(), db); err != nil {
-		log.Printf("[Coordinator] ensure mission-coordinator skill: %v", err)
-	}
 
 	// Phase 7.4: TOFU host-key ledger for every SSH surface.
 	sshauth.SetKnownHostStore(db)
 
 	// Phase 7.4: remote transport drops get ONE reconnect attempt (backoff 5s)
 	// through the same auto-restore path a daemon restart uses, instead of
-	// killing the session (and its mission worker) on a network blip.
+	// killing the session on a network blip.
 	remoteRetryMu := sync.Mutex{}
 	remoteLastRetry := map[string]time.Time{}
 	sessionMgr.OnRemoteSessionDropped = func(sessionID string) bool {
@@ -1039,12 +1036,6 @@ func main() {
 
 		// Temp Documents
 		r.Post("/documents", api.CreateTempDocument)
-		r.Post("/missions", api.CreateMissionUI)
-		r.Get("/mission-groups", api.ListMissionGroups)
-		r.Post("/missions/{id}/grants", api.CreateMissionGrant)
-		r.Post("/missions/{id}/status", api.UpdateMissionStatusUI)
-		r.Get("/missions", api.ListMissions)
-		r.Get("/missions/{id}/panel", api.GetMissionPanel)
 		r.Get("/documents/{id}", api.GetTempDocument)
 
 		// AI
@@ -1251,36 +1242,6 @@ func main() {
 			log.Printf("[Workspace] orphan lease sweep failed: %v", err)
 		} else if freed > 0 {
 			log.Printf("[Workspace] freed %d orphaned workspace lease(s)", freed)
-		}
-		// Mission resume (Phase 7.3): missions are durable — after the session
-		// restore pass, announce every still-active mission on the outbox with
-		// its current roster. The coordinator session (restored or re-opened)
-		// wakes via await_events, re-elects its lease lazily and carries on.
-		if missions, err := db.ListActiveMissions(restoreCtx); err != nil {
-			log.Printf("[Mission] resume sweep failed: %v", err)
-		} else {
-			for _, mission := range missions {
-				workers, _ := db.ListMissionWorkers(restoreCtx, mission.ID)
-				roster := make([]map[string]any, 0, len(workers))
-				for _, worker := range workers {
-					status := worker.Status
-					if sess, sessErr := db.GetSession(restoreCtx, worker.SessionID); sessErr == nil && sess != nil {
-						status = sess.Status
-					}
-					roster = append(roster, map[string]any{
-						"session_id": worker.SessionID, "project_id": worker.ProjectID,
-						"role": worker.Role, "status": status,
-					})
-				}
-				if err := db.AppendMissionEvent(restoreCtx, "mission.resumed", mission.ID, map[string]any{
-					"mission_id": mission.ID, "goal": mission.Goal,
-					"coordinator_session_id": mission.CoordinatorSessionID, "workers": roster,
-				}); err != nil {
-					log.Printf("[Mission] resume event for mission %d failed: %v", mission.ID, err)
-				} else {
-					log.Printf("[Mission] mission %d resumed (%d workers announced)", mission.ID, len(roster))
-				}
-			}
 		}
 	}()
 

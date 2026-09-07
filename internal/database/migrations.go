@@ -89,6 +89,7 @@ var migrations = []Migration{
 	{Version: 71, Description: "maestro: missions + mission_workers (goal-driven orchestration registry; one active mission per coordination group)", Up: migrateV71},
 	{Version: 72, Description: "ssh hardening: ssh_known_hosts TOFU ledger (first contact records, later contacts verify, mismatch fails closed)", Up: migrateV72},
 	{Version: 73, Description: "maestro integration: mission_grants (multi-use, mission-scoped human authority for destructive capabilities like workspaces.merge)", Up: migrateV73},
+	{Version: 74, Description: "retire missions: drop missions/mission_workers/mission_grants and the mission-coordinator skill (the coordinator tier stays)", Up: migrateV74},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -1997,6 +1998,34 @@ func migrateV73(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV73 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV74 — retires the mission concept (Maestro phases 7.1–7.6). The
+// registry was never adopted: goals lived in a coordinator session's prompt, no
+// watchdog guaranteed progress, and the human-facing controls (grants, budgets)
+// never reached the UI. The coordinator tier itself stays — electing a lease and
+// spawning/steering group workers works without a mission wrapper.
+//
+// V71/V73 are left untouched (migrations are additive by contract); this drops
+// what they created. temp_documents.mission_id (V69) survives as a vestigial
+// nullable column: dropping it would rewrite the table for no gain and nothing
+// writes it anymore.
+func migrateV74(tx *sqlx.Tx) error {
+	stmts := []string{
+		`DROP TABLE IF EXISTS mission_grants`,
+		`DROP TABLE IF EXISTS mission_workers`,
+		`DROP TABLE IF EXISTS missions`,
+		// The built-in coordinator playbook skill went with it. Deleting the row
+		// is what removes the materialized copy from every synced project (the
+		// config syncer prunes skill directories with no DB row).
+		`DELETE FROM skills WHERE name = 'mission-coordinator'`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV74 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

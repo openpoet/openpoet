@@ -7,12 +7,12 @@ import (
 	"testing"
 )
 
-// TestDocsInstructionBlockPerHarness: the steering block names the tool and the
-// mission link, and the managed upsert is idempotent, preserves user content,
-// and replaces (never duplicates) the marker-delimited section on re-sync.
+// TestDocsInstructionBlockPerHarness: the steering block names the tool, and
+// the managed upsert is idempotent, preserves user content, and replaces
+// (never duplicates) the marker-delimited section on re-sync.
 func TestDocsInstructionBlockPerHarness(t *testing.T) {
 	block := OpenPoetDocsInstructionBlock()
-	for _, token := range []string{"openpoet_create_document", "mission_id", docsSteeringBegin, docsSteeringEnd} {
+	for _, token := range []string{"openpoet_create_document", docsSteeringBegin, docsSteeringEnd} {
 		if !strings.Contains(block, token) {
 			t.Fatalf("steering block missing %q", token)
 		}

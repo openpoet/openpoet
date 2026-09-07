@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // TestConcurrentWritersNoDatabaseLocked: hammer the write handle from many
@@ -37,7 +39,7 @@ func TestConcurrentWritersNoDatabaseLocked(t *testing.T) {
 			}); err != nil {
 				errCh <- fmt.Errorf("blackboard %d: %w", i, err)
 			}
-			if err := db.AppendMissionEvent(ctx, "test.hammer", int64(i), map[string]any{"i": i}); err != nil {
+			if err := appendHammerEvent(ctx, db, i); err != nil {
 				errCh <- fmt.Errorf("outbox %d: %w", i, err)
 			}
 			if _, _, err := db.ReadEventOutboxPage(ctx, 0, 50); err != nil {
@@ -97,7 +99,7 @@ func TestReadPoolServesReadsDuringWrite(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
-	if err := db.AppendMissionEvent(ctx, "test.seed", 1, map[string]any{"seed": true}); err != nil {
+	if err := appendHammerEvent(ctx, db, 1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -122,4 +124,23 @@ func TestReadPoolServesReadsDuringWrite(t *testing.T) {
 	case <-time.After(4 * time.Second):
 		t.Fatal("read starved behind the write connection — read pool not effective")
 	}
+}
+
+// appendHammerEvent appends one outbox event in its own transaction — the write
+// side of the hammer, exercising the single write connection under contention.
+func appendHammerEvent(ctx context.Context, db *DB, i int) error {
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := AppendEventOutbox(ctx, tx, EventOutboxAppend{
+		EventID: uuid.NewString(), EventType: "test.hammer",
+		AggregateType: "test", AggregateID: fmt.Sprintf("%d", i),
+		Actor: "t", SchemaVersion: 1, PayloadJSON: fmt.Sprintf(`{"i":%d}`, i),
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

@@ -1559,7 +1559,7 @@ func (cs *ConfigSyncer) syncToLocalCodex(ctx context.Context, project *database.
 	// synced bidirectionally with the memory doc — upserting the steering block
 	// there would leak it into the user's memory doc and root CLAUDE.md. These
 	// harnesses get the steering via the per-session system-prompt channel
-	// (OPENPOET_APPEND_SYSTEM_PROMPT) with the mission briefing in Phase 7.3.
+	// (OPENPOET_APPEND_SYSTEM_PROMPT).
 
 	return nil
 }
@@ -1618,7 +1618,7 @@ func (cs *ConfigSyncer) syncToLocalOpenCode(ctx context.Context, project *databa
 	// synced bidirectionally with the memory doc — upserting the steering block
 	// there would leak it into the user's memory doc and root CLAUDE.md. These
 	// harnesses get the steering via the per-session system-prompt channel
-	// (OPENPOET_APPEND_SYSTEM_PROMPT) with the mission briefing in Phase 7.3.
+	// (OPENPOET_APPEND_SYSTEM_PROMPT).
 
 	return nil
 }

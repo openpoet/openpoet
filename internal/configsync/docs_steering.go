@@ -6,9 +6,8 @@ import (
 )
 
 // Phase 7.1 (Maestro): every harness is steered to publish documentation as
-// OpenPoet Docs (openpoet_create_document) — linked to the mission when one is
-// running — instead of harness-native artifacts, so mission output lands in one
-// durable, user-visible place.
+// OpenPoet Docs (openpoet_create_document) instead of harness-native artifacts,
+// so output lands in one durable, user-visible place.
 
 const docsSteeringBegin = "<!-- OPENPOET:BEGIN docs-steering -->"
 const docsSteeringEnd = "<!-- OPENPOET:END docs-steering -->"
@@ -24,9 +23,7 @@ func OpenPoetDocsInstructionBlock() string {
 When you produce documentation, reports, plans, or any long-form deliverable,
 create it as an OpenPoet Doc with the ` + "`openpoet_create_document`" + ` tool
 (or ` + "`$OPENPOET_BIN cli call openpoet_create_document ...`" + ` when MCP is
-unavailable) instead of harness-native artifacts or loose files. If you are
-working as part of an orchestration mission, pass ` + "`mission_id`" + ` so the
-document stays linked to the mission (missão) that produced it.
+unavailable) instead of harness-native artifacts or loose files.
 ` + docsSteeringEnd + "\n"
 }
 
