@@ -48,6 +48,10 @@ CLAUDE.md
 # Run configs
 .run/
 
+# Live session credential written next to the dev DB (opav1_ bearer). It was
+# only in .git/info/exclude, which is local — a fresh clone would not ignore it.
+/coordinator.token
+
 # Scratch dir of the isolation E2E harness (ops/lanes/e2e.sh): throwaway git
 # repos, a sandbox DB and server logs. Never part of the tree.
 .sandbox/
