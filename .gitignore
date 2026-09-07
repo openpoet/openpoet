@@ -16,7 +16,17 @@ package.json
 package-lock.json
 
 # Screenshots / test files
-#*.png
+#
+# Screenshots are ignored by DEFAULT and the few real assets are opted back in
+# below. Commenting this rule out (to let an icon through) is what leaked 65
+# debug screenshots of client projects into a public repo — add an exception
+# here instead, never disable the rule.
+*.png
+*.jpg
+*.jpeg
+!docs/images/*.png
+!web/static/icon-*.png
+!web/static/badge-*.png
 
 # IDE / Editor
 .idea/
