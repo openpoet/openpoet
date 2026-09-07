@@ -443,7 +443,6 @@ func AllToolDefs() []ToolDef {
 					"content":         {Type: "string", Description: "Full markdown content of the document"},
 					"conversation_id": {Type: "string", Description: "Current conversation ID (if available)"},
 					"task_id":         {Type: "string", Description: "Optional task ID to link this document to a task"},
-					"mission_id":      {Type: "string", Description: "Optional mission ID to link this document to an orchestration mission (Maestro)"},
 				},
 				Required: []string{"content"},
 			},
@@ -924,9 +923,9 @@ func AllToolDefs() []ToolDef {
 			Context: ToolContextBoth,
 		},
 		// ──── Coordinator tier (Phase 7.1 — Maestro) ────
-		// The session that starts a mission elects itself coordinator of a
-		// coordination group and gains scoped cross-project reach. Local and
-		// remote (SSH) projects participate identically.
+		// A session elects itself coordinator of a coordination group and gains
+		// scoped cross-project reach. Local and remote (SSH) projects
+		// participate identically.
 		{
 			Name:        "coordinator_elect",
 			Description: "Elect this session as the coordinator of a coordination group (or renew the lease it already holds). Returns the fence_version that MUST accompany every coordinator mutation.",
@@ -995,68 +994,12 @@ func AllToolDefs() []ToolDef {
 					"task_id":         {Type: "number", Description: "Optional task to bind the worker to"},
 					"backend":         {Type: "string", Description: "Optional backend override (claude_code, codex, copilot, acp, opencode); defaults to the project's backend"},
 					"workspace_id":    {Type: "string", Description: "Optional existing workspace (worktree lane) to run in"},
-					"isolation":       {Type: "string", Description: "Working-tree policy, provisioned on demand: 'auto' = main checkout while free, isolated lane once busy; 'always' = its own lane unconditionally (pick this when two workers of the mission will touch the same files); 'never' (default) = main checkout. The response returns workspace_id/work_dir so you can predict_merge and merge_workspace this lane later."},
+					"isolation":       {Type: "string", Description: "Working-tree policy, provisioned on demand: 'auto' = main checkout while free, isolated lane once busy; 'always' = its own lane unconditionally (pick this when two workers will touch the same files); 'never' (default) = main checkout. The response returns workspace_id/work_dir so you can predict_merge that lane later."},
 					"custom_prompt":   {Type: "string", Description: "Optional initial brief for the worker"},
-					"mission_id":      {Type: "number", Description: "Enroll the worker in this mission (briefing injected server-side)"},
-					"role":            {Type: "string", Description: "Worker role label within the mission"},
 					"idempotency_key": {Type: "string", Description: "Optional spawn fence: retrying with the same key returns the SAME session instead of double-spawning"},
 					"dry_run":         {Type: "boolean", Description: "Validate without creating the session"},
 				},
 				Required: []string{"project_id", "fence_version"},
-			},
-			Context: ToolContextSession,
-		},
-		{
-			Name:        "start_mission",
-			Description: "Start a goal-driven mission for the coordinated group (this session becomes the mission's coordinator). One active mission per group. Requires the current fence_version.",
-			InputSchema: ToolDefinitionInput{
-				Type: "object",
-				Properties: map[string]ToolPropertySchema{
-					"goal":          {Type: "string", Description: "The mission goal (what done looks like)"},
-					"fence_version": {Type: "number", Description: "Current fence token from coordinator_elect/status"},
-				},
-				Required: []string{"goal", "fence_version"},
-			},
-			Context: ToolContextSession,
-		},
-		{
-			Name:        "get_mission",
-			Description: "Read a mission of the coordinated group: goal, status, and the worker roster (session, project, backend, role, status, last_report_ref).",
-			InputSchema: ToolDefinitionInput{
-				Type: "object",
-				Properties: map[string]ToolPropertySchema{
-					"mission_id": {Type: "number", Description: "Mission id"},
-				},
-				Required: []string{"mission_id"},
-			},
-			Context: ToolContextSession,
-		},
-		{
-			Name:        "update_mission_status",
-			Description: "Transition a mission of the coordinated group (active|paused|completed|failed|archived). Requires the current fence_version.",
-			InputSchema: ToolDefinitionInput{
-				Type: "object",
-				Properties: map[string]ToolPropertySchema{
-					"mission_id":    {Type: "number", Description: "Mission id"},
-					"status":        {Type: "string", Description: "active, paused, completed, failed or archived"},
-					"fence_version": {Type: "number", Description: "Current fence token"},
-				},
-				Required: []string{"mission_id", "status", "fence_version"},
-			},
-			Context: ToolContextSession,
-		},
-		{
-			Name:        "attach_worker",
-			Description: "Adopt an EXISTING group session into a mission's worker roster (workers spawned via start_worker enroll automatically). Backfills its last dense report.",
-			InputSchema: ToolDefinitionInput{
-				Type: "object",
-				Properties: map[string]ToolPropertySchema{
-					"mission_id":    {Type: "number", Description: "Mission id"},
-					"session_id":    {Type: "string", Description: "Existing session to adopt (must belong to the group)"},
-					"role":          {Type: "string", Description: "Worker role label (e.g. impl, qa)"},
-					"fence_version": {Type: "number", Description: "Current fence token"},
-				},
-				Required: []string{"mission_id", "session_id", "fence_version"},
 			},
 			Context: ToolContextSession,
 		},
@@ -1081,20 +1024,6 @@ func AllToolDefs() []ToolDef {
 					"project_id": {Type: "number", Description: "Project id — must be a member of the coordinated group"},
 				},
 				Required: []string{"project_id"},
-			},
-			Context: ToolContextSession,
-		},
-		{
-			Name:        "merge_workspace",
-			Description: "Merge a workspace lane back into the main tree, spending one use of the mission's merge grant (pre-issued by the user). No grant → mission_grant_required: ask the user to grant workspaces.merge for the mission. A conflict aborts safely, lists the files, and costs nothing.",
-			InputSchema: ToolDefinitionInput{
-				Type: "object",
-				Properties: map[string]ToolPropertySchema{
-					"workspace_id":  {Type: "string", Description: "Workspace (lane) id to merge"},
-					"mission_id":    {Type: "number", Description: "Mission whose grant authorizes the merge"},
-					"fence_version": {Type: "number", Description: "Current fence token"},
-				},
-				Required: []string{"workspace_id", "mission_id", "fence_version"},
 			},
 			Context: ToolContextSession,
 		},

@@ -36,14 +36,6 @@ func (s *automationStartSessionStore) ProjectIDsForTags(_ context.Context, _ []i
 	return nil, nil
 }
 
-func (s *automationStartSessionStore) GetMission(_ context.Context, _ int64) (*database.Mission, error) {
-	return nil, nil
-}
-
-func (s *automationStartSessionStore) UpsertMissionWorker(_ context.Context, _ *database.MissionWorker) error {
-	return nil
-}
-
 func (s *automationStartSessionStore) UpdateSessionWorkspace(_ context.Context, _, _, _ string) error {
 	return nil
 }

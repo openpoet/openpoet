@@ -16,8 +16,8 @@ import (
 	"openpoet/internal/sessiontoken"
 )
 
-// Phase 7.1 (Maestro): the coordinator tier. The session that starts a mission
-// elects itself coordinator of a coordination group (a tag with coordination=1)
+// Phase 7.1 (Maestro): the coordinator tier. A session elects itself
+// coordinator of a coordination group (a tag with coordination=1)
 // by CAS-acquiring a lease on the group blackboard. While it holds the lease it
 // acts through a scoped SESSION actor — {Type:"session", ProjectFilter:
 // {"tag_ids":[group]}} — so every existing enforcement surface (central
@@ -125,13 +125,8 @@ func NewCoordinatorHandler(store CoordinatorStore, deps Dependencies) http.Handl
 	router.Post("/sessions/{id}/input", c.sendToWorker)
 	router.Get("/sessions/{id}/wait", c.waitForSession)
 	router.Get("/sessions/{id}/report", c.getWorkerReport)
-	router.Post("/missions", c.startMission)
-	router.Get("/missions/{id}", c.getMission)
-	router.Post("/missions/{id}/status", c.updateMissionStatus)
-	router.Post("/missions/workers/attach", c.attachWorker)
 	router.Get("/workspaces/{id}/merge_preview", c.predictMerge)
 	router.Get("/projects/{projectID}/merge_plan", c.planMerges)
-	router.Post("/workspaces/{id}/merge", c.mergeWorkspace)
 	router.Get("/events/await", c.awaitEvents)
 	return router
 }
@@ -466,10 +461,6 @@ type coordinatorSpawnRequest struct {
 	WorkspaceID  string `json:"workspace_id"`
 	Isolation    string `json:"isolation"`
 	CustomPrompt string `json:"custom_prompt"`
-	// MissionID/Role enroll the worker in a mission of the coordinated group
-	// (briefing injected server-side; roster row registered at create).
-	MissionID int64  `json:"mission_id"`
-	Role      string `json:"role"`
 	// IdempotencyKey fences retried spawns: a replay returns the SAME session
 	// instead of double-spawning (blackboard-backed, 24h TTL).
 	IdempotencyKey string `json:"idempotency_key"`
@@ -494,18 +485,6 @@ func (c *coordinatorAPI) startWorker(w http.ResponseWriter, r *http.Request) {
 	cs, group, ok := c.requireCoordinator(w, r, req.FenceVersion)
 	if !ok {
 		return
-	}
-	var mission *database.Mission
-	if req.MissionID != 0 {
-		store, storeOK := c.missions()
-		if !storeOK {
-			writeError(w, http.StatusServiceUnavailable, "mission_store_unavailable", "the mission store is unavailable", true)
-			return
-		}
-		mission = c.missionForGroup(w, r, store, req.MissionID, group)
-		if mission == nil {
-			return
-		}
 	}
 	// Spawn idempotency fence FIRST: a replay of an already-completed spawn is
 	// side-effect-free and must return the recorded session even when the cap
@@ -533,21 +512,14 @@ func (c *coordinatorAPI) startWorker(w http.ResponseWriter, r *http.Request) {
 		}
 		reservedVersion = version
 	}
-	// Safety nets (Phase 7.4): parallelism cap + mission budget. The anomaly
-	// auto-pause only fires on REAL spawns (a dry run is a declared probe).
-	if !c.enforceSpawnSafety(w, r, group, mission, !req.DryRun) {
+	// Safety net (Phase 7.4): the group's parallelism cap.
+	if !c.enforceSpawnSafety(w, r, group) {
 		if reservedVersion > 0 {
 			c.releaseSpawnKey(r.Context(), group, idempotencyKey, cs.SessionID, reservedVersion)
 		}
 		return
 	}
 	payload := map[string]any{}
-	if req.MissionID != 0 {
-		payload["mission_id"] = req.MissionID
-		if strings.TrimSpace(req.Role) != "" {
-			payload["mission_role"] = strings.TrimSpace(req.Role)
-		}
-	}
 	if req.TaskID != nil {
 		payload["task_id"] = *req.TaskID
 	}

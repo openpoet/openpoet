@@ -2,9 +2,6 @@ package automation
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,23 +12,18 @@ import (
 	"openpoet/internal/database"
 )
 
-// Phase 7.5 (Maestro integration): the conversational merge gate. Merging a
-// lane is destructive human-tier authority; the coordinator spends a
-// mission-scoped multi-use grant (V73) that the user pre-issued — no grant, no
-// merge, and the typed refusal tells the coordinator exactly what to ask for.
-// Prediction (git merge-tree) is a free read so the coordinator negotiates
-// with facts ("lane A merges clean, lane B collides on util.go").
+// Phase 7.5: merge FORECASTING for the coordinator tier. Prediction (git
+// merge-tree) and ordering are free reads, so a coordinator negotiates
+// integration with facts ("lane A merges clean, lane B collides on util.go").
+//
+// Performing the merge is deliberately NOT here: it is destructive and needs
+// human authority. Mission grants used to supply it; with missions retired
+// (V74) the merge itself runs through the platform's approved capability
+// surface (workspaces.merge from the UI), not from a session's own initiative.
 
 // MergePredictor is the prediction slice of the workspace service.
 type MergePredictor interface {
 	PredictMerge(ctx context.Context, workspaceID string) (*application.MergePrediction, error)
-}
-
-// missionGrantStore is the V73 grant ledger. *database.DB satisfies it.
-type missionGrantStore interface {
-	PeekMissionGrant(ctx context.Context, missionID int64, capability string) error
-	ConsumeMissionGrantUse(ctx context.Context, missionID int64, capability string) (int64, error)
-	RefundMissionGrantUse(ctx context.Context, grantID int64) error
 }
 
 // workspaceProjectStore resolves a workspace's project for scope checks.
@@ -121,105 +113,4 @@ func (c *coordinatorAPI) planMerges(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, plan)
-}
-
-type mergeWorkspaceRequest struct {
-	MissionID    int64  `json:"mission_id"`
-	FenceVersion *int64 `json:"fence_version"`
-}
-
-// mergeWorkspace is the conversational merge gate: fence-checked, grant-spent,
-// conflict-safe (the underlying Merge aborts and reports files on conflict —
-// and a conflict does NOT spend a grant use).
-func (c *coordinatorAPI) mergeWorkspace(w http.ResponseWriter, r *http.Request) {
-	var req mergeWorkspaceRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.MissionID <= 0 {
-		writeError(w, http.StatusBadRequest, "mission_id_required", "a mission_id is required (merge authority is mission-scoped)", false)
-		return
-	}
-	if req.FenceVersion == nil {
-		writeError(w, http.StatusBadRequest, "coordinator_fence_required", "a fence_version is required for coordinator mutations", false)
-		return
-	}
-	cs, group, ok := c.requireCoordinator(w, r, req.FenceVersion)
-	if !ok {
-		return
-	}
-	missions, ok := c.missions()
-	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "mission_store_unavailable", "the mission store is unavailable", true)
-		return
-	}
-	mission := c.missionForGroup(w, r, missions, req.MissionID, group)
-	if mission == nil {
-		return
-	}
-	if mission.Status != "active" {
-		writeError(w, http.StatusConflict, "mission_not_active", "the mission is not active — grants only spend on running missions", false)
-		return
-	}
-	workspaceID := strings.TrimSpace(chi.URLParam(r, "id"))
-	ws := c.resolveGroupWorkspace(w, r, cs, group, workspaceID)
-	if ws == nil {
-		return
-	}
-	grants, ok := c.store.(missionGrantStore)
-	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "mission_grant_store_unavailable", "the mission grant ledger is unavailable", true)
-		return
-	}
-	// CONSUME BEFORE the effect (no peek-then-act TOCTOU: two concurrent
-	// merges with one use left race the atomic decrement, exactly one wins).
-	// A non-effect outcome (conflict, dispatch failure) refunds the use.
-	grantID, err := grants.ConsumeMissionGrantUse(r.Context(), req.MissionID, "workspaces.merge")
-	if err != nil {
-		writeMissionGrantError(w, err)
-		return
-	}
-
-	// The mission grant IS the validated human approval for this destructive
-	// capability — attributed as such in the audit trail.
-	approval, err := NewValidatedPlatformApproval(fmt.Sprintf("mission-grant:%d", req.MissionID))
-	if err != nil {
-		_ = grants.RefundMissionGrantUse(r.Context(), grantID)
-		writeError(w, http.StatusInternalServerError, "mission_grant_store_unavailable", "the merge approval could not be constructed", true)
-		return
-	}
-	actor := coordinatorSessionActor(cs.SessionID, group)
-	target, _ := json.Marshal(map[string]any{"type": "workspace", "id": workspaceID})
-	result, err := DispatchPlatformCapability(r.Context(), c.api.platform, PlatformDispatchRequest{
-		Capability: application.CapabilityName("workspaces.merge"),
-		Target:     target, Payload: json.RawMessage(`{}`),
-		Actor: actor, Reason: fmt.Sprintf("mission %d integration merge (mission grant)", req.MissionID),
-		Approval: approval,
-	})
-	if err != nil {
-		_ = grants.RefundMissionGrantUse(r.Context(), grantID)
-		writeCoordinatorDispatchError(w, err)
-		return
-	}
-	encoded, _ := json.Marshal(result.Result)
-	view := map[string]any{}
-	_ = json.Unmarshal(encoded, &view)
-	merged, _ := view["merged"].(bool)
-	if merged {
-		_ = missions.AppendMissionEvent(r.Context(), "mission.merge_completed", req.MissionID, map[string]any{
-			"mission_id": req.MissionID, "workspace_id": workspaceID, "project_id": ws.ProjectID,
-		})
-	} else {
-		// A conflict costs nothing — the use goes back.
-		_ = grants.RefundMissionGrantUse(r.Context(), grantID)
-	}
-	writeJSON(w, http.StatusOK, view)
-}
-
-func writeMissionGrantError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, database.ErrMissionGrantRequired):
-		writeError(w, http.StatusForbidden, "mission_grant_required", err.Error(), false)
-	case errors.Is(err, database.ErrMissionGrantExhausted):
-		writeError(w, http.StatusForbidden, "mission_grant_exhausted", err.Error(), false)
-	default:
-		writeError(w, http.StatusInternalServerError, "mission_grant_check_failed", "the mission grant could not be checked", true)
-	}
 }

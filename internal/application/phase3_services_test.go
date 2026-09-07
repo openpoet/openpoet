@@ -67,14 +67,6 @@ func (s *phase3Store) ProjectIDsForTags(_ context.Context, _ []int64) ([]int64, 
 	return nil, nil
 }
 
-func (s *phase3Store) GetMission(_ context.Context, _ int64) (*database.Mission, error) {
-	return nil, nil
-}
-
-func (s *phase3Store) UpsertMissionWorker(_ context.Context, _ *database.MissionWorker) error {
-	return nil
-}
-
 func (s *phase3Store) UpdateSessionLineage(_ context.Context, _, _, _ string) error { return nil }
 
 func (s *phase3Store) UpdateSessionWorkspace(_ context.Context, _, workspaceID, workDir string) error {
