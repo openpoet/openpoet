@@ -16,7 +16,16 @@ package.json
 package-lock.json
 
 # Screenshots / test files
-#*.png
+#
+# Screenshots are ignored by DEFAULT and the few real assets are opted back in
+# below. Never comment this rule out to let a file
+# through: add an exception below instead.
+*.png
+*.jpg
+*.jpeg
+!docs/images/*.png
+!web/static/icon-*.png
+!web/static/badge-*.png
 
 # IDE / Editor
 .idea/
