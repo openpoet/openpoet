@@ -40,44 +40,47 @@ type CodexRunner struct {
 
 	terminalMu sync.Mutex
 
-	mu                  sync.Mutex
-	cmd                 *exec.Cmd
-	stdin               io.WriteCloser
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	done                chan struct{}
-	nextID              int
-	pending             map[int]chan codexRPCResponse
-	inputBuffer         []rune
-	inputLineVisible    bool
-	providerThreadID    string
-	activeTurnID        string
-	initialized         bool
-	shuttingDown        bool
-	allowForSession     map[string]bool
-	interruptedTurns    map[string]bool
-	commandProcesses    map[string]map[string]codexCommandProcess
-	modelOverride       string
-	modelOverrideSet    bool
-	reasoningOverride   string
-	reasoningSet        bool
-	serviceTierOverride string
-	serviceTierSet      bool
-	approvalOverride    string
-	sandboxOverride     string
-	lastAssistantChunk  bool
-	lastReasoningChunk  bool
-	lastCommandOutChunk bool
-	stderrTail          []string
-	agentPhase          string
-	agentDetail         string
-	lastInputTokens     float64
-	lastOutputTokens    float64
-	transcriptSeq       int
-	transcript          []codexTranscriptEvent
-	transcriptStreams   map[string]int
-	modelDefaults       codexModelDefaults
-	modelDefaultsByID   map[string]codexModelDefaults
+	mu                   sync.Mutex
+	cmd                  *exec.Cmd
+	stdin                io.WriteCloser
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	done                 chan struct{}
+	nextID               int
+	pending              map[int]chan codexRPCResponse
+	inputBuffer          []rune
+	inputLineVisible     bool
+	providerThreadID     string
+	activeTurnID         string
+	initialized          bool
+	shuttingDown         bool
+	allowForSession      map[string]bool
+	interruptedTurns     map[string]bool
+	commandProcesses     map[string]map[string]codexCommandProcess
+	modelOverride        string
+	modelOverrideSet     bool
+	reasoningOverride    string
+	reasoningSet         bool
+	serviceTierOverride  string
+	serviceTierSet       bool
+	approvalOverride     string
+	sandboxOverride      string
+	lastAssistantChunk   bool
+	lastReasoningChunk   bool
+	lastCommandOutChunk  bool
+	stderrTail           []string
+	agentPhase           string
+	agentDetail          string
+	lastInputTokens      float64
+	lastOutputTokens     float64
+	transcriptSeq        int
+	transcript           []codexTranscriptEvent
+	transcriptStreams    map[string]int
+	unknownNotifications []string
+	lastErrorTurnID      string
+	lastErrorMessage     string
+	modelDefaults        codexModelDefaults
+	modelDefaultsByID    map[string]codexModelDefaults
 }
 
 type codexCommandProcess struct {
@@ -143,6 +146,10 @@ type codexThreadResumeItem struct {
 	Query            string                  `json:"query"`
 	Path             string                  `json:"path"`
 	Review           string                  `json:"review"`
+	Kind             string                  `json:"kind"`
+	AgentPath        string                  `json:"agentPath"`
+	Name             string                  `json:"name"`
+	Output           interface{}             `json:"output"`
 }
 
 type codexThreadUserInput struct {
@@ -1950,7 +1957,7 @@ func codexUserInputAnswersForQuestions(questions []interface{}, answers map[stri
 }
 
 func (r *CodexRunner) postHook(kind string, event map[string]interface{}) (json.RawMessage, error) {
-	if r.cfg.ServerAddr == "" {
+	if r.cfg == nil || r.cfg.ServerAddr == "" {
 		return nil, errors.New("missing OpenPoet server address")
 	}
 	body, err := json.Marshal(event)
@@ -2014,11 +2021,15 @@ func (r *CodexRunner) handleNotification(method string, params json.RawMessage) 
 			r.lastAssistantChunk = false
 			r.lastReasoningChunk = false
 			r.lastCommandOutChunk = false
+			r.lastErrorTurnID = ""
+			r.lastErrorMessage = ""
 			r.mu.Unlock()
 			r.resetCodexTranscriptStream()
 			r.setCodexPhase("thinking", "Starting turn")
 		}
 	case "turn/completed", "turn/failed":
+		// app-server no longer emits turn/failed: a failed turn arrives as
+		// turn/completed with turn.status == "failed" and turn.error set.
 		turnID := extractString(params, "turn.id")
 		if turnID == "" {
 			turnID = extractString(params, "turnId")
@@ -2045,15 +2056,23 @@ func (r *CodexRunner) handleNotification(method string, params json.RawMessage) 
 			r.setCodexPhase("idle", "Turn interrupted")
 			return
 		}
-		if method == "turn/failed" {
-			msg := extractString(params, "error.message")
+		if method == "turn/failed" || turnStatus == "failed" {
+			msg := codexTurnErrorMessage(params)
 			if msg == "" {
 				msg = string(params)
 			}
 			r.resetCodexTranscriptStream()
+			if r.alreadyReportedTurnError(turnID, msg) {
+				// The `error` notification already showed this failure.
+				r.setCodexPhase("error", msg)
+				r.write([]byte("\r\n"))
+				r.writePrompt()
+				return
+			}
 			r.addCodexTranscriptBlock("error", msg, "Codex turn failed", "", "failed")
 			r.write([]byte(fmt.Sprintf("\r\n\x1b[31mCodex turn failed: %s\x1b[0m\r\n", msg)))
 			r.setCodexPhase("error", msg)
+			r.noteCodexTurnError(turnID, msg)
 		} else {
 			r.resetCodexTranscriptStream()
 			r.setCodexPhase("idle", "Waiting for instructions")
@@ -2116,18 +2135,91 @@ func (r *CodexRunner) handleNotification(method string, params json.RawMessage) 
 		r.writeItemCompleted(params)
 	case "thread/tokenUsage/updated":
 		r.writeTokenUsage(params)
-	case "config/warning":
-		msg := extractString(params, "message")
-		if msg != "" {
-			r.addCodexTranscriptBlock("warning", msg, "Config warning", "", "warning")
-			r.write([]byte(fmt.Sprintf("\r\n\x1b[33m%s\x1b[0m\r\n", msg)))
+	case "configWarning", "config/warning":
+		// configWarning carries summary/details/path; the pre-0.13x shape used
+		// a flat message field.
+		msg := codexJoinNonEmpty(" — ",
+			extractString(params, "summary"),
+			extractString(params, "details"),
+			extractString(params, "message"),
+		)
+		if path := extractString(params, "path"); path != "" {
+			msg = codexJoinNonEmpty(" ", msg, "("+path+")")
 		}
+		r.writeCodexWarning("Config warning", msg)
+	case "deprecationNotice":
+		r.writeCodexWarning("Codex deprecation notice", codexJoinNonEmpty(" — ",
+			extractString(params, "summary"),
+			extractString(params, "details"),
+		))
+	case "warning":
+		r.writeCodexWarning("Codex warning", extractString(params, "message"))
+	case "guardianWarning":
+		r.writeCodexWarning("Codex guardian", extractString(params, "message"))
+	case "windows/worldWritableWarning":
+		r.writeCodexWarning("Codex warning", extractString(params, "message"))
+	case "error":
+		// Turn-scoped transport/model error. willRetry means Codex keeps the
+		// turn alive, so it is a warning and not a turn failure.
+		msg := codexTurnErrorMessage(params)
+		if msg == "" {
+			msg = string(params)
+		}
+		if extractBool(params, "willRetry") {
+			r.writeCodexWarning("Codex retrying", msg)
+			return
+		}
+		r.resetCodexTranscriptStream()
+		r.addCodexTranscriptBlock("error", msg, "Codex error", "", "failed")
+		r.write([]byte(fmt.Sprintf("\r\n\x1b[31mCodex error: %s\x1b[0m\r\n", msg)))
+		r.setCodexPhase("error", msg)
+		r.noteCodexTurnError(extractString(params, "turnId"), msg)
+	case "mcpServer/startupStatus/updated":
+		if extractString(params, "status") != "failed" {
+			return
+		}
+		name := extractString(params, "name")
+		detail := codexJoinNonEmpty(" — ",
+			extractString(params, "error"),
+			extractString(params, "failureReason"),
+		)
+		r.writeCodexWarning("MCP server "+name+" failed to start", detail)
+	case "model/rerouted":
+		from := extractString(params, "fromModel")
+		to := extractString(params, "toModel")
+		if from == "" || to == "" {
+			return
+		}
+		msg := fmt.Sprintf("Model rerouted from %s to %s", from, to)
+		if reason := extractString(params, "reason"); reason != "" {
+			msg += " (" + reason + ")"
+		}
+		r.addCodexTranscriptBlock("status", msg, "Codex", "", "complete")
+		r.write([]byte(fmt.Sprintf("\r\n\x1b[90m%s\x1b[0m\r\n", msg)))
+	case "thread/status/changed":
+		r.applyCodexThreadStatus(params)
+	case "autoApprovalReview/strictReviewRequired":
+		msg := "Strict review required: Codex will review every command in this turn before running it."
+		r.addCodexTranscriptBlock("status", msg, "Codex", "", "running")
+		r.write([]byte(fmt.Sprintf("\r\n\x1b[90m%s\x1b[0m\r\n", msg)))
+	case "modelProvider/authRecoveryStarted", "modelProvider/authRecoveryCompleted":
+		stage := "auth recovery completed"
+		if method == "modelProvider/authRecoveryStarted" {
+			stage = "auth recovery started"
+		}
+		r.writeCodexWarning(codexJoinNonEmpty(" ", extractString(params, "provider"), stage), extractString(params, "message"))
+	case "item/reasoning/summaryPartAdded":
+		// Each summary part is a separate block; stop appending to the
+		// previous one so the transcript keeps them apart.
+		r.resetCodexTranscriptStream()
 	case "account/rateLimits/updated":
 		// Keep this out of the terminal by default; the payload is noisy and
 		// can arrive often.
 	default:
 		// Unknown notifications are expected as app-server evolves. Keep them
-		// in server logs without cluttering the user terminal.
+		// in server logs without cluttering the user terminal, and remember the
+		// method names so a live protocol test can report the drift.
+		r.recordUnknownNotification(method)
 		log.Printf("[codex] notification %s: %.500s", method, string(params))
 	}
 }
@@ -2165,6 +2257,145 @@ func (r *CodexRunner) writeContentDelta(params json.RawMessage, kind string) {
 	r.mu.Unlock()
 	r.addCodexTranscriptDelta(kind, codexItemID(params), delta)
 	r.write(append([]byte(prefix), codexTerminalTextBytes(delta)...))
+}
+
+// codexJoinNonEmpty joins the non-empty parts with sep, so notification
+// payloads that split a message across summary/details/path collapse into a
+// single terminal line.
+func codexJoinNonEmpty(sep string, parts ...string) string {
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			kept = append(kept, part)
+		}
+	}
+	return strings.Join(kept, sep)
+}
+
+// codexTurnErrorMessage reads a TurnError out of a turn/completed or error
+// notification. The current shape nests it under turn.error; older builds sent
+// a flat error object.
+func codexTurnErrorMessage(params json.RawMessage) string {
+	msg := extractString(params, "turn.error.message")
+	details := extractString(params, "turn.error.additionalDetails")
+	if msg == "" {
+		msg = extractString(params, "error.message")
+		details = extractString(params, "error.additionalDetails")
+	}
+	return codexJoinNonEmpty(" — ", codexHumanizeErrorMessage(msg), details)
+}
+
+// codexHumanizeErrorMessage unwraps the provider error JSON Codex forwards
+// verbatim in TurnError.message, so the terminal shows the sentence instead of
+// a serialized envelope.
+func codexHumanizeErrorMessage(msg string) string {
+	msg = strings.TrimSpace(msg)
+	if !strings.HasPrefix(msg, "{") {
+		return msg
+	}
+	var payload struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal([]byte(msg), &payload) != nil {
+		return msg
+	}
+	if inner := strings.TrimSpace(payload.Error.Message); inner != "" {
+		return inner
+	}
+	if inner := strings.TrimSpace(payload.Message); inner != "" {
+		return inner
+	}
+	return msg
+}
+
+// noteCodexTurnError remembers the last error reported for a turn. app-server
+// sends a failure twice — once as an `error` notification and again as the
+// turn/completed payload — and the user should only see it once.
+func (r *CodexRunner) noteCodexTurnError(turnID, message string) {
+	r.mu.Lock()
+	r.lastErrorTurnID = turnID
+	r.lastErrorMessage = message
+	r.mu.Unlock()
+}
+
+func (r *CodexRunner) alreadyReportedTurnError(turnID, message string) bool {
+	if message == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastErrorMessage == message && (turnID == "" || r.lastErrorTurnID == "" || r.lastErrorTurnID == turnID)
+}
+
+// codexUnknownNotificationLimit caps the remembered set of unhandled
+// notification methods so a chatty app-server cannot grow it without bound.
+const codexUnknownNotificationLimit = 64
+
+func (r *CodexRunner) recordUnknownNotification(method string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.unknownNotifications) >= codexUnknownNotificationLimit {
+		return
+	}
+	for _, seen := range r.unknownNotifications {
+		if seen == method {
+			return
+		}
+	}
+	r.unknownNotifications = append(r.unknownNotifications, method)
+}
+
+// UnhandledNotificationMethods lists the app-server notification methods this
+// session received but does not handle. It exists so protocol drift after a
+// Codex upgrade is observable instead of silent.
+func (r *CodexRunner) UnhandledNotificationMethods() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.unknownNotifications...)
+}
+
+func (r *CodexRunner) writeCodexWarning(title, message string) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return
+	}
+	r.addCodexTranscriptBlock("warning", message, title, "", "warning")
+	r.write([]byte(fmt.Sprintf("\r\n\x1b[33m%s: %s\x1b[0m\r\n", title, message)))
+}
+
+// applyCodexThreadStatus maps thread/status/changed onto the OpenPoet agent
+// phase. Only the waiting flags are mapped: turn notifications already own the
+// thinking/responding phases and would fight an idle/active override.
+func (r *CodexRunner) applyCodexThreadStatus(params json.RawMessage) {
+	switch extractString(params, "status.type") {
+	case "systemError":
+		r.setCodexPhase("error", "Codex reported a system error")
+		return
+	case "active":
+	default:
+		return
+	}
+	var payload struct {
+		Status struct {
+			ActiveFlags []string `json:"activeFlags"`
+		} `json:"status"`
+	}
+	if json.Unmarshal(params, &payload) != nil {
+		return
+	}
+	for _, flag := range payload.Status.ActiveFlags {
+		switch flag {
+		case "waitingOnApproval":
+			r.setCodexPhase("waiting_approval", "Waiting for approval")
+			return
+		case "waitingOnUserInput":
+			r.setCodexPhase("waiting_input", "Waiting for your answer")
+			return
+		}
+	}
 }
 
 func codexItemID(params json.RawMessage) string {
@@ -2220,20 +2451,72 @@ func (r *CodexRunner) writeItemStarted(params json.RawMessage) {
 			r.addCodexTranscriptBlock("command", "", "Running command", cmd, "running")
 			r.write([]byte(fmt.Sprintf("\r\n\x1b[90m$ %s\x1b[0m\r\n", cmd)))
 		}
-	case "file_change":
-		path := extractString(params, "item.path")
-		if path != "" {
-			r.setCodexPhase("editing", path)
-			r.addCodexTranscriptBlock("file", path, "Editing file", "", "editing")
-			r.write([]byte(fmt.Sprintf("\r\n\x1b[90mEditing %s\x1b[0m\r\n", path)))
-			// Feed the conflict radar: synthesize a PreToolUse so a codex edit
-			// indexes through the SAME extractor as claude_code and ACP. Async +
-			// best-effort so it can never stall or fail the codex stream.
+	case "fileChange", "file_change":
+		// A fileChange item carries changes[].path; only pre-0.13x builds sent
+		// a single flat path.
+		paths := codexItemChangedPaths(params)
+		if len(paths) == 0 {
+			if path := extractString(params, "item.path"); path != "" {
+				paths = []string{path}
+			}
+		}
+		if len(paths) == 0 {
+			return
+		}
+		label := strings.Join(paths, ", ")
+		r.setCodexPhase("editing", label)
+		r.addCodexTranscriptBlock("file", strings.Join(paths, "\n"), "Editing file", "", "editing")
+		r.write([]byte(fmt.Sprintf("\r\n\x1b[90mEditing %s\x1b[0m\r\n", label)))
+		// Feed the conflict radar: synthesize a PreToolUse so a codex edit
+		// indexes through the SAME extractor as claude_code and ACP. Async +
+		// best-effort so it can never stall or fail the codex stream.
+		for _, path := range paths {
 			if ev, ok := codexPreToolUseEvent(CodexItem{Type: "file_change", Path: path}); ok {
 				go func() { _, _ = r.postHook("event", ev) }()
 			}
 		}
+	case "mcpToolCall":
+		label := codexJoinNonEmpty(" ", extractString(params, "item.server"), extractString(params, "item.tool"))
+		if label == "" {
+			return
+		}
+		r.setCodexPhase("running_tool", label)
+		r.addCodexTranscriptBlock("command", "", "MCP tool", label, "running")
+		r.write([]byte(fmt.Sprintf("\r\n\x1b[90m» %s\x1b[0m\r\n", label)))
+	case "dynamicToolCall":
+		label := codexJoinNonEmpty(" ", extractString(params, "item.namespace"), extractString(params, "item.tool"))
+		if label == "" {
+			return
+		}
+		r.setCodexPhase("running_tool", label)
+		r.addCodexTranscriptBlock("command", "", "Tool", label, "running")
+		r.write([]byte(fmt.Sprintf("\r\n\x1b[90m» %s\x1b[0m\r\n", label)))
+	case "webSearch":
+		query := extractString(params, "item.query")
+		if query == "" {
+			return
+		}
+		r.setCodexPhase("searching", query)
+		r.addCodexTranscriptBlock("command", "", "Web search", query, "running")
+		r.write([]byte(fmt.Sprintf("\r\n\x1b[90m🔍 %s\x1b[0m\r\n", query)))
+	case "contextCompaction":
+		r.setCodexPhase("thinking", "Compacting context")
+		r.addCodexTranscriptBlock("status", "Compacting context…", "Codex", "", "running")
+		r.write([]byte("\r\n\x1b[90mCompacting context…\x1b[0m\r\n"))
 	}
+}
+
+// codexItemChangedPaths reads the edited paths out of a fileChange item.
+func codexItemChangedPaths(params json.RawMessage) []string {
+	var payload struct {
+		Item struct {
+			Changes []codexThreadFileChange `json:"changes"`
+		} `json:"item"`
+	}
+	if json.Unmarshal(params, &payload) != nil {
+		return nil
+	}
+	return codexThreadChangedPaths(payload.Item.Changes)
 }
 
 func (r *CodexRunner) trackCommandProcess(params json.RawMessage) {
@@ -2262,6 +2545,20 @@ func (r *CodexRunner) trackCommandProcess(params json.RawMessage) {
 	r.publishCodexState()
 }
 
+// codexQuietItemTypes are the item types whose content never arrives as a
+// stream delta, so their result is only visible if item/completed records it.
+var codexQuietItemTypes = map[string]bool{
+	"mcpToolCall":        true,
+	"dynamicToolCall":    true,
+	"webSearch":          true,
+	"imageView":          true,
+	"imageGeneration":    true,
+	"enteredReviewMode":  true,
+	"exitedReviewMode":   true,
+	"subAgentActivity":   true,
+	"functionCallOutput": true,
+}
+
 func (r *CodexRunner) writeItemCompleted(params json.RawMessage) {
 	r.untrackCommandProcess(params)
 	status := extractString(params, "item.status")
@@ -2274,6 +2571,26 @@ func (r *CodexRunner) writeItemCompleted(params json.RawMessage) {
 			r.addCodexTranscriptBlock("error", msg, "Item failed", "", "failed")
 			r.write([]byte(fmt.Sprintf("\r\n\x1b[31m%s\x1b[0m\r\n", msg)))
 		}
+		return
+	}
+
+	itemType := extractString(params, "item.type")
+	if !codexQuietItemTypes[itemType] {
+		return
+	}
+	var payload struct {
+		Item codexThreadResumeItem `json:"item"`
+	}
+	if json.Unmarshal(params, &payload) != nil {
+		return
+	}
+	event, ok := codexTranscriptEventFromThreadItem(payload.Item, time.Now())
+	if !ok {
+		return
+	}
+	r.addCodexTranscriptBlock(event.Kind, event.Text, event.Title, event.Command, event.Status)
+	if text := strings.TrimSpace(codexJoinNonEmpty(" ", event.Command, event.Text)); text != "" {
+		r.write(append([]byte("\r\n\x1b[90m"), append(codexTerminalTextBytes(text), []byte("\x1b[0m\r\n")...)...))
 	}
 }
 
@@ -2626,6 +2943,19 @@ func codexTranscriptEventFromThreadItem(item codexThreadResumeItem, createdAt ti
 		event.Kind = "status"
 		event.Title = "Review"
 		event.Text = item.Review
+	case "functionCallOutput":
+		event.Kind = "command"
+		event.Title = "Tool output"
+		event.Command = codexJoinNonEmpty(" ", item.Namespace, item.Name)
+		event.Text = codexThreadToolText(item.Output, item.Error)
+	case "subAgentActivity":
+		agent := item.AgentPath
+		if agent == "" {
+			return event, false
+		}
+		event.Kind = "status"
+		event.Title = "Sub-agent"
+		event.Text = codexJoinNonEmpty(" ", agent, item.Kind)
 	case "contextCompaction":
 		event.Kind = "status"
 		event.Title = "Codex"
@@ -3044,6 +3374,23 @@ func extractFloat(raw json.RawMessage, dotted string) float64 {
 	default:
 		return 0
 	}
+}
+
+func extractBool(raw json.RawMessage, dotted string) bool {
+	var v interface{}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return false
+	}
+	cur := v
+	for _, part := range strings.Split(dotted, ".") {
+		m, ok := cur.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		cur = m[part]
+	}
+	b, _ := cur.(bool)
+	return b
 }
 
 func extractMap(raw json.RawMessage, dotted string) map[string]interface{} {

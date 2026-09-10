@@ -727,7 +727,11 @@ class StructuredViewManager {
             working: 'working',
             responding: 'responding',
             running_command: 'using tools',
+            running_tool: 'using tools',
+            searching: 'searching',
             editing: 'using tools',
+            waiting_approval: 'waiting approval',
+            waiting_input: 'waiting for you',
             starting: 'starting',
         })[phase] || null;
 

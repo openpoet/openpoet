@@ -1059,3 +1059,217 @@ func TestCapCodexTranscriptEventsAlwaysKeepsNewestEvent(t *testing.T) {
 		t.Fatalf("expected only the newest event, got %#v", capped)
 	}
 }
+
+func TestCodexTurnCompletedWithFailedStatusSurfacesError(t *testing.T) {
+	var out strings.Builder
+	r := &CodexRunner{
+		outputHandler:    func(b []byte) { out.Write(b) },
+		activeTurnID:     "turn-1",
+		interruptedTurns: map[string]bool{},
+		commandProcesses: map[string]map[string]codexCommandProcess{},
+	}
+
+	r.handleNotification("turn/completed", json.RawMessage(`{"threadId":"t1","turn":{"id":"turn-1","status":"failed","items":[],"error":{"message":"usage limit reached","additionalDetails":"try again later"}}}`))
+
+	if !strings.Contains(out.String(), "usage limit reached") {
+		t.Fatalf("failed turn did not reach the terminal: %q", out.String())
+	}
+	if r.agentPhase != "error" {
+		t.Fatalf("phase = %q, want error", r.agentPhase)
+	}
+	found := false
+	for _, event := range r.transcript {
+		if event.Kind == "error" && strings.Contains(event.Text, "try again later") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("transcript missing failed-turn error: %#v", r.transcript)
+	}
+}
+
+func TestCodexErrorNotificationWithRetryIsWarningOnly(t *testing.T) {
+	var out strings.Builder
+	r := &CodexRunner{
+		outputHandler:    func(b []byte) { out.Write(b) },
+		interruptedTurns: map[string]bool{},
+	}
+
+	r.handleNotification("error", json.RawMessage(`{"threadId":"t1","turnId":"turn-1","willRetry":true,"error":{"message":"stream disconnected"}}`))
+
+	if r.agentPhase == "error" {
+		t.Fatalf("retryable error must not move the session to the error phase")
+	}
+	if !strings.Contains(out.String(), "stream disconnected") {
+		t.Fatalf("retryable error did not reach the terminal: %q", out.String())
+	}
+	if len(r.transcript) != 1 || r.transcript[0].Kind != "warning" {
+		t.Fatalf("transcript = %#v, want a single warning block", r.transcript)
+	}
+}
+
+func TestCodexConfigWarningUsesSummaryAndDetails(t *testing.T) {
+	var out strings.Builder
+	r := &CodexRunner{outputHandler: func(b []byte) { out.Write(b) }}
+
+	r.handleNotification("configWarning", json.RawMessage(`{"summary":"unknown key model_x","details":"remove it","path":"/home/u/.codex/config.toml"}`))
+
+	got := out.String()
+	for _, want := range []string{"unknown key model_x", "remove it", "config.toml"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("config warning output %q missing %q", got, want)
+		}
+	}
+}
+
+func TestCodexFileChangeItemStartedUsesChangesPaths(t *testing.T) {
+	var out strings.Builder
+	r := &CodexRunner{outputHandler: func(b []byte) { out.Write(b) }, interruptedTurns: map[string]bool{}}
+
+	r.handleNotification("item/started", json.RawMessage(`{"turnId":"turn-1","item":{"id":"i1","type":"fileChange","status":"inProgress","changes":[{"path":"/proj/a.go","kind":"update"},{"path":"/proj/b.go","kind":"add"}]}}`))
+
+	if r.agentPhase != "editing" {
+		t.Fatalf("phase = %q, want editing", r.agentPhase)
+	}
+	got := out.String()
+	if !strings.Contains(got, "/proj/a.go") || !strings.Contains(got, "/proj/b.go") {
+		t.Fatalf("file change output %q missing edited paths", got)
+	}
+	if len(r.transcript) != 1 || r.transcript[0].Kind != "file" {
+		t.Fatalf("transcript = %#v, want a single file block", r.transcript)
+	}
+}
+
+func TestCodexMCPToolCallItemsReachTranscript(t *testing.T) {
+	var out strings.Builder
+	r := &CodexRunner{outputHandler: func(b []byte) { out.Write(b) }, interruptedTurns: map[string]bool{}}
+
+	r.handleNotification("item/started", json.RawMessage(`{"turnId":"turn-1","item":{"id":"i1","type":"mcpToolCall","server":"openpoet","tool":"openpoet_read_document","status":"inProgress"}}`))
+	if r.agentPhase != "running_tool" {
+		t.Fatalf("phase = %q, want running_tool", r.agentPhase)
+	}
+	r.handleNotification("item/completed", json.RawMessage(`{"turnId":"turn-1","completedAtMs":1,"threadId":"t1","item":{"id":"i1","type":"mcpToolCall","server":"openpoet","tool":"openpoet_read_document","status":"completed","result":{"content":[{"type":"text","text":"doc"}]}}}`))
+
+	if len(r.transcript) != 2 {
+		t.Fatalf("transcript = %#v, want start and completion blocks", r.transcript)
+	}
+	if !strings.Contains(out.String(), "openpoet_read_document") {
+		t.Fatalf("mcp tool call did not reach the terminal: %q", out.String())
+	}
+}
+
+func TestCodexThreadStatusChangedMapsWaitingFlags(t *testing.T) {
+	r := &CodexRunner{outputHandler: func(b []byte) {}}
+
+	r.handleNotification("thread/status/changed", json.RawMessage(`{"threadId":"t1","status":{"type":"active","activeFlags":["waitingOnApproval"]}}`))
+	if r.agentPhase != "waiting_approval" {
+		t.Fatalf("phase = %q, want waiting_approval", r.agentPhase)
+	}
+
+	r.handleNotification("thread/status/changed", json.RawMessage(`{"threadId":"t1","status":{"type":"idle"}}`))
+	if r.agentPhase != "waiting_approval" {
+		t.Fatalf("idle status must not override turn-owned phases, got %q", r.agentPhase)
+	}
+}
+
+// codexBadModelError is the payload `codex app-server` 0.154 sends when the
+// account cannot use the requested model: the provider envelope arrives
+// verbatim in TurnError.message, first as an `error` notification and again in
+// the turn/completed payload.
+const codexBadModelError = `{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-does-not-exist' model is not supported when using Codex with a ChatGPT account."}}`
+
+func TestCodexErrorAndFailedTurnReportTheFailureOnce(t *testing.T) {
+	var out strings.Builder
+	r := &CodexRunner{
+		outputHandler:    func(b []byte) { out.Write(b) },
+		activeTurnID:     "turn-1",
+		interruptedTurns: map[string]bool{},
+		commandProcesses: map[string]map[string]codexCommandProcess{},
+	}
+	encoded, err := json.Marshal(codexBadModelError)
+	if err != nil {
+		t.Fatalf("marshal error message: %v", err)
+	}
+
+	r.handleNotification("error", json.RawMessage(`{"threadId":"t1","turnId":"turn-1","willRetry":false,"error":{"message":`+string(encoded)+`,"codexErrorInfo":"other","additionalDetails":null}}`))
+	r.handleNotification("turn/completed", json.RawMessage(`{"threadId":"t1","turn":{"id":"turn-1","status":"failed","items":[],"error":{"message":`+string(encoded)+`,"codexErrorInfo":"other"}}}`))
+
+	errorBlocks := 0
+	for _, event := range r.transcript {
+		if event.Kind == "error" {
+			errorBlocks++
+			if strings.Contains(event.Text, `"invalid_request_error"`) {
+				t.Errorf("error block kept the raw provider envelope: %q", event.Text)
+			}
+			if !strings.Contains(event.Text, "is not supported when using Codex") {
+				t.Errorf("error block lost the provider message: %q", event.Text)
+			}
+		}
+	}
+	if errorBlocks != 1 {
+		t.Fatalf("transcript has %d error blocks, want 1: %#v", errorBlocks, r.transcript)
+	}
+	if got := strings.Count(out.String(), "is not supported when using Codex"); got != 1 {
+		t.Fatalf("terminal printed the failure %d times, want 1:\n%s", got, out.String())
+	}
+	if r.agentPhase != "error" {
+		t.Fatalf("phase = %q, want error", r.agentPhase)
+	}
+	if r.activeTurnID != "" {
+		t.Fatalf("activeTurnID = %q, want it cleared after turn/completed", r.activeTurnID)
+	}
+}
+
+func TestCodexHumanizeErrorMessage(t *testing.T) {
+	cases := map[string]string{
+		codexBadModelError:            "The 'gpt-does-not-exist' model is not supported when using Codex with a ChatGPT account.",
+		`{"message":"plain wrapper"}`: "plain wrapper",
+		"context window exceeded":     "context window exceeded",
+		`{"broken":`:                  `{"broken":`,
+	}
+	for input, want := range cases {
+		if got := codexHumanizeErrorMessage(input); got != want {
+			t.Errorf("codexHumanizeErrorMessage(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestCodexModelMetadataWarningReachesTheUser(t *testing.T) {
+	var out strings.Builder
+	r := &CodexRunner{outputHandler: func(b []byte) { out.Write(b) }}
+
+	// Real 0.154 payload for an unknown model id.
+	r.handleNotification("warning", json.RawMessage(`{"threadId":"t1","message":"Model metadata for `+"`gpt-does-not-exist`"+` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}`))
+
+	if !strings.Contains(out.String(), "Model metadata for") {
+		t.Fatalf("warning did not reach the terminal: %q", out.String())
+	}
+	if len(r.transcript) != 1 || r.transcript[0].Kind != "warning" {
+		t.Fatalf("transcript = %#v, want a single warning block", r.transcript)
+	}
+}
+
+func TestCodexThreadStatusSystemErrorSetsErrorPhase(t *testing.T) {
+	r := &CodexRunner{outputHandler: func(b []byte) {}}
+
+	r.handleNotification("thread/status/changed", json.RawMessage(`{"threadId":"t1","status":{"type":"systemError"}}`))
+
+	if r.agentPhase != "error" {
+		t.Fatalf("phase = %q, want error", r.agentPhase)
+	}
+}
+
+func TestCodexFunctionCallOutputItemReachesTranscript(t *testing.T) {
+	var out strings.Builder
+	r := &CodexRunner{outputHandler: func(b []byte) { out.Write(b) }, interruptedTurns: map[string]bool{}}
+
+	r.handleNotification("item/completed", json.RawMessage(`{"threadId":"t1","turnId":"turn-1","completedAtMs":1,"item":{"type":"functionCallOutput","id":"i1","name":"read_file","namespace":"local","output":"file contents"}}`))
+
+	if len(r.transcript) != 1 {
+		t.Fatalf("transcript = %#v, want one block", r.transcript)
+	}
+	event := r.transcript[0]
+	if event.Command != "local read_file" || !strings.Contains(event.Text, "file contents") {
+		t.Fatalf("functionCallOutput block = %#v", event)
+	}
+}
