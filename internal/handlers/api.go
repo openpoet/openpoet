@@ -2227,7 +2227,10 @@ func (a *API) CreateMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := services.Configuration.MCP.CreateGlobal(platformUIContext(r), platformUIAuthorization(r), application.MCPServerInput{Name: m.Name, Command: m.Command, Args: m.Args, Env: m.Env, Enabled: m.Enabled})
+	created, err := services.Configuration.MCP.CreateGlobal(platformUIContext(r), platformUIAuthorization(r), application.MCPServerInput{
+		Name: m.Name, Command: m.Command, Args: m.Args, Env: m.Env, Enabled: m.Enabled,
+		CommandWindows: m.CommandWindows, ArgsWindows: m.ArgsWindows, EnvWindows: m.EnvWindows,
+	})
 	if err != nil {
 		respondApplicationError(w, err)
 		return
@@ -2268,7 +2271,10 @@ func (a *API) UpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := services.Configuration.MCP.UpdateGlobal(platformUIContext(r), platformUIAuthorization(r), application.UpdateMCPServerCommand{ID: id, Name: &m.Name, Command: &m.Command, Args: &m.Args, Env: &m.Env, Enabled: &m.Enabled})
+	updated, err := services.Configuration.MCP.UpdateGlobal(platformUIContext(r), platformUIAuthorization(r), application.UpdateMCPServerCommand{
+		ID: id, Name: &m.Name, Command: &m.Command, Args: &m.Args, Env: &m.Env, Enabled: &m.Enabled,
+		CommandWindows: &m.CommandWindows, ArgsWindows: &m.ArgsWindows, EnvWindows: &m.EnvWindows,
+	})
 	if err != nil {
 		respondApplicationError(w, err)
 		return

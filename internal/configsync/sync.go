@@ -1992,8 +1992,10 @@ func (cs *ConfigSyncer) buildOpenCodeMCPConfig(ctx context.Context, project *dat
 	if err != nil {
 		log.Printf("Warning: failed to list global MCP servers for OpenCode config: %v", err)
 	} else {
+		targetsWindows := project.TargetsWindows()
 		for _, server := range servers {
-			entry, decodeErr := cs.mcpConfigFromParts(server.Name, server.Command, server.Args, server.Env)
+			rawCommand, rawArgs, rawEnv := server.PartsFor(targetsWindows)
+			entry, decodeErr := cs.mcpConfigFromParts(server.Name, rawCommand, rawArgs, rawEnv)
 			if decodeErr != nil {
 				return nil, decodeErr
 			}
@@ -2248,8 +2250,10 @@ func (cs *ConfigSyncer) buildCodexConfigTOML(ctx context.Context, project *datab
 	if err != nil {
 		log.Printf("Warning: failed to list global MCP servers for Codex config: %v", err)
 	}
+	targetsWindows := project.TargetsWindows()
 	for _, server := range servers {
-		entry, decodeErr := cs.mcpConfigFromParts(server.Name, server.Command, server.Args, server.Env)
+		rawCommand, rawArgs, rawEnv := server.PartsFor(targetsWindows)
+		entry, decodeErr := cs.mcpConfigFromParts(server.Name, rawCommand, rawArgs, rawEnv)
 		if decodeErr != nil {
 			return "", decodeErr
 		}

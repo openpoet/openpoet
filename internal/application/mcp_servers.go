@@ -22,13 +22,17 @@ type MCPStore interface {
 }
 
 type MCPServerView struct {
-	ID         int64  `json:"id"`
-	ProjectID  int64  `json:"project_id,omitempty"`
-	Name       string `json:"name"`
-	Enabled    bool   `json:"enabled"`
-	HasCommand bool   `json:"has_command"`
-	HasArgs    bool   `json:"has_args"`
-	HasEnv     bool   `json:"has_env"`
+	ID        int64  `json:"id"`
+	ProjectID int64  `json:"project_id,omitempty"`
+	Name      string `json:"name"`
+	Enabled   bool   `json:"enabled"`
+	// Secrets are never returned; the UI only needs to know a part is set.
+	HasCommand        bool `json:"has_command"`
+	HasArgs           bool `json:"has_args"`
+	HasEnv            bool `json:"has_env"`
+	HasWindowsCommand bool `json:"has_windows_command,omitempty"`
+	HasWindowsArgs    bool `json:"has_windows_args,omitempty"`
+	HasWindowsEnv     bool `json:"has_windows_env,omitempty"`
 }
 
 type MCPServerInput struct {
@@ -37,15 +41,23 @@ type MCPServerInput struct {
 	Args    string
 	Env     string
 	Enabled bool
+	// Windows variants, global servers only. Empty means the primary command
+	// serves every host.
+	CommandWindows string
+	ArgsWindows    string
+	EnvWindows     string
 }
 
 type UpdateMCPServerCommand struct {
-	ID      int64
-	Name    *string
-	Command *string
-	Args    *string
-	Env     *string
-	Enabled *bool
+	ID             int64
+	Name           *string
+	Command        *string
+	Args           *string
+	Env            *string
+	Enabled        *bool
+	CommandWindows *string
+	ArgsWindows    *string
+	EnvWindows     *string
 }
 
 type MCPService struct {
@@ -131,6 +143,24 @@ func (s *MCPService) UpdateGlobal(ctx context.Context, boundary R4Boundary, comm
 			return nil, err
 		}
 	}
+	if command.CommandWindows != nil {
+		item.CommandWindows, err = s.encryptVariant(*command.CommandWindows, nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if command.ArgsWindows != nil {
+		item.ArgsWindows, err = s.encryptVariant(*command.ArgsWindows, validateWindowsArgs)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if command.EnvWindows != nil {
+		item.EnvWindows, err = s.encryptVariant(*command.EnvWindows, validateWindowsEnv)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if command.Enabled != nil {
 		item.Enabled = *command.Enabled
 	}
@@ -204,6 +234,9 @@ func (s *MCPService) CreateProject(ctx context.Context, boundary R4Boundary, pro
 
 func (s *MCPService) UpdateProject(ctx context.Context, boundary R4Boundary, projectID int64, command UpdateMCPServerCommand) (*MCPServerView, error) {
 	if err := requireR4(boundary); err != nil {
+		return nil, err
+	}
+	if err := rejectProjectWindowsVariant(command.CommandWindows != nil, command.ArgsWindows != nil, command.EnvWindows != nil); err != nil {
 		return nil, err
 	}
 	item, err := s.project(ctx, projectID, command.ID)
@@ -290,10 +323,73 @@ func (s *MCPService) newGlobal(input MCPServerInput) (*database.MCPServer, error
 	if err != nil {
 		return nil, err
 	}
-	return &database.MCPServer{Name: strings.TrimSpace(input.Name), Command: command, Args: args, Env: env, Enabled: input.Enabled}, nil
+	commandWindows, err := s.encryptVariant(input.CommandWindows, nil)
+	if err != nil {
+		return nil, err
+	}
+	argsWindows, err := s.encryptVariant(input.ArgsWindows, validateWindowsArgs)
+	if err != nil {
+		return nil, err
+	}
+	envWindows, err := s.encryptVariant(input.EnvWindows, validateWindowsEnv)
+	if err != nil {
+		return nil, err
+	}
+	return &database.MCPServer{
+		Name: strings.TrimSpace(input.Name), Command: command, Args: args, Env: env,
+		CommandWindows: commandWindows, ArgsWindows: argsWindows, EnvWindows: envWindows,
+		Enabled: input.Enabled,
+	}, nil
+}
+
+// encryptVariant stores an optional per-OS override. Empty clears the variant —
+// that is how a server goes back to "the primary command serves every host" —
+// so it is stored as-is rather than encrypted into a non-empty blob.
+func (s *MCPService) encryptVariant(value string, validate func(string) error) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return "", nil
+	}
+	needsEncryption, err := needsEnvelopeEncryption(value)
+	if err != nil {
+		return "", err
+	}
+	if !needsEncryption {
+		// Already an encrypted envelope: the config form round-trips whatever it
+		// was given, and re-encrypting would nest a second envelope.
+		return value, nil
+	}
+	if validate != nil {
+		if err := validate(value); err != nil {
+			return "", err
+		}
+	}
+	return encryptEnvelope(s.codec, value)
+}
+
+// rejectProjectWindowsVariant keeps the per-OS variants a property of global
+// servers. A project override already targets one project, hence one host, so a
+// variant there would be a second way to say the same thing — and the project
+// table has no columns to store it, which would silently drop the value.
+func rejectProjectWindowsVariant(command, args, env bool) error {
+	if command || args || env {
+		return validationError("mcp_windows_variant_global_only",
+			"Windows variants belong to global MCP servers; a project override already targets a single host")
+	}
+	return nil
+}
+
+func validateWindowsArgs(value string) error {
+	return validateJSONArray(value, "invalid_mcp_args", "MCP Windows args must be a JSON array")
+}
+
+func validateWindowsEnv(value string) error {
+	return validateJSONObject(value, "invalid_mcp_env", "MCP Windows env must be a JSON object")
 }
 
 func (s *MCPService) newProject(projectID int64, input MCPServerInput) (*database.ProjectMCPServer, error) {
+	if err := rejectProjectWindowsVariant(input.CommandWindows != "", input.ArgsWindows != "", input.EnvWindows != ""); err != nil {
+		return nil, err
+	}
 	global, err := s.newGlobal(input)
 	if err != nil {
 		return nil, err
@@ -397,7 +493,11 @@ func defaultJSON(value, fallback string) string {
 }
 
 func globalMCPView(item database.MCPServer) MCPServerView {
-	return MCPServerView{ID: item.ID, Name: item.Name, Enabled: item.Enabled, HasCommand: item.Command != "", HasArgs: item.Args != "", HasEnv: item.Env != ""}
+	return MCPServerView{
+		ID: item.ID, Name: item.Name, Enabled: item.Enabled,
+		HasCommand: item.Command != "", HasArgs: item.Args != "", HasEnv: item.Env != "",
+		HasWindowsCommand: item.CommandWindows != "", HasWindowsArgs: item.ArgsWindows != "", HasWindowsEnv: item.EnvWindows != "",
+	}
 }
 
 func projectMCPView(item database.ProjectMCPServer) MCPServerView {

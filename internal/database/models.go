@@ -195,14 +195,21 @@ type ProjectShare struct {
 }
 
 type MCPServer struct {
-	ID        int64     `db:"id" json:"id"`
-	Name      string    `db:"name" json:"name"`
-	Command   string    `db:"command" json:"command"`
-	Args      string    `db:"args" json:"args"` // JSON array
-	Env       string    `db:"env" json:"env"`   // JSON object
-	Enabled   bool      `db:"enabled" json:"enabled"`
-	CreatedAt time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+	ID      int64  `db:"id" json:"id"`
+	Name    string `db:"name" json:"name"`
+	Command string `db:"command" json:"command"`
+	Args    string `db:"args" json:"args"` // JSON array
+	Env     string `db:"env" json:"env"`   // JSON object
+	// Windows variants. A global server is injected into every project, but a
+	// command is an absolute path on one operating system — these let a single
+	// logical server (one name, one set of tools) also run on Windows hosts.
+	// Empty means "no variant": the primary command is used for every host.
+	CommandWindows string    `db:"command_windows" json:"command_windows"`
+	ArgsWindows    string    `db:"args_windows" json:"args_windows"`
+	EnvWindows     string    `db:"env_windows" json:"env_windows"`
+	Enabled        bool      `db:"enabled" json:"enabled"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time `db:"updated_at" json:"updated_at"`
 }
 
 type MCPHTTPSession struct {

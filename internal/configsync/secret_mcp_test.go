@@ -81,3 +81,57 @@ func TestConfigSyncEncryptsNewMCPImportsWhenCompositionProvidesEncryptor(t *test
 		t.Fatalf("resolved env = %q, err=%v", resolved, err)
 	}
 }
+
+// A global MCP server is injected into every project, so on a fleet mixing a
+// Linux host with a Windows one its single absolute command could only ever
+// satisfy one of them — the Windows sessions died with os error 3.
+func TestConfigSyncWritesWindowsVariantForWindowsProjects(t *testing.T) {
+	cs, posixProject := setupConfigSyncTest(t)
+	encryptor, err := security.NewEncryptor("configsync-mcp-windows-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.decryptFunc = encryptor.Decrypt
+	ctx := context.Background()
+
+	command, _ := secretvalue.Encrypt(encryptor, "/home/dev/.nvm/current/bin/playwright-mcp")
+	args, _ := secretvalue.Encrypt(encryptor, `["--headless"]`)
+	commandWindows, _ := secretvalue.Encrypt(encryptor, "node")
+	argsWindows, _ := secretvalue.Encrypt(encryptor, `["C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\@playwright\\mcp\\cli.js","--headless"]`)
+	if err := cs.db.CreateMCPServer(ctx, &database.MCPServer{
+		Name: "playwright", Command: command, Args: args, Env: "",
+		CommandWindows: commandWindows, ArgsWindows: argsWindows, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	windowsProject := &database.Project{
+		Name: "sample", Path: `C:\Users\dev\projects\sample`,
+		Type: "remote", Backend: "codex", BackendConfig: "{}",
+	}
+	if err := cs.db.CreateProject(ctx, windowsProject); err != nil {
+		t.Fatal(err)
+	}
+
+	windowsTOML, err := cs.buildCodexConfigTOML(ctx, windowsProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(windowsTOML, `command = "node"`) || !strings.Contains(windowsTOML, `cli.js`) {
+		t.Fatalf("Windows project did not get the variant:\n%s", windowsTOML)
+	}
+	if strings.Contains(windowsTOML, "/home/dev") {
+		t.Fatalf("Windows project inherited the Linux path:\n%s", windowsTOML)
+	}
+
+	posixTOML, err := cs.buildCodexConfigTOML(ctx, posixProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(posixTOML, "/home/dev/.nvm/current/bin/playwright-mcp") {
+		t.Fatalf("POSIX project lost its command:\n%s", posixTOML)
+	}
+	if strings.Contains(posixTOML, "cli.js") {
+		t.Fatalf("POSIX project got the Windows variant:\n%s", posixTOML)
+	}
+}

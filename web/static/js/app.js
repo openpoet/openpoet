@@ -8191,6 +8191,22 @@ class OpenPoet {
                     <label class="form-label">Environment (JSON object)</label>
                     <input type="text" class="form-input" name="env" value="${mcp?.env || '{}'}">
                 </div>
+                <details class="form-group" ${mcp?.command_windows ? 'open' : ''}>
+                    <summary class="form-label" style="cursor: pointer;">Windows variant (optional)</summary>
+                    <small style="display: block; margin: 6px 0 10px; font-size: 12px; color: var(--color-text-secondary, #999);">A global server reaches every project, but a command is an absolute path on one OS. Fill this in to serve Windows hosts under the same server name; leave it empty and the command above is used everywhere.</small>
+                    <div class="form-group">
+                        <label class="form-label">Command on Windows</label>
+                        <input type="text" class="form-input" name="command_windows" value="${this.escapeHtml(mcp?.command_windows || '')}" placeholder="e.g. node">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Arguments on Windows (JSON array)</label>
+                        <input type="text" class="form-input" name="args_windows" value="${this.escapeHtml(mcp?.args_windows || '')}" placeholder="empty = same as above">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Environment on Windows (JSON object)</label>
+                        <input type="text" class="form-input" name="env_windows" value="${this.escapeHtml(mcp?.env_windows || '')}" placeholder="empty = same as above">
+                    </div>
+                </details>
                 <div class="form-checkbox">
                     <input type="checkbox" name="enabled" ${mcp?.enabled !== false ? 'checked' : ''}>
                     <label>Enabled</label>
@@ -8213,6 +8229,9 @@ class OpenPoet {
             command: form.querySelector('input[name="command"]').value,
             args: form.querySelector('input[name="args"]').value,
             env: form.querySelector('input[name="env"]').value,
+            command_windows: form.querySelector('input[name="command_windows"]').value.trim(),
+            args_windows: form.querySelector('input[name="args_windows"]').value.trim(),
+            env_windows: form.querySelector('input[name="env_windows"]').value.trim(),
             enabled: form.querySelector('input[name="enabled"]').checked
         };
 
