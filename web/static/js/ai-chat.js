@@ -850,6 +850,8 @@ class AIChatManager {
             'delete_skill': 'Deleting skill',
             'list_skills': 'Listing skills',
             'list_projects': 'Listing projects',
+            'create_project': 'Creating project',
+            'manage_project_containers': 'Managing containers',
             'list_mcp_servers': 'Listing MCP servers',
             'create_mcp_server': 'Creating MCP server',
             'update_setting': 'Updating setting',

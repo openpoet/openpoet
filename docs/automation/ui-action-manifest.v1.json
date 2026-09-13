@@ -9,6 +9,11 @@
     {"route":"/api/projects","method":"POST","capability":"projects.create","domain":"projects","risk":"R4","scopes":["projects:write","credentials:write"],"application_service":"ProjectService","ui_binding":"shared_application_service","status":"implemented"},
     {"route":"/api/projects/{id}","method":"PUT","capability":"projects.update","domain":"projects","risk":"R4","scopes":["projects:write","credentials:write"],"application_service":"ProjectService","ui_binding":"shared_application_service","status":"implemented"},
     {"route":"/api/projects/{id}","method":"DELETE","capability":"projects.delete","domain":"projects","risk":"R3","scopes":["projects:write"],"application_service":"ProjectService","ui_binding":"shared_application_service","status":"implemented"},
+    {"route":"/api/projects/scaffold","method":"POST","capability":"projects.scaffold","domain":"projects","risk":"R4","scopes":["projects:write"],"application_service":"ProjectScaffoldService","ui_binding":"shared_application_service","status":"implemented"},
+    {"route":"/api/projects/{id}/compose/approve","method":"POST","capability":"compose.approve","domain":"environments","risk":"R4","scopes":["environments:manage"],"application_service":"ComposeApplicationService","ui_binding":"shared_application_service","status":"implemented"},
+    {"route":"/api/projects/{id}/compose/up","method":"POST","capability":"compose.up","domain":"environments","risk":"R4","scopes":["environments:manage"],"application_service":"ComposeApplicationService","ui_binding":"shared_application_service","status":"implemented"},
+    {"route":"/api/projects/{id}/compose/down","method":"POST","capability":"compose.down","domain":"environments","risk":"R3","scopes":["environments:manage"],"application_service":"ComposeApplicationService","ui_binding":"shared_application_service","status":"implemented"},
+    {"route":"/api/projects/{id}/compose/restart","method":"POST","capability":"compose.restart","domain":"environments","risk":"R2","scopes":["environments:manage"],"application_service":"ComposeApplicationService","ui_binding":"shared_application_service","status":"implemented"},
     {"route":"/api/projects/{id}/duplicate","method":"POST","capability":"projects.duplicate","domain":"projects","risk":"R4","scopes":["projects:write","credentials:write"],"application_service":"ProjectService","ui_binding":"shared_application_service","status":"implemented"},
     {"route":"/api/projects/{id}/validate","method":"POST","capability":"projects.validate","domain":"projects","risk":"R1","scopes":["projects:read"],"application_service":"ProjectOperationService","ui_binding":"shared_application_service","status":"implemented"},
     {"route":"/api/projects/{id}/sync-config","method":"POST","capability":"projects.sync_config","domain":"projects","risk":"R4","scopes":["projects:write","config:write"],"application_service":"ConfigurationService","ui_binding":"shared_application_service","status":"implemented"},
@@ -133,16 +138,56 @@
     {"route":"/api/tunnel/pair-confirm","method":"POST","capability":"tunnel.confirm_pairing","domain":"tunnel","risk":"R4","scopes":["tunnel:admin","credentials:write"],"application_service":"TunnelMutationService","ui_binding":"shared_application_service","status":"implemented"}
   ],
   "business_ui_actions": [
-    "app.endMission","app.reopenMission","app.stopAllMissionSessions","app._createTag","app._deleteTag","app._handleProactiveAction","app._saveEditTag","app.applyBinaryUpdate","app.approveAllPendingTaskVerifications","app.approveSelectedTaskVerifications","app.cancelOpenAIOAuth","app.clearTokenUsage","app.confirmPairing","app.connectOpenAIOAuth","app.createTaskWithAI","app.customizeGlobalSkill","app.cycleTaskStatus","app.deleteAIConfig","app.deleteAgent","app.deleteMCP","app.deletePairedDevice","app.deleteProject","app.deleteProjectCustomTool","app.deleteProjectMCPServer","app.deleteProjectSkill","app.deleteSkill","app.deleteTask","app.disconnectOpenAIOAuth","app.discussSkillWithAI","app.duplicateProject","app.duplicateSkill","app.duplicateTask","app.editMemoryDocWithAI","app.executeDuplicate","app.generateAISkill","app.generateMCPAPIKey","app.importSkillsDialog","app.resetProjectSkill","app.restoreSkillVersion","app.revokeMCPAPIKey","app.revokePairedDevice","app.saveAIConfig","app.saveAIConfigAssignments","app.saveAIGeneratedSkill","app.saveAgent","app.saveMCP","app.saveMCPHTTPSettings","app.saveProject","app.saveProjectCustomTool","app.saveProjectMCPServer","app.saveProjectShares","app.saveProjectSkill","app.saveProjectSkillConfig","app.saveProjectToolsFromDetail","app.saveSkill","app.saveTask","app.saveToolPolicies","app.saveWhisperSettings","app.startSession","app.startSessionFromTask","app.stopSession","app.syncAllConfig","app.syncProjectConfig","app.testAIConfig","app.toggleTunnel"
+    "app._createTag", "app._deleteTag", "app._handleProactiveAction", "app._saveEditTag",
+    "app.applyBinaryUpdate", "app.approveAllPendingTaskVerifications", "app.approveCompose",
+    "app.approveSelectedTaskVerifications", "app.cancelOpenAIOAuth", "app.clearTokenUsage",
+    "app.composeAction", "app.confirmPairing", "app.connectOpenAIOAuth", "app.createTaskWithAI",
+    "app.customizeGlobalSkill", "app.cycleTaskStatus", "app.deleteAIConfig", "app.deleteAgent",
+    "app.deleteMCP", "app.deletePairedDevice", "app.deleteProject", "app.deleteProjectCustomTool",
+    "app.deleteProjectMCPServer", "app.deleteProjectSkill", "app.deleteSkill", "app.deleteTask",
+    "app.disconnectOpenAIOAuth", "app.discussSkillWithAI", "app.duplicateProject", "app.duplicateSkill",
+    "app.duplicateTask", "app.editMemoryDocWithAI", "app.endMission", "app.executeDuplicate",
+    "app.generateAISkill", "app.generateMCPAPIKey", "app.importSkillsDialog", "app.reopenMission",
+    "app.resetProjectSkill", "app.restoreSkillVersion", "app.revokeMCPAPIKey", "app.revokePairedDevice",
+    "app.saveAIConfig", "app.saveAIConfigAssignments", "app.saveAIGeneratedSkill", "app.saveAgent",
+    "app.saveMCP", "app.saveMCPHTTPSettings", "app.saveProject", "app.saveProjectCustomTool",
+    "app.saveProjectMCPServer", "app.saveProjectShares", "app.saveProjectSkill", "app.saveProjectSkillConfig",
+    "app.saveProjectToolsFromDetail", "app.saveProjectsRootPath", "app.saveSkill", "app.saveTask",
+    "app.saveToolPolicies", "app.saveWhisperSettings", "app.scaffoldProject", "app.startSession",
+    "app.startSessionFromTask", "app.stopAllMissionSessions", "app.stopSession", "app.syncAllConfig",
+    "app.syncProjectConfig", "app.testAIConfig", "app.toggleTunnel"
   ],
   "presentation_only": [
-    "app.openMissionDetail","app.gotoMissionPage","app.openMissionDoc","app.openMissionSession","app._browseToPath","app._closeDirPicker","app._editTag","app._loadDirectoryListing","app._selectDirectory","app._selectEditTagColor","app._selectNewTagColor","app.browseDirectory","app.checkForBinaryUpdate","app.closeSkillModal","app.closeSyncModal","app.copyOpenAIOAuthCode","app.editAgent","app.editMCP","app.editProject","app.editSkill","app.exportSkills","app.filterByStatus","app.filterByTag","app.hideModal","app.loadGlobalTokenUsage","app.loadProjectSkills","app.loadProjectTokenUsage","app.loadProjectTools","app.openTerminal","app.showAIConfigModal","app.showAISkillCreator","app.showAgentModal","app.showMCPModal","app.showManageTagsModal","app.showPairForm","app.showProjectCustomToolModal","app.showProjectDetail","app.showProjectMCPServerModal","app.showProjectSkillModal","app.showSharesModal","app.showSkillModal","app.showSkillVersions","app.showTaskModal","app.showToast","app.switchSkillEditorTab","app.toggleDoneSection","app.toggleProjectGroup","app.toggleProjectToolPolicy","app.toggleTPContext","app.toggleTaskCollapse","app.tpProjectSelectAll","app.tpSelectAll","app.viewTaskDetail","theme.applyTheme"
+    "app._browseToPath", "app._closeDirPicker", "app._editTag", "app._loadDirectoryListing",
+    "app._selectDirectory", "app._selectEditTagColor", "app._selectNewTagColor", "app._updateScaffoldPreview",
+    "app.browseDirectory", "app.browseProjectsRoot", "app.checkForBinaryUpdate", "app.closeSkillModal",
+    "app.closeSyncModal", "app.copyOpenAIOAuthCode", "app.editAgent", "app.editMCP", "app.editProject",
+    "app.editSkill", "app.exportSkills", "app.filterByStatus", "app.filterByTag", "app.gotoMissionPage",
+    "app.hideModal", "app.loadGlobalTokenUsage", "app.loadProjectSkills", "app.loadProjectTokenUsage",
+    "app.loadProjectTools", "app.openMissionDetail", "app.openMissionDoc", "app.openMissionSession",
+    "app.openTerminal", "app.refreshComposeStatus", "app.showAIConfigModal", "app.showAISkillCreator",
+    "app.showAgentModal", "app.showComposeFile", "app.showComposeLogs", "app.showComposeModal",
+    "app.showMCPModal", "app.showManageTagsModal", "app.showPairForm", "app.showProjectCustomToolModal",
+    "app.showProjectDetail", "app.showProjectMCPServerModal", "app.showProjectSkillModal",
+    "app.showScaffoldProjectModal", "app.showSharesModal", "app.showSkillModal", "app.showSkillVersions",
+    "app.showTaskModal", "app.showToast", "app.switchSkillEditorTab", "app.toggleDoneSection",
+    "app.toggleProjectGroup", "app.toggleProjectToolPolicy", "app.toggleTPContext", "app.toggleTaskCollapse",
+    "app.tpProjectSelectAll", "app.tpSelectAll", "app.viewTaskDetail", "theme.applyTheme"
   ],
   "business_event_actions": [
     "element#btn-mark-all-read","element#btn-stop-session","element#btn-upload-file","element#hook-ask-user-chat","element#hook-ask-user-submit","element#hook-permission-allow","element#hook-permission-allow-always","element#hook-permission-deny","element#hook-plan-submit","element#hook-task-loaded-add-prompt","element#hook-task-loaded-plan","element#hook-task-loaded-send-extra","element#hook-task-loaded-start","element#image-paste-add-btn","element#image-paste-send","element#link-task-submit","element#task-menu-link","element#task-menu-new","element#task-menu-unlink","element#update-btn"
   ],
   "presentation_event_actions": [
-    "element#btn-add-project","element#btn-back-projects","element#btn-back-sessions","element#btn-close-files","element#btn-close-tool-panel","element#btn-file-browser","element#btn-image-picker","element#btn-mobile-image-picker","element#btn-structured-view","element#btn-tool-activity","element#btn-view-plan","element#file-viewer-close","element#file-viewer-download","element#file-viewer-error-download","element#git-commit-collapse","element#git-status-refresh","element#git-viewer-close","element#hook-ask-user-dismiss","element#hook-permission-dismiss","element#hook-plan-dismiss","element#hook-task-loaded-dismiss","element#image-paste-cancel","element#image-paste-close","element#image-paste-voice-btn","element#modal-overlay","element#sidebar-toggle","element#task-menu-view"
+    "element#btn-add-project", "element#btn-back-projects", "element#btn-back-sessions",
+    "element#btn-close-files", "element#btn-close-tool-panel", "element#btn-file-browser",
+    "element#btn-image-picker", "element#btn-mobile-image-picker", "element#btn-new-project-folder",
+    "element#btn-structured-view", "element#btn-tool-activity", "element#btn-view-plan",
+    "element#file-viewer-close", "element#file-viewer-download", "element#file-viewer-error-download",
+    "element#git-commit-collapse", "element#git-status-refresh", "element#git-viewer-close",
+    "element#hook-ask-user-dismiss", "element#hook-permission-dismiss", "element#hook-plan-dismiss",
+    "element#hook-task-loaded-dismiss", "element#image-paste-cancel", "element#image-paste-close",
+    "element#image-paste-voice-btn", "element#modal-overlay", "element#sidebar-toggle",
+    "element#task-menu-view"
   ],
   "allowlist": [
     {"route":"/api/client-log","method":"POST","reason":"telemetry"},

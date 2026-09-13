@@ -11,9 +11,11 @@
 *.log
 
 # Node
+#
+# package.json/package-lock.json ARE tracked: they pin the dev-only Playwright
+# used by the browser tests under tests/ (`make test-web`). Nothing here ships
+# in the Go binary.
 node_modules/
-package.json
-package-lock.json
 
 # Screenshots / test files
 #

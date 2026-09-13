@@ -213,6 +213,53 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return formatProjectsList(body)
 
+	case "openpoet_create_project":
+		payload, _ := json.Marshal(map[string]any{
+			"name":         params["name"],
+			"dir_name":     params["dir_name"],
+			"compose_yaml": params["compose_yaml"],
+			"git_init":     params["git_init"] != "false",
+			"files":        readmeFiles(params),
+		})
+		body, err := client.Post("/api/projects/scaffold", string(payload))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Project created: %s\nThe containers are NOT running — the user must approve the compose file before it can start.", string(body)), nil
+
+	case "openpoet_manage_project_containers":
+		projectID := getProjectID(params)
+		if projectID <= 0 {
+			return "", fmt.Errorf("project_id is required")
+		}
+		action, _ := params["action"].(string)
+		switch action {
+		case "", "status":
+			body, err := client.Get(fmt.Sprintf("/api/projects/%d/compose", projectID))
+			if err != nil {
+				return "", err
+			}
+			return string(body), nil
+		case "logs":
+			query := fmt.Sprintf("/api/projects/%d/compose/logs?tail=200", projectID)
+			if service, _ := params["service"].(string); service != "" {
+				query += "&service=" + url.QueryEscape(service)
+			}
+			body, err := client.Get(query)
+			if err != nil {
+				return "", err
+			}
+			return string(body), nil
+		case "up", "down", "restart":
+			body, err := client.Post(fmt.Sprintf("/api/projects/%d/compose/%s", projectID, action), "{}")
+			if err != nil {
+				return "", err
+			}
+			return string(body), nil
+		default:
+			return "", fmt.Errorf("unknown action %q: use status, logs, up, down or restart", action)
+		}
+
 	case "openpoet_get_mcp_server":
 		id, ok := getID(params)
 		if !ok {
@@ -2177,4 +2224,13 @@ func collectSharedFiles(client *APIClient, projectID int64, dirPath string) ([]s
 		}
 	}
 	return files, nil
+}
+
+// readmeFiles turns an optional readme argument into the scaffold files map.
+func readmeFiles(params map[string]interface{}) map[string]string {
+	readme, _ := params["readme"].(string)
+	if strings.TrimSpace(readme) == "" {
+		return nil
+	}
+	return map[string]string{"README.md": readme}
 }

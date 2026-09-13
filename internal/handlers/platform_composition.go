@@ -22,9 +22,14 @@ const (
 	// blackboard.put (exec write): +3 capabilities, +1 mutation, +2 reads.
 	// Phase 6 added environments.approve_manifest (unsafe) + workspaces.discard
 	// (destructive): +2 capabilities, +2 mutations, +0 reads.
-	expectedPlatformCapabilities = 170
-	expectedPlatformMutations    = 113
-	expectedPlatformReads        = 57
+	// Project scaffolding added projects.scaffold_root (config read) +
+	// projects.scaffold (unsafe mutation): +2 capabilities, +1 mutation, +1 read.
+	// Container lifecycle added compose.status/logs (reads) and
+	// compose.approve/up/down/restart (mutations): +6 capabilities,
+	// +4 mutations, +2 reads.
+	expectedPlatformCapabilities = 178
+	expectedPlatformMutations    = 118
+	expectedPlatformReads        = 60
 )
 
 // PlatformServices is the explicit runtime composition root for Automation.
@@ -75,18 +80,20 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 
 	effects := &platformEffects{api: a, db: services.DB, hub: services.Hub}
 	reinitializer := platformAIReinitializer{callback: services.ReinitializeAI}
+	projectService := application.NewProjectService(services.DB, services.Encryptor, effects, platformProjectPathValidator{})
 	configuration := automation.ConfigurationPlatformServices{
-		Projects: application.NewProjectService(services.DB, services.Encryptor, effects, platformProjectPathValidator{}),
+		Projects: projectService,
 		ProjectOperations: application.NewProjectOperationService(
 			services.DB, NewProjectOperationAdapter(a), effects,
 		),
-		Tags:          application.NewTagService(services.DB),
-		Skills:        application.NewSkillService(services.DB, effects),
-		Agents:        application.NewAIAgentService(services.DB, effects),
-		AIConfigs:     application.NewAIConfigService(services.DB, services.Encryptor, effects, reinitializer),
-		MCP:           application.NewMCPService(services.DB, services.Encryptor, effects),
-		CustomTools:   application.NewCustomToolService(services.DB, services.Encryptor, effects),
-		Configuration: application.NewConfigurationService(services.DB, services.Encryptor, effects, reinitializer, services.ConfigSync),
+		Tags:            application.NewTagService(services.DB),
+		Skills:          application.NewSkillService(services.DB, effects),
+		Agents:          application.NewAIAgentService(services.DB, effects),
+		AIConfigs:       application.NewAIConfigService(services.DB, services.Encryptor, effects, reinitializer),
+		MCP:             application.NewMCPService(services.DB, services.Encryptor, effects),
+		CustomTools:     application.NewCustomToolService(services.DB, services.Encryptor, effects),
+		Configuration:   application.NewConfigurationService(services.DB, services.Encryptor, effects, reinitializer, services.ConfigSync),
+		ProjectScaffold: application.NewProjectScaffoldService(services.DB, projectService),
 	}
 
 	workspaceService := application.NewWorkspaceService(services.DB, NewGitCommandAdapter(services.GitHandler), services.ConfigSync)
@@ -128,6 +135,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		Workspaces:         workspaceService,
 		Blackboard:         services.DB,
 		Environments:       application.NewEnvironmentService(services.DB),
+		Compose:            application.NewComposeApplicationService(projectService, NewComposeRunnerAdapter(), services.DB),
 	}
 
 	collaboration := automation.CollaborationPlatformServices{

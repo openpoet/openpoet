@@ -122,9 +122,19 @@ make build
 # Run in development mode
 make dev
 
-# Run tests
+# Run Go tests
 make test
+
+# Run the browser/DOM tests (Playwright)
+make test-web
 ```
+
+`make test-web` installs the dev-only Node dependency on first use and runs the
+tests under `tests/` in three groups: `unit` (node only), `browser` (Playwright
+against in-process pages) and `server` (Playwright against a running instance).
+The `server` group is skipped unless something answers at `http://localhost:8080`
+— start one with `./.scripts/dev-server.sh start`, or point the suite elsewhere
+with `OPENPOET_E2E_URL`. Port 8081 is production and the runner refuses it.
 
 ## Contributing
 

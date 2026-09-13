@@ -53,6 +53,7 @@ type ExecutionPlatformServices struct {
 	Workspaces     *application.WorkspaceService
 	Blackboard     BlackboardPort
 	Environments   EnvironmentManifestApprover
+	Compose        ComposeLifecyclePort
 }
 
 func RegisterExecutionPlatformCapabilities(registry *PlatformCapabilityRegistry, services ExecutionPlatformServices) error {
@@ -65,7 +66,7 @@ func RegisterExecutionPlatformCapabilities(registry *PlatformCapabilityRegistry,
 		services.SessionQueries == nil || services.SessionRuntime == nil || services.SessionEvents == nil ||
 		services.Files == nil || services.Git == nil || services.Tunnel == nil || services.Updates == nil ||
 		services.Conflicts == nil || services.Workspaces == nil || services.Blackboard == nil ||
-		services.Environments == nil {
+		services.Environments == nil || services.Compose == nil {
 		return errors.New("all execution platform services and read ports are required")
 	}
 	groups := []struct {
@@ -85,6 +86,7 @@ func RegisterExecutionPlatformCapabilities(registry *PlatformCapabilityRegistry,
 		{workspacePlatformDefinitions(), &workspacePlatformExecutor{service: services.Workspaces}},
 		{blackboardPlatformDefinitions(), &blackboardPlatformExecutor{port: services.Blackboard}},
 		{environmentPlatformDefinitions(), &environmentPlatformExecutor{service: services.Environments}},
+		{composePlatformDefinitions(), &composePlatformExecutor{service: services.Compose}},
 	}
 	for _, group := range groups {
 		for _, definition := range group.definitions {

@@ -757,6 +757,148 @@ func (a *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusCreated, project)
 }
 
+// ScaffoldProject creates the project directory under the configured projects
+// root, writes its docker-compose.yml plus any extra files, and registers the
+// project. Unlike CreateProject it does not require the path to already exist —
+// creating it is the point.
+func (a *API) ScaffoldProject(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	var input application.ScaffoldProjectInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	result, err := services.Configuration.ProjectScaffold.Create(platformUIContext(r), input)
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusCreated, result)
+}
+
+// GetProjectsRoot reports the configured projects root, or the reason it is
+// unusable, so the UI can enable or explain the "create folder" mode.
+func (a *API) GetProjectsRoot(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	root, err := services.Configuration.ProjectScaffold.Root(platformUIContext(r))
+	if err != nil {
+		respondJSON(w, http.StatusOK, map[string]any{
+			"configured": false,
+			"reason":     err.Error(),
+			"code":       application.ErrorCode(err),
+		})
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"configured": true, "root": root})
+}
+
+// composeService resolves the project id and the compose service in one step,
+// writing the error response itself when either is unusable.
+func (a *API) composeService(w http.ResponseWriter, r *http.Request) (*application.ComposeApplicationService, int64, bool) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return nil, 0, false
+	}
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid project ID")
+		return nil, 0, false
+	}
+	service, ok := services.Execution.Compose.(*application.ComposeApplicationService)
+	if !ok || service == nil {
+		respondError(w, http.StatusServiceUnavailable, "Container management is unavailable")
+		return nil, 0, false
+	}
+	return service, id, true
+}
+
+// GetProjectCompose reports the project's container stack.
+func (a *API) GetProjectCompose(w http.ResponseWriter, r *http.Request) {
+	service, id, ok := a.composeService(w, r)
+	if !ok {
+		return
+	}
+	status, err := service.Status(platformUIContext(r), id)
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, status)
+}
+
+// ApproveProjectCompose records the current docker-compose.yml as approved to
+// run. Without this, ComposeUp refuses.
+func (a *API) ApproveProjectCompose(w http.ResponseWriter, r *http.Request) {
+	service, id, ok := a.composeService(w, r)
+	if !ok {
+		return
+	}
+	var payload struct {
+		ContentSHA256 string `json:"content_sha256"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+
+	status, err := service.Approve(platformUIContext(r), id, payload.ContentSHA256, platformUIAuthorization(r).Actor.ID)
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, status)
+}
+
+func (a *API) ProjectComposeUp(w http.ResponseWriter, r *http.Request) {
+	a.runComposeAction(w, r, func(s *application.ComposeApplicationService, ctx context.Context, id int64) (*application.ComposeActionResult, error) {
+		return s.Up(ctx, id)
+	})
+}
+
+func (a *API) ProjectComposeDown(w http.ResponseWriter, r *http.Request) {
+	a.runComposeAction(w, r, func(s *application.ComposeApplicationService, ctx context.Context, id int64) (*application.ComposeActionResult, error) {
+		return s.Down(ctx, id)
+	})
+}
+
+func (a *API) ProjectComposeRestart(w http.ResponseWriter, r *http.Request) {
+	a.runComposeAction(w, r, func(s *application.ComposeApplicationService, ctx context.Context, id int64) (*application.ComposeActionResult, error) {
+		return s.Restart(ctx, id)
+	})
+}
+
+func (a *API) runComposeAction(w http.ResponseWriter, r *http.Request,
+	action func(*application.ComposeApplicationService, context.Context, int64) (*application.ComposeActionResult, error)) {
+	service, id, ok := a.composeService(w, r)
+	if !ok {
+		return
+	}
+	result, err := action(service, platformUIContext(r), id)
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, result)
+}
+
+// GetProjectComposeLogs returns the tail of the stack's logs.
+func (a *API) GetProjectComposeLogs(w http.ResponseWriter, r *http.Request) {
+	service, id, ok := a.composeService(w, r)
+	if !ok {
+		return
+	}
+	tail, _ := strconv.Atoi(r.URL.Query().Get("tail"))
+	logs, err := service.Logs(platformUIContext(r), id, r.URL.Query().Get("service"), tail)
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"logs": logs})
+}
+
 func (a *API) GetProject(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -922,6 +1064,10 @@ func (a *API) BrowseRemoteDirectory(w http.ResponseWriter, r *http.Request) {
 // SFTP uses — "/C:/Users/foo" — so we can decide whether to treat the host as
 // Windows for path-format purposes.
 func looksLikeSFTPWindowsPath(p string) bool {
+	if len(p) == 3 && p[0] == '/' && isASCIILetter(p[1]) && p[2] == ':' {
+		// Drive root as listed by "ls /" on Windows OpenSSH: "/C:".
+		return true
+	}
 	return len(p) >= 4 && p[0] == '/' && isASCIILetter(p[1]) && p[2] == ':' && (p[3] == '/' || p[3] == '\\')
 }
 
@@ -945,7 +1091,12 @@ func sftpPathToWindows(p string) string {
 	if looksLikeSFTPWindowsPath(p) {
 		p = p[1:]
 	}
-	return strings.ReplaceAll(p, "/", `\`)
+	p = strings.ReplaceAll(p, "/", `\`)
+	if len(p) == 2 && isASCIILetter(p[0]) && p[1] == ':' {
+		// A bare "C:" is drive-relative on Windows; the drive root is "C:\".
+		p += `\`
+	}
+	return p
 }
 
 func isASCIILetter(b byte) bool {
