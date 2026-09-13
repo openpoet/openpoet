@@ -958,8 +958,8 @@ func (d *DB) IncrementProjectSkillSyncCount(ctx context.Context, id int64) error
 
 // MCP Server operations
 func (d *DB) CreateMCPServer(ctx context.Context, m *MCPServer) error {
-	query := `INSERT INTO mcp_servers (name, command, args, env, enabled) VALUES (?, ?, ?, ?, ?)`
-	result, err := d.ExecContext(ctx, query, m.Name, m.Command, m.Args, m.Env, m.Enabled)
+	query := `INSERT INTO mcp_servers (name, command, args, env, command_windows, args_windows, env_windows, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	result, err := d.ExecContext(ctx, query, m.Name, m.Command, m.Args, m.Env, m.CommandWindows, m.ArgsWindows, m.EnvWindows, m.Enabled)
 	if err != nil {
 		return err
 	}
@@ -986,8 +986,8 @@ func (d *DB) ListEnabledMCPServers(ctx context.Context) ([]MCPServer, error) {
 }
 
 func (d *DB) UpdateMCPServer(ctx context.Context, m *MCPServer) error {
-	query := `UPDATE mcp_servers SET name=?, command=?, args=?, env=?, enabled=?, updated_at=? WHERE id=?`
-	_, err := d.ExecContext(ctx, query, m.Name, m.Command, m.Args, m.Env, m.Enabled, time.Now(), m.ID)
+	query := `UPDATE mcp_servers SET name=?, command=?, args=?, env=?, command_windows=?, args_windows=?, env_windows=?, enabled=?, updated_at=? WHERE id=?`
+	_, err := d.ExecContext(ctx, query, m.Name, m.Command, m.Args, m.Env, m.CommandWindows, m.ArgsWindows, m.EnvWindows, m.Enabled, time.Now(), m.ID)
 	return err
 }
 

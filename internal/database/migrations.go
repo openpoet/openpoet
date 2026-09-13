@@ -90,6 +90,7 @@ var migrations = []Migration{
 	{Version: 72, Description: "ssh hardening: ssh_known_hosts TOFU ledger (first contact records, later contacts verify, mismatch fails closed)", Up: migrateV72},
 	{Version: 73, Description: "maestro integration: mission_grants (multi-use, mission-scoped human authority for destructive capabilities like workspaces.merge)", Up: migrateV73},
 	{Version: 74, Description: "retire missions: drop missions/mission_workers/mission_grants and the mission-coordinator skill (the coordinator tier stays)", Up: migrateV74},
+	{Version: 75, Description: "mcp: per-OS command variants on global servers (command_windows/args_windows/env_windows) so one logical server serves a mixed Linux/Windows fleet", Up: migrateV75},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2026,6 +2027,29 @@ func migrateV74(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV74 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV75 — lets one global MCP server serve hosts with different operating
+// systems. The stored command is a single absolute path, so a fleet mixing a
+// Linux host with a Windows one could only ever satisfy one of them: the
+// Windows sessions inherited the Linux path and died with "o sistema não pode
+// encontrar o caminho especificado" (os error 3).
+//
+// The Windows columns are optional. Empty means "no variant", and the config
+// syncer keeps writing the primary command for every host, which is the
+// behavior every existing row already has.
+func migrateV75(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE mcp_servers ADD COLUMN command_windows TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE mcp_servers ADD COLUMN args_windows TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE mcp_servers ADD COLUMN env_windows TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV75 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

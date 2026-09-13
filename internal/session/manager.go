@@ -1664,8 +1664,10 @@ func (m *Manager) buildMCPConfigJSON(ctx context.Context, project *database.Proj
 	if err != nil {
 		log.Printf("Warning: failed to list MCP servers: %v", err)
 	}
+	targetsWindows := project.TargetsWindows()
 	for _, server := range servers {
-		command, args, env, decodeErr := resolveSessionMCPParts(server.Name, server.Command, server.Args, server.Env, decrypt)
+		rawCommand, rawArgs, rawEnv := server.PartsFor(targetsWindows)
+		command, args, env, decodeErr := resolveSessionMCPParts(server.Name, rawCommand, rawArgs, rawEnv, decrypt)
 		if decodeErr != nil {
 			return "", decodeErr
 		}
