@@ -27,6 +27,7 @@ func configurationPlatformTestServices() ConfigurationPlatformServices {
 		MCP:               application.NewMCPService(nil, nil, nil),
 		CustomTools:       application.NewCustomToolService(nil, nil, nil),
 		Configuration:     application.NewConfigurationService(nil, nil, nil, nil, nil),
+		ProjectScaffold:   application.NewProjectScaffoldService(nil, nil),
 	}
 }
 
@@ -48,6 +49,7 @@ func configurationPlatformDefinitionsForTest() []PlatformCapabilityDefinition {
 		projectPlatformDefinitions(), projectOperationPlatformDefinitions(), tagPlatformDefinitions(),
 		skillPlatformDefinitions(), agentPlatformDefinitions(), aiConfigPlatformDefinitions(),
 		mcpPlatformDefinitions(), customToolPlatformDefinitions(), configurationPlatformDefinitions(),
+		projectScaffoldPlatformDefinitions(),
 	}
 	var result []PlatformCapabilityDefinition
 	for _, group := range groups {
@@ -68,8 +70,8 @@ func configurationPlatformActor(definitions []PlatformCapabilityDefinition) Acto
 
 func TestConfigurationPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := configurationPlatformDefinitionsForTest()
-	if len(definitions) != 64 {
-		t.Fatalf("configuration surface has %d capabilities, want 64", len(definitions))
+	if len(definitions) != 66 {
+		t.Fatalf("configuration surface has %d capabilities, want 66", len(definitions))
 	}
 
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
@@ -180,7 +182,7 @@ func TestConfigurationPlatformMutationMetadataMatchesManifest(t *testing.T) {
 func TestConfigurationPlatformReadSurfaceIsExplicit(t *testing.T) {
 	want := []string{
 		"agents.list", "ai_configs.list", "ai_configs.list_assignments", "mcp.list", "mcp.list_project",
-		"mcp_api_key.status", "projects.get", "projects.get_shares", "projects.list", "settings.get",
+		"mcp_api_key.status", "projects.get", "projects.get_shares", "projects.list", "projects.scaffold_root", "settings.get",
 		"skills.list", "skills.list_project", "skills.list_project_config", "skills.list_versions", "tags.list",
 		"groups.list", "tags.list_project", "tools.get_policies", "tools.get_project_policy", "tools.list_project",
 	}
@@ -295,6 +297,8 @@ func configurationDryRunCases() []configurationDryRunCase {
 		{name: "tools.update_policies", target: `{}`, payload: `{"policies":{"chat":"{\"mode\":\"allow\"}"}}`},
 		{name: "tools.update_project_policy", target: `{"project_id":1}`, payload: `{"policy":"{\"mode\":\"allow\"}"}`},
 		{name: "projects.update_shares", target: `{"project_id":1}`, payload: `{"shared_project_ids":[2,3]}`},
+		{name: "projects.scaffold_root", target: `{}`, payload: `{}`},
+		{name: "projects.scaffold", target: `{}`, payload: `{"name":"demo","compose_yaml":"services:\n  app:\n    image: nginx\n"}`},
 	}
 }
 

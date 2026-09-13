@@ -69,7 +69,8 @@ Do NOT call the same tool more than once with the same arguments. If you already
 		sb.WriteString(`
 ## Available Tools
 **Skills**: list_skills, create_skill, update_skill, delete_skill
-**Projects**: list_projects, list_directory, read_file
+**Projects**: list_projects, create_project (creates a new folder + docker-compose.yml on the server), list_directory, read_file
+**Containers**: manage_project_containers (status, logs, up, down, restart — 'up' needs the user to approve the compose file first)
 **MCP**: list_mcp_servers, create_mcp_server
 **Memory**: get_memory_doc, update_memory_doc (proposals only — require user approval)
 **Tasks**: list_tasks, create_task, update_task, delete_task, get_task_report

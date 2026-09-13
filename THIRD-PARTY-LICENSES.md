@@ -49,6 +49,15 @@ each package's repository.
 | xterm-addon-web-links | 0.x | MIT | https://github.com/xtermjs/xterm.js |
 | marked | 15.x | MIT | https://github.com/markedjs/marked |
 
+## Development-Only Tooling
+
+Not distributed: these are installed by `make test-web` to run the browser
+tests under `tests/` and never end up in the OpenPoet binary or in `web/static`.
+
+| Tool | Version | License | Repository |
+|------|---------|---------|------------|
+| playwright | 1.63.0 | Apache-2.0 | https://github.com/microsoft/playwright |
+
 ---
 
 ## License Summaries

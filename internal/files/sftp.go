@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"openpoet/internal/database"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -87,20 +86,7 @@ func (m *RemoteFileManager) buildSSHConfig() (*ssh.ClientConfig, error) {
 
 	// Fall back to default SSH keys when no credential was provided
 	if len(authMethods) == 0 {
-		homeDir, _ := os.UserHomeDir()
-		keyPaths := []string{
-			homeDir + "/.ssh/id_rsa",
-			homeDir + "/.ssh/id_ed25519",
-			homeDir + "/.ssh/id_ecdsa",
-		}
-		for _, keyPath := range keyPaths {
-			if keyData, err := os.ReadFile(keyPath); err == nil {
-				if signer, err := ssh.ParsePrivateKey(keyData); err == nil {
-					authMethods = append(authMethods, ssh.PublicKeys(signer))
-					break
-				}
-			}
-		}
+		authMethods = sshauth.DefaultKeyAuthMethods()
 	}
 
 	if len(authMethods) == 0 {

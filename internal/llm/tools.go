@@ -186,6 +186,46 @@ func AllToolDefs() []ToolDef {
 			Context: ToolContextBoth,
 		},
 		{
+			Name: "create_project",
+			Description: "Create a new local project: creates its own folder inside the configured projects root directory on the server, writes a docker-compose.yml, and registers the project in OpenPoet. " +
+				"Write the compose file for the stack the user described (choose sensible images and a host port). " +
+				"NEVER use host ports 8080, 8081 or 8090 — they are reserved and will be refused. " +
+				"NEVER use privileged, network_mode/pid: host, cap_add, or bind-mount absolute host paths or the Docker socket — all are refused. " +
+				"Use relative paths (./data) or named volumes instead. " +
+				"The containers are NOT started: the user must review and approve the compose file before it can run.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"name":         {Type: "string", Description: "Project name, as the user would read it (e.g. 'Loja Online')"},
+					"compose_yaml": {Type: "string", Description: "Full docker-compose.yml body for the stack. Do NOT wrap it in markdown fences."},
+					"dir_name":     {Type: "string", Description: "Optional folder name. Lowercase letters, digits, '.', '_' and '-' only. Defaults to a slug of the name."},
+					"readme":       {Type: "string", Description: "Optional README.md content describing the project and how to run it."},
+					"git_init":     {Type: "string", Description: "'true' (default) to initialize a git repository in the new folder, 'false' to skip."},
+				},
+				Required: []string{"name", "compose_yaml"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name: "manage_project_containers",
+			Description: "Inspect and control the docker-compose containers of a local project. " +
+				"Actions: 'status' (services, state, ports, and whether the compose file is approved to run), " +
+				"'logs' (recent output), 'up' (start — requires the compose file to have been approved by the user), " +
+				"'down' (stop and remove containers; named volumes are kept), 'restart'. " +
+				"If 'up' reports the file is not approved, tell the user to review and approve it in the project's Containers panel — you cannot approve it yourself.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id": {Type: "string", Description: "The project ID (number)"},
+					"action":     {Type: "string", Description: "What to do", Enum: []string{"status", "logs", "up", "down", "restart"}},
+					"service":    {Type: "string", Description: "Optional service name, for 'logs' only"},
+					"tail":       {Type: "string", Description: "Optional number of log lines for 'logs' (default 200)"},
+				},
+				Required: []string{"project_id", "action"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
 			Name:           "get_mcp_server",
 			Description:    "Get the full details of a global MCP server by ID. Returns name, command, args, env, and enabled status.",
 			MCPDescription: "Get a global MCP server's full details by ID.",

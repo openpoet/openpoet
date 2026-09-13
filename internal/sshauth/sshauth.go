@@ -19,12 +19,18 @@ import (
 // (~/.ssh/id_rsa|id_ed25519|id_ecdsa). Used when a remote project declares
 // key auth but stores no pasted credential — the standard ssh behavior of
 // "use my own keys" instead of a hard failure.
+//
+// Every readable key is offered, not just the first one: a host that only
+// trusts id_ed25519 must not fail because an unrelated id_rsa happens to exist.
+// All signers go into a single ssh.PublicKeys method on purpose — the client
+// never retries an auth method it has already attempted, so one method per key
+// would stop at the first rejected key.
 func DefaultKeyAuthMethods() []ssh.AuthMethod {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
-	var methods []ssh.AuthMethod
+	var signers []ssh.Signer
 	for _, keyPath := range []string{
 		homeDir + "/.ssh/id_rsa",
 		homeDir + "/.ssh/id_ed25519",
@@ -38,10 +44,12 @@ func DefaultKeyAuthMethods() []ssh.AuthMethod {
 		if err != nil {
 			continue
 		}
-		methods = append(methods, ssh.PublicKeys(signer))
-		break
+		signers = append(signers, signer)
 	}
-	return methods
+	if len(signers) == 0 {
+		return nil
+	}
+	return []ssh.AuthMethod{ssh.PublicKeys(signers...)}
 }
 
 // KnownHostStore is the TOFU ledger (implemented by *database.DB, V72).

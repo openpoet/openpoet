@@ -141,9 +141,10 @@ func validateUIActionManifest(t *testing.T, manifest uiActionManifest) (map[stri
 			t.Errorf("credential/tunnel/update mutation must be R4: %s", key)
 		}
 	}
-	// 122 after V74 retired the three mission mutations (create/set_status/grant).
-	if implemented != 122 || internal != 3 {
-		t.Errorf("manifest convergence = %d implemented/%d internal, want 122/3", implemented, internal)
+	// 122 after V74 retired the three mission mutations (create/set_status/grant);
+	// 123 with projects.scaffold; 127 with the four compose lifecycle mutations.
+	if implemented != 127 || internal != 3 {
+		t.Errorf("manifest convergence = %d implemented/%d internal, want 127/3", implemented, internal)
 	}
 	allowlist := make(map[string]struct{}, len(manifest.Allowlist))
 	for _, item := range manifest.Allowlist {

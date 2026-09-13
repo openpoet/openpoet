@@ -1,0 +1,16 @@
+{
+  "name": "openpoet-web-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Dev-only harness for the browser and unit tests under tests/. The application itself is Go; nothing here ships in the binary.",
+  "license": "MIT",
+  "scripts": {
+    "test": "node tests/run-web-tests.js",
+    "test:unit": "node tests/run-web-tests.js --unit",
+    "test:browser": "node tests/run-web-tests.js --browser",
+    "test:server": "node tests/run-web-tests.js --server"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

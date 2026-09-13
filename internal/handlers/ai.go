@@ -2108,6 +2108,103 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		}
 		return sb.String(), nil
 
+	case "create_project":
+		services, ok := h.api.platformApplicationServices()
+		if !ok {
+			return "", fmt.Errorf("project services are unavailable")
+		}
+		projectName, _ := input["name"].(string)
+		composeYAML, _ := input["compose_yaml"].(string)
+		if strings.TrimSpace(projectName) == "" || strings.TrimSpace(composeYAML) == "" {
+			return "", fmt.Errorf("name and compose_yaml are required")
+		}
+		dirName, _ := input["dir_name"].(string)
+		readme, _ := input["readme"].(string)
+		gitInit := true
+		if raw, ok := input["git_init"].(string); ok && strings.EqualFold(strings.TrimSpace(raw), "false") {
+			gitInit = false
+		}
+		scaffoldInput := application.ScaffoldProjectInput{
+			Name:        projectName,
+			DirName:     dirName,
+			ComposeYAML: stripMarkdownFence(composeYAML),
+			GitInit:     gitInit,
+		}
+		if strings.TrimSpace(readme) != "" {
+			scaffoldInput.Files = map[string]string{"README.md": readme}
+		}
+		result, err := services.Configuration.ProjectScaffold.Create(ctx, scaffoldInput)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf(
+			"Created project '%s' (ID %d) at %s with %s.\n"+
+				"The containers are NOT running yet: the user must review and approve the compose file in the project's Containers panel before it can start.",
+			result.Project.Name, result.Project.ID, result.CreatedPath,
+			strings.Join(result.Files, ", ")), nil
+
+	case "manage_project_containers":
+		services, ok := h.api.platformApplicationServices()
+		if !ok {
+			return "", fmt.Errorf("container services are unavailable")
+		}
+		projectID, err := parseIDParam(input, "project_id")
+		if err != nil {
+			return "", err
+		}
+		compose, ok := services.Execution.Compose.(*application.ComposeApplicationService)
+		if !ok || compose == nil {
+			return "", fmt.Errorf("container management is unavailable")
+		}
+		action := strings.ToLower(strings.TrimSpace(toStringParam(input, "action")))
+		switch action {
+		case "status", "":
+			status, err := compose.Status(ctx, projectID)
+			if err != nil {
+				return "", err
+			}
+			return formatComposeStatus(status), nil
+		case "logs":
+			tail := 200
+			if raw := strings.TrimSpace(toStringParam(input, "tail")); raw != "" {
+				if parsed, convErr := strconv.Atoi(raw); convErr == nil {
+					tail = parsed
+				}
+			}
+			logs, err := compose.Logs(ctx, projectID, toStringParam(input, "service"), tail)
+			if err != nil {
+				return "", err
+			}
+			if strings.TrimSpace(logs) == "" {
+				return "No log output.", nil
+			}
+			return logs, nil
+		case "up", "down", "restart":
+			var result *application.ComposeActionResult
+			switch action {
+			case "up":
+				result, err = compose.Up(ctx, projectID)
+			case "down":
+				result, err = compose.Down(ctx, projectID)
+			default:
+				result, err = compose.Restart(ctx, projectID)
+			}
+			if err != nil {
+				return "", err
+			}
+			output := strings.TrimSpace(result.Output)
+			if output == "" {
+				output = "(no output)"
+			}
+			summary := fmt.Sprintf("compose %s finished.\n%s", action, output)
+			if result.Status != nil {
+				summary += "\n\n" + formatComposeStatus(result.Status)
+			}
+			return summary, nil
+		default:
+			return "", fmt.Errorf("unknown action %q: use status, logs, up, down or restart", action)
+		}
+
 	case "get_mcp_server":
 		id, err := parseIDParam(input, "id")
 		if err != nil {
@@ -5805,4 +5902,89 @@ func (h *AIHandler) sendSSE(w http.ResponseWriter, flusher http.Flusher, eventTy
 
 	fmt.Fprintf(w, "data: %s\n\n", jsonData)
 	flusher.Flush()
+}
+
+// toStringParam reads a tool argument that the model may send as a string or,
+// for numbers and booleans, as a raw JSON value.
+func toStringParam(input map[string]interface{}, key string) string {
+	switch value := input[key].(type) {
+	case string:
+		return value
+	case float64:
+		return strconv.FormatInt(int64(value), 10)
+	case bool:
+		return strconv.FormatBool(value)
+	case nil:
+		return ""
+	default:
+		return fmt.Sprintf("%v", value)
+	}
+}
+
+// stripMarkdownFence removes a ```yaml … ``` wrapper the model sometimes adds
+// around a file body despite being told not to.
+func stripMarkdownFence(body string) string {
+	trimmed := strings.TrimSpace(body)
+	if !strings.HasPrefix(trimmed, "```") {
+		return body
+	}
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) < 2 {
+		return body
+	}
+	lines = lines[1:]
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "```" {
+		lines = lines[:len(lines)-1]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// formatComposeStatus renders a container stack as the plain text a tool result
+// carries back to the model.
+func formatComposeStatus(status *application.ComposeStatus) string {
+	if status == nil {
+		return "No container status available."
+	}
+	if status.Unsupported != "" {
+		return status.Unsupported
+	}
+	if !status.HasCompose {
+		return "This project has no docker-compose.yml."
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Stack: %s\n", status.ComposeName)
+	if !status.DockerReady {
+		sb.WriteString("Docker is not installed or not on PATH on this host.\n")
+	}
+	if status.Approved {
+		fmt.Fprintf(&sb, "Compose file APPROVED to run (%s).\n", truncateSHA(status.ManifestSHA))
+	} else {
+		fmt.Fprintf(&sb, "Compose file NOT approved to run (%s) — the user must approve it in the Containers panel before 'up' works.\n", truncateSHA(status.ManifestSHA))
+	}
+	if status.LintError != "" {
+		fmt.Fprintf(&sb, "Refused by the compose lint: %s\n", status.LintError)
+	}
+	if status.StatusError != "" {
+		fmt.Fprintf(&sb, "Status warning: %s\n", status.StatusError)
+	}
+	if len(status.Services) == 0 {
+		sb.WriteString("No containers running.")
+		return sb.String()
+	}
+	sb.WriteString("Services:\n")
+	for _, service := range status.Services {
+		fmt.Fprintf(&sb, "- %s: %s", service.Service, service.State)
+		if service.Ports != "" {
+			fmt.Fprintf(&sb, " (%s)", service.Ports)
+		}
+		sb.WriteString("\n")
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func truncateSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }

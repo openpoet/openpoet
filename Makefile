@@ -1,4 +1,4 @@
-.PHONY: all build run clean test deps vendor-js provider-helper setup format
+.PHONY: all build run clean test test-web deps vendor-js provider-helper setup format
 
 # Variables
 BINARY_NAME=openpoet
@@ -63,6 +63,17 @@ vendor-js:
 # Run tests
 test:
 	go test -v ./...
+
+# Run the browser/DOM tests under tests/ (Playwright). Installs the dev-only
+# Node deps on first use; the server group is skipped unless a dev instance is
+# up (./.scripts/dev-server.sh start).
+test-web: node_modules
+	node tests/run-web-tests.js
+
+node_modules: package.json
+	npm install
+	npx playwright install chromium
+	@touch node_modules
 
 # Run tests with coverage
 test-coverage:
@@ -139,6 +150,7 @@ help:
 	@echo "  vendor-js    Download vendor JavaScript libraries"
 	@echo "  provider-helper Install the pinned OpenAI OAuth provider bridge"
 	@echo "  test         Run tests"
+	@echo "  test-web     Run the Playwright browser/DOM tests"
 	@echo "  test-coverage Run tests with coverage"
 	@echo "  clean        Remove build artifacts"
 	@echo "  fmt          Format code (go fmt)"

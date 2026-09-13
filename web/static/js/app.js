@@ -1127,8 +1127,151 @@ class OpenPoet {
                     <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); app.syncProjectConfig(${project.id})">
                         Sync
                     </button>
+                    ${project.type === 'local' ? `
+                    <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); app.showComposeModal(${project.id})" title="Manage this project's containers">
+                        Containers
+                    </button>` : ''}
                 </div>
             </div>`;
+    }
+
+    // ── Container (docker compose) management ───────────────────────────────
+
+    async showComposeModal(projectId) {
+        this._composeProjectId = projectId;
+        this.showModal('Containers', '<div id="compose-body" class="text-muted">Loading...</div>', `
+            <button class="btn btn-secondary" onclick="app.hideModal()">Close</button>
+        `);
+        await this.refreshComposeStatus();
+    }
+
+    async refreshComposeStatus() {
+        const body = document.getElementById('compose-body');
+        if (!body) return;
+        try {
+            const status = await this.api('GET', `/projects/${this._composeProjectId}/compose`);
+            this._composeStatus = status;
+            body.innerHTML = this._renderComposeStatus(status);
+        } catch (error) {
+            body.innerHTML = `<div style="color:var(--color-danger);font-size:13px;">${this.escapeHtml(error.message || 'Failed to load container status')}</div>`;
+        }
+    }
+
+    _renderComposeStatus(status) {
+        if (status.unsupported) {
+            return `<div class="text-muted" style="font-size:13px;">${this.escapeHtml(status.unsupported)}</div>`;
+        }
+        if (!status.has_compose) {
+            return `<div class="text-muted" style="font-size:13px;">This project has no <code>docker-compose.yml</code>. Ask the AI assistant to create one, or add the file yourself.</div>`;
+        }
+
+        const notices = [];
+        if (!status.docker_ready) {
+            notices.push(`<div style="color:var(--color-danger);font-size:13px;margin-bottom:10px;">Docker is not installed or not on PATH on this host.</div>`);
+        }
+        if (status.lint_error) {
+            notices.push(`<div style="color:var(--color-danger);font-size:13px;margin-bottom:10px;">${this.escapeHtml(status.lint_error)}</div>`);
+        }
+        if (status.status_error) {
+            notices.push(`<div style="color:var(--color-warning,#d29922);font-size:12px;margin-bottom:10px;">${this.escapeHtml(status.status_error)}</div>`);
+        }
+
+        const pid = status.project_id;
+        const approval = status.approved
+            ? `<div style="font-size:12px;color:var(--color-success,#4caf50);margin-bottom:10px;">Compose file approved to run (${this.escapeHtml((status.manifest_sha || '').slice(0, 12))}).</div>`
+            : `<div style="font-size:12px;margin-bottom:10px;padding:10px;border:1px solid var(--color-border);border-radius:6px;">
+                   <strong>Review required.</strong> This compose file has not been approved to run.
+                   Starting it executes its contents on this host.
+                   <div style="margin-top:8px;display:flex;gap:6px;">
+                       <button class="btn btn-sm" onclick="app.showComposeFile()" title="Show the compose file">Review file</button>
+                       <button class="btn btn-sm btn-primary" onclick="withLoading(this, () => app.approveCompose())" title="Approve this compose file">Approve</button>
+                   </div>
+               </div>`;
+
+        const rows = (status.services || []).map(s => `
+            <tr>
+                <td style="padding:6px 8px;">${this.escapeHtml(s.service || s.name || '')}</td>
+                <td style="padding:6px 8px;"><span class="badge badge-${s.state === 'running' ? 'local' : 'remote'}">${this.escapeHtml(s.state || '')}</span></td>
+                <td style="padding:6px 8px;font-size:11px;color:var(--color-text-secondary,#999);">${this.escapeHtml(s.ports || '')}</td>
+            </tr>`).join('');
+
+        const table = rows
+            ? `<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;">
+                   <thead><tr>
+                       <th style="text-align:left;padding:6px 8px;">Service</th>
+                       <th style="text-align:left;padding:6px 8px;">State</th>
+                       <th style="text-align:left;padding:6px 8px;">Ports</th>
+                   </tr></thead><tbody>${rows}</tbody></table></div>`
+            : `<div class="text-muted" style="font-size:13px;">Nothing running.</div>`;
+
+        return `
+            ${notices.join('')}
+            ${approval}
+            <div style="font-size:11px;color:var(--color-text-secondary,#999);margin-bottom:8px;">Stack: <code>${this.escapeHtml(status.compose_name || '')}</code></div>
+            ${table}
+            <div style="display:flex;gap:6px;margin-top:12px;flex-wrap:wrap;">
+                <button class="btn btn-sm btn-primary" onclick="withLoading(this, () => app.composeAction('up'))" title="Start the containers" ${status.approved && status.docker_ready ? '' : 'disabled'}>Up</button>
+                <button class="btn btn-sm" onclick="withLoading(this, () => app.composeAction('restart'))" title="Restart the containers" ${status.docker_ready ? '' : 'disabled'}>Restart</button>
+                <button class="btn btn-sm btn-danger" onclick="withLoading(this, () => app.composeAction('down'))" title="Stop and remove the containers" ${status.docker_ready ? '' : 'disabled'}>Down</button>
+                <button class="btn btn-sm" onclick="withLoading(this, () => app.showComposeLogs())" title="Show recent container logs" ${status.docker_ready ? '' : 'disabled'}>Logs</button>
+                <button class="btn btn-sm" onclick="withLoading(this, () => app.refreshComposeStatus())" title="Refresh container status">Refresh</button>
+            </div>
+            <pre id="compose-output" style="display:none;margin-top:12px;max-height:260px;overflow:auto;font-size:11px;background:var(--color-bg-tertiary,#0d1117);padding:10px;border-radius:6px;white-space:pre-wrap;"></pre>
+        `;
+    }
+
+    _showComposeOutput(text) {
+        const out = document.getElementById('compose-output');
+        if (!out) return;
+        out.textContent = text || '(no output)';
+        out.style.display = '';
+    }
+
+    showComposeFile() {
+        this._showComposeOutput(this._composeStatus?.manifest || '(compose file unavailable)');
+    }
+
+    async approveCompose() {
+        try {
+            await this.api('POST', `/projects/${this._composeProjectId}/compose/approve`, {
+                content_sha256: this._composeStatus?.manifest_sha || ''
+            });
+            this.showToast('Approved', 'The compose file is approved to run', 'success');
+            await this.refreshComposeStatus();
+        } catch (error) {
+            this._showApiError(error);
+        }
+    }
+
+    async composeAction(action) {
+        const id = this._composeProjectId;
+        // Spelled out per action so the route inventory sees real endpoints
+        // instead of one interpolated path.
+        const routes = {
+            up: `/projects/${id}/compose/up`,
+            down: `/projects/${id}/compose/down`,
+            restart: `/projects/${id}/compose/restart`,
+        };
+        const route = routes[action];
+        if (!route) return;
+        try {
+            const result = await this.api('POST', route);
+            await this.refreshComposeStatus();
+            this._showComposeOutput(result.output);
+            this.showToast('Containers', `compose ${action} finished`, 'success');
+        } catch (error) {
+            await this.refreshComposeStatus();
+            this._showComposeOutput(error.message || `compose ${action} failed`);
+        }
+    }
+
+    async showComposeLogs() {
+        try {
+            const data = await this.api('GET', `/projects/${this._composeProjectId}/compose/logs?tail=200`);
+            this._showComposeOutput(data.logs);
+        } catch (error) {
+            this._showComposeOutput(error.message || 'Could not read logs');
+        }
     }
 
     renderProjects() {
@@ -5616,6 +5759,25 @@ class OpenPoet {
             </div>
             <div class="card" style="margin-bottom: 16px;">
                 <div class="card-header">
+                    <div class="card-title">Project Creation</div>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: 12px; color: var(--color-text-secondary, #999); font-size: 13px;">
+                        Container directory for projects created by OpenPoet. New projects get their own folder inside this path. Leave empty to disable folder creation.
+                    </p>
+                    <div class="form-group">
+                        <label class="form-label">Projects root directory</label>
+                        <div style="display: flex; gap: 6px;">
+                            <input type="text" class="form-input" id="projects-root-path" placeholder="/home/user/projects" style="flex: 1;">
+                            <button class="btn btn-sm" onclick="app.browseProjectsRoot()" title="Browse for a directory" style="flex-shrink: 0;">Browse</button>
+                        </div>
+                        <small id="projects-root-hint" style="display: block; margin-top: 6px; font-size: 12px; color: var(--color-text-secondary, #999);"></small>
+                    </div>
+                    <button class="btn btn-sm btn-primary" onclick="app.saveProjectsRootPath()">Save</button>
+                </div>
+            </div>
+            <div class="card" style="margin-bottom: 16px;">
+                <div class="card-header">
                     <div class="card-title">Push Notifications</div>
                 </div>
                 <div class="card-body">
@@ -5768,6 +5930,10 @@ class OpenPoet {
                 const autoApproveVerificationCheckbox = document.getElementById('task-auto-approve-verification');
                 if (autoApproveVerificationCheckbox) {
                     autoApproveVerificationCheckbox.checked = this.settings.task_auto_approve_verification_enabled === 'true';
+                }
+                const projectsRootInput = document.getElementById('projects-root-path');
+                if (projectsRootInput) {
+                    projectsRootInput.value = this.settings.projects_root_path || '';
                 }
                 const providerSelect = document.getElementById('whisper-provider');
                 if (providerSelect && this.settings.whisper_provider) {
@@ -6051,6 +6217,145 @@ class OpenPoet {
                 </div>
             </div>
         `;
+    }
+
+    // Creates a brand-new project folder under the configured projects root,
+    // together with its docker-compose.yml. Distinct from showProjectModal,
+    // which registers a directory that already exists.
+    async showScaffoldProjectModal() {
+        let root = null;
+        let reason = '';
+        try {
+            const info = await this.api('GET', '/projects/scaffold/root');
+            if (info.configured) {
+                root = info.root;
+            } else {
+                reason = info.reason || 'The projects root directory is not configured.';
+            }
+        } catch (error) {
+            reason = error.message || 'Could not read the projects root directory.';
+        }
+
+        if (!root) {
+            this.showModal('New Project Folder', `
+                <p style="font-size: 13px; color: var(--color-text-secondary, #999); margin-bottom: 12px;">
+                    ${this.escapeHtml(reason)}
+                </p>
+                <p style="font-size: 13px;">
+                    Set a projects root directory under <strong>Settings → Project Creation</strong> before creating project folders.
+                </p>
+            `, `<button class="btn btn-secondary" onclick="app.hideModal()">Close</button>`);
+            return;
+        }
+
+        const content = `
+            <form id="scaffold-form">
+                <div class="form-group">
+                    <label class="form-label">Name</label>
+                    <input type="text" class="form-input" name="name" oninput="app._updateScaffoldPreview()" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Folder name</label>
+                    <input type="text" class="form-input" name="dir_name" placeholder="derived from the name">
+                    <small style="display:block;margin-top:6px;font-size:12px;color:var(--color-text-secondary,#999);">
+                        Will be created at <code id="scaffold-path-preview">${this.escapeHtml(root)}/…</code>
+                    </small>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">docker-compose.yml</label>
+                    <textarea class="form-input" name="compose_yaml" rows="12" spellcheck="false"
+                        style="font-family: monospace; font-size: 12px;">${this.escapeHtml(this._defaultComposeYAML())}</textarea>
+                    <small style="display:block;margin-top:6px;font-size:12px;color:var(--color-text-secondary,#999);">
+                        Host ports 8080, 8081 and 8090 are reserved and will be refused. Ask the AI assistant to generate this for a specific stack.
+                    </small>
+                </div>
+                <div class="form-group">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input type="checkbox" name="git_init" checked>
+                        <span style="font-size:13px;">Initialize a git repository</span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input type="checkbox" name="readme" checked>
+                        <span style="font-size:13px;">Create a README.md</span>
+                    </label>
+                </div>
+                <div id="scaffold-error" class="form-error" style="display:none;color:var(--color-danger);font-size:12px;margin-top:8px;"></div>
+            </form>
+        `;
+
+        this._scaffoldRoot = root;
+        this.showModal('New Project Folder', content, `
+            <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="withLoading(this, () => app.scaffoldProject())">Create</button>
+        `);
+    }
+
+    _defaultComposeYAML() {
+        return [
+            'services:',
+            '  app:',
+            '    image: nginx:alpine',
+            '    ports:',
+            '      - "3000:80"',
+            '    restart: unless-stopped',
+            ''
+        ].join('\n');
+    }
+
+    // Mirrors the server-side slug so the preview matches what gets created.
+    _slugify(value) {
+        return (value || '')
+            .toLowerCase()
+            .replace(/[^a-z0-9._\- ]+/g, '')
+            .replace(/[._\- ]+/g, '-')
+            .replace(/^[-._]+|[-._]+$/g, '');
+    }
+
+    _updateScaffoldPreview() {
+        const form = document.getElementById('scaffold-form');
+        const preview = document.getElementById('scaffold-path-preview');
+        if (!form || !preview) return;
+        const dir = form.dir_name.value.trim() || this._slugify(form.name.value);
+        preview.textContent = `${this._scaffoldRoot}/${dir || '…'}`;
+    }
+
+    async scaffoldProject() {
+        const form = document.getElementById('scaffold-form');
+        if (!form) return;
+        const errorEl = document.getElementById('scaffold-error');
+        const showError = (message) => {
+            if (!errorEl) return this._showApiError({ message });
+            errorEl.textContent = message;
+            errorEl.style.display = '';
+        };
+        if (errorEl) errorEl.style.display = 'none';
+
+        const name = form.name.value.trim();
+        if (!name) return showError('Name is required');
+        const compose = form.compose_yaml.value.trim();
+        if (!compose) return showError('A docker-compose.yml body is required');
+
+        const payload = {
+            name,
+            dir_name: form.dir_name.value.trim(),
+            compose_yaml: compose,
+            git_init: form.git_init.checked,
+            files: {},
+        };
+        if (form.readme.checked) {
+            payload.files['README.md'] = `# ${name}\n`;
+        }
+
+        try {
+            const result = await this.api('POST', '/projects/scaffold', payload);
+            this.hideModal();
+            this.showToast('Project created', `Created ${result.created_path}`, 'success');
+            await this.loadProjects();
+        } catch (error) {
+            showError(error.message || 'Could not create the project');
+        }
     }
 
     showProjectModal(project = null) {
@@ -6785,7 +7090,9 @@ class OpenPoet {
         try {
             let data;
             if (this._browseProjectType === 'remote') {
-                const body = { ...this._browseSSHData, path: path || '/' };
+                // Empty path lets the backend start at the remote home directory,
+                // which is what a Windows host needs ("/" only lists drive roots).
+                const body = { ...this._browseSSHData, path: path || '' };
                 const resp = await fetch('/api/browse/remote', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -6811,9 +7118,15 @@ class OpenPoet {
 
             let html = '';
 
-            // Parent directory
-            const parent = data.current.split('/').slice(0, -1).join('/') || '/';
-            if (data.current !== '/') {
+            // Parent directory — remote Windows hosts report native paths
+            // ("C:\Users\dev"), so pick the separator the path actually uses.
+            const sep = data.current.includes('\\') ? '\\' : '/';
+            const isWindowsPath = /^[A-Za-z]:\\/.test(data.current);
+            const isRoot = isWindowsPath ? /^[A-Za-z]:\\?$/.test(data.current) : data.current === '/';
+            let parent = data.current.split(sep).slice(0, -1).join(sep);
+            if (!parent) parent = isWindowsPath ? '/' : '/';
+            else if (isWindowsPath && /^[A-Za-z]:$/.test(parent)) parent = parent + '\\';
+            if (!isRoot) {
                 html += `
                     <div class="file-item directory" onclick="app._loadDirectoryListing('${this._escapeAttr(parent)}')" style="padding: 8px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--color-border);">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -6865,6 +7178,16 @@ class OpenPoet {
         const path = this._browseCurrentPath;
         if (!path) return;
 
+        // Standalone pickers (settings, scaffold) hand the path to a callback
+        // instead of going through the project-form snapshot.
+        if (this._dirPickerOnSelect) {
+            const cb = this._dirPickerOnSelect;
+            this._dirPickerOnSelect = null;
+            this.hideModal();
+            cb(path);
+            return;
+        }
+
         // Update the saved form state with the selected path
         if (this._savedProjectForm) {
             this._savedProjectForm.path = path;
@@ -6873,7 +7196,44 @@ class OpenPoet {
     }
 
     _closeDirPicker() {
+        if (this._dirPickerOnSelect) {
+            this._dirPickerOnSelect = null;
+            this.hideModal();
+            return;
+        }
         this._restoreProjectForm();
+    }
+
+    // Opens the directory picker standalone and calls back with the chosen path.
+    pickDirectory(startPath, onSelect) {
+        this._browseProjectType = 'local';
+        this._dirPickerOnSelect = onSelect;
+        this._showDirectoryPicker(startPath || null);
+    }
+
+    browseProjectsRoot() {
+        const input = document.getElementById('projects-root-path');
+        const start = input && input.value.trim() ? input.value.trim() : null;
+        this.pickDirectory(start, (path) => {
+            // The settings view is still mounted behind the modal.
+            const el = document.getElementById('projects-root-path');
+            if (el) el.value = path;
+        });
+    }
+
+    async saveProjectsRootPath() {
+        const input = document.getElementById('projects-root-path');
+        if (!input) return;
+        const value = input.value.trim();
+        const hint = document.getElementById('projects-root-hint');
+        try {
+            await this.api('PUT', '/config/settings', { projects_root_path: value });
+            if (this.settings) this.settings.projects_root_path = value;
+            if (hint) hint.textContent = value ? '' : 'Folder creation is disabled while this is empty.';
+            this.showToast('Success', value ? 'Projects root saved' : 'Projects root cleared', 'success');
+        } catch (error) {
+            this._showApiError(error);
+        }
     }
 
     _restoreProjectForm() {
@@ -6913,7 +7273,14 @@ class OpenPoet {
     }
 
     _escapeAttr(str) {
-        return str.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        // The result is interpolated into a single-quoted JS string literal inside
+        // an inline onclick, so backslashes must be escaped first — otherwise a
+        // Windows path like "C:\Users\dev" arrives as "C:Usersmique" (and
+        // "C:\temp" gains a literal tab).
+        return String(str)
+            .replace(/\\/g, '\\\\')
+            .replace(/'/g, "\\'")
+            .replace(/"/g, '&quot;');
     }
 
     deleteProject(projectId) {
@@ -7403,6 +7770,10 @@ class OpenPoet {
         // Add project button
         document.getElementById('btn-add-project')?.addEventListener('click', () => {
             this.showProjectModal();
+        });
+
+        document.getElementById('btn-new-project-folder')?.addEventListener('click', () => {
+            this.showScaffoldProjectModal();
         });
 
         // Config tabs

@@ -178,6 +178,7 @@ func executionPlatformTestServices(ports *executionPlatformFakePorts) ExecutionP
 		Workspaces:         application.NewWorkspaceService(nil, nil, nil),
 		Blackboard:         ports,
 		Environments:       ports,
+		Compose:            ports,
 	}
 }
 
@@ -212,7 +213,7 @@ func executionPlatformDefinitionsForTest() []PlatformCapabilityDefinition {
 		fileExecutionPlatformDefinitions(), gitExecutionPlatformDefinitions(), hookExecutionPlatformDefinitions(),
 		voiceExecutionPlatformDefinitions(), tunnelExecutionPlatformDefinitions(), updateExecutionPlatformDefinitions(),
 		conflictPlatformDefinitions(), workspacePlatformDefinitions(), blackboardPlatformDefinitions(),
-		environmentPlatformDefinitions(),
+		environmentPlatformDefinitions(), composePlatformDefinitions(),
 	}
 	var result []PlatformCapabilityDefinition
 	for _, group := range groups {
@@ -233,8 +234,8 @@ func executionPlatformActor(definitions []PlatformCapabilityDefinition) Actor {
 
 func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := executionPlatformDefinitionsForTest()
-	if len(definitions) != 58 {
-		t.Fatalf("execution surface has %d capabilities, want 58", len(definitions))
+	if len(definitions) != 64 {
+		t.Fatalf("execution surface has %d capabilities, want 64", len(definitions))
 	}
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -244,11 +245,11 @@ func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 		seen[definition.Name] = struct{}{}
 	}
 	capabilities, registry := executionPlatformTestRegistry(t, &executionPlatformFakePorts{})
-	if got := len(capabilities.List()); got != 58 {
-		t.Fatalf("application registry has %d execution capabilities, want 58", got)
+	if got := len(capabilities.List()); got != 64 {
+		t.Fatalf("application registry has %d execution capabilities, want 64", got)
 	}
-	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 58 {
-		t.Fatalf("platform discovery has %d execution capabilities, want 58", got)
+	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 64 {
+		t.Fatalf("platform discovery has %d execution capabilities, want 64", got)
 	}
 }
 
@@ -341,6 +342,7 @@ func TestExecutionPlatformReadSurfaceIsExplicit(t *testing.T) {
 		"sessions.active", "sessions.events_status", "sessions.file_activity", "sessions.get", "sessions.history", "sessions.list",
 		"tunnel.devices", "tunnel.status", "update.check", "update.status",
 		"workspaces.get", "workspaces.list", "workspaces.plan_merges",
+		"compose.status", "compose.logs",
 	}
 	var got []string
 	for _, definition := range executionPlatformDefinitionsForTest() {
@@ -447,6 +449,12 @@ func executionDryRunCases() []executionDryRunCase {
 		{name: "blackboard.get", target: `{}`, payload: `{"scope":"global","key":"k"}`},
 		{name: "blackboard.put", target: `{}`, payload: `{"scope":"global","key":"k","value":{"n":1},"expected_version":0}`},
 		{name: "environments.approve_manifest", target: `{"type":"project","project_id":1}`, payload: `{"content_sha256":""}`},
+		{name: "compose.status", target: `{"type":"project","project_id":1}`, payload: `{}`},
+		{name: "compose.logs", target: `{"type":"project","project_id":1}`, payload: `{"tail":50}`},
+		{name: "compose.approve", target: `{"type":"project","project_id":1}`, payload: `{"content_sha256":""}`},
+		{name: "compose.up", target: `{"type":"project","project_id":1}`, payload: `{}`},
+		{name: "compose.down", target: `{"type":"project","project_id":1}`, payload: `{}`},
+		{name: "compose.restart", target: `{"type":"project","project_id":1}`, payload: `{}`},
 	}
 }
 
@@ -721,4 +729,32 @@ func TestExecutionSessionViewOmitsPlanAndProviderIdentifiers(t *testing.T) {
 			t.Fatalf("session view leaked %q: %s", forbidden, encoded)
 		}
 	}
+}
+
+// Compose lifecycle stubs — the execution fixture drives every capability's
+// dry-run path, so the port only has to be present and side-effect free.
+func (f *executionPlatformFakePorts) Status(context.Context, int64) (*application.ComposeStatus, error) {
+	f.readCalls++
+	return &application.ComposeStatus{Services: []application.ComposeService{}}, nil
+}
+
+func (f *executionPlatformFakePorts) Approve(context.Context, int64, string, string) (*application.ComposeStatus, error) {
+	return &application.ComposeStatus{Approved: true}, nil
+}
+
+func (f *executionPlatformFakePorts) Up(context.Context, int64) (*application.ComposeActionResult, error) {
+	return &application.ComposeActionResult{Action: "up"}, nil
+}
+
+func (f *executionPlatformFakePorts) Down(context.Context, int64) (*application.ComposeActionResult, error) {
+	return &application.ComposeActionResult{Action: "down"}, nil
+}
+
+func (f *executionPlatformFakePorts) Restart(context.Context, int64) (*application.ComposeActionResult, error) {
+	return &application.ComposeActionResult{Action: "restart"}, nil
+}
+
+func (f *executionPlatformFakePorts) Logs(context.Context, int64, string, int) (string, error) {
+	f.readCalls++
+	return "", nil
 }

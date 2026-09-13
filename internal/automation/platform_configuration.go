@@ -22,6 +22,7 @@ type ConfigurationPlatformServices struct {
 	MCP               *application.MCPService
 	CustomTools       *application.CustomToolService
 	Configuration     *application.ConfigurationService
+	ProjectScaffold   *application.ProjectScaffoldService
 }
 
 func RegisterConfigurationPlatformCapabilities(registry *PlatformCapabilityRegistry, services ConfigurationPlatformServices) error {
@@ -30,7 +31,8 @@ func RegisterConfigurationPlatformCapabilities(registry *PlatformCapabilityRegis
 	}
 	if services.Projects == nil || services.ProjectOperations == nil || services.Tags == nil ||
 		services.Skills == nil || services.Agents == nil || services.AIConfigs == nil ||
-		services.MCP == nil || services.CustomTools == nil || services.Configuration == nil {
+		services.MCP == nil || services.CustomTools == nil || services.Configuration == nil ||
+		services.ProjectScaffold == nil {
 		return errors.New("all configuration platform services are required")
 	}
 	groups := []struct {
@@ -46,6 +48,7 @@ func RegisterConfigurationPlatformCapabilities(registry *PlatformCapabilityRegis
 		{mcpPlatformDefinitions(), &mcpPlatformExecutor{service: services.MCP}},
 		{customToolPlatformDefinitions(), &customToolPlatformExecutor{service: services.CustomTools}},
 		{configurationPlatformDefinitions(), &configurationPlatformExecutor{service: services.Configuration}},
+		{projectScaffoldPlatformDefinitions(), &projectScaffoldPlatformExecutor{service: services.ProjectScaffold}},
 	}
 	for _, group := range groups {
 		for _, definition := range group.definitions {
