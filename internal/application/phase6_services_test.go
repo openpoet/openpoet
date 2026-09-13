@@ -214,3 +214,87 @@ func TestRemoteBrowseFailureHasNoAuditEffect(t *testing.T) {
 		t.Fatalf("failed browse published audit effect: %#v", effects.changes)
 	}
 }
+
+func phase6SavedRemoteProject() *database.Project {
+	return &database.Project{
+		ID: 45, Type: "remote",
+		SSHHost:                sql.NullString{String: "192.0.2.10", Valid: true},
+		SSHPort:                sql.NullInt64{Int64: 22, Valid: true},
+		SSHUser:                sql.NullString{String: "dev", Valid: true},
+		SSHAuthType:            sql.NullString{String: "key", Valid: true},
+		SSHCredentialEncrypted: sql.NullString{String: "cipher", Valid: true},
+		SSHCredentialIV:        sql.NullString{String: "iv", Valid: true},
+	}
+}
+
+// The edit form never re-displays a saved password or private key, so a saved
+// project must stay browsable on the credential already stored for it.
+func TestRemoteBrowseFallsBackToStoredCredentialOfEditedProject(t *testing.T) {
+	store := &phase6ProjectStore{project: phase6SavedRemoteProject()}
+	port := &phase6ProjectPort{result: RemoteDirectoryResult{Current: `C:\Users\dev`}}
+	service := NewProjectOperationService(store, port, &phase6ProjectEffects{})
+
+	if _, err := service.BrowseRemote(context.Background(), BrowseRemoteProjectCommand{
+		Connection: RemoteBrowseConnection{
+			Host: "192.0.2.10", Port: 22, User: "dev", AuthType: "key", ProjectID: 45,
+		},
+		Authorization: phase6Approval(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if port.browseCalls != 1 || !port.connection.StoredCredential || port.connection.ProjectID != 45 {
+		t.Fatalf("adapter was not told to use the stored credential: %#v", port.connection)
+	}
+	if port.connection.Credential != "" {
+		t.Fatalf("stored-credential browse must not carry a plaintext credential: %#v", port.connection)
+	}
+}
+
+func TestRemoteBrowseRefusesStoredCredentialForAnotherTarget(t *testing.T) {
+	base := RemoteBrowseConnection{Host: "192.0.2.10", Port: 22, User: "dev", AuthType: "key", ProjectID: 45}
+	cases := map[string]RemoteBrowseConnection{
+		"other host": {Host: "192.0.2.11", Port: base.Port, User: base.User, AuthType: base.AuthType, ProjectID: base.ProjectID},
+		"other user": {Host: base.Host, Port: base.Port, User: "adm", AuthType: base.AuthType, ProjectID: base.ProjectID},
+		"other port": {Host: base.Host, Port: 2222, User: base.User, AuthType: base.AuthType, ProjectID: base.ProjectID},
+		"other auth": {Host: base.Host, Port: base.Port, User: base.User, AuthType: "password", ProjectID: base.ProjectID},
+	}
+	for name, connection := range cases {
+		t.Run(name, func(t *testing.T) {
+			store := &phase6ProjectStore{project: phase6SavedRemoteProject()}
+			port := &phase6ProjectPort{}
+			service := NewProjectOperationService(store, port, &phase6ProjectEffects{})
+			_, err := service.BrowseRemote(context.Background(), BrowseRemoteProjectCommand{
+				Connection: connection, Authorization: phase6Approval(),
+			})
+			if !ErrorIsKind(err, ErrorValidation) {
+				t.Fatalf("expected validation failure, got %v", err)
+			}
+			if port.browseCalls != 0 {
+				t.Fatalf("stored credential reached the adapter for %s", name)
+			}
+		})
+	}
+}
+
+// A project without a stored credential must keep failing as before instead of
+// silently attempting a credential-less connection.
+func TestRemoteBrowseKeepsRequiringCredentialWithoutStoredOne(t *testing.T) {
+	saved := phase6SavedRemoteProject()
+	saved.SSHCredentialEncrypted = sql.NullString{}
+	store := &phase6ProjectStore{project: saved}
+	port := &phase6ProjectPort{}
+	service := NewProjectOperationService(store, port, &phase6ProjectEffects{})
+
+	_, err := service.BrowseRemote(context.Background(), BrowseRemoteProjectCommand{
+		Connection: RemoteBrowseConnection{
+			Host: "192.0.2.10", Port: 22, User: "dev", AuthType: "key", ProjectID: 45,
+		},
+		Authorization: phase6Approval(),
+	})
+	if !ErrorIsKind(err, ErrorValidation) {
+		t.Fatalf("expected validation failure, got %v", err)
+	}
+	if port.browseCalls != 0 {
+		t.Fatal("credential-less browse reached the adapter")
+	}
+}

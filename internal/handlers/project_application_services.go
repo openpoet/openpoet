@@ -54,13 +54,23 @@ func (a projectOperationAdapter) BrowseRemoteDirectory(ctx context.Context, conn
 		SSHUser:     sql.NullString{String: connection.User, Valid: true},
 		SSHAuthType: sql.NullString{String: connection.AuthType, Valid: connection.AuthType != "default_keys"},
 	}
-	if connection.Credential != "" {
+	switch {
+	case connection.Credential != "":
 		encrypted, iv, err := a.api.encryptor.Encrypt(connection.Credential)
 		if err != nil {
 			return application.RemoteDirectoryResult{}, errors.New("failed to protect ephemeral SSH credential")
 		}
 		project.SSHCredentialEncrypted = sql.NullString{String: encrypted, Valid: true}
 		project.SSHCredentialIV = sql.NullString{String: iv, Valid: true}
+	case connection.StoredCredential:
+		// The service already checked that this project is remote, still points
+		// at the same host/user/auth type and does hold a credential.
+		saved, err := a.api.db.GetProject(ctx, connection.ProjectID)
+		if err != nil {
+			return application.RemoteDirectoryResult{}, err
+		}
+		project.SSHCredentialEncrypted = saved.SSHCredentialEncrypted
+		project.SSHCredentialIV = saved.SSHCredentialIV
 	}
 
 	manager := files.NewRemoteFileManager(project, a.api.DecryptFunc())

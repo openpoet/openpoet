@@ -7044,7 +7044,11 @@ class OpenPoet {
                 ssh_port: parseInt(this._savedProjectForm.ssh_port) || 22,
                 ssh_user: this._savedProjectForm.ssh_user,
                 ssh_auth_type: this._savedProjectForm.ssh_auth_type,
-                ssh_credential: this._savedProjectForm.ssh_credential
+                ssh_credential: this._savedProjectForm.ssh_credential,
+                // The edit form never re-displays a saved password or private
+                // key, so the backend falls back to the stored one for this
+                // project when the field is left untouched.
+                project_id: this._savedProjectForm.id || 0
             };
             if (!this._browseSSHData.ssh_host || !this._browseSSHData.ssh_user) {
                 this._showFieldError('ssh_host', 'Fill in SSH host and user before browsing');

@@ -1036,6 +1036,7 @@ func (a *API) BrowseRemoteDirectory(w http.ResponseWriter, r *http.Request) {
 		SSHAuthType   string `json:"ssh_auth_type"`
 		SSHCredential string `json:"ssh_credential"`
 		Path          string `json:"path"`
+		ProjectID     int64  `json:"project_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
@@ -1043,7 +1044,7 @@ func (a *API) BrowseRemoteDirectory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := services.Configuration.ProjectOperations.BrowseRemote(platformUIContext(r), application.BrowseRemoteProjectCommand{
-		Connection:    application.RemoteBrowseConnection{Host: input.SSHHost, Port: input.SSHPort, User: input.SSHUser, AuthType: input.SSHAuthType, Credential: input.SSHCredential, Path: input.Path},
+		Connection:    application.RemoteBrowseConnection{Host: input.SSHHost, Port: input.SSHPort, User: input.SSHUser, AuthType: input.SSHAuthType, Credential: input.SSHCredential, Path: input.Path, ProjectID: input.ProjectID},
 		Authorization: platformUIAuthorization(r),
 	})
 	if err != nil {
