@@ -32,6 +32,13 @@ type RemoteBrowseConnection struct {
 	AuthType   string
 	Credential string
 	Path       string
+	// ProjectID lets the browser reuse a saved project's stored credential.
+	// The edit form never re-displays a password or private key, so without
+	// this a saved project could never be browsed.
+	ProjectID int64
+	// StoredCredential is set by the service (never by the caller) when the
+	// connection must fall back to the saved project's credential.
+	StoredCredential bool
 }
 
 type RemoteDirectoryEntry struct {
@@ -126,7 +133,11 @@ func (s *ProjectOperationService) BrowseRemote(ctx context.Context, command Brow
 	if err := requireExplicitActionApproval(command.Authorization); err != nil {
 		return RemoteDirectoryResult{}, err
 	}
-	connection, err := normalizeRemoteBrowseConnection(command.Connection)
+	request, err := s.resolveStoredBrowseCredential(ctx, command.Connection)
+	if err != nil {
+		return RemoteDirectoryResult{}, err
+	}
+	connection, err := normalizeRemoteBrowseConnection(request)
 	if err != nil {
 		return RemoteDirectoryResult{}, err
 	}
@@ -145,6 +156,55 @@ func (s *ProjectOperationService) BrowseRemote(ctx context.Context, command Brow
 		Action: "remote_browsed", EntryCount: len(result.Entries), Actor: command.Authorization.Actor,
 	})
 	return result, nil
+}
+
+// resolveStoredBrowseCredential decides whether this browse may run on the
+// credential already stored for the project being edited. The edit form shows
+// only "has_credential", never the secret itself, so a saved password or
+// private key would otherwise be un-browsable. The fallback is deliberately
+// narrow: the saved project must be remote and must still point at the same
+// host, port, user and auth type being browsed, so a stored key is never
+// offered to a host the user just retyped.
+func (s *ProjectOperationService) resolveStoredBrowseCredential(ctx context.Context, connection RemoteBrowseConnection) (RemoteBrowseConnection, error) {
+	connection.StoredCredential = false
+	if connection.Credential != "" || connection.ProjectID <= 0 {
+		return connection, nil
+	}
+	switch strings.TrimSpace(connection.AuthType) {
+	case "password", "key", "key_passphrase":
+	default:
+		return connection, nil
+	}
+	if s.store == nil {
+		return connection, nil
+	}
+	project, err := s.store.GetProject(ctx, connection.ProjectID)
+	if err != nil || project == nil {
+		if errors.Is(err, sql.ErrNoRows) || project == nil {
+			return RemoteBrowseConnection{}, notFoundError("project_not_found", "Project not found", err)
+		}
+		return RemoteBrowseConnection{}, err
+	}
+	if project.Type != "remote" || !project.SSHCredentialEncrypted.Valid {
+		return connection, nil
+	}
+	port := int(project.SSHPort.Int64)
+	if port == 0 {
+		port = 22
+	}
+	requestedPort := connection.Port
+	if requestedPort == 0 {
+		requestedPort = 22
+	}
+	if strings.TrimSpace(project.SSHHost.String) != strings.TrimSpace(connection.Host) ||
+		strings.TrimSpace(project.SSHUser.String) != strings.TrimSpace(connection.User) ||
+		port != requestedPort ||
+		strings.TrimSpace(project.SSHAuthType.String) != strings.TrimSpace(connection.AuthType) {
+		return RemoteBrowseConnection{}, validationError("remote_credential_required",
+			"Retype the credential to browse a host other than the one saved for this project")
+	}
+	connection.StoredCredential = true
+	return connection, nil
 }
 
 func normalizeRemoteBrowseConnection(connection RemoteBrowseConnection) (RemoteBrowseConnection, error) {
@@ -175,7 +235,7 @@ func normalizeRemoteBrowseConnection(connection RemoteBrowseConnection) (RemoteB
 			return RemoteBrowseConnection{}, validationError("remote_credential_unexpected", "Default-key authentication must not include a credential")
 		}
 	case "password", "key", "key_passphrase":
-		if connection.Credential == "" {
+		if connection.Credential == "" && !connection.StoredCredential {
 			return RemoteBrowseConnection{}, validationError("remote_credential_required", "Selected authentication requires an ephemeral credential")
 		}
 	default:
