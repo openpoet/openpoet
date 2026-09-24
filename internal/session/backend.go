@@ -73,6 +73,12 @@ type BackendStrategy interface {
 	NotFoundMessage() string
 }
 
+// sessionTokenEnvVar is the environment variable every backend reads the
+// per-session opst1_ bearer from. Codex is the reason it is named here rather
+// than inlined: its mcp_servers config takes the variable NAME
+// (bearer_token_env_var), never the token value, so the two must agree.
+const sessionTokenEnvVar = "OPENPOET_SESSION_TOKEN"
+
 // applySessionTokenEnv injects the per-session credentials into a backend's
 // environment when present: OPENPOET_HOOK_TOKEN authenticates the hook bridge's
 // posts, OPENPOET_SESSION_TOKEN authenticates the CLI/MCP caller. Both are
@@ -85,7 +91,7 @@ func applySessionTokenEnv(env map[string]string, cfg *SessionConfig) {
 		env["OPENPOET_HOOK_TOKEN"] = cfg.HookToken
 	}
 	if cfg.MCPToken != "" {
-		env["OPENPOET_SESSION_TOKEN"] = cfg.MCPToken
+		env[sessionTokenEnvVar] = cfg.MCPToken
 	}
 }
 
