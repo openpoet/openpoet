@@ -272,6 +272,13 @@ func (r *RemoteRunner) buildSSHConfig() (*ssh.ClientConfig, error) {
 		}
 	}
 
+	// "default_keys" (or no auth type at all): the user's own default keys —
+	// parity with internal/files and configsync, which already browse/sync
+	// such projects.
+	if len(authMethods) == 0 {
+		authMethods = sshauth.DefaultKeyAuthMethods()
+	}
+
 	if len(authMethods) == 0 {
 		return nil, fmt.Errorf("no authentication methods available")
 	}
