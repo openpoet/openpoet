@@ -662,10 +662,10 @@ func (r *RemoteRunner) injectCodexOpenPoetMCPForRemote() {
 	// supported by codex-cli >= 0.144 (validated via `codex mcp list`); older
 	// versions that reject the key would fail config parse, so the token stays
 	// in the env and only the key name is shipped here.
-	if strings.TrimSpace(r.envVars["OPENPOET_SESSION_TOKEN"]) != "" {
-		r.insertCodexConfigOverride("mcp_servers.openpoet.bearer_token_env_var", "OPENPOET_SESSION_TOKEN", providerSessionID)
+	if strings.TrimSpace(r.envVars[sessionTokenEnvVar]) != "" {
+		r.insertCodexConfigOverride("mcp_servers.openpoet.bearer_token_env_var", sessionTokenEnvVar, providerSessionID)
 	}
-	log.Printf("[remote] Codex MCP inject: openpoet -> HTTP %s (bearer=%v)", mcpURL, strings.TrimSpace(r.envVars["OPENPOET_SESSION_TOKEN"]) != "")
+	log.Printf("[remote] Codex MCP inject: openpoet -> HTTP %s (bearer=%v)", mcpURL, strings.TrimSpace(r.envVars[sessionTokenEnvVar]) != "")
 }
 
 func (r *RemoteRunner) injectOpenCodeOpenPoetMCPForRemote() {
@@ -703,7 +703,7 @@ func (r *RemoteRunner) injectOpenCodeOpenPoetMCPForRemote() {
 	}
 	// Carry the per-session bearer so the remote OpenCode MCP calls authenticate
 	// as the verified session instead of relying on the spoofable query param.
-	if token := strings.TrimSpace(r.envVars["OPENPOET_SESSION_TOKEN"]); token != "" {
+	if token := strings.TrimSpace(r.envVars[sessionTokenEnvVar]); token != "" {
 		openpoetEntry["headers"] = map[string]interface{}{
 			"Authorization": "Bearer " + token,
 		}

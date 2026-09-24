@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"net"
 	"strings"
 	"testing"
@@ -149,5 +150,87 @@ func TestRemoteRunnerInjectsCodexBearerEnvVarWhenTokenPresent(t *testing.T) {
 	}
 	if strings.Contains(got, "opst1_session-1.secret") {
 		t.Fatalf("the token value itself must never appear in CLI args, got %#v", runner.cliArgs)
+	}
+}
+
+// decodeRemoteCodexOpenPoetEntry runs the app-server MCP rewrite and returns the
+// resulting "openpoet" server entry as Codex would parse it.
+func decodeRemoteCodexOpenPoetEntry(t *testing.T, cfg *SessionConfig, listener net.Listener) map[string]interface{} {
+	t.Helper()
+	rewriteCodexMCPConfigForRemote(cfg, listener)
+	var config struct {
+		MCPServers map[string]map[string]interface{} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(cfg.MCPConfigJSON), &config); err != nil {
+		t.Fatalf("rewritten MCP config is not valid JSON: %v (%s)", err, cfg.MCPConfigJSON)
+	}
+	entry, ok := config.MCPServers["openpoet"]
+	if !ok {
+		t.Fatalf("openpoet server missing from rewritten config: %s", cfg.MCPConfigJSON)
+	}
+	return entry
+}
+
+// A remote codex/app-server session used to publish its bearer under a "headers"
+// key, which Codex's mcp_servers schema does not define — it was dropped, the
+// MCP client called the tunnel anonymously, and every write (openpoet_create_document
+// among them) came back 401 while reads kept working.
+func TestRewriteCodexMCPConfigForRemoteUsesBearerTokenEnvVar(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	cfg := &SessionConfig{
+		SessionID:     "session-1",
+		MCPToken:      "opst1_session-1.secret",
+		MCPConfigJSON: `{"mcpServers":{"openpoet":{"command":"openpoet","args":["mcp-serve"]}}}`,
+	}
+	entry := decodeRemoteCodexOpenPoetEntry(t, cfg, listener)
+
+	if got := entry["bearer_token_env_var"]; got != sessionTokenEnvVar {
+		t.Fatalf("expected bearer_token_env_var=%q, got %#v (entry %#v)", sessionTokenEnvVar, got, entry)
+	}
+	if _, ok := entry["headers"]; ok {
+		t.Fatal(`"headers" is not a Codex mcp_servers key — Codex ignores it and the session calls the tunnel anonymously`)
+	}
+	if strings.Contains(cfg.MCPConfigJSON, cfg.MCPToken) {
+		t.Fatalf("the token value itself must never appear in the config blob, got %s", cfg.MCPConfigJSON)
+	}
+	if url, _ := entry["url"].(string); !strings.HasSuffix(url, "/mcp?session_id=session-1") {
+		t.Fatalf("expected session-scoped MCP URL, got %#v", entry["url"])
+	}
+}
+
+func TestRewriteCodexMCPConfigForRemoteOmitsBearerWithoutToken(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	cfg := &SessionConfig{
+		SessionID:     "session-1",
+		MCPConfigJSON: `{"mcpServers":{"openpoet":{"command":"openpoet"}}}`,
+	}
+	entry := decodeRemoteCodexOpenPoetEntry(t, cfg, listener)
+
+	if _, ok := entry["bearer_token_env_var"]; ok {
+		t.Fatalf("bearer override should be omitted when no session token is minted, got %#v", entry)
+	}
+}
+
+// The env var name shipped in the Codex config only authenticates anything if the
+// backend actually exports a value under that same name.
+func TestCodexBackendExportsSessionTokenUnderTheNameCodexReads(t *testing.T) {
+	env := (&CodexBackend{}).BuildEnvVars(&SessionConfig{
+		ServerAddr: "127.0.0.1:8080",
+		SessionID:  "session-1",
+		MCPToken:   "opst1_session-1.secret",
+	})
+
+	if env[sessionTokenEnvVar] != "opst1_session-1.secret" {
+		t.Fatalf("expected the bearer exported as %s, got %#v", sessionTokenEnvVar, env)
 	}
 }

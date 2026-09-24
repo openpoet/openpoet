@@ -256,10 +256,16 @@ func rewriteCodexMCPConfigForRemote(cfg *SessionConfig, listener net.Listener) {
 	openpoetEntry := map[string]interface{}{
 		"url": mcpURL,
 	}
+	// Codex's mcp_servers schema has no "headers" key — it takes http_headers,
+	// bearer_token_env_var or http_headers_helper — so an entry keyed "headers"
+	// is dropped silently and the MCP client calls the tunnel anonymously.
+	// Reads still pass (the REST actor resolver only gates mutations), so the
+	// breakage surfaces as a 401 on the first write. Point Codex at the env var
+	// name instead of embedding the token, mirroring the PTY path in
+	// RemoteRunner.injectCodexOpenPoetMCPForRemote; the backend already exports
+	// OPENPOET_SESSION_TOKEN into the remote shell (POSIX and Windows).
 	if cfg.MCPToken != "" {
-		openpoetEntry["headers"] = map[string]interface{}{
-			"Authorization": "Bearer " + cfg.MCPToken,
-		}
+		openpoetEntry["bearer_token_env_var"] = sessionTokenEnvVar
 	}
 	config.MCPServers["openpoet"] = openpoetEntry
 
@@ -268,7 +274,7 @@ func rewriteCodexMCPConfigForRemote(cfg *SessionConfig, listener net.Listener) {
 		return
 	}
 	cfg.MCPConfigJSON = string(out)
-	log.Printf("[remote-codex] MCP rewrite: openpoet -> HTTP %s", mcpURL)
+	log.Printf("[remote-codex] MCP rewrite: openpoet -> HTTP %s (bearer=%v)", mcpURL, cfg.MCPToken != "")
 }
 
 func (r *RemoteCodexRunner) Stop() error {
