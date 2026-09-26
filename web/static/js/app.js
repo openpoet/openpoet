@@ -6038,6 +6038,183 @@ class OpenPoet {
         return `<option value="${value}" ${current === value ? 'selected' : ''}>${label}</option>`;
     }
 
+    // ── Model picker ─────────────────────────────────────────────────────
+    // A filterable combobox over the models the harness CLI itself reports
+    // (GET /api/models). Typing filters by name, ID or description; free text
+    // is still accepted for IDs the catalog does not list.
+
+    _modelPickerHTML(name, value, placeholder, harness, opts = {}) {
+        const allowDefault = opts.allowDefault !== false;
+        return `
+            <div class="model-picker" data-harness="${harness}" data-allow-default="${allowDefault ? '1' : ''}" data-1m="${opts.oneMillionVariants ? '1' : ''}">
+                <div class="model-picker-field">
+                    <input type="text" class="form-input model-picker-input" name="${name}"
+                        value="${this.escapeHtml(value || '')}" placeholder="${this.escapeHtml(placeholder)}"
+                        autocomplete="off" autocapitalize="off" spellcheck="false"
+                        role="combobox" aria-autocomplete="list" aria-expanded="false">
+                    <button type="button" class="model-picker-refresh" title="Reload model list from the CLI" tabindex="-1">&#8635;</button>
+                    <div class="model-picker-list hidden" role="listbox"></div>
+                </div>
+                <small class="model-picker-hint"></small>
+            </div>`;
+    }
+
+    _loadModelCatalog(harness, refresh = false) {
+        this._modelCatalogs = this._modelCatalogs || {};
+        if (refresh || !this._modelCatalogs[harness]) {
+            this._modelCatalogs[harness] = this.api('GET', `/models?harness=${encodeURIComponent(harness)}${refresh ? '&refresh=1' : ''}`, null, { timeout: 45000 })
+                .catch(err => ({ harness, models: [], error: err.message }));
+        }
+        return this._modelCatalogs[harness];
+    }
+
+    _modelPickerEntries(picker, catalog) {
+        let models = (catalog?.models || []).slice();
+        if (picker.dataset['1m']) {
+            // Claude Code on OpenAI: offer the 1M-context variant of each model first.
+            models = models.flatMap(m => [
+                { ...m, id: `${m.id}[1m]`, label: `${m.label} · 1M context` },
+                m,
+            ]);
+        }
+        if (picker.dataset.allowDefault) {
+            models.unshift({ id: '', label: 'Harness default', description: 'Leave empty and let the CLI pick its default model' });
+        }
+        return models;
+    }
+
+    initModelPickers(root) {
+        if (!root) return;
+        root.querySelectorAll('.model-picker').forEach(picker => this._initModelPicker(picker));
+    }
+
+    _initModelPicker(picker) {
+        const input = picker.querySelector('.model-picker-input');
+        const list = picker.querySelector('.model-picker-list');
+        const hint = picker.querySelector('.model-picker-hint');
+        const harness = picker.dataset.harness;
+        let entries = [];
+        let visible = [];
+        let active = -1;
+        let catalog = null;
+
+        const updateHint = () => {
+            const value = input.value.trim();
+            hint.classList.remove('model-picker-hint-warn');
+            if (!catalog) { hint.textContent = ''; return; }
+            if (!value) {
+                hint.textContent = catalog.error ? `Model list unavailable: ${catalog.error}` : '';
+                return;
+            }
+            const match = entries.find(m => m.id === value);
+            if (match) {
+                hint.textContent = match.resolved_id ? `${match.label} → currently ${match.resolved_id}` : match.label;
+            } else if ((catalog.models || []).length) {
+                hint.textContent = 'Not in the list reported by the CLI — it will be passed as typed';
+                hint.classList.add('model-picker-hint-warn');
+            } else {
+                hint.textContent = catalog.error ? `Model list unavailable: ${catalog.error}` : '';
+            }
+        };
+
+        const close = () => {
+            list.classList.add('hidden');
+            input.setAttribute('aria-expanded', 'false');
+            active = -1;
+        };
+
+        const setActive = (index) => {
+            active = index;
+            list.querySelectorAll('.model-picker-option').forEach((el, i) => {
+                el.classList.toggle('active', i === active);
+                if (i === active) el.scrollIntoView({ block: 'nearest' });
+            });
+        };
+
+        const render = () => {
+            const terms = input.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+            // When the input holds an exact catalog ID (e.g. just opened), show everything.
+            const exact = entries.some(m => m.id && m.id === input.value.trim());
+            visible = (terms.length && !exact) ? entries.filter(m => {
+                const hay = `${m.id} ${m.resolved_id || ''} ${m.label || ''} ${m.description || ''}`.toLowerCase();
+                return terms.every(t => hay.includes(t));
+            }) : entries;
+            if (!catalog) {
+                list.innerHTML = '<div class="model-picker-empty">Loading models…</div>';
+            } else if (!visible.length) {
+                list.innerHTML = `<div class="model-picker-empty">${entries.length ? 'No match — the typed value will be used as-is' : this.escapeHtml(catalog.error ? `Model list unavailable: ${catalog.error}` : 'No models reported')}</div>`;
+            } else {
+                list.innerHTML = visible.map((m, i) => `
+                    <div class="model-picker-option ${m.id === input.value.trim() ? 'selected' : ''}" role="option" data-index="${i}">
+                        <div class="model-picker-option-main">
+                            <span class="model-picker-option-label">${this.escapeHtml(m.label || m.id)}${m.is_default ? ' <span class="model-picker-badge">default</span>' : ''}</span>
+                            ${m.description ? `<span class="model-picker-option-desc">${this.escapeHtml(m.description)}</span>` : ''}
+                        </div>
+                        <code class="model-picker-option-id">${m.id ? this.escapeHtml(m.id) : '—'}${m.resolved_id ? `<span class="model-picker-option-resolved">→ ${this.escapeHtml(m.resolved_id)}</span>` : ''}</code>
+                    </div>`).join('');
+            }
+            active = -1;
+        };
+
+        const open = () => {
+            render();
+            list.classList.remove('hidden');
+            input.setAttribute('aria-expanded', 'true');
+        };
+
+        const choose = (m) => {
+            input.value = m.id;
+            close();
+            updateHint();
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        };
+
+        const load = async (refresh = false) => {
+            catalog = null;
+            if (!list.classList.contains('hidden')) render();
+            catalog = await this._loadModelCatalog(harness, refresh);
+            entries = this._modelPickerEntries(picker, catalog);
+            if (!list.classList.contains('hidden')) render();
+            updateHint();
+        };
+
+        input.addEventListener('focus', open);
+        input.addEventListener('click', () => { if (list.classList.contains('hidden')) open(); });
+        input.addEventListener('input', () => { open(); updateHint(); });
+        input.addEventListener('blur', () => setTimeout(close, 150));
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (list.classList.contains('hidden')) open();
+                if (!visible.length) return;
+                const delta = e.key === 'ArrowDown' ? 1 : -1;
+                setActive((active + delta + visible.length) % visible.length);
+            } else if (e.key === 'Enter') {
+                if (!list.classList.contains('hidden') && active >= 0 && visible[active]) {
+                    e.preventDefault();
+                    choose(visible[active]);
+                }
+            } else if (e.key === 'Escape') {
+                if (!list.classList.contains('hidden')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    close();
+                }
+            }
+        });
+        // mousedown keeps focus in the input so blur does not close the list first.
+        list.addEventListener('mousedown', (e) => e.preventDefault());
+        list.addEventListener('click', (e) => {
+            const el = e.target.closest('.model-picker-option');
+            if (el && visible[Number(el.dataset.index)]) choose(visible[Number(el.dataset.index)]);
+        });
+        const refreshBtn = picker.querySelector('.model-picker-refresh');
+        refreshBtn.addEventListener('mousedown', (e) => e.preventDefault());
+        refreshBtn.addEventListener('click', () => { load(true); input.focus(); });
+
+        load();
+    }
+
     _renderClaudeBackendConfig(config = {}, visible = false) {
         const provider = ['openai', 'openai_oauth'].includes(config.provider) ? 'openai_oauth' : 'anthropic';
         const profileId = Number(config.provider_config_id) || 0;
@@ -6064,9 +6241,7 @@ class OpenPoet {
                     </div>
                     <div class="form-group" id="claude-anthropic-model-group">
                         <label class="form-label">Model</label>
-                        <input type="text" class="form-input" name="claude_anthropic_model"
-                            value="${provider === 'anthropic' ? this.escapeHtml(config.model || '') : ''}"
-                            placeholder="Claude Code default">
+                        ${this._modelPickerHTML('claude_anthropic_model', provider === 'anthropic' ? config.model : '', 'Claude Code default', 'claude_code')}
                     </div>
                     <div class="form-group hidden" id="claude-openai-profile-group">
                         <label class="form-label">OpenAI OAuth Profile</label>
@@ -6078,14 +6253,7 @@ class OpenPoet {
                     </div>
                     <div class="form-group hidden" id="claude-openai-model-group">
                         <label class="form-label">OpenAI Model</label>
-                        <input type="text" class="form-input" name="claude_openai_model"
-                            value="${provider === 'openai_oauth' ? this.escapeHtml(config.model || '') : ''}"
-                            placeholder="e.g. gpt-5.6-sol[1m]" list="claude-openai-model-suggestions">
-                        <datalist id="claude-openai-model-suggestions">
-                            <option value="gpt-5.6-sol[1m]">
-                            <option value="gpt-5.6-luna[1m]">
-                            <option value="gpt-5.4[1m]">
-                        </datalist>
+                        ${this._modelPickerHTML('claude_openai_model', provider === 'openai_oauth' ? config.model : '', 'e.g. gpt-5.6-sol[1m]', 'codex', { oneMillionVariants: true, allowDefault: false })}
                     </div>
                     <div class="form-group hidden" id="claude-openai-small-model-group">
                         <label class="form-label">Small/Fast Model</label>
@@ -6131,7 +6299,7 @@ class OpenPoet {
                     </div>
                     <div class="form-group">
                         <label class="form-label">Model</label>
-                        <input type="text" class="form-input" name="codex_model" value="${this.escapeHtml(config.model || '')}" placeholder="Codex CLI default">
+                        ${this._modelPickerHTML('codex_model', config.model, 'Codex CLI default', 'codex')}
                     </div>
                     <div class="form-group">
                         <label class="form-label">Reasoning Effort</label>
@@ -6187,7 +6355,7 @@ class OpenPoet {
                     </div>
                     <div class="form-group">
                         <label class="form-label">Model</label>
-                        <input type="text" class="form-input" name="opencode_model" value="${this.escapeHtml(config.model || '')}" placeholder="OpenCode default">
+                        ${this._modelPickerHTML('opencode_model', config.model, 'OpenCode default', 'opencode')}
                     </div>
                     <div class="form-group">
                         <label class="form-label">Default Agent</label>
@@ -6505,6 +6673,7 @@ class OpenPoet {
         this._populateProjectToolPolicy(project?.tool_policy || '');
         this.onProjectTypeChange(project?.type || 'local');
         this.onProjectBackendChange();
+        this.initModelPickers(document.getElementById('project-form'));
     }
 
     async _populateProjectToolPolicy(policyJson) {
