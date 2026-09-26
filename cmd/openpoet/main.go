@@ -792,6 +792,9 @@ func main() {
 			json.NewEncoder(w).Encode(map[string]string{"version": BuildVersion})
 		})
 
+		// Harness model catalogs (for model pickers)
+		r.Get("/models", api.ListHarnessModels)
+
 		// Projects
 		r.Get("/projects", api.ListProjects)
 		r.Post("/projects", api.CreateProject)
