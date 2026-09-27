@@ -433,6 +433,7 @@ func (r *CodexRunner) codexCommandResumeApply(ctx context.Context, raw json.RawM
 
 	params := r.threadParams()
 	params["threadId"] = threadID
+	params["excludeTurns"] = true
 	delete(params, "sessionStartSource")
 
 	result, err := r.codexCommandRequest(ctx, "thread/resume", params)
@@ -445,7 +446,7 @@ func (r *CodexRunner) codexCommandResumeApply(ctx context.Context, raw json.RawM
 		resumedThreadID = threadID
 	}
 	r.switchCodexThread(resumedThreadID)
-	r.replaceCodexTranscriptFromThreadResponse(rawResult)
+	r.replaceCodexTranscriptFromThread(resumedThreadID)
 	msg := fmt.Sprintf("Resumed Codex thread: %s", resumedThreadID)
 	r.addCodexCommandFeedback("Resume", msg)
 	r.write([]byte(msg + "\r\n"))
