@@ -1,9 +1,11 @@
 package session
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1271,5 +1273,92 @@ func TestCodexFunctionCallOutputItemReachesTranscript(t *testing.T) {
 	event := r.transcript[0]
 	if event.Command != "local read_file" || !strings.Contains(event.Text, "file contents") {
 		t.Fatalf("functionCallOutput block = %#v", event)
+	}
+}
+
+// fakeCodexAppServer answers the runner's JSON-RPC requests with handle.
+func fakeCodexAppServer(t *testing.T, r *CodexRunner, handle func(method string, params map[string]interface{}) interface{}) {
+	t.Helper()
+	reader, writer := io.Pipe()
+	r.stdin = writer
+	t.Cleanup(func() { _ = writer.Close() })
+	go func() {
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 1<<20), 1<<20)
+		for scanner.Scan() {
+			var req struct {
+				ID     json.RawMessage        `json:"id"`
+				Method string                 `json:"method"`
+				Params map[string]interface{} `json:"params"`
+			}
+			if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
+				continue
+			}
+			result, _ := json.Marshal(handle(req.Method, req.Params))
+			r.handleMessage(&codexWireMessage{ID: req.ID, Result: result})
+		}
+	}()
+}
+
+func TestCodexCommandResumeExcludesTurnsAndPagesHistory(t *testing.T) {
+	r := &CodexRunner{
+		cfg:     &SessionConfig{},
+		pending: make(map[int]chan codexRPCResponse),
+	}
+	var resumeParams map[string]interface{}
+	var cursors []interface{}
+	fakeCodexAppServer(t, r, func(method string, params map[string]interface{}) interface{} {
+		switch method {
+		case "thread/resume":
+			resumeParams = params
+			return map[string]interface{}{"thread": map[string]interface{}{"id": "thread-2"}}
+		case "thread/turns/list":
+			cursors = append(cursors, params["cursor"])
+			if params["itemsView"] != "full" || params["sortDirection"] != "asc" {
+				t.Errorf("turns/list params = %#v, want full items ascending", params)
+			}
+			if params["cursor"] == nil {
+				return map[string]interface{}{
+					"data": []interface{}{map[string]interface{}{
+						"id": "turn-1", "status": "completed",
+						"items": []interface{}{map[string]interface{}{
+							"id": "i1", "type": "userMessage",
+							"content": []interface{}{map[string]interface{}{"type": "text", "text": "primeira"}},
+						}},
+					}},
+					"nextCursor": "page-2",
+				}
+			}
+			return map[string]interface{}{
+				"data": []interface{}{map[string]interface{}{
+					"id": "turn-2", "status": "completed",
+					"items": []interface{}{map[string]interface{}{"id": "i2", "type": "agentMessage", "text": "segunda"}},
+				}},
+				"nextCursor": nil,
+			}
+		}
+		t.Errorf("unexpected request %s", method)
+		return nil
+	})
+
+	if _, err := r.codexCommandResumeApply(context.Background(), json.RawMessage(`{"threadId":"thread-2"}`)); err != nil {
+		t.Fatalf("resume returned error: %v", err)
+	}
+	if resumeParams["excludeTurns"] != true {
+		t.Fatalf("thread/resume excludeTurns = %#v, want true", resumeParams["excludeTurns"])
+	}
+	if len(cursors) != 2 || cursors[1] != "page-2" {
+		t.Fatalf("turns/list cursors = %#v, want [nil page-2]", cursors)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var got []string
+	for _, event := range r.transcript {
+		if event.Kind == "user" || event.Kind == "assistant" {
+			got = append(got, event.Kind+":"+event.Text)
+		}
+	}
+	if strings.Join(got, ",") != "user:primeira,assistant:segunda" {
+		t.Fatalf("transcript = %v, want both pages in order", got)
 	}
 }

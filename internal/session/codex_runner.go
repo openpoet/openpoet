@@ -106,12 +106,9 @@ type codexTranscriptEvent struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-type codexThreadResumeResponse struct {
-	Thread *codexThreadResumeThread `json:"thread"`
-}
-
-type codexThreadResumeThread struct {
-	Turns []codexThreadResumeTurn `json:"turns"`
+type codexThreadTurnsPage struct {
+	Data       []codexThreadResumeTurn `json:"data"`
+	NextCursor *string                 `json:"nextCursor"`
 }
 
 type codexThreadResumeTurn struct {
@@ -635,6 +632,7 @@ func (r *CodexRunner) openThread(ctx context.Context) error {
 
 	if r.cfg.IsReopen && r.cfg.ProviderSessionID != "" {
 		params["threadId"] = r.cfg.ProviderSessionID
+		params["excludeTurns"] = true
 		result, err = r.request(ctx, "thread/resume", params)
 		if err != nil {
 			r.write([]byte(fmt.Sprintf("\x1b[33mCodex thread resume failed; starting a new thread: %v\x1b[0m\r\n", err)))
@@ -1270,6 +1268,7 @@ func (r *CodexRunner) handleSlashFork() {
 	params := r.threadParams()
 	params["threadId"] = threadID
 	params["threadSource"] = "user"
+	params["excludeTurns"] = true
 	delete(params, "sessionStartSource")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1306,6 +1305,7 @@ func (r *CodexRunner) handleSlashResume(args string) {
 
 	params := r.threadParams()
 	params["threadId"] = threadID
+	params["excludeTurns"] = true
 	delete(params, "sessionStartSource")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1320,7 +1320,7 @@ func (r *CodexRunner) handleSlashResume(args string) {
 		resumedThreadID = threadID
 	}
 	r.switchCodexThread(resumedThreadID)
-	r.replaceCodexTranscriptFromThreadResponse(result)
+	r.replaceCodexTranscriptFromThread(resumedThreadID)
 	r.write([]byte(fmt.Sprintf("Resumed Codex thread: %s\r\n", resumedThreadID)))
 	r.writePrompt()
 }
@@ -2831,18 +2831,59 @@ func tailBytesUTF8(s string, n int) string {
 	return s[i:]
 }
 
-func (r *CodexRunner) replaceCodexTranscriptFromThreadResponse(raw json.RawMessage) bool {
-	var response codexThreadResumeResponse
-	if len(raw) == 0 || json.Unmarshal(raw, &response) != nil {
-		return false
-	}
-	if response.Thread == nil {
-		return false
-	}
+// thread/turns/list page size, and a ceiling on pages so a cursor that never
+// ends cannot hang a resume.
+const (
+	codexThreadTurnsPageLimit = 50
+	codexThreadTurnsMaxPages  = 200
+)
 
-	events := codexTranscriptEventsFromThreadTurns(response.Thread.Turns)
-	r.replaceCodexTranscript(events)
-	return true
+// loadCodexThreadTurns pages a thread's history oldest-first. Resume and fork
+// pass excludeTurns: Codex deprecated full-history hydration in thread/resume
+// for paginated threads and warns on every call that still relies on it.
+func (r *CodexRunner) loadCodexThreadTurns(ctx context.Context, threadID string) ([]codexThreadResumeTurn, error) {
+	var turns []codexThreadResumeTurn
+	cursor := ""
+	for page := 0; page < codexThreadTurnsMaxPages; page++ {
+		params := map[string]interface{}{
+			"threadId":      threadID,
+			"itemsView":     "full",
+			"sortDirection": "asc",
+			"limit":         codexThreadTurnsPageLimit,
+		}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		raw, err := r.request(ctx, "thread/turns/list", params)
+		if err != nil {
+			return nil, err
+		}
+		var resp codexThreadTurnsPage
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return nil, fmt.Errorf("decode thread/turns/list: %w", err)
+		}
+		turns = append(turns, resp.Data...)
+		if resp.NextCursor == nil || *resp.NextCursor == "" || len(resp.Data) == 0 {
+			return turns, nil
+		}
+		cursor = *resp.NextCursor
+	}
+	return nil, fmt.Errorf("thread/turns/list did not finish after %d pages", codexThreadTurnsMaxPages)
+}
+
+// replaceCodexTranscriptFromThread rebuilds the transcript from a resumed
+// thread's persisted history. The resume itself already succeeded, so a
+// failure here only leaves the transcript empty and is reported as a warning.
+func (r *CodexRunner) replaceCodexTranscriptFromThread(threadID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	turns, err := r.loadCodexThreadTurns(ctx, threadID)
+	if err != nil {
+		r.replaceCodexTranscript(nil)
+		r.writeCodexWarning("Codex history", fmt.Sprintf("could not load thread history: %v", err))
+		return
+	}
+	r.replaceCodexTranscript(codexTranscriptEventsFromThreadTurns(turns))
 }
 
 func codexTranscriptEventsFromThreadTurns(turns []codexThreadResumeTurn) []codexTranscriptEvent {
