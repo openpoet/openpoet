@@ -142,9 +142,10 @@ func validateUIActionManifest(t *testing.T, manifest uiActionManifest) (map[stri
 		}
 	}
 	// 122 after V74 retired the three mission mutations (create/set_status/grant);
-	// 123 with projects.scaffold; 127 with the four compose lifecycle mutations.
-	if implemented != 127 || internal != 3 {
-		t.Errorf("manifest convergence = %d implemented/%d internal, want 127/3", implemented, internal)
+	// 123 with projects.scaffold; 127 with the four compose lifecycle mutations;
+	// 128 with the chunked voice upload completion (voice.transcribe).
+	if implemented != 128 || internal != 3 {
+		t.Errorf("manifest convergence = %d implemented/%d internal, want 128/3", implemented, internal)
 	}
 	allowlist := make(map[string]struct{}, len(manifest.Allowlist))
 	for _, item := range manifest.Allowlist {

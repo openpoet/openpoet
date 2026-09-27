@@ -1023,6 +1023,9 @@ func main() {
 
 		// Voice
 		r.Post("/voice/transcribe", voiceHandler.Transcribe)
+		r.Post("/voice/uploads/{uploadId}/chunks/{index}", voiceHandler.UploadChunk)
+		r.Post("/voice/uploads/{uploadId}/complete", voiceHandler.CompleteUpload)
+		r.Delete("/voice/uploads/{uploadId}", voiceHandler.DiscardUpload)
 
 		// Notifications
 		r.Get("/notifications", api.GetNotifications)

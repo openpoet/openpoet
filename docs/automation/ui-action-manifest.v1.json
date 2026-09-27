@@ -100,6 +100,7 @@
     {"route":"/api/projects/{id}/custom-tools/{toolId}","method":"PUT","capability":"tools.update_project","domain":"tools","risk":"R4","scopes":["tools:write","projects:write"],"application_service":"CustomToolService","ui_binding":"shared_application_service","status":"implemented"},
     {"route":"/api/projects/{id}/custom-tools/{toolId}","method":"DELETE","capability":"tools.delete_project","domain":"tools","risk":"R4","scopes":["tools:write","projects:write"],"application_service":"CustomToolService","ui_binding":"shared_application_service","status":"implemented"},
     {"route":"/api/voice/transcribe","method":"POST","capability":"voice.transcribe","domain":"voice","risk":"R1","scopes":["voice:use"],"application_service":"VoiceTranscriptionService","ui_binding":"shared_application_service","status":"implemented"},
+    {"route":"/api/voice/uploads/{uploadId}/complete","method":"POST","capability":"voice.transcribe","domain":"voice","risk":"R1","scopes":["voice:use"],"application_service":"VoiceTranscriptionService","ui_binding":"shared_application_service","status":"implemented"},
     {"route":"/api/notifications/{id}/read","method":"PUT","capability":"notifications.mark_read","domain":"notifications","risk":"R1","scopes":["notifications:write"],"application_service":"NotificationService","ui_binding":"shared_application_service","status":"implemented"},
     {"route":"/api/notifications/read-all","method":"PUT","capability":"notifications.mark_all_read","domain":"notifications","risk":"R1","scopes":["notifications:write"],"application_service":"NotificationService","ui_binding":"shared_application_service","status":"implemented"},
     {"route":"/api/notifications/subscribe","method":"POST","capability":"notifications.subscribe_push","domain":"notifications","risk":"R2","scopes":["notifications:write"],"application_service":"NotificationDeliveryService","ui_binding":"shared_application_service","status":"implemented"},
@@ -191,6 +192,8 @@
   ],
   "allowlist": [
     {"route":"/api/client-log","method":"POST","reason":"telemetry"},
+    {"route":"/api/voice/uploads/{uploadId}/chunks/{index}","method":"POST","reason":"voice_upload_staging"},
+    {"route":"/api/voice/uploads/{uploadId}","method":"DELETE","reason":"voice_upload_staging"},
     {"route":"/api/debug/client-error","method":"POST","reason":"debug_telemetry"},
     {"route":"/api/debug/client-log","method":"POST","reason":"debug_telemetry"},
     {"route":"/v1/metrics","method":"POST","reason":"otel_ingest"},

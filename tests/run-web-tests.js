@@ -28,6 +28,7 @@ const GROUPS = {
   browser: [
     'tests/structured-view-session-status-smoke.js',
     'tests/url-state-browser-smoke.js',
+    'tests/voice-chunked-upload-smoke.js',
   ],
   server: [
     'tests/codex-slash-palette-smoke.js',
