@@ -329,8 +329,10 @@ func TestExecutionPlatformMutationMetadataMatchesManifest(t *testing.T) {
 		}
 		checked++
 	}
-	if checked != 27 {
-		t.Fatalf("checked %d execution mutations, want 27", checked)
+	// 28: voice.transcribe is reachable from both /voice/transcribe and the
+	// chunked /voice/uploads/{id}/complete route.
+	if checked != 28 {
+		t.Fatalf("checked %d execution mutations, want 28", checked)
 	}
 }
 

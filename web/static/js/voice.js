@@ -1,4 +1,114 @@
 // Voice Input using MediaRecorder and OpenAI Whisper
+//
+// A recording must never be lost. The public entrypoint sits behind a proxy
+// that rejects request bodies over 1 MiB, so recordings are:
+//   1. encoded at a speech bitrate (Opus ~32 kbps ≈ 240 KB/min);
+//   2. persisted to IndexedDB every second while recording, so a reload,
+//      crash or failed upload can always be resumed (see VoiceStore);
+//   3. uploaded in small idempotent byte slices that the server reassembles
+//      into the original file before transcribing (/api/voice/uploads/…).
+
+// IndexedDB persistence for in-progress and unsent recordings. Every method
+// swallows storage errors (private mode, quota): persistence is a safety net,
+// recording and uploading keep working in memory without it.
+const VoiceStore = {
+    dbPromise: null,
+
+    open() {
+        if (this.dbPromise) return this.dbPromise;
+        this.dbPromise = new Promise((resolve, reject) => {
+            if (!window.indexedDB) { reject(new Error('IndexedDB unavailable')); return; }
+            const request = indexedDB.open('openpoet-voice', 1);
+            request.onupgradeneeded = () => {
+                const db = request.result;
+                if (!db.objectStoreNames.contains('recordings')) db.createObjectStore('recordings', { keyPath: 'id' });
+                if (!db.objectStoreNames.contains('chunks')) db.createObjectStore('chunks', { keyPath: ['id', 'seq'] });
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+        this.dbPromise.catch(() => {});
+        return this.dbPromise;
+    },
+
+    async tx(stores, mode, fn) {
+        const db = await this.open();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(stores, mode);
+            let result;
+            Promise.resolve(fn(tx)).then(value => { result = value; });
+            tx.oncomplete = () => resolve(result);
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error);
+        });
+    },
+
+    async putRecording(record) {
+        try {
+            await this.tx(['recordings'], 'readwrite', tx => { tx.objectStore('recordings').put(record); });
+        } catch (err) { console.warn('[voice] could not persist recording metadata:', err); }
+    },
+
+    async updateRecording(id, fields) {
+        try {
+            await this.tx(['recordings'], 'readwrite', tx => {
+                const store = tx.objectStore('recordings');
+                const get = store.get(id);
+                get.onsuccess = () => {
+                    if (get.result) store.put({ ...get.result, ...fields, updatedAt: Date.now() });
+                };
+            });
+        } catch (err) { console.warn('[voice] could not update recording metadata:', err); }
+    },
+
+    async appendChunk(id, seq, blob) {
+        try {
+            await this.tx(['chunks', 'recordings'], 'readwrite', tx => {
+                tx.objectStore('chunks').put({ id, seq, blob });
+                const store = tx.objectStore('recordings');
+                const get = store.get(id);
+                get.onsuccess = () => {
+                    if (get.result) store.put({ ...get.result, updatedAt: Date.now() });
+                };
+            });
+        } catch (err) { console.warn('[voice] could not persist audio chunk:', err); }
+    },
+
+    async listRecordings() {
+        try {
+            return await this.tx(['recordings'], 'readonly', tx => new Promise(resolve => {
+                const req = tx.objectStore('recordings').getAll();
+                req.onsuccess = () => resolve(req.result || []);
+                req.onerror = () => resolve([]);
+            }));
+        } catch (_) { return []; }
+    },
+
+    async loadBlob(record) {
+        try {
+            const range = IDBKeyRange.bound([record.id, 0], [record.id, Number.MAX_SAFE_INTEGER]);
+            const chunks = await this.tx(['chunks'], 'readonly', tx => new Promise(resolve => {
+                const req = tx.objectStore('chunks').getAll(range);
+                req.onsuccess = () => resolve(req.result || []);
+                req.onerror = () => resolve([]);
+            }));
+            if (!chunks.length) return null;
+            chunks.sort((a, b) => a.seq - b.seq);
+            return new Blob(chunks.map(c => c.blob), { type: record.mimeType || 'audio/webm' });
+        } catch (_) { return null; }
+    },
+
+    async remove(id) {
+        if (!id) return;
+        try {
+            await this.tx(['chunks', 'recordings'], 'readwrite', tx => {
+                tx.objectStore('chunks').delete(IDBKeyRange.bound([id, 0], [id, Number.MAX_SAFE_INTEGER]));
+                tx.objectStore('recordings').delete(id);
+            });
+        } catch (err) { console.warn('[voice] could not remove persisted recording:', err); }
+    }
+};
+
 class VoiceInput {
     constructor() {
         this.mediaRecorder = null;
@@ -22,16 +132,25 @@ class VoiceInput {
         this.recordingTimer = null;
         this.timeoutTimer = null;
         this.recordingSeconds = 0;
+        this.recordingId = null;
+        this.recordingMimeType = null;
+        this.chunkSeq = 0;
         // Held between attempts so retries don't lose the recording.
         this.pendingAudioBlob = null;
+        this.pendingRecordingId = null; // doubles as the server upload id
+        this.pendingMimeType = null;
         this.pendingTargetCallback = null; // destination bound to the in-flight upload
         this.pendingSubmit = false;
+        this.uploadedSlices = new Set(); // slices of the pending upload the server already has
+        this.uploading = false;
         this.uploadAttemptCount = 0;
-        this.maxSingleUploadBytes = 20 * 1024 * 1024;
-        this.maxChunkUploadBytes = 18 * 1024 * 1024;
-        this.maxChunkSeconds = 90;
+
+        this.maxRecordingSeconds = 20 * 60;
+        this.audioBitsPerSecond = 32000;
+        this.sliceBytes = 256 * 1024; // ~350 KB as base64 JSON, far below the proxy's 1 MiB
 
         this.setupEventListeners();
+        this.recoverPendingRecordings();
     }
 
     setupEventListeners() {
@@ -61,18 +180,43 @@ class VoiceInput {
         }
     }
 
+    newRecordingId() {
+        if (window.crypto?.randomUUID) return crypto.randomUUID();
+        return `rec-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+    }
+
+    createMediaRecorder(stream) {
+        const mimeType = this.getSupportedMimeType();
+        try {
+            return new MediaRecorder(stream, { mimeType, audioBitsPerSecond: this.audioBitsPerSecond });
+        } catch (err) {
+            console.warn('[voice] MediaRecorder rejected options, using defaults:', err);
+            return new MediaRecorder(stream);
+        }
+    }
+
     async startRecording() {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
             this.audioChunks = [];
-            this.mediaRecorder = new MediaRecorder(stream, {
-                mimeType: this.getSupportedMimeType()
+            this.chunkSeq = 0;
+            this.mediaRecorder = this.createMediaRecorder(stream);
+            const recordingId = this.newRecordingId();
+            this.recordingId = recordingId;
+            this.recordingMimeType = this.mediaRecorder.mimeType || this.getSupportedMimeType();
+            VoiceStore.putRecording({
+                id: recordingId,
+                mimeType: this.recordingMimeType,
+                status: 'recording',
+                createdAt: Date.now(),
+                updatedAt: Date.now()
             });
 
             this.mediaRecorder.ondataavailable = (event) => {
                 if (event.data.size > 0) {
                     this.audioChunks.push(event.data);
+                    VoiceStore.appendChunk(recordingId, this.chunkSeq++, event.data);
                 }
             };
 
@@ -81,12 +225,15 @@ class VoiceInput {
                 if (this.cancelled) {
                     this.cancelled = false;
                     this.audioChunks = [];
+                    VoiceStore.remove(recordingId);
                     return;
                 }
-                await this.processRecording();
+                await this.processRecording(recordingId);
             };
 
-            this.mediaRecorder.start();
+            // A timeslice flushes audio every second so it reaches IndexedDB
+            // while the user is still talking, not only at stop().
+            this.mediaRecorder.start(1000);
             this.isRecording = true;
             this.showIndicator();
             this.startTimers();
@@ -121,7 +268,8 @@ class VoiceInput {
             navigator.vibrate([200, 100, 200]);
         }
         // Visual toast
-        app.showToast('Info', 'Recording auto-stopped: 60s limit reached. Transcribing...', 'info');
+        const minutes = Math.round(this.maxRecordingSeconds / 60);
+        app.showToast('Info', `Recording auto-stopped: ${minutes} min limit reached. Transcribing...`, 'info');
     }
 
     playStopBeep() {
@@ -146,7 +294,7 @@ class VoiceInput {
         }
     }
 
-    cancelRecording(isTimeout = false) {
+    cancelRecording() {
         if (this.mediaRecorder && this.isRecording) {
             this.clearTimers();
             this.cancelled = true;
@@ -154,11 +302,7 @@ class VoiceInput {
             this.mediaRecorder.stop();
             this.isRecording = false;
             this.hideIndicator();
-            if (isTimeout) {
-                app.showToast('Warning', 'Recording cancelled: 60s limit reached', 'warning');
-            } else {
-                app.showToast('Info', 'Recording cancelled', 'info');
-            }
+            app.showToast('Info', 'Recording cancelled', 'info');
         }
     }
 
@@ -169,7 +313,7 @@ class VoiceInput {
             this.recordingSeconds++;
             this.updateTimerDisplay();
         }, 1000);
-        this.timeoutTimer = setTimeout(() => this.autoStopRecording(), 60000);
+        this.timeoutTimer = setTimeout(() => this.autoStopRecording(), this.maxRecordingSeconds * 1000);
     }
 
     clearTimers() {
@@ -189,38 +333,81 @@ class VoiceInput {
         const mins = Math.floor(this.recordingSeconds / 60);
         const secs = this.recordingSeconds % 60;
         this.timerDisplay.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
-        this.timerDisplay.classList.toggle('warning', this.recordingSeconds >= 55);
+        this.timerDisplay.classList.toggle('warning', this.recordingSeconds >= this.maxRecordingSeconds - 30);
     }
 
-    async processRecording() {
+    async processRecording(recordingId) {
         if (this.audioChunks.length === 0) {
+            VoiceStore.remove(recordingId);
+            this.hideUploading();
             app.showToast('Error', 'No audio recorded', 'error');
             return;
         }
 
         // Keep the blob around so we can retry without losing the recording.
-        this.pendingAudioBlob = new Blob(this.audioChunks, { type: this.getSupportedMimeType() });
+        this.pendingAudioBlob = new Blob(this.audioChunks, { type: this.recordingMimeType || this.getSupportedMimeType() });
+        this.pendingRecordingId = recordingId;
+        this.pendingMimeType = this.pendingAudioBlob.type;
         this.pendingSubmit = this.submitAfterTranscribe;
+        this.uploadedSlices = new Set();
         this.uploadAttemptCount = 0;
         // Bind the destination to THIS recording. targetCallback is read at
         // delivery time, seconds later; a recording started meanwhile would
         // otherwise steal this transcript — or, if none is registered by then,
         // it would fall through to insertText() and type into the terminal.
         this.pendingTargetCallback = this.targetCallback;
+        VoiceStore.updateRecording(recordingId, { status: 'stopped', submit: this.pendingSubmit });
 
         await this.uploadWithRetry();
     }
 
-    async uploadWithRetry() {
-        if (!this.pendingAudioBlob) return;
+    // Offer any recording persisted by an earlier page load (or an earlier
+    // failed upload) that never produced a transcript.
+    async recoverPendingRecordings() {
+        if (this.isRecording || this.pendingAudioBlob || this.uploading) return;
+        const now = Date.now();
+        const records = (await VoiceStore.listRecordings())
+            .filter(r => r.id !== this.recordingId)
+            // Skip recordings another tab is actively writing or uploading.
+            .filter(r => r.status === 'stopped' || now - (r.updatedAt || 0) > 15000)
+            .filter(r => r.status !== 'uploading' || now - (r.updatedAt || 0) > 180000)
+            .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+        for (const record of records) {
+            if (this.isRecording || this.pendingAudioBlob || this.uploading) return;
+            const blob = await VoiceStore.loadBlob(record);
+            if (!blob || blob.size === 0) {
+                VoiceStore.remove(record.id);
+                continue;
+            }
+            this.pendingAudioBlob = blob;
+            this.pendingRecordingId = record.id;
+            this.pendingMimeType = record.mimeType || blob.type;
+            this.pendingSubmit = false;
+            this.pendingTargetCallback = null;
+            this.uploadedSlices = new Set();
+            const when = new Date(record.createdAt || now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const err = new Error(`Unsent recording from ${when} (${Math.round(blob.size / 1024)} KB) recovered`);
+            this.showRetryAvailable(err);
+            return;
+        }
+    }
 
+    async uploadWithRetry() {
+        if (!this.pendingAudioBlob || this.uploading) return;
+
+        this.uploading = true;
         this.showUploading();
+        const recordingId = this.pendingRecordingId;
+        VoiceStore.updateRecording(recordingId, { status: 'uploading' });
 
         try {
-            const result = await this.transcribeBlob(this.pendingAudioBlob);
+            const result = await this.transcribePending();
             // Success: clear pending state, deliver text.
             this.hideUploading();
             this.pendingAudioBlob = null;
+            this.pendingRecordingId = null;
+            this.uploadedSlices = new Set();
+            await VoiceStore.remove(recordingId);
             const deliver = this.pendingTargetCallback;
             this.pendingTargetCallback = null;
             if (this.targetCallback === deliver) this.targetCallback = null;
@@ -232,218 +419,121 @@ class VoiceInput {
                 }
             }
         } catch (err) {
-            // All retries exhausted: keep the blob and offer manual retry.
+            // All retries exhausted: keep the blob (in memory and IndexedDB)
+            // and offer manual retry.
+            VoiceStore.updateRecording(recordingId, { status: 'stopped' });
             this.showRetryAvailable(err);
+        } finally {
+            this.uploading = false;
         }
+        if (!this.pendingAudioBlob) this.recoverPendingRecordings();
     }
 
-    async transcribeBlob(audioBlob) {
-        if (audioBlob.size > this.maxSingleUploadBytes) {
-            return this.uploadInChunks(audioBlob);
-        }
+    recordingFilename(mimeType) {
+        const type = String(mimeType || '').toLowerCase();
+        if (type.includes('mp4') || type.includes('aac') || type.includes('m4a')) return 'recording.mp4';
+        if (type.includes('ogg')) return 'recording.ogg';
+        if (type.includes('wav')) return 'recording.wav';
+        if (type.includes('mpeg') || type.includes('mp3')) return 'recording.mp3';
+        return 'recording.webm';
+    }
 
-        try {
-            return await this.uploadBlobWithRetry(audioBlob);
-        } catch (err) {
-            if (this.isAudioTooLargeError(err)) {
-                return this.uploadInChunks(audioBlob);
+    // Upload the pending recording as byte slices, then ask the server to
+    // reassemble and transcribe it. Slices the server already holds are not
+    // re-sent; slices it reports missing (e.g. lost across a restart) are.
+    async transcribePending() {
+        const blob = this.pendingAudioBlob;
+        const uploadId = this.pendingRecordingId;
+        const totalSlices = Math.max(1, Math.ceil(blob.size / this.sliceBytes));
+        const filename = this.recordingFilename(this.pendingMimeType || blob.type);
+        const base = `/api/voice/uploads/${encodeURIComponent(uploadId)}`;
+
+        for (let round = 0; round < 3; round++) {
+            for (let i = 0; i < totalSlices; i++) {
+                if (this.uploadedSlices.has(i)) continue;
+                const slice = blob.slice(i * this.sliceBytes, Math.min(blob.size, (i + 1) * this.sliceBytes));
+                const data = await this.blobToBase64(slice);
+                await this.requestWithRetry(
+                    () => this.postJSON(`${base}/chunks/${i}`, { data }, 90000),
+                    totalSlices > 1 ? `Sending ${i + 1}/${totalSlices}` : `Sending ${Math.round(blob.size / 1024)} KB`
+                );
+                this.uploadedSlices.add(i);
             }
-            throw err;
+
+            try {
+                return await this.requestWithRetry(
+                    () => this.postJSON(`${base}/complete`, { chunks: totalSlices, filename }, 180000),
+                    'Transcribing'
+                );
+            } catch (err) {
+                if (err.status === 409 && Array.isArray(err.body?.missing)) {
+                    err.body.missing.forEach(i => this.uploadedSlices.delete(i));
+                    continue;
+                }
+                throw err;
+            }
         }
+        throw new Error('Upload could not be completed');
     }
 
-    async uploadBlobWithRetry(audioBlob, options = {}) {
-        // Backoff: immediate, 1.5s, 4s — total ~5.5s before giving up.
-        const backoffsMs = [0, 1500, 4000];
-        const sizeKB = Math.round(audioBlob.size / 1024);
-        const filename = options.filename || 'recording.webm';
-
+    async requestWithRetry(send, label) {
+        // Backoff: immediate, 1.5s, 4s, 8s — ~13.5s before handing the
+        // decision to the user (the recording is kept either way).
+        const backoffsMs = [0, 1500, 4000, 8000];
         let lastError = null;
         for (let attempt = 0; attempt < backoffsMs.length; attempt++) {
             this.uploadAttemptCount++;
             if (backoffsMs[attempt] > 0) {
-                const retryLabel = options.totalChunks
-                    ? `Retrying part ${options.chunkIndex}/${options.totalChunks}`
-                    : 'Retrying';
-                this.setStatusLabel(`${retryLabel} (${attempt + 1}/${backoffsMs.length})…`);
+                this.setStatusLabel(`${label} — retrying (${attempt + 1}/${backoffsMs.length})…`);
                 await new Promise(resolve => setTimeout(resolve, backoffsMs[attempt]));
-            } else if (options.totalChunks) {
-                this.setStatusLabel(`Sending part ${options.chunkIndex}/${options.totalChunks} (${sizeKB} KB)…`);
             } else {
-                this.setStatusLabel(`Sending ${sizeKB} KB…`);
+                this.setStatusLabel(`${label}…`);
             }
-
             try {
-                return await this.uploadOnce(audioBlob, filename);
+                return await send();
             } catch (err) {
                 lastError = err;
-                console.warn(`[voice] attempt ${attempt + 1} failed:`, err);
-                if (this.isAudioTooLargeError(err)) throw err;
+                console.warn(`[voice] ${label} attempt ${attempt + 1} failed:`, err);
                 if (!this.isRetryableError(err)) break;
             }
         }
-
         throw lastError || new Error('Upload failed');
     }
 
-    async uploadInChunks(audioBlob) {
-        this.setStatusLabel('Splitting audio…');
-        const chunks = await this.createTranscriptionChunks(audioBlob);
-        const texts = [];
-
-        for (let i = 0; i < chunks.length; i++) {
-            const result = await this.uploadBlobWithRetry(chunks[i].blob, {
-                filename: chunks[i].filename,
-                chunkIndex: i + 1,
-                totalChunks: chunks.length
-            });
-            const text = result?.text?.trim();
-            if (text) texts.push(text);
-        }
-
-        return { text: texts.join(' ').replace(/\s+/g, ' ').trim() };
+    blobToBase64(blob) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+                const url = String(reader.result || '');
+                resolve(url.slice(url.indexOf(',') + 1));
+            };
+            reader.onerror = () => reject(reader.error || new Error('Could not read recording'));
+            reader.readAsDataURL(blob);
+        });
     }
 
-    async createTranscriptionChunks(audioBlob) {
-        const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-        if (!AudioContextCtor) {
-            const err = new Error('Recording too large and this browser cannot split audio');
-            err.nonRetryable = true;
-            throw err;
-        }
-
-        const audioContext = new AudioContextCtor();
-        let decoded;
-        try {
-            const arrayBuffer = await audioBlob.arrayBuffer();
-            decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-        } catch (err) {
-            const splitErr = new Error('Recording too large and could not be split');
-            splitErr.cause = err;
-            splitErr.nonRetryable = true;
-            throw splitErr;
-        } finally {
-            if (audioContext.close) {
-                const closeResult = audioContext.close();
-                if (closeResult?.catch) closeResult.catch(() => {});
-            }
-        }
-
-        const sampleRate = decoded.sampleRate;
-        const totalFrames = decoded.length;
-        const channelCount = decoded.numberOfChannels || 1;
-        const monoSamples = new Float32Array(totalFrames);
-
-        for (let channel = 0; channel < channelCount; channel++) {
-            const source = decoded.getChannelData(channel);
-            for (let i = 0; i < totalFrames; i++) {
-                monoSamples[i] += source[i] / channelCount;
-            }
-        }
-
-        const bytesPerSecond = sampleRate * 2; // mono 16-bit PCM
-        const maxSecondsBySize = Math.floor((this.maxChunkUploadBytes - 44) / bytesPerSecond);
-        const chunkSeconds = Math.max(10, Math.min(this.maxChunkSeconds, maxSecondsBySize));
-        const framesPerChunk = Math.max(sampleRate * 10, Math.floor(chunkSeconds * sampleRate));
-        const chunks = [];
-
-        for (let start = 0; start < totalFrames; start += framesPerChunk) {
-            const end = Math.min(start + framesPerChunk, totalFrames);
-            const wavBuffer = this.encodeWavMono(monoSamples.subarray(start, end), sampleRate);
-            chunks.push({
-                blob: new Blob([wavBuffer], { type: 'audio/wav' }),
-                filename: `recording-part-${chunks.length + 1}.wav`
-            });
-        }
-
-        if (chunks.length === 0) {
-            throw new Error('No audio recorded');
-        }
-
-        return chunks;
-    }
-
-    encodeWavMono(samples, sampleRate) {
-        const bytesPerSample = 2;
-        const blockAlign = bytesPerSample;
-        const dataSize = samples.length * bytesPerSample;
-        const buffer = new ArrayBuffer(44 + dataSize);
-        const view = new DataView(buffer);
-
-        this.writeAscii(view, 0, 'RIFF');
-        view.setUint32(4, 36 + dataSize, true);
-        this.writeAscii(view, 8, 'WAVE');
-        this.writeAscii(view, 12, 'fmt ');
-        view.setUint32(16, 16, true);
-        view.setUint16(20, 1, true);
-        view.setUint16(22, 1, true);
-        view.setUint32(24, sampleRate, true);
-        view.setUint32(28, sampleRate * blockAlign, true);
-        view.setUint16(32, blockAlign, true);
-        view.setUint16(34, 16, true);
-        this.writeAscii(view, 36, 'data');
-        view.setUint32(40, dataSize, true);
-
-        let offset = 44;
-        for (let i = 0; i < samples.length; i++, offset += 2) {
-            const sample = Math.max(-1, Math.min(1, samples[i]));
-            view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-        }
-
-        return buffer;
-    }
-
-    writeAscii(view, offset, text) {
-        for (let i = 0; i < text.length; i++) {
-            view.setUint8(offset + i, text.charCodeAt(i));
-        }
-    }
-
-    async uploadOnce(audioBlob, filename = 'recording.webm') {
-        // Detect relay: binary multipart data gets corrupted through the
-        // tunnel JSON serialization, so send base64-encoded JSON instead.
-        const isTunnel = window.location.hostname !== 'localhost'
-            && window.location.hostname !== '127.0.0.1'
-            && !window.location.hostname.match(/^(10|192\.168|172\.(1[6-9]|2\d|3[01]))\./);
-
-        // Per-attempt 90s ceiling — generous enough for slow uplinks on large
-        // recordings, tight enough to retry sooner than browser defaults.
+    // JSON is used for every request: binary bodies get corrupted by the
+    // relay tunnel's JSON serialization, base64 survives it.
+    async postJSON(url, payload, timeoutMs) {
         const controller = new AbortController();
-        const abortTimer = setTimeout(() => controller.abort(), 90000);
-
+        const abortTimer = setTimeout(() => controller.abort(), timeoutMs);
         let response;
         try {
-            if (isTunnel) {
-                const arrayBuf = await audioBlob.arrayBuffer();
-                const bytes = new Uint8Array(arrayBuf);
-                let binary = '';
-                for (let i = 0; i < bytes.length; i += 8192) {
-                    binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
-                }
-                const base64 = btoa(binary);
-                response = await fetch('/api/voice/transcribe', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ audio: base64, filename }),
-                    signal: controller.signal
-                });
-            } else {
-                const formData = new FormData();
-                formData.append('audio', audioBlob, filename);
-                response = await fetch('/api/voice/transcribe', {
-                    method: 'POST',
-                    body: formData,
-                    signal: controller.signal
-                });
-            }
+            response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                signal: controller.signal
+            });
         } finally {
             clearTimeout(abortTimer);
         }
 
         if (!response.ok) {
-            const message = await this.parseErrorBody(response);
+            const { message, body } = await this.parseErrorBody(response);
             const err = new Error(message);
             err.status = response.status;
+            err.body = body;
             throw err;
         }
 
@@ -468,38 +558,24 @@ class VoiceInput {
         if (bodyText) {
             try {
                 const json = JSON.parse(bodyText);
-                if (json && json.error) return json.error;
+                if (json && json.error) return { message: json.error, body: json };
             } catch (_) {
                 // Not JSON (likely HTML 502/504 from a tunnel) — fall through.
             }
         }
         const status = response.status;
-        if (status === 0) return 'Network error';
-        if (status === 413) return 'Recording too large for the server';
-        if (status === 429) return 'Rate limited — please retry';
-        if (status >= 500) return `Server error (${status})`;
-        return `Request failed (${status})`;
-    }
-
-    isAudioTooLargeError(err) {
-        if (!err) return false;
-        if (err.status === 413) return true;
-
-        const message = String(err.message || '').toLowerCase();
-        return message.includes('too large')
-            || message.includes('maximum')
-            || message.includes('exceeds')
-            || message.includes('file size')
-            || message.includes('request entity too large')
-            || message.includes('25mb')
-            || message.includes('25 mb');
+        let message = `Request failed (${status})`;
+        if (status === 0) message = 'Network error';
+        else if (status === 413) message = 'Recording too large for the server';
+        else if (status === 429) message = 'Rate limited — please retry';
+        else if (status >= 500) message = `Server error (${status})`;
+        return { message, body: null };
     }
 
     isRetryableError(err) {
         // AbortError, network failure (TypeError from fetch), 5xx, 429.
         if (!err) return false;
         if (err.nonRetryable) return false;
-        if (this.isAudioTooLargeError(err)) return false;
         if (err.name === 'AbortError') return true;
         if (err.parseError) return true;
         if (err.status === 429) return true;
@@ -515,11 +591,18 @@ class VoiceInput {
     }
 
     discardPendingAudio() {
+        const recordingId = this.pendingRecordingId;
         this.pendingAudioBlob = null;
+        this.pendingRecordingId = null;
         this.pendingSubmit = false;
         this.targetCallback = null;
         this.pendingTargetCallback = null;
+        this.uploadedSlices = new Set();
         this.hideUploading();
+        if (recordingId) {
+            VoiceStore.remove(recordingId).then(() => this.recoverPendingRecordings());
+            fetch(`/api/voice/uploads/${encodeURIComponent(recordingId)}`, { method: 'DELETE' }).catch(() => {});
+        }
     }
 
     // Insert transcribed text into the appropriate input (mobile input bar or terminal)
@@ -665,7 +748,8 @@ class VoiceInput {
     }
 
     showRetryAvailable(err) {
-        this.indicator?.classList.remove('uploading');
+        this.indicator?.classList.remove('hidden', 'uploading');
+        if (this.timerDisplay) this.timerDisplay.classList.add('hidden');
         this.indicator?.classList.add('retry-available');
         const msg = err && err.message ? err.message : 'Upload failed';
         const canRetry = !err?.nonRetryable;

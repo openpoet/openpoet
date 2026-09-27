@@ -14,6 +14,7 @@ import (
 type VoiceHandler struct {
 	api               *API
 	getProviderConfig func() (voice.ProviderType, string, string) // provider, apiKey, model
+	uploadDir         string                                      // staging root for chunked uploads; empty = OS temp dir
 }
 
 func NewVoiceHandler(api *API, getProviderConfig func() (voice.ProviderType, string, string)) *VoiceHandler {
