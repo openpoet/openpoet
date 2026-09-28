@@ -26,11 +26,29 @@ func ResolveJSONLPath(projectPath, sessionID string) string {
 	if err != nil {
 		homeDir = os.Getenv("HOME")
 	}
-	return filepath.Join(homeDir, ".claude", "projects", encoded, sessionID+".jsonl")
+	configDir := ClaudeConfigDir(homeDir, os.Getenv("CLAUDE_CONFIG_DIR"))
+	return filepath.Join(configDir, "projects", encoded, sessionID+".jsonl")
+}
+
+// ClaudeConfigDir returns the Claude Code config root that holds projects/.
+// Claude Code honors CLAUDE_CONFIG_DIR (containers sharing one install point
+// it at a per-container volume); without it the root is ~/.claude. Values
+// that are not POSIX-absolute or ~-relative are ignored.
+func ClaudeConfigDir(homeDir, configDirEnv string) string {
+	configDirEnv = strings.TrimSpace(configDirEnv)
+	switch {
+	case strings.HasPrefix(configDirEnv, "/"):
+		return filepath.Clean(configDirEnv)
+	case configDirEnv == "~":
+		return homeDir
+	case strings.HasPrefix(configDirEnv, "~/"):
+		return filepath.Join(homeDir, configDirEnv[2:])
+	}
+	return filepath.Join(homeDir, ".claude")
 }
 
 // ResolveRemoteJSONLPath computes the JSONL file path on a remote machine.
-// remoteHomeDir is the remote user's home directory (from SFTP Getwd()).
+// configDir is the remote Claude Code config root (see ClaudeConfigDir).
 // projectPath is the absolute project path on the remote machine.
 // Unlike the local version, this cannot resolve symlinks since the path is remote.
 //
@@ -39,17 +57,17 @@ func ResolveJSONLPath(projectPath, sessionID string) string {
 // folders like "C--Users-foo" — no leading "-" because the original path
 // doesn't start with a separator. Detect that shape and skip the leading-dash
 // convention that POSIX paths need.
-func ResolveRemoteJSONLPath(projectPath, sessionID, remoteHomeDir string) string {
+func ResolveRemoteJSONLPath(projectPath, sessionID, configDir string) string {
 	if isSFTPWindowsAbsPath(projectPath) {
 		// Strip the leading "/" so we encode "C:/Users/foo" rather than
 		// "/C:/Users/foo".
 		trimmed := projectPath[1:]
 		encoded := nonAlphanumRe.ReplaceAllString(trimmed, "-")
-		return filepath.Join(remoteHomeDir, ".claude", "projects", encoded, sessionID+".jsonl")
+		return filepath.Join(configDir, "projects", encoded, sessionID+".jsonl")
 	}
 	trimmed := strings.TrimPrefix(projectPath, "/")
 	encoded := "-" + nonAlphanumRe.ReplaceAllString(trimmed, "-")
-	return filepath.Join(remoteHomeDir, ".claude", "projects", encoded, sessionID+".jsonl")
+	return filepath.Join(configDir, "projects", encoded, sessionID+".jsonl")
 }
 
 func isSFTPWindowsAbsPath(p string) bool {
