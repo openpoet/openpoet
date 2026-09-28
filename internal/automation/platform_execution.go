@@ -183,7 +183,7 @@ func executionProjectID(target executionCommandTarget, fallback int64) (int64, e
 
 func decodeExecutionPayload[T any](raw json.RawMessage, output *T) error {
 	if err := decodeExecutionJSON(raw, output); err != nil {
-		return platformFailure("platform_payload_invalid", "the execution payload is invalid", false)
+		return payloadDecodeFailure(err, output, "execution", nil)
 	}
 	return nil
 }
@@ -206,7 +206,7 @@ func requireEmptyExecutionPayload(raw json.RawMessage) error {
 		return err
 	}
 	if len(payload) != 0 {
-		return platformFailure("platform_payload_invalid", "this capability does not accept payload fields", false)
+		return unexpectedPayloadFields(payload)
 	}
 	return nil
 }

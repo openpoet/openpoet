@@ -30,8 +30,11 @@ type Dependencies struct {
 	Waiter               OutboxWaiter
 	Sessions             SessionStateStore
 	ProjectScope         ProjectScopeStore
-	ApprovalRandom       io.Reader
-	Now                  func() time.Time
+	// SessionIDs resolves session targets given by unique id prefix (the
+	// 8-char ids MCP tools print) to full session ids.
+	SessionIDs     SessionIDResolver
+	ApprovalRandom io.Reader
+	Now            func() time.Time
 	// MergePredictor (Phase 7.5): the workspace merge-prediction port for the
 	// coordinator tier.
 	MergePredictor MergePredictor
@@ -59,6 +62,12 @@ func NewHandler(store Store, dependencies ...Dependencies) http.Handler {
 	}
 	if deps.PlatformCapabilities != nil && deps.ProjectScope != nil {
 		deps.PlatformCapabilities.SetProjectScopeStore(deps.ProjectScope)
+	}
+	if deps.SessionIDs == nil {
+		deps.SessionIDs, _ = store.(SessionIDResolver)
+	}
+	if deps.PlatformCapabilities != nil && deps.SessionIDs != nil {
+		deps.PlatformCapabilities.SetSessionIDResolver(deps.SessionIDs)
 	}
 	if deps.Now == nil {
 		deps.Now = time.Now

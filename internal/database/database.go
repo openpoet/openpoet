@@ -432,6 +432,23 @@ func (d *DB) GetSession(ctx context.Context, id string) (*Session, error) {
 	return &s, err
 }
 
+// MatchSessionIDs returns up to limit session ids equal to value or, when no id
+// is equal, starting with it (automation targets accept the short ids MCP
+// tools print).
+func (d *DB) MatchSessionIDs(ctx context.Context, value string, limit int) ([]string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || limit <= 0 {
+		return nil, nil
+	}
+	var ids []string
+	if err := d.SelectContext(ctx, &ids, "SELECT id FROM sessions WHERE id = ?", value); err != nil || len(ids) > 0 {
+		return ids, err
+	}
+	escaped := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(value)
+	err := d.SelectContext(ctx, &ids, `SELECT id FROM sessions WHERE id LIKE ? ESCAPE '\' ORDER BY id LIMIT ?`, escaped+"%", limit)
+	return ids, err
+}
+
 func (d *DB) ListSessions(ctx context.Context) ([]Session, error) {
 	var sessions []Session
 	err := d.SelectContext(ctx, &sessions, "SELECT * FROM sessions ORDER BY start_time DESC")

@@ -35,6 +35,8 @@ type capabilityDescriptor struct {
 	Service          application.CapabilityServiceName `json:"service"`
 	Allowed          bool                              `json:"allowed"`
 	ApprovalRequired bool                              `json:"approval_required"`
+	MaxPayloadBytes  int                               `json:"max_payload_bytes,omitempty"`
+	Payload          *PlatformPayloadSchema            `json:"payload,omitempty"`
 }
 
 type capabilitiesResponse struct {
@@ -75,6 +77,7 @@ func (a *commandAPI) mergedCapabilityDescriptors(actor Actor) []capabilityDescri
 				Risk:   capability.Risk, Approval: capability.Approval, Mutation: capability.Mutation,
 				Handler: capability.Handler, Service: capability.Service,
 				Allowed: capability.Allowed, ApprovalRequired: capability.ApprovalRequired,
+				MaxPayloadBytes: capability.MaxPayloadBytes, Payload: capability.Payload,
 			}
 		}
 	}

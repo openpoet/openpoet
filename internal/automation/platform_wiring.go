@@ -42,6 +42,9 @@ type PlatformCapabilityDefinition struct {
 	Handler  application.CapabilityHandler
 	Service  application.CapabilityServiceName
 	Limits   PlatformCapabilityLimits
+	// Payload, when set, is published by discovery so callers can build a
+	// valid target and payload without trial and error.
+	Payload *PlatformPayloadSchema
 }
 
 // PlatformDomainExecutor validates and prepares a typed domain invocation.
@@ -67,6 +70,9 @@ type PlatformExecutionInput struct {
 	// executors that list across projects (sessions.list) must intersect their
 	// results with it so a scoped client never sees another group's projects.
 	ProjectScope *ProjectScopeSet
+	// ActorScopes lets executors gate optional behavior (e.g. reading a
+	// source file) on scopes beyond the capability's required ones.
+	ActorScopes ScopeSet
 }
 
 type platformCapabilityService struct {
@@ -91,6 +97,7 @@ type PlatformCapabilityRegistry struct {
 	mu           sync.RWMutex
 	bindings     map[application.CapabilityName]platformCapabilityBinding
 	scopeStore   ProjectScopeStore // resolves client project_filter tag membership (may be nil)
+	sessionIDs   SessionIDResolver // resolves session target id prefixes (may be nil)
 }
 
 // SetProjectScopeStore wires the tag→projects resolver used to enforce a
@@ -103,6 +110,24 @@ func (r *PlatformCapabilityRegistry) SetProjectScopeStore(store ProjectScopeStor
 	r.mu.Lock()
 	r.scopeStore = store
 	r.mu.Unlock()
+}
+
+// SetSessionIDResolver wires the resolver that expands a session target given
+// by unique id prefix into the full session id. Optional: without it session
+// targets must carry the full id.
+func (r *PlatformCapabilityRegistry) SetSessionIDResolver(resolver SessionIDResolver) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.sessionIDs = resolver
+	r.mu.Unlock()
+}
+
+func (r *PlatformCapabilityRegistry) sessionIDResolver() SessionIDResolver {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.sessionIDs
 }
 
 func (r *PlatformCapabilityRegistry) projectScopeStore() ProjectScopeStore {
@@ -173,6 +198,8 @@ type PlatformCapabilityDescriptor struct {
 	Service          application.CapabilityServiceName `json:"service"`
 	Allowed          bool                              `json:"allowed"`
 	ApprovalRequired bool                              `json:"approval_required"`
+	MaxPayloadBytes  int                               `json:"max_payload_bytes,omitempty"`
+	Payload          *PlatformPayloadSchema            `json:"payload,omitempty"`
 }
 
 // ListForActor is the multi-scope discovery source. Scope remains the first
@@ -191,6 +218,8 @@ func (r *PlatformCapabilityRegistry) ListForActor(actor Actor) []PlatformCapabil
 			Handler: binding.definition.Handler, Service: binding.definition.Service,
 			Allowed:          actorHasPlatformScopes(actor, scopes),
 			ApprovalRequired: binding.definition.Approval == application.ApprovalExplicit,
+			MaxPayloadBytes:  binding.definition.Limits.MaxPayloadBytes,
+			Payload:          binding.definition.Payload,
 		})
 	}
 	r.mu.RUnlock()
@@ -260,6 +289,10 @@ func DispatchPlatformCapability(ctx context.Context, registry *PlatformCapabilit
 	if err != nil {
 		return PlatformDispatchResult{}, err
 	}
+	target, err = canonicalizeSessionTarget(ctx, registry.sessionIDResolver(), target)
+	if err != nil {
+		return PlatformDispatchResult{}, err
+	}
 	payload, err := normalizePlatformJSON(request.Payload, binding.definition.Limits.MaxPayloadBytes, false, "payload")
 	if err != nil {
 		return PlatformDispatchResult{}, err
@@ -276,7 +309,7 @@ func DispatchPlatformCapability(ctx context.Context, registry *PlatformCapabilit
 		Capability: request.Capability, Handler: binding.definition.Handler,
 		Scopes: append([]application.CapabilityScope(nil), binding.definition.Scopes...),
 		Target: target, Payload: payload, Authorization: authorization,
-		ProjectScope: scope,
+		ProjectScope: scope, ActorScopes: request.Actor.Scopes,
 	})
 	if validateErr != nil {
 		return PlatformDispatchResult{}, redactPlatformExecutionError(validateErr)
