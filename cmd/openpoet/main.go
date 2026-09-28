@@ -693,6 +693,7 @@ func main() {
 		Waiter:               db,
 		Sessions:             db,
 		ProjectScope:         db, // resolves client project_filter tag membership
+		SessionIDs:           db, // resolves session target id prefixes
 	}
 	if reportService != nil {
 		automationDeps.Reports = reportService

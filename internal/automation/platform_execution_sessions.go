@@ -72,22 +72,25 @@ func sessionAutomationView(session database.Session, runtime SessionRuntimeReadP
 }
 
 func sessionPlatformDefinitions() []PlatformCapabilityDefinition {
+	session := sessionTargetDescription
 	return []PlatformCapabilityDefinition{
-		executionReadCapability("sessions.list", "sessions", "sessions:read"),
-		executionReadCapability("sessions.get", "sessions", "sessions:read"),
-		executionReadCapability("sessions.history", "sessions", "sessions:read"),
-		executionReadCapability("sessions.active", "sessions", "sessions:read"),
-		executionPayloadLimit(executionWriteCapability("sessions.create", "sessions", "sessions:write"), 128<<10),
-		executionDestructiveCapability("sessions.stop", "sessions", "sessions:write"),
+		withPayloadSchema(executionReadCapability("sessions.list", "sessions", "sessions:read"), "{}", sessionListPayload{}, "", ""),
+		withPayloadSchema(executionReadCapability("sessions.get", "sessions", "sessions:read"), session, nil, "", ""),
+		withPayloadSchema(executionReadCapability("sessions.history", "sessions", "sessions:read"), session, sessionHistoryPayload{}, "", ""),
+		withPayloadSchema(executionReadCapability("sessions.active", "sessions", "sessions:read"), "{}", nil, "", ""),
+		withPayloadSchema(executionPayloadLimit(executionWriteCapability("sessions.create", "sessions", "sessions:write"), 128<<10), projectTargetDescription, sessionCreatePayload{}, "", ""),
+		withPayloadSchema(executionDestructiveCapability("sessions.stop", "sessions", "sessions:write"), session, nil, "", ""),
 		// Destructive: isolating restarts a live session, which discards its
 		// conversation (a runner cannot change working directory in place).
-		executionDestructiveCapability("sessions.isolate", "sessions", "sessions:write"),
-		executionWriteCapability("sessions.reopen", "sessions", "sessions:write"),
-		executionPayloadLimit(executionWriteCapability("sessions.send_input", "sessions", "sessions:write"), 20<<10),
-		executionWriteCapability("sessions.set_model", "sessions", "sessions:write"),
-		executionWriteCapability("sessions.set_effort", "sessions", "sessions:write"),
-		executionWriteCapability("sessions.evaluate", "sessions", "sessions:write", "tasks:write"),
-		executionPayloadLimit(platformMutation(executionReadCapability("sessions.image_prompt_hint", "sessions", "sessions:write")), 20<<10),
+		withPayloadSchema(executionDestructiveCapability("sessions.isolate", "sessions", "sessions:write"), session, sessionIsolatePayload{}, "", ""),
+		withPayloadSchema(executionWriteCapability("sessions.reopen", "sessions", "sessions:write"), session, sessionReopenPayload{}, "", ""),
+		withPayloadSchema(executionPayloadLimit(executionWriteCapability("sessions.send_input", "sessions", "sessions:write"), 20<<10), session, sessionInputPayload{}, "", ""),
+		withPayloadSchema(executionWriteCapability("sessions.set_model", "sessions", "sessions:write"), session, sessionModelPayload{}, "", ""),
+		withPayloadSchema(executionWriteCapability("sessions.set_effort", "sessions", "sessions:write"), session, sessionEffortPayload{}, "", ""),
+		withPayloadSchema(executionWriteCapability("sessions.evaluate", "sessions", "sessions:write", "tasks:write"), session, nil, "", ""),
+		withPayloadSchema(executionPayloadLimit(platformMutation(executionReadCapability("sessions.image_prompt_hint", "sessions", "sessions:write")), 20<<10), session, sessionImageHintPayload{},
+			`{"image_count":1,"user_prompt":"Describe this photo"}`,
+			"Requires a running session. Stores the prompt that accompanies images pasted with files.paste_session_image; it does not transfer image data."),
 	}
 }
 
@@ -156,8 +159,8 @@ type sessionEffortPayload struct {
 }
 
 type sessionImageHintPayload struct {
-	UserPrompt string `json:"user_prompt,omitempty"`
-	ImageCount int    `json:"image_count"`
+	UserPrompt string `json:"user_prompt,omitempty" doc:"prompt the pasted images accompany (at most 4000 characters)"`
+	ImageCount int    `json:"image_count" doc:"number of images pasted for this prompt (1-20)"`
 }
 
 type sessionHistoryPayload struct {
@@ -489,8 +492,11 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if err := decodeExecutionPayload(input.Payload, &payload); err != nil {
 			return nil, err
 		}
-		if utf8.RuneCountInString(strings.TrimSpace(payload.UserPrompt)) > 4000 || payload.ImageCount <= 0 || payload.ImageCount > 20 {
-			return nil, platformFailure("platform_payload_invalid", "image prompt hint is invalid or too large", false)
+		if payload.ImageCount <= 0 || payload.ImageCount > 20 {
+			return nil, missingPayloadField("image_count", "an integer from 1 to 20 (the number of images pasted)")
+		}
+		if utf8.RuneCountInString(strings.TrimSpace(payload.UserPrompt)) > 4000 {
+			return nil, platformFailure("platform_payload_invalid", `payload field "user_prompt" exceeds 4000 characters`, false)
 		}
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"session_id": sessionID, "image_count": payload.ImageCount, "prompt_bytes": len([]byte(payload.UserPrompt))}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
 			if err := e.service.StoreImagePromptHint(ctx, application.StoreImagePromptHintCommand{SessionID: sessionID, UserPrompt: payload.UserPrompt, ImageCount: payload.ImageCount, Authorization: authorization}); err != nil {
@@ -525,9 +531,9 @@ func (e *sessionPlatformExecutor) sessionWithoutPayload(
 
 func sessionWatcherPlatformDefinitions() []PlatformCapabilityDefinition {
 	return []PlatformCapabilityDefinition{
-		executionReadCapability("sessions.events_status", "session_event_watcher", "sessions:read"),
-		platformMutation(executionReadCapability("sessions.events_watch_start", "session_event_watcher", "sessions:read")),
-		executionDestructiveCapability("sessions.events_watch_stop", "session_event_watcher", "sessions:read"),
+		withPayloadSchema(executionReadCapability("sessions.events_status", "session_event_watcher", "sessions:read"), sessionTargetDescription, nil, "", ""),
+		withPayloadSchema(platformMutation(executionReadCapability("sessions.events_watch_start", "session_event_watcher", "sessions:read")), sessionTargetDescription, nil, "", ""),
+		withPayloadSchema(executionDestructiveCapability("sessions.events_watch_stop", "session_event_watcher", "sessions:read"), sessionTargetDescription, nil, "", ""),
 	}
 }
 
@@ -569,7 +575,7 @@ func (e *sessionWatcherPlatformExecutor) Validate(_ context.Context, input Platf
 
 func sessionSuggestionPlatformDefinitions() []PlatformCapabilityDefinition {
 	return []PlatformCapabilityDefinition{
-		platformMutation(executionReadCapability("sessions.suggest_task_data", "session_task_suggestions", "sessions:read", "ai:use")),
+		withPayloadSchema(platformMutation(executionReadCapability("sessions.suggest_task_data", "session_task_suggestions", "sessions:read", "ai:use")), sessionTargetDescription, nil, "", ""),
 	}
 }
 

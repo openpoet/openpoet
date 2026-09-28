@@ -336,8 +336,11 @@ func (r platformFileReader) ReadOperationalFile(ctx context.Context, scope autom
 	if err != nil {
 		return automation.OperationalFileReadResult{}, err
 	}
-	if maxBytes <= 0 || maxBytes > 1<<20 {
+	// files.read bounds itself to 1 MiB; image paste reads up to 10 MiB.
+	if maxBytes <= 0 {
 		maxBytes = 1 << 20
+	} else if maxBytes > 10<<20 {
+		maxBytes = 10 << 20
 	}
 	data, info, err := r.readBounded(project, path, int64(maxBytes)+1)
 	if err != nil {

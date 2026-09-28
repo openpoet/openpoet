@@ -3,6 +3,8 @@ package automation
 import (
 	"context"
 	"encoding/base64"
+	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -49,14 +51,17 @@ type fileContentAutomationView struct {
 }
 
 func fileExecutionPlatformDefinitions() []PlatformCapabilityDefinition {
+	projectOrSession := projectTargetDescription + " or " + sessionTargetDescription
 	return []PlatformCapabilityDefinition{
-		executionReadCapability("files.list", "file_operations", "files:read"),
-		executionReadCapability("files.read", "file_operations", "files:read"),
-		executionReadCapability("files.preview_metadata", "file_operations", "files:read"),
-		executionPayloadLimit(executionDestructiveCapability("files.write", "file_mutations", "files:write"), 3<<20),
-		executionPayloadLimit(executionDestructiveCapability("files.upload_project", "file_mutations", "files:write"), 16<<20),
-		executionPayloadLimit(executionDestructiveCapability("files.upload_session", "file_mutations", "files:write", "sessions:write"), 48<<20),
-		executionPayloadLimit(executionWriteCapability("files.paste_session_image", "file_mutations", "files:write", "sessions:write"), 16<<20),
+		withPayloadSchema(executionReadCapability("files.list", "file_operations", "files:read"), projectOrSession, fileListPayload{}, "", ""),
+		withPayloadSchema(executionReadCapability("files.read", "file_operations", "files:read"), projectOrSession, fileReadPayload{}, "", "content is returned base64-encoded; max_bytes is at most 1 MiB"),
+		withPayloadSchema(executionReadCapability("files.preview_metadata", "file_operations", "files:read"), projectOrSession, filePreviewMetadataPayload{}, "", ""),
+		withPayloadSchema(executionPayloadLimit(executionDestructiveCapability("files.write", "file_mutations", "files:write"), 3<<20), projectTargetDescription, fileWritePayload{}, "", ""),
+		withPayloadSchema(executionPayloadLimit(executionDestructiveCapability("files.upload_project", "file_mutations", "files:write"), 16<<20), projectTargetDescription, fileUploadPayload{}, "", ""),
+		withPayloadSchema(executionPayloadLimit(executionDestructiveCapability("files.upload_session", "file_mutations", "files:write", "sessions:write"), 48<<20), sessionTargetDescription, sessionFileUploadPayload{}, "", ""),
+		withPayloadSchema(executionPayloadLimit(executionWriteCapability("files.paste_session_image", "file_mutations", "files:write", "sessions:write"), 16<<20), sessionTargetDescription, sessionImagePayload{},
+			`{"source":{"project_id":1,"path":"channels/_attachments/photo.jpeg"}}`,
+			"Send exactly one of data_url (inline base64 image) or source (a file in any OpenPoet project, local or SSH, so the image may live on another machine than the session). The image is written into the session's project and its relative path is returned; call sessions.image_prompt_hint to attach a prompt."),
 	}
 }
 
@@ -73,6 +78,10 @@ type fileListPayload struct {
 type fileReadPayload struct {
 	Path     string `json:"path"`
 	MaxBytes int    `json:"max_bytes,omitempty"`
+}
+
+type filePreviewMetadataPayload struct {
+	Path string `json:"path"`
 }
 
 type fileWritePayload struct {
@@ -96,10 +105,26 @@ type sessionFileUploadPayload struct {
 }
 
 type sessionImagePayload struct {
-	Directory string `json:"directory,omitempty"`
-	Filename  string `json:"filename,omitempty"`
-	DataURL   string `json:"data_url"`
+	Directory string              `json:"directory,omitempty" doc:"directory inside the session project where the image is written (relative)"`
+	Filename  string              `json:"filename,omitempty" doc:"file name to write (relative); defaults to the source file name or paste_<timestamp>.<ext>"`
+	DataURL   string              `json:"data_url,omitempty" doc:"inline image as data:image/(png|jpeg|gif|webp);base64,<data>; send exactly one of data_url or source"`
+	Source    *sessionImageSource `json:"source,omitempty" doc:"image file OpenPoet reads from a project (local or SSH), so it can live on another machine than the session; requires files:read"`
 }
+
+type sessionImageSource struct {
+	ProjectID int64  `json:"project_id" doc:"project whose filesystem holds the image"`
+	Path      string `json:"path" doc:"image path relative to that project's root"`
+}
+
+// sessionImagePayloadHints answers the shapes callers try before reading the
+// schema: a bare host path is never readable by OpenPoet, only project files.
+var sessionImagePayloadHints = map[string]string{
+	"path":      `send the image inline as data_url, or reference a project file with source {"project_id":<id>,"path":"<path relative to the project root>"}`,
+	"file_path": `send the image inline as data_url, or reference a project file with source {"project_id":<id>,"path":"<path relative to the project root>"}`,
+	"image":     `send the image as data_url ("data:image/png;base64,...") or as source {"project_id":<id>,"path":"<relative path>"}`,
+}
+
+const maxAutomationPasteImage = 10 << 20
 
 func (e *fileExecutionPlatformExecutor) Validate(_ context.Context, input PlatformExecutionInput) (PlatformValidatedCommand, error) {
 	target, err := decodeExecutionTarget(input.Target)
@@ -177,9 +202,7 @@ func (e *fileExecutionPlatformExecutor) Validate(_ context.Context, input Platfo
 		if err != nil {
 			return nil, err
 		}
-		var payload struct {
-			Path string `json:"path"`
-		}
+		var payload filePreviewMetadataPayload
 		if err := decodeExecutionPayload(input.Payload, &payload); err != nil {
 			return nil, err
 		}
@@ -276,8 +299,8 @@ func (e *fileExecutionPlatformExecutor) Validate(_ context.Context, input Platfo
 			return nil, err
 		}
 		var payload sessionImagePayload
-		if err := decodeExecutionPayload(input.Payload, &payload); err != nil {
-			return nil, err
+		if err := decodeExecutionJSON(input.Payload, &payload); err != nil {
+			return nil, payloadDecodeFailure(err, &payload, "execution", sessionImagePayloadHints)
 		}
 		payload.Directory, err = normalizeExecutionRelativePath(payload.Directory, true)
 		if err != nil {
@@ -289,16 +312,79 @@ func (e *fileExecutionPlatformExecutor) Validate(_ context.Context, input Platfo
 				return nil, err
 			}
 		}
-		if len(payload.DataURL) == 0 || len(payload.DataURL) > 14<<20 || !strings.HasPrefix(strings.ToLower(payload.DataURL), "data:image/") {
-			return nil, platformFailure("platform_payload_invalid", "image data URL is invalid or too large", false)
+		preview := map[string]any{"session_id": sessionID, "directory": payload.Directory, "has_filename": payload.Filename != ""}
+		switch {
+		case payload.DataURL != "" && payload.Source != nil:
+			return nil, platformFailure("platform_payload_invalid", "send exactly one of data_url or source, not both", false)
+		case payload.Source != nil:
+			source, err := validateSessionImageSource(*payload.Source, input)
+			if err != nil {
+				return nil, err
+			}
+			preview["source"] = map[string]any{"project_id": source.ProjectID, "path": source.Path}
+			return &executionValidatedCommand{preview: executionPreview(input.Handler, preview), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+				dataURL, name, err := e.readSessionImageSource(ctx, source)
+				if err != nil {
+					return nil, err
+				}
+				filename := payload.Filename
+				if filename == "" {
+					filename = name
+				}
+				write, err := e.service.PasteSessionImage(ctx, application.PasteSessionImageCommand{SessionID: sessionID, Directory: payload.Directory, Filename: filename, DataURL: dataURL, Authorization: authorization})
+				return fileWriteResult(write), err
+			}}, nil
+		case payload.DataURL == "":
+			return nil, missingPayloadField("data_url", `send data_url ("data:image/png;base64,...") or source {"project_id":<id>,"path":"<path relative to the project root>"}`)
 		}
-		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"session_id": sessionID, "directory": payload.Directory, "has_filename": payload.Filename != "", "encoded_bytes": len(payload.DataURL)}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+		if len(payload.DataURL) > 14<<20 || !strings.HasPrefix(strings.ToLower(payload.DataURL), "data:image/") {
+			return nil, platformFailure("platform_payload_invalid", `payload field "data_url" must be a data:image/(png|jpeg|gif|webp);base64,... URL of at most 10 MiB decoded`, false)
+		}
+		preview["encoded_bytes"] = len(payload.DataURL)
+		return &executionValidatedCommand{preview: executionPreview(input.Handler, preview), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
 			write, err := e.service.PasteSessionImage(ctx, application.PasteSessionImageCommand{SessionID: sessionID, Directory: payload.Directory, Filename: payload.Filename, DataURL: payload.DataURL, Authorization: authorization})
 			return fileWriteResult(write), err
 		}}, nil
 	default:
 		return nil, platformFailure("platform_handler_unsupported", "the file capability handler is unsupported", false)
 	}
+}
+
+func validateSessionImageSource(source sessionImageSource, input PlatformExecutionInput) (sessionImageSource, error) {
+	if source.ProjectID <= 0 {
+		return sessionImageSource{}, missingPayloadField("source.project_id", "a positive id of the project whose filesystem holds the image")
+	}
+	path, err := normalizeExecutionRelativePath(source.Path, false)
+	if err != nil {
+		return sessionImageSource{}, platformFailure("platform_path_invalid", `payload field "source.path" must be a path relative to the project root (e.g. "channels/_attachments/photo.jpeg"), without ".." or a leading "/"`, false)
+	}
+	if !input.ActorScopes.Has(ScopeFilesRead) {
+		return sessionImageSource{}, platformFailure("platform_insufficient_scope", "reading a source image requires the files:read scope", false)
+	}
+	if !input.ProjectScope.Allows(source.ProjectID) {
+		return sessionImageSource{}, platformFailure("platform_project_out_of_scope", "the automation actor is not scoped to the source project", false)
+	}
+	return sessionImageSource{ProjectID: source.ProjectID, Path: path}, nil
+}
+
+// readSessionImageSource loads a project image as a data URL for
+// PasteSessionImage, which validates the type and size again.
+func (e *fileExecutionPlatformExecutor) readSessionImageSource(ctx context.Context, source sessionImageSource) (string, string, error) {
+	result, err := e.reader.ReadOperationalFile(ctx, OperationalFileScope{ProjectID: source.ProjectID}, source.Path, maxAutomationPasteImage)
+	if err != nil {
+		return "", "", err
+	}
+	if result.Metadata.IsDir || len(result.Data) == 0 {
+		return "", "", platformFailure("platform_path_invalid", "source.path must name a non-empty image file", false)
+	}
+	if len(result.Data) > maxAutomationPasteImage {
+		return "", "", platformFailure("platform_payload_invalid", "source image exceeds 10 MiB", false)
+	}
+	mimeType := http.DetectContentType(result.Data)
+	if !strings.HasPrefix(mimeType, "image/") {
+		return "", "", platformFailure("platform_payload_invalid", "source file is not a PNG, JPEG, GIF, or WebP image (detected "+mimeType+")", false)
+	}
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(result.Data), path.Base(source.Path), nil
 }
 
 func executionFileScope(target executionCommandTarget) (OperationalFileScope, error) {

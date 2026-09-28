@@ -191,7 +191,7 @@ func collaborationProjectID(target collaborationCommandTarget, fallback int64) (
 
 func decodeCollaborationPayload[T any](raw json.RawMessage, output *T) error {
 	if err := decodeCollaborationJSON(raw, output); err != nil {
-		return platformFailure("platform_payload_invalid", "the collaboration payload is invalid", false)
+		return payloadDecodeFailure(err, output, "collaboration", nil)
 	}
 	return nil
 }
@@ -214,7 +214,7 @@ func requireEmptyCollaborationPayload(raw json.RawMessage) error {
 		return err
 	}
 	if len(payload) != 0 {
-		return platformFailure("platform_payload_invalid", "this capability does not accept payload fields", false)
+		return unexpectedPayloadFields(payload)
 	}
 	return nil
 }

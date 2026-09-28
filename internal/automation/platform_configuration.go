@@ -152,7 +152,7 @@ func configurationProjectID(target configurationCommandTarget, fallback int64) (
 
 func decodeConfigurationPayload[T any](raw json.RawMessage, output *T) error {
 	if err := decodeConfigurationJSON(raw, output); err != nil {
-		return platformFailure("platform_payload_invalid", "the configuration payload is invalid", false)
+		return payloadDecodeFailure(err, output, "configuration", nil)
 	}
 	return nil
 }
@@ -175,7 +175,7 @@ func requireEmptyConfigurationPayload(raw json.RawMessage) error {
 		return err
 	}
 	if len(payload) != 0 {
-		return platformFailure("platform_payload_invalid", "this capability does not accept payload fields", false)
+		return unexpectedPayloadFields(payload)
 	}
 	return nil
 }
