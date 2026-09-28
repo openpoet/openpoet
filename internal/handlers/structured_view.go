@@ -14,6 +14,8 @@ import (
 	"sync"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
 )
 
 // StructuredViewHandler manages JSONL file watchers for the structured view.
@@ -135,11 +137,10 @@ func (h *StructuredViewHandler) readRecentSessionEvents(source *jsonlSource) ([]
 	}
 	defer sftpClient.Close()
 	defer sshClient.Close()
-	homeDir, err := sftpClient.Getwd()
+	remotePath, err := remoteJSONLPath(sshClient, sftpClient, source)
 	if err != nil {
 		return nil, err
 	}
-	remotePath := jsonlview.ResolveRemoteJSONLPath(source.project.Path, source.sessionID, homeDir)
 	file, err := sftpClient.Open(remotePath)
 	if err != nil {
 		return nil, err
@@ -343,20 +344,54 @@ func (h *StructuredViewHandler) readRemoteEvents(source *jsonlSource) ([]*jsonlv
 	defer sftpClient.Close()
 	defer sshClient.Close()
 
-	homeDir, err := sftpClient.Getwd()
+	remotePath, err := remoteJSONLPath(sshClient, sftpClient, source)
 	if err != nil {
 		return nil, err
 	}
 
-	remotePath := jsonlview.ResolveRemoteJSONLPath(source.project.Path, source.sessionID, homeDir)
-
 	file, err := sftpClient.Open(remotePath)
 	if err != nil {
+		log.Printf("[StructuredView] No transcript yet for session %s at %s: %v", source.sessionID, remotePath, err)
 		return nil, nil // File doesn't exist yet
 	}
 	defer file.Close()
 
 	return jsonlview.ParseReader(file)
+}
+
+// remoteJSONLPath resolves the session transcript path on the remote host,
+// under the Claude config root that SSH sessions there actually use.
+func remoteJSONLPath(sshClient *ssh.Client, sftpClient *sftp.Client, source *jsonlSource) (string, error) {
+	homeDir, err := sftpClient.Getwd()
+	if err != nil {
+		return "", err
+	}
+	configDir := jsonlview.ClaudeConfigDir(homeDir, remoteClaudeConfigDirEnv(sshClient))
+	return jsonlview.ResolveRemoteJSONLPath(source.project.Path, source.sessionID, configDir), nil
+}
+
+const remoteConfigDirMarker = "__OPENPOET_CLAUDE_CONFIG_DIR__"
+
+// remoteClaudeConfigDirEnv reads CLAUDE_CONFIG_DIR as a login shell on the
+// remote host sees it (/etc/environment and /etc/profile.d both apply), since
+// that is the environment the Claude session was launched with. Returns ""
+// when unset or when the host has no POSIX shell (e.g. Windows).
+func remoteClaudeConfigDirEnv(sshClient *ssh.Client) string {
+	sess, err := sshClient.NewSession()
+	if err != nil {
+		return ""
+	}
+	defer sess.Close()
+	out, err := sess.Output(`sh -lc 'printf "\n` + remoteConfigDirMarker + `%s" "$CLAUDE_CONFIG_DIR"'`)
+	if err != nil {
+		return ""
+	}
+	// Profile scripts may print noise; the value follows the last marker.
+	idx := strings.LastIndex(string(out), remoteConfigDirMarker)
+	if idx < 0 {
+		return ""
+	}
+	return strings.TrimSpace(string(out[idx+len(remoteConfigDirMarker):]))
 }
 
 // startLocalWatching starts a local file watcher for a session.
@@ -401,15 +436,13 @@ func (h *StructuredViewHandler) startRemoteWatchingAtOffset(sessionID string, so
 		return false
 	}
 
-	homeDir, err := sftpClient.Getwd()
+	remotePath, err := remoteJSONLPath(sshClient, sftpClient, source)
 	if err != nil {
 		sftpClient.Close()
 		sshClient.Close()
-		log.Printf("[StructuredView] Failed to get remote home dir for session %s: %v", sessionID, err)
+		log.Printf("[StructuredView] Failed to resolve remote transcript for session %s: %v", sessionID, err)
 		return false
 	}
-
-	remotePath := jsonlview.ResolveRemoteJSONLPath(source.project.Path, source.sessionID, homeDir)
 
 	// Get initial file size for offset
 	offset := requestedOffset
