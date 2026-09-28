@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -44,6 +45,10 @@ type voiceCompleteRequest struct {
 	Chunks   int    `json:"chunks"`
 	Filename string `json:"filename"`
 	Language string `json:"language,omitempty"`
+	// Client-measured diagnostics: recorded duration, and what remained after
+	// the client shortened long pauses (0 when sent unchanged).
+	Seconds     float64 `json:"seconds,omitempty"`
+	KeptSeconds float64 `json:"kept_seconds,omitempty"`
 }
 
 func (h *VoiceHandler) uploadRoot() string {
@@ -194,9 +199,12 @@ func (h *VoiceHandler) CompleteUpload(w http.ResponseWriter, r *http.Request) {
 		Authorization: platformUIAuthorization(r),
 	})
 	if err != nil {
+		log.Printf("[voice] upload %s failed: bytes=%d client_seconds=%.1f err=%v", filepath.Base(dir), total, req.Seconds, err)
 		respondApplicationError(w, err)
 		return
 	}
+	log.Printf("[voice] upload %s complete: bytes=%d chunks=%d client_seconds=%.1f kept_seconds=%.1f chars=%d",
+		filepath.Base(dir), total, req.Chunks, req.Seconds, req.KeptSeconds, len(result.Text))
 	os.RemoveAll(dir)
 	respondJSON(w, http.StatusOK, result)
 }
