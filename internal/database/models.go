@@ -97,6 +97,10 @@ type Session struct {
 	// created it) and the audit identity of whoever created it.
 	ParentSessionID string `db:"parent_session_id" json:"parent_session_id,omitempty"`
 	SpawnedBy       string `db:"spawned_by" json:"spawned_by,omitempty"`
+	// V76: why an errored session ended and the last screen it showed, kept
+	// because the runtime output buffer dies with the process.
+	ErrorReason string `db:"error_reason" json:"error_reason,omitempty"`
+	LastOutput  string `db:"last_output" json:"-"`
 }
 
 // Workspace is one isolated execution lane for a project (V60). In the MVP the
