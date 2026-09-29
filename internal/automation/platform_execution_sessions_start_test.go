@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"sync"
 	"testing"
+	"time"
 
 	"openpoet/internal/application"
 	"openpoet/internal/database"
@@ -95,11 +97,38 @@ func (l automationStartSessionLinker) LinkSession(context.Context, application.L
 	return &application.LinkSessionTaskResult{Task: l.task, SessionName: l.task.Title}, nil
 }
 
-type automationInitialPromptCapture struct{ prompts []string }
+// automationInitialPromptCapture records prompts delivered by the background
+// initial-prompt goroutine; release (when set) blocks delivery until closed.
+type automationInitialPromptCapture struct {
+	mu      sync.Mutex
+	prompts []string
+	release chan struct{}
+	ctxErr  error
+}
 
-func (c *automationInitialPromptCapture) SubmitInitialSessionPrompt(_ context.Context, _ string, prompt string) error {
+func (c *automationInitialPromptCapture) SubmitInitialSessionPrompt(ctx context.Context, _ string, prompt string) error {
+	if c.release != nil {
+		<-c.release
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ctxErr = ctx.Err()
 	c.prompts = append(c.prompts, prompt)
 	return nil
+}
+
+func (c *automationInitialPromptCapture) waitPrompts(t *testing.T, n int) []string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		c.mu.Lock()
+		got := append([]string(nil), c.prompts...)
+		c.mu.Unlock()
+		if len(got) >= n || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 type automationTaskNotificationCapture struct{ calls int }
@@ -158,8 +187,8 @@ func TestAutomationSessionCreateStartsTaskImmediatelyWithoutUINotification(t *te
 			if view.Status != "running" || !view.RuntimeActive {
 				t.Fatalf("session did not start immediately: %+v", view)
 			}
-			if len(prompts.prompts) != 1 || prompts.prompts[0] != test.wantPrompt {
-				t.Fatalf("initial prompts = %#v, want %q", prompts.prompts, test.wantPrompt)
+			if got := prompts.waitPrompts(t, 1); len(got) != 1 || got[0] != test.wantPrompt {
+				t.Fatalf("initial prompts = %#v, want %q", got, test.wantPrompt)
 			}
 			if notifications.calls != 0 {
 				t.Fatalf("programmatic create emitted %d UI task notifications", notifications.calls)
@@ -187,5 +216,65 @@ func TestAutomationSessionCreateRejectsConflictingStartOptionsBeforeStarting(t *
 	}
 	if manager.starts != 0 {
 		t.Fatalf("validation started %d sessions", manager.starts)
+	}
+}
+
+// Regression for the home-server incident: the initial prompt used to be
+// delivered inside the create call, so a client timeout aborted it and the
+// session ended in error. Create must return while delivery is still
+// blocked, a canceled client context must not reach the delivery, and the
+// session must stay running.
+func TestAutomationSessionCreateReturnsBeforePromptDeliveryAndSurvivesClientCancel(t *testing.T) {
+	taskID := int64(9)
+	store := &automationStartSessionStore{
+		project: &database.Project{ID: 12, Name: "home server", Type: "local", Backend: "claude_code"},
+		task:    &database.ProjectTask{ID: taskID, ProjectID: 12, Title: "Fix home server", Status: "todo", Priority: "high"},
+	}
+	manager := &automationStartSessionManager{store: store}
+	prompts := &automationInitialPromptCapture{release: make(chan struct{})}
+	service := application.NewSessionService(
+		store, manager, nil, automationStartSessionLinker{task: store.task}, nil, nil, nil, nil,
+		application.SessionCreationCollaborators{InitialInput: prompts},
+	)
+	executor := &sessionPlatformExecutor{service: service, runtime: manager}
+	command, err := executor.Validate(context.Background(), PlatformExecutionInput{
+		Handler: "sessions.create", Target: json.RawMessage(`{"project_id":12}`), Payload: json.RawMessage(`{"task_id":9}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan any, 1)
+	go func() {
+		result, err := command.Execute(ctx, application.ActionAuthorization{Actor: application.Actor{Type: "automation_client", ID: "helena"}})
+		if err != nil {
+			done <- err
+			return
+		}
+		done <- result
+	}()
+	var result any
+	select {
+	case result = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sessions.create blocked on initial prompt delivery")
+	}
+	view, ok := result.(SessionAutomationView)
+	if !ok {
+		t.Fatalf("create failed: %v", result)
+	}
+	cancel() // the client gives up after create returned
+	close(prompts.release)
+	if got := prompts.waitPrompts(t, 1); len(got) != 1 {
+		t.Fatalf("initial prompt was not delivered after the client left: %#v", got)
+	}
+	prompts.mu.Lock()
+	ctxErr := prompts.ctxErr
+	prompts.mu.Unlock()
+	if ctxErr != nil {
+		t.Fatalf("initial prompt delivery saw the client's cancellation: %v", ctxErr)
+	}
+	if view.Status != "running" || store.session.Status != "running" || !manager.IsSessionRunning(view.ID) {
+		t.Fatalf("session did not survive: view=%+v stored=%s", view, store.session.Status)
 	}
 }

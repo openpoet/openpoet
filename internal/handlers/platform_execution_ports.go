@@ -185,8 +185,14 @@ func (s platformSessionInputSubmitter) SubmitSessionLine(ctx context.Context, se
 	return s.api.sessionMgr.SubmitLineToSession(sessionID, text, delay)
 }
 
-type platformSessionInitialPromptSubmitter struct{ api *API }
+type platformSessionInitialPromptSubmitter struct {
+	api       *API
+	questions platformSessionQuestions
+}
 
+// SubmitInitialSessionPrompt runs detached from any client request (see
+// SessionService.deliverInitialPrompt). It never types while a question is
+// open on the session; a failure here is reported, not fatal to the session.
 func (s platformSessionInitialPromptSubmitter) SubmitInitialSessionPrompt(ctx context.Context, sessionID, text string) error {
 	if s.api == nil || s.api.sessionMgr == nil {
 		return errors.New("session input submitter unavailable")
@@ -194,11 +200,8 @@ func (s platformSessionInitialPromptSubmitter) SubmitInitialSessionPrompt(ctx co
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	readyCtx, cancel := context.WithTimeout(ctx, taskSessionReadyTimeout)
-	err := s.api.waitForTaskSessionReady(readyCtx, sessionID)
-	cancel()
-	if err != nil {
-		log.Printf("[Session] initial prompt readiness wait ended for %s: %v", sessionID, err)
+	if err := s.api.waitForInitialPromptSlot(ctx, sessionID, s.questions); err != nil {
+		return err
 	}
 	delay := s.api.sessionLineSubmitDelay(ctx, sessionID)
 	return s.api.sessionMgr.SubmitLineToSession(sessionID, text, delay)

@@ -27,8 +27,8 @@ const (
 	// Container lifecycle added compose.status/logs (reads) and
 	// compose.approve/up/down/restart (mutations): +6 capabilities,
 	// +4 mutations, +2 reads.
-	expectedPlatformCapabilities = 178
-	expectedPlatformMutations    = 118
+	expectedPlatformCapabilities = 179
+	expectedPlatformMutations    = 119
 	expectedPlatformReads        = 60
 )
 
@@ -99,6 +99,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 	workspaceService := application.NewWorkspaceService(services.DB, NewGitCommandAdapter(services.GitHandler), services.ConfigSync)
 	workspaceService.SetEnvironmentProvisioner(workspace.NewProvisioner(services.DB)) // Phase 6: environment.yaml provisioning
 	workRunService := application.NewWorkRunService(services.DB)
+	questions := platformSessionQuestions{hook: services.HookHandler, mgr: services.SessionManager}
 	sessionService := application.NewSessionService(
 		services.DB, services.SessionManager, services.ConfigSync, a.taskService,
 		services.HookHandler, services.HookHandler, a.DecryptFunc(), effects,
@@ -107,7 +108,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 			Names:        platformSessionNameStore{db: services.DB},
 			Tasks:        platformSessionTaskNotifier{hook: services.HookHandler},
 			Input:        platformSessionInputSubmitter{api: a},
-			InitialInput: platformSessionInitialPromptSubmitter{api: a},
+			InitialInput: platformSessionInitialPromptSubmitter{api: a, questions: questions},
 			Settings:     platformSessionRuntimeSettings{api: a},
 			Workspaces:   workspaceService,
 			Signals:      services.HookHandler,
@@ -116,6 +117,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 	)
 	execution := automation.ExecutionPlatformServices{
 		Sessions:           sessionService,
+		SessionQuestions:   application.NewSessionQuestionService(services.DB, questions, effects),
 		SessionWatchers:    application.NewSessionEventWatcherService(services.DB, NewSessionEventWatcherAdapter(services.StructuredView), effects),
 		SessionSuggestions: application.NewSessionTaskSuggestionService(services.DB, services.SessionManager, platformSessionSuggestionProvider{handler: services.AIHandler}, effects),
 		FileMutations:      application.NewFileMutationService(services.DB, services.FileHandler, effects),
@@ -187,6 +189,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		decryptor.SetSecretDecryptor(services.Encryptor.Decrypt)
 	}
 	services.ConfigSync.SetSecretEncryptor(services.Encryptor)
+	a.startSessionQuestionMonitor(questions, effects)
 	return nil
 }
 

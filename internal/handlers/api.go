@@ -112,13 +112,15 @@ type pendingSkillProposal struct {
 }
 
 type API struct {
-	db                   *database.DB
-	hub                  *websocket.Hub
-	sessionMgr           *session.Manager
-	configSync           *configsync.ConfigSyncer
-	encryptor            *security.Encryptor
-	notifService         *notifications.Service
-	hookHandler          *HookHandler
+	db           *database.DB
+	hub          *websocket.Hub
+	sessionMgr   *session.Manager
+	configSync   *configsync.ConfigSyncer
+	encryptor    *security.Encryptor
+	notifService *notifications.Service
+	hookHandler  *HookHandler
+	// questionMonitorOnce starts the awaiting_input event monitor once.
+	questionMonitorOnce  sync.Once
 	aiHandler            *AIHandler
 	otelHandler          *OTELHandler
 	taskService          *application.ProjectTaskService
