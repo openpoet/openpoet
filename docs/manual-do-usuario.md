@@ -632,6 +632,13 @@ projetada terá de honrar quando entregar.
    Auto-grant é negado por padrão (`deny_self_grant`); `approvals:self` é uma
    decisão de provisionamento sua, nunca um acidente. *(o broker já existe hoje;
    os verbos projetados aderem a ele)*
+   Exceção deliberada: `sessions.close_completed` encerra, sem grant, uma sessão
+   cuja task vinculada está `done`, que não está no meio de um turno (modo
+   `idle`, ou 10 min sem atividade quando o modo é desconhecido) e que não está
+   esperando resposta a uma pergunta. Exige `reason`; quem encerrou e por quê
+   ficam no histórico da task (`session_closed_completed`) e no outbox
+   (`platform.session.closure_recorded`). Qualquer outro caso continua em
+   `sessions.stop`.
 3. **Superfícies spoofáveis só recebem verbos aditivos.** MCP com identidade
    de sessão e REST de sessão criam e listam; remover, mergear e aprovar
    manifesto vivem apenas no plano de automação autenticado.

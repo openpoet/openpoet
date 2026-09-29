@@ -2,6 +2,8 @@ package automation
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -148,7 +150,8 @@ func sessionPlatformDefinitions() []PlatformCapabilityDefinition {
 		withPayloadSchema(executionPayloadLimit(executionWriteCapability("sessions.create", "sessions", "sessions:write"), 128<<10), projectTargetDescription, sessionCreatePayload{}, "", sessionCreateNotes),
 		withPayloadSchema(executionPayloadLimit(executionWriteCapability("sessions.answer_prompt", "sessions", "sessions:write"), 64<<10), session, sessionAnswerPromptPayload{},
 			`{"question_id":"t_3f2a9c0d1e4b5a67","option":2}`, sessionAnswerPromptNotes),
-		withPayloadSchema(executionDestructiveCapability("sessions.stop", "sessions", "sessions:write"), session, nil, "", ""),
+		withPayloadSchema(executionDestructiveCapability("sessions.stop", "sessions", "sessions:write"), session, nil, "", sessionStopNotes),
+		withPayloadSchema(executionWriteCapability("sessions.close_completed", "sessions", "sessions:write"), session, nil, "", sessionCloseCompletedNotes),
 		// Destructive: isolating restarts a live session, which discards its
 		// conversation (a runner cannot change working directory in place).
 		withPayloadSchema(executionDestructiveCapability("sessions.isolate", "sessions", "sessions:write"), session, sessionIsolatePayload{}, "", ""),
@@ -242,6 +245,15 @@ const sessionStateNotes = "Session views carry interaction_state: awaiting_input
 const sessionCreateNotes = "Returns as soon as the agent process is running (status running, interaction_state starting); it never waits for the agent to be ready. " +
 	"The initial prompt (task, planning or custom_prompt) is delivered in the background and is held back while a question is open, so it can never answer a dialog by accident. " +
 	"A client timeout or disconnect never stops the session. Poll sessions.get: startup_state becomes ready once the prompt is delivered, or awaiting_input when a question (e.g. workspace_trust) needs an answer via sessions.answer_prompt."
+
+const sessionStopNotes = "Stops any starting or running session; needs an explicit approval_token. " +
+	"For an idle session whose linked task is already done, use sessions.close_completed instead (no per-session approval)."
+
+const sessionCloseCompletedNotes = "Closes a session whose work is finished, with policy approval (no approval_token). " +
+	"Requires a command reason and correlation_id. Refuses unless ALL hold: the session has a linked task whose status is done (session_task_missing, session_task_not_done); " +
+	"it is not waiting on a question (session_awaiting_input); and it is not mid-turn — idle after its last turn, or, when the turn state is unknown, " +
+	"silent for 10 minutes (session_busy). A refused session can still be stopped with sessions.stop. An already stopped session is returned unchanged. " +
+	"Who closed it and the reason are recorded in the task history (session_closed_completed) and the event outbox (platform.session.closure_recorded)."
 
 const sessionAnswerPromptNotes = "Answers the question in the session's awaiting_input. question_id must be the current one (a stale id fails with session_question_changed). " +
 	"Send option (1-based index from awaiting_input.options); text where accepts_text is true (deny reason, plan feedback, free-text answer, y/n text; text alone on a tool_permission denies with that reason); " +
@@ -509,6 +521,28 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 				return nil, err
 			}
 			return e.view(ctx, *item), nil
+		})
+	case "sessions.close_completed":
+		return e.sessionWithoutPayload(input, target, func(ctx context.Context, sessionID string, authorization application.ActionAuthorization) (any, error) {
+			item, err := e.queries.GetSession(ctx, sessionID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return nil, err
+			}
+			if err != nil || item == nil || !input.ProjectScope.Allows(item.ProjectID) {
+				return nil, platformFailure("session_not_found", "session not found", false)
+			}
+			awaiting := false
+			if e.questions != nil && e.runtime != nil && e.runtime.IsSessionRunning(item.ID) {
+				question, err := e.questions.Pending(ctx, item.ID)
+				awaiting = err == nil && question != nil
+			}
+			stopped, err := e.service.CloseCompleted(ctx, application.CloseCompletedSessionCommand{
+				SessionID: item.ID, AwaitingInput: awaiting, Authorization: authorization,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return e.view(ctx, *stopped), nil
 		})
 	case "sessions.isolate":
 		sessionID, err := executionStringID(target, "session id")

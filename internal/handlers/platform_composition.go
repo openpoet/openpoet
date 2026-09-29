@@ -27,8 +27,8 @@ const (
 	// Container lifecycle added compose.status/logs (reads) and
 	// compose.approve/up/down/restart (mutations): +6 capabilities,
 	// +4 mutations, +2 reads.
-	expectedPlatformCapabilities = 179
-	expectedPlatformMutations    = 119
+	expectedPlatformCapabilities = 180
+	expectedPlatformMutations    = 120
 	expectedPlatformReads        = 60
 )
 

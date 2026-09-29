@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log"
 	"strconv"
@@ -94,7 +95,43 @@ func (e *platformEffects) publish(ctx context.Context, domain, action, aggregate
 	e.audit(ctx, domain, action, aggregateID, actor)
 }
 
+// RecordSessionClosure keeps who closed a completed session and why, both in
+// the event outbox and in the linked task's history. The generic "closed_completed"
+// session change is published separately by the service.
+func (e *platformEffects) RecordSessionClosure(ctx context.Context, closure application.SessionClosure) {
+	actorID := strings.TrimSpace(closure.Actor.ID)
+	e.auditPayload(ctx, "session", "closure_recorded", nonEmptyAggregateID(closure.SessionID), closure.Actor, map[string]any{
+		"action": "closure_recorded", "task_id": closure.TaskID, "task_status": closure.TaskStatus,
+		"mode": closure.Mode, "reason": closure.Reason, "approved_by": closure.ApprovedBy,
+	})
+	if e.db == nil || closure.TaskID <= 0 {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	details, _ := json.Marshal(map[string]any{
+		"session_id": closure.SessionID, "reason": closure.Reason, "mode": closure.Mode,
+		"actor_type": closure.Actor.Type, "approved_by": closure.ApprovedBy,
+	})
+	if actorID == "" {
+		actorID = "automation"
+	}
+	history := &database.TaskHistory{
+		TaskID: closure.TaskID, ProjectID: closure.ProjectID, EventType: "session_closed_completed",
+		Details: string(details), Actor: actorID,
+		SessionID: sql.NullString{String: closure.SessionID, Valid: closure.SessionID != ""},
+	}
+	if err := e.db.CreateTaskHistory(ctx, history); err != nil {
+		log.Printf("[Automation] session closure history failed task=%d session=%s: %v", closure.TaskID, closure.SessionID, err)
+	}
+}
+
 func (e *platformEffects) audit(ctx context.Context, domain, action, aggregateID string, actor application.Actor) {
+	e.auditPayload(ctx, domain, action, aggregateID, actor, map[string]any{"action": action})
+}
+
+func (e *platformEffects) auditPayload(ctx context.Context, domain, action, aggregateID string, actor application.Actor, fields map[string]any) {
 	if e.db == nil {
 		return
 	}
@@ -105,7 +142,7 @@ func (e *platformEffects) audit(ctx context.Context, domain, action, aggregateID
 	if strings.TrimSpace(actor.Type) == "" && strings.TrimSpace(actor.ID) == "" {
 		actor = metadata.Actor
 	}
-	payload, _ := json.Marshal(map[string]string{"action": action})
+	payload, _ := json.Marshal(fields)
 	tx, err := e.db.BeginTxx(ctx, nil)
 	if err != nil {
 		log.Printf("[Automation] platform audit unavailable domain=%s action=%s: %v", domain, action, err)
