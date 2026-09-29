@@ -541,6 +541,11 @@ func (s *SessionService) Stop(ctx context.Context, command StopSessionCommand) (
 	if session.Status == "stopped" {
 		return session, nil
 	}
+	return s.stopLive(ctx, session, "stopped", command.Authorization.Actor)
+}
+
+// stopLive ends a starting/running session and publishes action.
+func (s *SessionService) stopLive(ctx context.Context, session *database.Session, action string, actor Actor) (*database.Session, error) {
 	if session.Status != "starting" && session.Status != "running" {
 		return nil, conflictError("session_not_stoppable", "Only starting or running sessions can be stopped")
 	}
@@ -557,7 +562,99 @@ func (s *SessionService) Stop(ctx context.Context, command StopSessionCommand) (
 	if err != nil {
 		return nil, err
 	}
-	s.publish(ctx, SessionChange{Action: "stopped", Session: stored, ID: stored.ID, Actor: command.Authorization.Actor})
+	s.publish(ctx, SessionChange{Action: action, Session: stored, ID: stored.ID, Actor: actor})
+	return stored, nil
+}
+
+// CloseCompletedQuietPeriod is how long a session whose turn state is unknown
+// (no hook signal since the server started) must be silent before
+// CloseCompleted treats it as idle.
+const CloseCompletedQuietPeriod = 10 * time.Minute
+
+type CloseCompletedSessionCommand struct {
+	SessionID string
+	// AwaitingInput reports that the session is blocked on a question; such a
+	// session still wants something and is never closed by this path.
+	AwaitingInput bool
+	Authorization ActionAuthorization
+}
+
+// SessionClosure is the audit record of a CloseCompleted stop.
+type SessionClosure struct {
+	SessionID  string
+	ProjectID  int64
+	TaskID     int64
+	TaskStatus string
+	Mode       string
+	Reason     string
+	Actor      Actor
+	ApprovedBy string
+}
+
+// SessionClosureRecorder is optionally implemented by SessionEffects to keep
+// who closed a completed session and why.
+type SessionClosureRecorder interface {
+	RecordSessionClosure(context.Context, SessionClosure)
+}
+
+// CloseCompleted stops a session whose work is finished, without the explicit
+// per-session approval Stop requires. It only applies when the linked task is
+// done and the session is not mid-turn; anything else must go through Stop.
+func (s *SessionService) CloseCompleted(ctx context.Context, command CloseCompletedSessionCommand) (*database.Session, error) {
+	if err := requireActionActor(command.Authorization); err != nil {
+		return nil, err
+	}
+	reason := strings.TrimSpace(command.Authorization.Reason)
+	if reason == "" {
+		return nil, validationError("reason_required", "A reason is required to close a completed session")
+	}
+	session, err := s.getSession(ctx, command.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session.Status == "stopped" {
+		return session, nil
+	}
+	if !session.TaskID.Valid {
+		return nil, conflictError("session_task_missing", "The session has no linked task; use sessions.stop")
+	}
+	task, err := s.store.GetTask(ctx, session.TaskID.Int64)
+	if err != nil || task == nil {
+		return nil, notFoundError("task_not_found", "The session's linked task was not found", err)
+	}
+	if task.Status != TaskStatusDone {
+		return nil, conflictError("session_task_not_done", "The linked task is "+task.Status+", not done; use sessions.stop")
+	}
+	if command.AwaitingInput {
+		return nil, conflictError("session_awaiting_input", "The session is waiting on a question; answer it or use sessions.stop")
+	}
+	mode := ""
+	if s.creation.Signals != nil {
+		mode = s.creation.Signals.GetSessionMode(session.ID)
+	}
+	switch mode {
+	case "idle":
+	case "":
+		last := session.StartTime
+		if session.LastActivityAt.Valid && session.LastActivityAt.Time.After(last) {
+			last = session.LastActivityAt.Time
+		}
+		if s.creation.Now().Sub(last) < CloseCompletedQuietPeriod {
+			return nil, conflictError("session_busy", "The session's turn state is unknown and it was active in the last 10 minutes; retry later or use sessions.stop")
+		}
+	default:
+		return nil, conflictError("session_busy", "The session is mid-turn ("+mode+"); retry when it is idle or use sessions.stop")
+	}
+	stored, err := s.stopLive(ctx, session, "closed_completed", command.Authorization.Actor)
+	if err != nil {
+		return nil, err
+	}
+	if recorder, ok := s.effects.(SessionClosureRecorder); ok {
+		recorder.RecordSessionClosure(ctx, SessionClosure{
+			SessionID: stored.ID, ProjectID: stored.ProjectID, TaskID: task.ID, TaskStatus: task.Status,
+			Mode: mode, Reason: reason, Actor: command.Authorization.Actor, ApprovedBy: command.Authorization.ApprovedBy,
+		})
+	}
 	return stored, nil
 }
 

@@ -234,8 +234,8 @@ func executionPlatformActor(definitions []PlatformCapabilityDefinition) Actor {
 
 func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := executionPlatformDefinitionsForTest()
-	if len(definitions) != 65 {
-		t.Fatalf("execution surface has %d capabilities, want 65", len(definitions))
+	if len(definitions) != 66 {
+		t.Fatalf("execution surface has %d capabilities, want 66", len(definitions))
 	}
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -245,11 +245,11 @@ func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 		seen[definition.Name] = struct{}{}
 	}
 	capabilities, registry := executionPlatformTestRegistry(t, &executionPlatformFakePorts{})
-	if got := len(capabilities.List()); got != 65 {
-		t.Fatalf("application registry has %d execution capabilities, want 65", got)
+	if got := len(capabilities.List()); got != 66 {
+		t.Fatalf("application registry has %d execution capabilities, want 66", got)
 	}
-	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 65 {
-		t.Fatalf("platform discovery has %d execution capabilities, want 65", got)
+	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 66 {
+		t.Fatalf("platform discovery has %d execution capabilities, want 66", got)
 	}
 }
 
@@ -400,6 +400,7 @@ func executionDryRunCases() []executionDryRunCase {
 		{name: "sessions.create", target: `{"project_id":1}`, payload: `{"environment":{"API_KEY":"session-secret"}}`, secretText: []string{"session-secret"}},
 		{name: "sessions.answer_prompt", target: `{"id":"s1"}`, payload: `{"question_id":"t_1","option":1,"text":"answer-secret"}`, secretText: []string{"answer-secret"}},
 		{name: "sessions.stop", target: `{"id":"s1"}`, payload: `{}`},
+		{name: "sessions.close_completed", target: `{"id":"s1"}`, payload: `{}`},
 		{name: "sessions.isolate", target: `{"id":"s1"}`, payload: `{"reason":"contested write","briefing":"brief-secret"}`, secretText: []string{"brief-secret"}},
 		{name: "sessions.reopen", target: `{"id":"s1"}`, payload: `{}`},
 		{name: "sessions.send_input", target: `{"id":"s1"}`, payload: `{"text":"input-secret"}`, secretText: []string{"input-secret"}},
