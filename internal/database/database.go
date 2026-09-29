@@ -483,6 +483,16 @@ func (d *DB) EndSession(ctx context.Context, id string, status string) error {
 	return err
 }
 
+// SetSessionErrorDetails records why a session failed and the tail of what it
+// printed. Empty values leave the stored column untouched so a later, less
+// specific failure path cannot erase a precise reason.
+func (d *DB) SetSessionErrorDetails(ctx context.Context, id, reason, lastOutput string) error {
+	_, err := d.ExecContext(ctx,
+		"UPDATE sessions SET error_reason=CASE WHEN ?='' THEN error_reason ELSE ? END, last_output=CASE WHEN ?='' THEN last_output ELSE ? END WHERE id=?",
+		reason, reason, lastOutput, lastOutput, id)
+	return err
+}
+
 // UpdateSessionTokenHashes stores the SHA-256 hex digests of a session's
 // MCP/REST bearer and hook bridge tokens. Empty strings clear a hash.
 func (d *DB) UpdateSessionTokenHashes(ctx context.Context, id, mcpTokenHash, hookTokenHash string) error {
@@ -2158,7 +2168,7 @@ func (d *DB) ListTaskHistory(ctx context.Context, taskID int64, limit int) ([]Ta
 
 func (d *DB) ReopenSession(ctx context.Context, id string) error {
 	_, err := d.ExecContext(ctx,
-		"UPDATE sessions SET status='starting', end_time=NULL, start_time=?, pid=NULL WHERE id=? AND status IN ('stopped', 'completed')",
+		"UPDATE sessions SET status='starting', end_time=NULL, start_time=?, pid=NULL, error_reason='', last_output='' WHERE id=? AND status IN ('stopped', 'completed')",
 		time.Now(), id)
 	return err
 }

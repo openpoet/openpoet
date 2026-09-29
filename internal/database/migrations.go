@@ -91,6 +91,7 @@ var migrations = []Migration{
 	{Version: 73, Description: "maestro integration: mission_grants (multi-use, mission-scoped human authority for destructive capabilities like workspaces.merge)", Up: migrateV73},
 	{Version: 74, Description: "retire missions: drop missions/mission_workers/mission_grants and the mission-coordinator skill (the coordinator tier stays)", Up: migrateV74},
 	{Version: 75, Description: "mcp: per-OS command variants on global servers (command_windows/args_windows/env_windows) so one logical server serves a mixed Linux/Windows fleet", Up: migrateV75},
+	{Version: 76, Description: "sessions: add error_reason and last_output so an errored session explains itself after its runtime is gone", Up: migrateV76},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2050,6 +2051,19 @@ func migrateV75(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV75 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV76(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE sessions ADD COLUMN error_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN last_output TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV76 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil
