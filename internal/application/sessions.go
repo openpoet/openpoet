@@ -416,22 +416,27 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 	if err != nil {
 		return nil, err
 	}
+	// From here on the process is running. Nothing a client does (timing out,
+	// disconnecting) may kill it: every remaining step runs detached from the
+	// caller's cancellation.
+	ctx = context.WithoutCancel(ctx)
 	if linkedTask != nil {
 		if s.linker == nil {
-			s.compensateFailedCreate(ctx, created.ID)
-			return nil, validationError("session_task_linker_unavailable", "Session task linker is unavailable")
+			err := validationError("session_task_linker_unavailable", "Session task linker is unavailable")
+			s.compensateFailedCreate(ctx, created.ID, err)
+			return nil, err
 		}
 		result, linkErr := s.linker.LinkSession(ctx, LinkSessionTaskCommand{
 			SessionID: created.ID, TaskID: &linkedTask.ID, Actor: command.Authorization.Actor,
 		})
 		if linkErr != nil {
-			s.compensateFailedCreate(ctx, created.ID)
+			s.compensateFailedCreate(ctx, created.ID, linkErr)
 			return nil, linkErr
 		}
 		created.Name = result.SessionName
 		if initialPrompt == "" && s.creation.Tasks != nil {
 			if err := s.creation.Tasks.NotifyTaskLoaded(ctx, created.ID, linkedTask); err != nil {
-				s.compensateFailedCreate(ctx, created.ID)
+				s.compensateFailedCreate(ctx, created.ID, err)
 				return nil, err
 			}
 		}
@@ -439,16 +444,12 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 		if s.creation.Names != nil {
 			created.Name = project.Name + " (" + s.creation.Now().Format("15:04:05") + ")"
 			if err := s.creation.Names.RenameSession(ctx, created.ID, created.Name); err != nil {
-				s.compensateFailedCreate(ctx, created.ID)
-				return nil, err
+				log.Printf("[Sessions] naming session %s failed (session keeps running): %v", created.ID, err)
 			}
 		}
 	}
 	if initialPrompt != "" {
-		if err := s.writeInitialPrompt(ctx, created.ID, initialPrompt); err != nil {
-			s.compensateFailedCreate(ctx, created.ID)
-			return nil, err
-		}
+		s.deliverInitialPrompt(ctx, created.ID, initialPrompt)
 	}
 	if workspace != nil {
 		if err := s.creation.Workspaces.Bind(ctx, workspace.ID, reservationToken, created.ID); err != nil {
@@ -1039,6 +1040,35 @@ func (s *SessionService) writeLine(ctx context.Context, sessionID, text string) 
 	return s.manager.WriteToSession(sessionID, []byte("\n"))
 }
 
+// sessionStartupTracker is implemented by the session runtime; it publishes
+// the initial prompt's delivery progress to readers such as sessions.get.
+type sessionStartupTracker interface {
+	SetStartupState(sessionID, state, detail string)
+}
+
+// deliverInitialPrompt submits the first prompt in the background: waiting for
+// the agent to be ready (and for any startup question to be answered) can
+// take far longer than a client should block. A delivery failure is recorded
+// in the startup state and never stops the session.
+func (s *SessionService) deliverInitialPrompt(ctx context.Context, sessionID, text string) {
+	tracker, _ := s.manager.(sessionStartupTracker)
+	if tracker != nil {
+		tracker.SetStartupState(sessionID, runtime.StartupStarting, "")
+	}
+	go func() {
+		if err := s.writeInitialPrompt(ctx, sessionID, text); err != nil {
+			log.Printf("[Sessions] initial prompt for %s was not delivered: %v", sessionID, err)
+			if tracker != nil {
+				tracker.SetStartupState(sessionID, runtime.StartupFailed, err.Error())
+			}
+			return
+		}
+		if tracker != nil {
+			tracker.SetStartupState(sessionID, runtime.StartupReady, "")
+		}
+	}()
+}
+
 func (s *SessionService) writeInitialPrompt(ctx context.Context, sessionID, text string) error {
 	if s.creation.InitialInput != nil {
 		return s.creation.InitialInput.SubmitInitialSessionPrompt(ctx, sessionID, text)
@@ -1046,9 +1076,18 @@ func (s *SessionService) writeInitialPrompt(ctx context.Context, sessionID, text
 	return s.writeLine(ctx, sessionID, text)
 }
 
-func (s *SessionService) compensateFailedCreate(ctx context.Context, sessionID string) {
+// sessionErrorRecorder is implemented by stores that keep an errored
+// session's reason.
+type sessionErrorRecorder interface {
+	SetSessionErrorDetails(ctx context.Context, id, reason, lastOutput string) error
+}
+
+func (s *SessionService) compensateFailedCreate(ctx context.Context, sessionID string, cause error) {
 	_ = s.manager.StopSession(ctx, sessionID)
 	_ = s.store.EndSession(ctx, sessionID, "error")
+	if recorder, ok := s.store.(sessionErrorRecorder); ok && cause != nil {
+		_ = recorder.SetSessionErrorDetails(ctx, sessionID, "session creation failed after start: "+cause.Error(), "")
+	}
 }
 
 func (s *SessionService) publish(ctx context.Context, change SessionChange) {

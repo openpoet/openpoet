@@ -89,6 +89,10 @@ type Manager struct {
 	// a real question) without this package knowing who consumes them.
 	OnSessionAttention func(sessionID, kind, excerpt string)
 	attention          *AttentionSentinel
+
+	// interaction tracks each session's emulated screen (for interactive
+	// question detection) and initial-prompt startup state.
+	interaction interactionRegistry
 }
 
 // OutputBuffer is a ring buffer for storing recent terminal output
@@ -264,8 +268,7 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	// Build MCP config
 	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID, cfg.MCPToken)
 	if configErr != nil {
-		_ = m.db.EndSession(ctx, sessionID, "error")
-		return nil, fmt.Errorf("build MCP configuration: %w", configErr)
+		return nil, m.failSession(ctx, sessionID, fmt.Errorf("build MCP configuration: %w", configErr))
 	}
 	cfg.MCPConfigJSON = mcpConfig
 
@@ -280,6 +283,7 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	var runnerErr error
 
 	if project.Type == "local" {
+		m.resetScreen(sessionID, 24, 80)
 		dumper := newPTYDumper(sessionID, "local")
 		outputHandler := func(data []byte) {
 			dumper.write(data)
@@ -297,8 +301,7 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	}
 
 	if runnerErr != nil {
-		m.db.EndSession(ctx, sessionID, "error")
-		return nil, fmt.Errorf("failed to create runner: %w", runnerErr)
+		return nil, m.failSession(ctx, sessionID, fmt.Errorf("failed to create runner: %w", runnerErr))
 	}
 
 	// Start the session
@@ -320,8 +323,7 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 		m.mu.Lock()
 		delete(m.sessions, sessionID)
 		m.mu.Unlock()
-		m.db.EndSession(ctx, sessionID, "error")
-		return nil, fmt.Errorf("failed to start runner: %w", err)
+		return nil, m.failSession(ctx, sessionID, fmt.Errorf("failed to start runner: %w", err))
 	}
 	if project.Type == "local" && backend.Type() == BackendCodex && !useCodexAppServer(project.Backend, project.BackendConfig) {
 		go m.captureCodexProviderSessionID(sessionID, project.Path, envVars, session.StartTime)
@@ -513,6 +515,11 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	if project.Type != "local" {
 		dumperKind = "remote"
 	}
+	if project.Type == "local" {
+		m.resetScreen(sessionID, 24, 80)
+	} else {
+		m.resetScreen(sessionID, 48, 164)
+	}
 	dumper := newPTYDumper(sessionID, dumperKind)
 	outputHandler := func(data []byte) {
 		dumper.write(data)
@@ -547,8 +554,7 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	}
 
 	if err != nil {
-		m.db.EndSession(ctx, sessionID, "error")
-		return fmt.Errorf("failed to create runner: %w", err)
+		return m.failSession(ctx, sessionID, fmt.Errorf("failed to create runner: %w", err))
 	}
 
 	// Start the session
@@ -571,8 +577,7 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 		m.mu.Lock()
 		delete(m.sessions, sessionID)
 		m.mu.Unlock()
-		m.db.EndSession(ctx, sessionID, "error")
-		return fmt.Errorf("failed to start runner: %w", err)
+		return m.failSession(ctx, sessionID, fmt.Errorf("failed to start runner: %w", err))
 	}
 	if project.Type == "local" && backend.Type() == BackendCodex && !useCodexAppServer(project.Backend, project.BackendConfig) {
 		go m.captureCodexProviderSessionID(sessionID, project.Path, envVars, session.StartTime)
@@ -1376,6 +1381,7 @@ func (m *Manager) ResizeSession(sessionID string, rows, cols uint16) error {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
+	m.resizeScreen(sessionID, rows, cols)
 	return rs.runner.Resize(rows, cols)
 }
 
@@ -1407,6 +1413,7 @@ func (m *Manager) RegisterClientSize(sessionID, clientID string, rows, cols uint
 	log.Printf("Session %s: client %s reported %dx%d, PTY min is %dx%d (%d clients)",
 		sessionID[:8], clientID[:8], cols, rows, minCols, minRows, clientCount)
 
+	m.resizeScreen(sessionID, minRows, minCols)
 	return rs.runner.Resize(minRows, minCols)
 }
 
@@ -1444,6 +1451,7 @@ func (m *Manager) UnregisterClientSize(sessionID, clientID string) {
 	if sessionOk {
 		log.Printf("Session %s: client %s disconnected, PTY resized to %dx%d (%d clients remain)",
 			sessionID[:8], clientID[:8], minCols, minRows, clientCount)
+		m.resizeScreen(sessionID, minRows, minCols)
 		rs.runner.Resize(minRows, minCols)
 	}
 }
@@ -1555,6 +1563,8 @@ func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 		m.attention.Forget(sessionID)
 	}
 
+	defer m.forgetInteraction(sessionID)
+
 	if shuttingDown {
 		log.Printf("Session %s stopped for restart (preserving DB state)", sessionID)
 		if m.OnSessionFlush != nil {
@@ -1614,6 +1624,12 @@ func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 	}
 
 	m.db.EndSession(ctx, sessionID, status)
+	if status == "error" {
+		reason := m.terminalErrorReason(sessionID, err)
+		if detailErr := m.db.SetSessionErrorDetails(ctx, sessionID, reason, m.errorOutputTail(sessionID, outputSnapshot)); detailErr != nil {
+			log.Printf("Session %s: failed to record error details: %v", sessionID, detailErr)
+		}
+	}
 	m.hub.BroadcastSessionStatus(sessionID, status)
 
 	log.Printf("Session %s ended with status: %s", sessionID, status)
@@ -1630,6 +1646,7 @@ func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 }
 
 func (m *Manager) checkForNotificationTriggers(sessionID string, data []byte) {
+	m.feedScreen(sessionID, data)
 	m.ScanOutputForAttention(sessionID, data)
 }
 
@@ -1894,8 +1911,7 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	// Build MCP config
 	mcpConfig, configErr := m.buildMCPConfigJSON(ctx, project, sessionID, cfg.MCPToken)
 	if configErr != nil {
-		_ = m.db.EndSession(ctx, sessionID, "error")
-		return nil, fmt.Errorf("build MCP configuration: %w", configErr)
+		return nil, m.failSession(ctx, sessionID, fmt.Errorf("build MCP configuration: %w", configErr))
 	}
 	cfg.MCPConfigJSON = mcpConfig
 
@@ -1908,6 +1924,7 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	// Create output buffer (1MB max)
 	outputBuffer := NewOutputBuffer(1024 * 1024)
 
+	m.resetScreen(sessionID, 48, 164)
 	dumper := newPTYDumper(sessionID, "remote")
 	outputHandler := func(data []byte) {
 		dumper.write(data)
@@ -1928,8 +1945,7 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	}
 
 	if err != nil {
-		m.db.EndSession(ctx, sessionID, "error")
-		return nil, fmt.Errorf("failed to create remote runner: %w", err)
+		return nil, m.failSession(ctx, sessionID, fmt.Errorf("failed to create remote runner: %w", err))
 	}
 
 	sessionCtx, cancel := context.WithCancel(context.Background())
@@ -1951,8 +1967,7 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 		m.mu.Lock()
 		delete(m.sessions, sessionID)
 		m.mu.Unlock()
-		m.db.EndSession(ctx, sessionID, "error")
-		return nil, fmt.Errorf("failed to start remote runner: %w", err)
+		return nil, m.failSession(ctx, sessionID, fmt.Errorf("failed to start remote runner: %w", err))
 	}
 
 	session.Status = "running"

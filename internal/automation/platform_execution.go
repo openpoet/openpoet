@@ -33,6 +33,7 @@ var (
 
 type ExecutionPlatformServices struct {
 	Sessions           *application.SessionService
+	SessionQuestions   *application.SessionQuestionService // optional: sessions.answer_prompt and awaiting_input
 	SessionWatchers    *application.SessionEventWatcherService
 	SessionSuggestions *application.SessionTaskSuggestionService
 	FileMutations      *application.FileMutationService
@@ -73,7 +74,7 @@ func RegisterExecutionPlatformCapabilities(registry *PlatformCapabilityRegistry,
 		definitions []PlatformCapabilityDefinition
 		executor    PlatformDomainExecutor
 	}{
-		{sessionPlatformDefinitions(), &sessionPlatformExecutor{service: services.Sessions, queries: services.SessionQueries, runtime: services.SessionRuntime}},
+		{sessionPlatformDefinitions(), &sessionPlatformExecutor{service: services.Sessions, questions: services.SessionQuestions, queries: services.SessionQueries, runtime: services.SessionRuntime}},
 		{sessionWatcherPlatformDefinitions(), &sessionWatcherPlatformExecutor{service: services.SessionWatchers, statuses: services.SessionEvents}},
 		{sessionSuggestionPlatformDefinitions(), &sessionSuggestionPlatformExecutor{service: services.SessionSuggestions}},
 		{fileExecutionPlatformDefinitions(), &fileExecutionPlatformExecutor{service: services.FileMutations, reader: services.Files}},
