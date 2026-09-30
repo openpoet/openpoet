@@ -27,6 +27,7 @@ import (
 	"openpoet/internal/providerbridge"
 	"openpoet/internal/security"
 	"openpoet/internal/session"
+	"openpoet/internal/sessionprompt"
 	"openpoet/internal/tunnel"
 	"openpoet/internal/updater"
 	"openpoet/internal/websocket"
@@ -1451,8 +1452,22 @@ func (a *API) GetSession(w http.ResponseWriter, r *http.Request) {
 
 	respondJSON(w, http.StatusOK, struct {
 		*database.Session
-		Turn *sessionTurnJSON `json:"turn,omitempty"`
-	}{sess, a.sessionTurn(sess.ID)})
+		Turn           *sessionTurnJSON                   `json:"turn,omitempty"`
+		PermissionMode *sessionprompt.PermissionModeState `json:"permission_mode,omitempty"`
+	}{sess, a.sessionTurn(sess.ID), a.sessionPermissionMode(sess.ID)})
+}
+
+// sessionPermissionMode is a running Claude Code session's permission mode as
+// last observed, or nil when unknown.
+func (a *API) sessionPermissionMode(sessionID string) *sessionprompt.PermissionModeState {
+	if a.sessionMgr == nil {
+		return nil
+	}
+	state, known := a.sessionMgr.SessionPermissionMode(sessionID)
+	if !known {
+		return nil
+	}
+	return &state
 }
 
 // sessionTurnJSON says whether the agent is inside a turn (prompt accepted,
@@ -3662,6 +3677,42 @@ func (a *API) SetSessionEffort(w http.ResponseWriter, r *http.Request) {
 		"requested_model": updated.RequestedModel,
 		"effort":          updated.Effort,
 		"harness":         updated.Harness,
+	})
+}
+
+// SetSessionPermissionMode switches a running Claude Code session's permission
+// mode. The body carries the owner's authorization_ref and a reason; both are
+// recorded with the change.
+func (a *API) SetSessionPermissionMode(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var input struct {
+		Mode             string `json:"mode"`
+		AuthorizationRef string `json:"authorization_ref"`
+		Reason           string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	authorization := platformUIAuthorization(r)
+	authorization.Reason = strings.TrimSpace(input.Reason)
+	result, err := services.Execution.Sessions.SetPermissionMode(platformUIContext(r), application.SetSessionPermissionModeCommand{
+		SessionID: id, Mode: input.Mode, AuthorizationRef: input.AuthorizationRef, Authorization: authorization,
+	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"session_id": id,
+		"from":       result.From,
+		"to":         result.To,
+		"changed":    result.Changed,
+		"presses":    result.Presses,
 	})
 }
 

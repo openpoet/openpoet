@@ -39,6 +39,12 @@ type SessionStartupReadPort interface {
 	SessionStartupState(sessionID string) (state, detail string)
 }
 
+// SessionPermissionModeReadPort is optionally implemented by the session
+// runtime: it reports a running Claude Code session's permission mode.
+type SessionPermissionModeReadPort interface {
+	SessionPermissionMode(sessionID string) (sessionprompt.PermissionModeState, bool)
+}
+
 // SessionScreenReadPort is optionally implemented by the session runtime: it
 // renders the terminal as a human currently sees it.
 type SessionScreenReadPort interface {
@@ -84,6 +90,9 @@ type SessionAutomationView struct {
 	// Turn says whether the agent is inside a turn (prompt accepted, reply
 	// not finished). Omitted while no turn signal has been seen.
 	Turn *SessionTurnView `json:"turn,omitempty"`
+	// PermissionMode is a running Claude Code session's permission mode as
+	// last observed (screen indicator, else hook report). Omitted when unknown.
+	PermissionMode *sessionprompt.PermissionModeState `json:"permission_mode,omitempty"`
 }
 
 // SessionTurnView is the automation shape of application.SessionTurnState.
@@ -137,6 +146,11 @@ func (e *sessionPlatformExecutor) view(ctx context.Context, session database.Ses
 	if startup, ok := e.runtime.(SessionStartupReadPort); ok {
 		view.StartupState, view.StartupDetail = startup.SessionStartupState(session.ID)
 	}
+	if modes, ok := e.runtime.(SessionPermissionModeReadPort); ok {
+		if state, known := modes.SessionPermissionMode(session.ID); known {
+			view.PermissionMode = &state
+		}
+	}
 	if e.service != nil {
 		if turn, known := e.service.TurnState(session.ID); known {
 			view.Turn = sessionTurnView(turn)
@@ -180,6 +194,8 @@ func sessionPlatformDefinitions() []PlatformCapabilityDefinition {
 		withPayloadSchema(executionPayloadLimit(executionWriteCapability("sessions.send_input", "sessions", "sessions:write"), 20<<10), session, sessionInputPayload{}, "", sessionSendInputNotes),
 		withPayloadSchema(executionWriteCapability("sessions.set_model", "sessions", "sessions:write"), session, sessionModelPayload{}, "", ""),
 		withPayloadSchema(executionWriteCapability("sessions.set_effort", "sessions", "sessions:write"), session, sessionEffortPayload{}, "", ""),
+		withPayloadSchema(executionWriteCapability("sessions.set_permission_mode", "sessions", "sessions:write"), session, sessionPermissionModePayload{},
+			`{"mode":"acceptEdits"}`, sessionSetPermissionModeNotes),
 		withPayloadSchema(executionWriteCapability("sessions.evaluate", "sessions", "sessions:write", "tasks:write"), session, nil, "", ""),
 		withPayloadSchema(executionPayloadLimit(platformMutation(executionReadCapability("sessions.image_prompt_hint", "sessions", "sessions:write")), 20<<10), session, sessionImageHintPayload{},
 			`{"image_count":1,"user_prompt":"Describe this photo"}`,
@@ -254,6 +270,10 @@ type sessionEffortPayload struct {
 	Effort string `json:"effort"`
 }
 
+type sessionPermissionModePayload struct {
+	Mode string `json:"mode" doc:"auto, acceptEdits, default (shown as manual) or plan; bypassPermissions and dontAsk are refused"`
+}
+
 type sessionImageHintPayload struct {
 	UserPrompt string `json:"user_prompt,omitempty" doc:"prompt the pasted images accompany (at most 4000 characters)"`
 	ImageCount int    `json:"image_count" doc:"number of images pasted for this prompt (1-20)"`
@@ -274,6 +294,13 @@ const sessionSendInputNotes = "Types text into the session's agent and, by defau
 	"Refused with session_busy while the session's turn is open (from the accepted prompt until the turn completes, however long its tools run) or while another guarded send to it is still being delivered; retry after turn.open is false, or send force true to type anyway. " +
 	"A call takes about 2-10 s, so use a client timeout of at least 15 s. The command finishes and records its real result even if the client times out or disconnects. " +
 	"After a timeout NEVER resend with a new idempotency_key (that delivers the text twice): resend the identical envelope (same idempotency_key and command_id), which returns the recorded result or waits for it, or read it with automation.commands.get."
+
+const sessionSetPermissionModeNotes = "Switches a running Claude Code session's permission mode (auto, acceptEdits, default, plan) with the session's own Shift+Tab cycle, reading the mode indicator on its screen after every press; " +
+	"the result's to is that read-back, never assumed. bypassPermissions and dontAsk are never set this way. " +
+	"Policy approval, no approval_token, but the command needs a reason and correlation_id set to the owner's authorization reference (e.g. ain:292); both are kept with who changed it, from and to, " +
+	"in the event outbox (platform.session.permission_mode_recorded, also written for no-ops and for failed attempts that pressed keys; platform.session.permission_mode_changed signals an actual change) and in the linked task's history (session_permission_mode_changed). " +
+	"Refused with session_awaiting_input while a question is open (answer it first); session_setting_unsupported when the target is not offered by the session's cycle (e.g. auto mode unavailable; the error names the mode it ended in) or the backend is not claude_code; " +
+	"permission_mode_unconfirmed when no indicator repainted (re-read sessions.get permission_mode). Already in the mode returns changed false with no key pressed. The current mode is permission_mode in sessions.get."
 
 const sessionStopNotes = "Stops any starting or running session; needs an explicit approval_token. " +
 	"For an idle session whose linked task is already done, use sessions.close_completed instead (no per-session approval)."
@@ -685,6 +712,41 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 				return nil, err
 			}
 			return e.view(ctx, *item), nil
+		}}, nil
+	case "sessions.set_permission_mode":
+		sessionID, err := executionStringID(target, "session id")
+		if err != nil {
+			return nil, err
+		}
+		var payload sessionPermissionModePayload
+		if err := decodeExecutionPayload(input.Payload, &payload); err != nil {
+			return nil, err
+		}
+		payload.Mode = strings.TrimSpace(payload.Mode)
+		if payload.Mode == "" || utf8.RuneCountInString(payload.Mode) > 50 {
+			return nil, missingPayloadField("mode", "one of auto, acceptEdits, default, plan")
+		}
+		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"session_id": sessionID, "mode": payload.Mode}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+			if e.queries != nil {
+				item, err := e.queries.GetSession(ctx, sessionID)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return nil, err
+				}
+				if err != nil || item == nil || !input.ProjectScope.Allows(item.ProjectID) {
+					return nil, platformFailure("session_not_found", "session not found", false)
+				}
+			}
+			result, err := e.service.SetPermissionMode(ctx, application.SetSessionPermissionModeCommand{
+				SessionID: sessionID, Mode: payload.Mode, Authorization: authorization,
+				AuthorizationRef: application.EventMetadataFromContext(ctx).CorrelationID,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{
+				"session_id": sessionID, "from": result.From, "to": result.To, "changed": result.Changed,
+				"presses": result.Presses, "session": e.view(ctx, *result.Session),
+			}, nil
 		}}, nil
 	case "sessions.evaluate":
 		return e.sessionWithoutPayload(input, target, func(ctx context.Context, sessionID string, authorization application.ActionAuthorization) (any, error) {

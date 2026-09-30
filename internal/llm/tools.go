@@ -912,6 +912,25 @@ func AllToolDefs() []ToolDef {
 			Context: ToolContextBoth,
 		},
 		{
+			Name:        "set_session_permission_mode",
+			Description: "Switch a running Claude Code session's permission mode (auto, acceptEdits, default, plan) with its own Shift+Tab cycle and report the mode read back from its screen. Never sets bypassPermissions or dontAsk. Needs the owner's authorization reference and a reason, both recorded with the change; session agents are refused.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"session_id": {Type: "string", Description: "Running OpenPoet session ID"},
+					"mode": {
+						Type:        "string",
+						Description: "Target permission mode (default is shown as manual mode)",
+						Enum:        []string{"auto", "acceptEdits", "default", "plan"},
+					},
+					"authorization_ref": {Type: "string", Description: "Reference to the owner's authorization, e.g. ain:292"},
+					"reason":            {Type: "string", Description: "Why the mode is being changed"},
+				},
+				Required: []string{"session_id", "mode", "authorization_ref", "reason"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
 			Name:        "read_session_history",
 			Description: "Read a compact slice of a session's terminal/message history without loading the full transcript. Supports tail, head, window, and search modes. To read what was said in the conversation, prefer session_messages.",
 			InputSchema: ToolDefinitionInput{

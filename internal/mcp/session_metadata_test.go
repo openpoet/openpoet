@@ -157,3 +157,31 @@ func TestSetSessionToolsCallRuntimeSettingEndpoints(t *testing.T) {
 		t.Fatalf("calls = %#v, want %#v", calls, wantCalls)
 	}
 }
+
+func TestSetSessionPermissionModeToolPostsModeReferenceAndReason(t *testing.T) {
+	var input map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/sessions/session-12345678/permission-mode" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		fmt.Fprint(w, `{"session_id":"session-12345678","from":"auto","to":"acceptEdits","changed":true,"presses":2}`)
+	}))
+	t.Cleanup(server.Close)
+
+	got, err := executeTool(NewAPIClient(server.URL), "openpoet_set_session_permission_mode",
+		json.RawMessage(`{"session_id":"session-12345678","mode":"acceptEdits","authorization_ref":"ain:292","reason":"approve by hand"}`), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input["mode"] != "acceptEdits" || input["authorization_ref"] != "ain:292" || input["reason"] != "approve by hand" {
+		t.Fatalf("payload = %#v", input)
+	}
+	if !strings.Contains(got, "changed from auto to acceptEdits") {
+		t.Fatalf("result = %q", got)
+	}
+}

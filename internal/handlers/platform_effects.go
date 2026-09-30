@@ -127,6 +127,51 @@ func (e *platformEffects) RecordSessionClosure(ctx context.Context, closure appl
 	}
 }
 
+// RecordSessionPermissionModeChange keeps who changed a session's permission
+// mode, from what to what, under which authorization and why: in the event
+// outbox (its correlation_id is the command's authorization reference) and in
+// the linked task's history. The bare "permission_mode_changed" session change
+// is published separately by the service, only when the mode changed.
+func (e *platformEffects) RecordSessionPermissionModeChange(ctx context.Context, change application.SessionPermissionModeChange) {
+	fields := map[string]any{
+		"action": "permission_mode_recorded", "requested": change.Requested, "from": change.From, "to": change.To,
+		"presses": change.Presses, "outcome": change.Outcome, "reason": change.Reason,
+		"authorization_ref": change.AuthorizationRef, "approved_by": change.ApprovedBy,
+	}
+	if change.Error != "" {
+		fields["error"] = change.Error
+	}
+	if change.TaskID > 0 {
+		fields["task_id"] = change.TaskID
+	}
+	e.auditPayload(ctx, "session", "permission_mode_recorded", nonEmptyAggregateID(change.SessionID), change.Actor, fields)
+	log.Printf("[Automation] session permission mode %s session=%s %s->%s requested=%s actor=%s:%s ref=%s",
+		change.Outcome, change.SessionID, change.From, change.To, change.Requested, change.Actor.Type, change.Actor.ID, change.AuthorizationRef)
+	if e.db == nil || change.TaskID <= 0 {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	details, _ := json.Marshal(map[string]any{
+		"session_id": change.SessionID, "requested": change.Requested, "from": change.From, "to": change.To,
+		"outcome": change.Outcome, "error": change.Error, "reason": change.Reason,
+		"authorization_ref": change.AuthorizationRef, "actor_type": change.Actor.Type, "approved_by": change.ApprovedBy,
+	})
+	actorID := strings.TrimSpace(change.Actor.ID)
+	if actorID == "" {
+		actorID = "automation"
+	}
+	history := &database.TaskHistory{
+		TaskID: change.TaskID, ProjectID: change.ProjectID, EventType: "session_permission_mode_changed",
+		Details: string(details), Actor: actorID,
+		SessionID: sql.NullString{String: change.SessionID, Valid: change.SessionID != ""},
+	}
+	if err := e.db.CreateTaskHistory(ctx, history); err != nil {
+		log.Printf("[Automation] permission mode history failed task=%d session=%s: %v", change.TaskID, change.SessionID, err)
+	}
+}
+
 func (e *platformEffects) audit(ctx context.Context, domain, action, aggregateID string, actor application.Actor) {
 	e.auditPayload(ctx, domain, action, aggregateID, actor, map[string]any{"action": action})
 }

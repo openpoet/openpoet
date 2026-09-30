@@ -1085,6 +1085,32 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return string(body), nil
 
+	case "openpoet_set_session_permission_mode":
+		sid, _ := params["session_id"].(string)
+		mode, _ := params["mode"].(string)
+		if strings.TrimSpace(sid) == "" || strings.TrimSpace(mode) == "" {
+			return "", fmt.Errorf("session_id and mode are required")
+		}
+		ref, _ := params["authorization_ref"].(string)
+		reason, _ := params["reason"].(string)
+		payload, _ := json.Marshal(map[string]string{"mode": mode, "authorization_ref": ref, "reason": reason})
+		body, err := client.Post(fmt.Sprintf("/api/sessions/%s/permission-mode", sid), string(payload))
+		if err != nil {
+			return "", err
+		}
+		var updated struct {
+			From    string `json:"from"`
+			To      string `json:"to"`
+			Changed bool   `json:"changed"`
+		}
+		if json.Unmarshal(body, &updated) == nil && updated.To != "" {
+			if !updated.Changed {
+				return fmt.Sprintf("Session %s is already in %s permission mode", shortID(sid), updated.To), nil
+			}
+			return fmt.Sprintf("Session %s permission mode changed from %s to %s", shortID(sid), updated.From, updated.To), nil
+		}
+		return string(body), nil
+
 	case "openpoet_read_session_history":
 		sid, _ := params["session_id"].(string)
 		if sid == "" {
@@ -1566,6 +1592,10 @@ func formatSessionDetail(client *APIClient, body []byte) (string, error) {
 			Since  time.Time `json:"since"`
 			Reason string    `json:"reason"`
 		} `json:"turn"`
+		PermissionMode *struct {
+			Mode   string `json:"mode"`
+			Source string `json:"source"`
+		} `json:"permission_mode"`
 	}
 	if err := json.Unmarshal(body, &sess); err != nil {
 		return string(body), nil
@@ -1585,6 +1615,9 @@ func formatSessionDetail(client *APIClient, body []byte) (string, error) {
 			state = "open (mid-turn)"
 		}
 		sb.WriteString(fmt.Sprintf("Turn: %s since %s (%s)\n", state, sess.Turn.Since.Local().Format("2006-01-02 15:04:05"), sess.Turn.Reason))
+	}
+	if sess.PermissionMode != nil {
+		sb.WriteString(fmt.Sprintf("Permission mode: %s (from %s)\n", sess.PermissionMode.Mode, sess.PermissionMode.Source))
 	}
 	if meta.HarnessDetails != "" {
 		sb.WriteString(fmt.Sprintf("Harness details: %s\n", meta.HarnessDetails))

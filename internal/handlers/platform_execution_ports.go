@@ -224,6 +224,13 @@ func (s platformSessionRuntimeSettings) SetSessionEffort(ctx context.Context, se
 	return s.api.sessionMgr.SetSessionEffort(ctx, sessionID, effort, s.api.sessionLineSubmitDelay(ctx, sessionID))
 }
 
+func (s platformSessionRuntimeSettings) SetSessionPermissionMode(ctx context.Context, sessionID, mode string) (session.PermissionModeChange, error) {
+	if s.api == nil || s.api.sessionMgr == nil {
+		return session.PermissionModeChange{}, errors.New("session runtime settings unavailable")
+	}
+	return s.api.sessionMgr.SetSessionPermissionMode(ctx, sessionID, mode)
+}
+
 type platformSessionEventReader struct{ handler *StructuredViewHandler }
 
 func (r platformSessionEventReader) SessionEventStatus(ctx context.Context, sessionID string) (automation.SessionEventStatusView, error) {

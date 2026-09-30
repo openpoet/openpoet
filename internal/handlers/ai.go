@@ -3099,6 +3099,32 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			return "", err
 		}
 		return fmt.Sprintf("Session %s effort changed to %s (model: %s, harness: %s)", sessionID, updated.Effort, updated.Model, updated.Harness), nil
+	case "set_session_permission_mode":
+		sessionID, _ := input["session_id"].(string)
+		mode, _ := input["mode"].(string)
+		ref, _ := input["authorization_ref"].(string)
+		reason, _ := input["reason"].(string)
+		if sessionID == "" || strings.TrimSpace(mode) == "" {
+			return "", fmt.Errorf("session_id and mode are required")
+		}
+		if _, err := h.getAllowedSession(ctx, conversationID, sessionID); err != nil {
+			return "", err
+		}
+		services, ok := h.api.platformApplicationServices()
+		if !ok {
+			return "", errors.New("platform application services unavailable")
+		}
+		authorization.Reason = strings.TrimSpace(reason)
+		result, err := services.Execution.Sessions.SetPermissionMode(ctx, application.SetSessionPermissionModeCommand{
+			SessionID: sessionID, Mode: mode, AuthorizationRef: ref, Authorization: authorization,
+		})
+		if err != nil {
+			return "", err
+		}
+		if !result.Changed {
+			return fmt.Sprintf("Session %s is already in %s permission mode", sessionID, result.To), nil
+		}
+		return fmt.Sprintf("Session %s permission mode changed from %s to %s (read back from its screen)", sessionID, result.From, result.To), nil
 	case "read_session_history":
 		sessionID, _ := input["session_id"].(string)
 		if sessionID == "" {
@@ -4905,6 +4931,9 @@ func (h *AIHandler) formatSessionForTool(ctx context.Context, sess *database.Ses
 	sb.WriteString(fmt.Sprintf("Session: %s\nName: %s\nProject ID: %d\nStatus: %s\nBackend: %s\n", sess.ID, sess.Name, sess.ProjectID, sess.Status, sess.Backend))
 	meta := h.sessionMetadataForTool(ctx, sess)
 	sb.WriteString(fmt.Sprintf("Model: %s\nEffort: %s\nHarness: %s\n", meta.Model, meta.Effort, meta.Harness))
+	if mode := h.api.sessionPermissionMode(sess.ID); mode != nil {
+		sb.WriteString(fmt.Sprintf("Permission mode: %s (from %s)\n", mode.Mode, mode.Source))
+	}
 	if meta.HarnessDetails != "" {
 		sb.WriteString(fmt.Sprintf("Harness details: %s\n", meta.HarnessDetails))
 	}
