@@ -66,6 +66,7 @@ func (a *commandAPI) mergedCapabilityDescriptors(actor Actor) []capabilityDescri
 				Handler: capability.Handler, Service: serviceName,
 				Allowed:          actorHasPlatformScopes(actor, scopes),
 				ApprovalRequired: capability.Approval == application.ApprovalExplicit && !actor.Scopes.Has(ScopeApprovalsWaived),
+				Payload:          taskPayloadSchemas[capability.Name],
 			}
 		}
 	}

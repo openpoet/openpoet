@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -501,6 +502,13 @@ func TestVersionedAutomationSchemasMatchRegistry(t *testing.T) {
 	}
 	if _, ok := openAPI.Components.Schemas.Capability.Properties["scopes"]; !ok {
 		t.Fatal("OpenAPI capability contract is missing scopes")
+	}
+	descriptorFields := reflect.TypeOf(capabilityDescriptor{})
+	for i := 0; i < descriptorFields.NumField(); i++ {
+		name, _, _ := jsonFieldName(descriptorFields.Field(i))
+		if _, ok := openAPI.Components.Schemas.Capability.Properties[name]; !ok {
+			t.Errorf("OpenAPI capability contract is missing %s", name)
+		}
 	}
 	hasRequiredScopes := false
 	for _, field := range openAPI.Components.Schemas.Capability.Required {

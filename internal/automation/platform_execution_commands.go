@@ -18,7 +18,7 @@ type AutomationCommandLedgerPort interface {
 	FindAutomationCommand(ctx context.Context, clientID, idempotencyKey, commandID string) (*database.AutomationCommand, error)
 }
 
-const automationCommandsGetNotes = "Reads the outcome of one of YOUR OWN earlier commands from the idempotency ledger, by idempotency_key (exact) or command_id (most recent). " +
+const automationCommandsGetNotes = "Reads the outcome of one of YOUR OWN earlier commands from the idempotency ledger. Target {}; payload {\"idempotency_key\":\"<key>\"} (exact match) or {\"command_id\":\"<id>\"} (most recent command with that id). " +
 	"Use it after a timeout, abort or disconnect instead of guessing: the server never stops a command because its caller went away, and it records the real result. " +
 	"state: pending (still running; ask again shortly), applied (succeeded; result holds the recorded command result), failed (error holds the recorded error), " +
 	"indeterminate (the server restarted while it ran; check the target's state before acting again). found=false means the command never reached the server: resend it with the SAME envelope. " +

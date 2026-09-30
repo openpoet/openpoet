@@ -58,10 +58,12 @@ func fileExecutionPlatformDefinitions() []PlatformCapabilityDefinition {
 		withPayloadSchema(executionReadCapability("files.preview_metadata", "file_operations", "files:read"), projectOrSession, filePreviewMetadataPayload{}, "", ""),
 		withPayloadSchema(executionPayloadLimit(executionDestructiveCapability("files.write", "file_mutations", "files:write"), 3<<20), projectTargetDescription, fileWritePayload{}, "", ""),
 		withPayloadSchema(executionPayloadLimit(executionDestructiveCapability("files.upload_project", "file_mutations", "files:write"), 16<<20), projectTargetDescription, fileUploadPayload{}, "", ""),
-		withPayloadSchema(executionPayloadLimit(executionDestructiveCapability("files.upload_session", "file_mutations", "files:write", "sessions:write"), 48<<20), sessionTargetDescription, sessionFileUploadPayload{}, "", ""),
+		withPayloadSchema(executionPayloadLimit(executionDestructiveCapability("files.upload_session", "file_mutations", "files:write", "sessions:write"), 48<<20), sessionTargetDescription, sessionFileUploadPayload{},
+			`{"directory":"uploads","files":[{"path":"notes.txt","data_base64":"aGVsbG8K"}]}`,
+			"Writes files into the session's project. data_base64 is plain standard base64 of the file bytes (padding included), never a data URL; files.paste_session_image is the one that takes a data URL."),
 		withPayloadSchema(executionPayloadLimit(executionWriteCapability("files.paste_session_image", "file_mutations", "files:write", "sessions:write"), 16<<20), sessionTargetDescription, sessionImagePayload{},
 			`{"source":{"project_id":1,"path":"channels/_attachments/photo.jpeg"}}`,
-			"Send exactly one of data_url (inline base64 image) or source (a file in any OpenPoet project, local or SSH, so the image may live on another machine than the session). The image is written into the session's project and its relative path is returned; call sessions.image_prompt_hint to attach a prompt."),
+			"Send exactly one of data_url (the full data URL data:image/<type>;base64,<data>; unlike files.upload_session's data_base64, bare base64 is refused) or source (a file in any OpenPoet project, local or SSH, so the image may live on another machine than the session). The image is written into the session's project and its relative path is returned; call sessions.image_prompt_hint to attach a prompt."),
 	}
 }
 
@@ -97,17 +99,17 @@ type fileUploadPayload struct {
 }
 
 type sessionFileUploadPayload struct {
-	Directory string `json:"directory,omitempty"`
+	Directory string `json:"directory,omitempty" doc:"directory inside the session project where the files are written (relative)"`
 	Files     []struct {
-		Path string `json:"path"`
-		Data string `json:"data_base64"`
+		Path string `json:"path" doc:"file path relative to directory"`
+		Data string `json:"data_base64" doc:"file content as plain base64 (no data: prefix)"`
 	} `json:"files"`
 }
 
 type sessionImagePayload struct {
 	Directory string              `json:"directory,omitempty" doc:"directory inside the session project where the image is written (relative)"`
 	Filename  string              `json:"filename,omitempty" doc:"file name to write (relative); defaults to the source file name or paste_<timestamp>.<ext>"`
-	DataURL   string              `json:"data_url,omitempty" doc:"inline image as data:image/(png|jpeg|gif|webp);base64,<data>; send exactly one of data_url or source"`
+	DataURL   string              `json:"data_url,omitempty" doc:"inline image as a full data URL, data:image/(png|jpeg|gif|webp);base64,<data> (plain base64 without the prefix is refused); send exactly one of data_url or source"`
 	Source    *sessionImageSource `json:"source,omitempty" doc:"image file OpenPoet reads from a project (local or SSH), so it can live on another machine than the session; requires files:read"`
 }
 

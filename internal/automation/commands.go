@@ -652,15 +652,15 @@ func supportsExpectedVersion(handler application.CapabilityHandler) bool {
 }
 
 type taskListPayload struct {
-	ProjectID int64  `json:"project_id,omitempty"`
-	Status    string `json:"status,omitempty"`
-	Priority  string `json:"priority,omitempty"`
-	Search    string `json:"search,omitempty"`
+	ProjectID int64  `json:"project_id,omitempty" doc:"list one project's tasks (the status, priority and search filters then do not apply); omit to list all projects"`
+	Status    string `json:"status,omitempty" doc:"all-projects filter: todo, in_progress, awaiting_approval or done"`
+	Priority  string `json:"priority,omitempty" doc:"all-projects filter: low, medium, high or urgent"`
+	Search    string `json:"search,omitempty" doc:"all-projects filter: text in the title or description"`
 }
 
 type taskReferencePayload struct {
-	ProjectID int64 `json:"project_id,omitempty"`
-	TaskID    int64 `json:"task_id,omitempty"`
+	ProjectID int64 `json:"project_id,omitempty" doc:"project of the task, when the target does not carry it"`
+	TaskID    int64 `json:"task_id,omitempty" doc:"task id, when the target does not carry it"`
 }
 
 type bulkApproveVerificationPayload struct {
@@ -670,32 +670,32 @@ type bulkApproveVerificationPayload struct {
 }
 
 type createTaskPayload struct {
-	ProjectID   int64  `json:"project_id,omitempty"`
-	Title       string `json:"title"`
-	Description string `json:"description,omitempty"`
-	Status      string `json:"status,omitempty"`
-	Priority    string `json:"priority,omitempty"`
-	DueDate     string `json:"due_date,omitempty"`
-	ParentID    *int64 `json:"parent_id,omitempty"`
-	SortOrder   int    `json:"sort_order,omitempty"`
+	ProjectID   int64  `json:"project_id,omitempty" doc:"project to create the task in, when the target does not carry it"`
+	Title       string `json:"title" doc:"task title (required, not blank)"`
+	Description string `json:"description,omitempty" doc:"task body: the brief a session created with this task_id reads (openpoet_get_my_task)"`
+	Status      string `json:"status,omitempty" doc:"todo (default), in_progress, awaiting_approval or done"`
+	Priority    string `json:"priority,omitempty" doc:"low, medium (default), high or urgent"`
+	DueDate     string `json:"due_date,omitempty" doc:"RFC 3339, YYYY-MM-DD, YYYY-MM-DDTHH:MM or YYYY-MM-DD HH:MM[:SS]"`
+	ParentID    *int64 `json:"parent_id,omitempty" doc:"parent task id in the same project (subtask)"`
+	SortOrder   int    `json:"sort_order,omitempty" doc:"position in the project list (0 or more)"`
 }
 
 type updateTaskPayload struct {
-	ProjectID   int64   `json:"project_id,omitempty"`
-	TaskID      int64   `json:"task_id,omitempty"`
-	Title       *string `json:"title,omitempty"`
-	Description *string `json:"description,omitempty"`
-	Status      *string `json:"status,omitempty"`
-	Priority    *string `json:"priority,omitempty"`
-	DueDate     *string `json:"due_date,omitempty"`
-	ParentID    *int64  `json:"parent_id,omitempty"`
-	SortOrder   *int    `json:"sort_order,omitempty"`
+	ProjectID   int64   `json:"project_id,omitempty" doc:"project of the task, when the target does not carry it"`
+	TaskID      int64   `json:"task_id,omitempty" doc:"task id, when the target does not carry it"`
+	Title       *string `json:"title,omitempty" doc:"new title (not blank)"`
+	Description *string `json:"description,omitempty" doc:"new description (replaces the whole text)"`
+	Status      *string `json:"status,omitempty" doc:"todo, in_progress, awaiting_approval or done"`
+	Priority    *string `json:"priority,omitempty" doc:"low, medium, high or urgent"`
+	DueDate     *string `json:"due_date,omitempty" doc:"same formats as tasks.create; empty string clears it"`
+	ParentID    *int64  `json:"parent_id,omitempty" doc:"new parent task id in the same project"`
+	SortOrder   *int    `json:"sort_order,omitempty" doc:"new position in the project list"`
 }
 
 type changeStatusPayload struct {
-	ProjectID int64  `json:"project_id,omitempty"`
-	TaskID    int64  `json:"task_id,omitempty"`
-	Status    string `json:"status"`
+	ProjectID int64  `json:"project_id,omitempty" doc:"project of the task, when the target does not carry it"`
+	TaskID    int64  `json:"task_id,omitempty" doc:"task id, when the target does not carry it"`
+	Status    string `json:"status" doc:"todo, in_progress, awaiting_approval or done"`
 }
 
 type linkSessionPayload struct {
@@ -716,9 +716,9 @@ type sessionReferencePayload struct {
 }
 
 type addCommentPayload struct {
-	ProjectID int64  `json:"project_id,omitempty"`
-	TaskID    int64  `json:"task_id,omitempty"`
-	Comment   string `json:"comment"`
+	ProjectID int64  `json:"project_id,omitempty" doc:"project of the task, when the target does not carry it"`
+	TaskID    int64  `json:"task_id,omitempty" doc:"task id, when the target does not carry it"`
+	Comment   string `json:"comment" doc:"comment text added to the task history"`
 }
 
 func decodePayload(raw json.RawMessage, destination any) error {

@@ -14,6 +14,8 @@ const sessionMessagesNotes = "Reads the session's conversation as clean text fro
 	"expand: message = one message in full, in 8000-character chunks {id, role, at, chars, offset, text, next_offset}; pass offset = next_offset for the next chunk (a search hit's offset shows where the match is). " +
 	"Ids are short prefixes of the transcript entry uuid; any unique prefix is accepted. Secrets are redacted. " +
 	"Fails with session_transcript_unavailable for backends without a structured transcript (copilot, codex, opencode). " +
+	"A session on a remote (SSH) project is read from its host: allow up to 20 s, after which it fails with session_transcript_timeout (host slow or unreachable; try later); an ended remote session is read once and then served from memory. " +
+	"Each read needs its own fresh idempotency_key: resending a key replays its first answer, or idempotency_in_progress while that read still runs. " +
 	"Same service as the MCP tool openpoet_session_messages and GET /api/sessions/{id}/messages."
 
 type sessionMessagesPayload struct {
