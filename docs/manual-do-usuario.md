@@ -331,6 +331,37 @@ curl -s -X POST "$AV1/commands" -H "Authorization: Bearer $OPAV1_TOKEN" \
   `openpoet_get_session` mostra a linha `Turn:`. `openpoet_send_to_worker`
   aplica a mesma regra de turno aberto.
 
+**Restart ou deploy do OpenPoet no meio do turno** *(real hoje)*. Todo
+restart do `openpoet-prod` (deploy, crash, reboot, `update.apply`) mata os
+agentes, e o boot os reabre com `claude --resume`. O servidor guarda o turno
+de cada sessão no banco (`session_restart_state`) e, depois do restore:
+
+- **Sessão que estava no meio do turno** (e não esperando uma pergunta)
+  recebe sozinha, uma vez por restart, um prompt de continuação: *"O servidor
+  do OpenPoet reiniciou durante o seu turno (…; motivo: deploy; resultado:
+  deploy de 8e35de5 concluído com sucesso …). … Confira o estado atual antes
+  de repetir qualquer efeito e continue de onde parou."* Sessão ociosa ou
+  esperando o usuário não recebe nada.
+- **A sessão que rodou o `deploy.sh`** recebe o resultado mesmo que o turno
+  dela já tenha acabado (o deploy é o último passo do turno): *"O deploy que
+  você disparou (…) terminou: …. Faça a verificação pós-deploy …"*. Isso vale
+  também para um build que falhou sem derrubar a produção.
+- **Eventos no outbox** (ator `system:restart-recovery`):
+  - `platform.deploy.completed` / `platform.deploy.failed` (aggregate = id do
+    deploy): `commit`, `state` (`succeeded`, `failed`, `rolled_back`,
+    `rollback_failed`), `step`, `health`, `rollback`, `version`,
+    `requested_by_session`, `started_at`, `finished_at`, `outcome`. Publicado
+    uma vez por deploy.
+  - `platform.session.restored` (aggregate = sessão): `interrupted_turn`,
+    `awaiting_input`, `will_resume`, `restart_cause` (`deploy` ou `restart`),
+    `deploy_id`, `task_id`, `turn_since`.
+  - `platform.session.resume_prompt_delivered` / `resume_prompt_failed`:
+    `kind` (`interrupted_turn` ou `deploy_result`), `deploy_id`.
+
+O `deploy.sh` grava o deploy em `.run/deploy.record.json` (quem pediu vem de
+`OPENPOET_SESSION_ID`). Se o rollback falhar e a produção ficar fora, ninguém
+publica nada: o sinal é a Automation API não responder.
+
 **Parar a sessão de outra pessoa exige grant** (fluxo do broker de aprovações,
 que já existe hoje):
 
