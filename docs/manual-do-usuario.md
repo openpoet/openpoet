@@ -362,6 +362,66 @@ O `deploy.sh` grava o deploy em `.run/deploy.record.json` (quem pediu vem de
 `OPENPOET_SESSION_ID`). Se o rollback falhar e a produção ficar fora, ninguém
 publica nada: o sinal é a Automation API não responder.
 
+**Trocar o modo de permissão de uma sessão** *(real hoje)*. Quando o
+classificador do auto mode barra algo que você quer (ex.: editar
+`.claude/settings.json`, reiniciar um serviço), a Helena pode passar a sessão
+para `acceptEdits` e você aprova o passo pelo prompt normal, sem reiniciar a
+sessão. `sessions.set_permission_mode` aceita `auto`, `acceptEdits`, `default`
+(que o Claude Code mostra como *manual mode*) e `plan`; **`bypassPermissions` e
+`dontAsk` nunca são aceitos por esse caminho**.
+
+```bash
+curl -s -X POST "$AV1/commands" -H "Authorization: Bearer $OPAV1_TOKEN" \
+  -H 'Content-Type: application/json' -d '{
+    "command_id": "mode-50bc056f-1", "idempotency_key": "mode-50bc056f-1",
+    "capability": "sessions.set_permission_mode",
+    "target": {"type": "session", "id": "50bc056f"},
+    "payload": {"mode": "acceptEdits"},
+    "correlation_id": "ain:292",
+    "reason": "presidente vai aprovar à mão a regra de restart no .claude/settings.json"
+  }'
+# result: {"from":"auto","to":"acceptEdits","changed":true,"presses":2,"session":{...,"permission_mode":{"mode":"acceptEdits","source":"screen",...}}}
+```
+
+- **Como troca:** o OpenPoet aperta Shift+Tab na sessão (o mesmo ciclo do
+  teclado) e, a cada toque, lê o indicador de modo desenhado abaixo da caixa de
+  prompt (`⏵⏵ accept edits on`, `⏸ plan mode on`, `⏵⏵ auto mode on`,
+  `⏸ manual mode on`). Para assim que o alvo aparece. O `to` do resultado é o
+  que a tela mostrou, nunca uma suposição. Se a sessão já está no modo, volta
+  `changed: false` e nenhuma tecla é enviada. Vale só para `claude_code`.
+- **Risco e autorização:** é escrita R2 com aprovação por política (sem
+  `approval_token` a cada troca), mas exige `reason` e um `correlation_id` que
+  seja a referência da sua autorização (`ain:`, `inbound:`, `signal:`, `task:`
+  ou `policy:`). Agente de sessão (token `opst1_`) é recusado
+  (`action_approval_required`): nenhuma sessão tira os próprios prompts, nem os
+  de outra.
+- **Auditoria:** toda tentativa que chega ao teclado gera
+  `platform.session.permission_mode_recorded` no outbox (`requested`, `from`,
+  `to`, `presses`, `outcome` = `changed`/`unchanged`/`failed`, `error`,
+  `reason`, `authorization_ref`, `approved_by`; o `correlation_id` do evento é a
+  referência) e, se a sessão tem task, `session_permission_mode_changed` no
+  histórico da task. A troca efetiva também publica
+  `platform.session.permission_mode_changed`. O ledger de comandos
+  (`automation.commands.get`) guarda o envelope.
+- **Recusas:** `session_awaiting_input` com uma pergunta aberta (responda
+  antes; se o primeiro uso do auto mode abrir o opt-in, o erro sai assim e a
+  pergunta aparece em `awaiting_input`); `session_setting_unsupported` quando o
+  ciclo da sessão não oferece o alvo (ex.: auto mode indisponível; a mensagem
+  diz em que modo ela ficou) ou o backend não é Claude Code;
+  `permission_mode_unconfirmed` quando o indicador não repintou (releia
+  `sessions.get`).
+- **Modo atual:** `permission_mode {mode, source, observed_at}` em
+  `sessions.get`, `sessions.active` e `GET /api/sessions/{id}`. `source` é
+  `screen` (indicador na tela) ou `hook` (o `permission_mode` do último evento
+  de hook). `openpoet_get_session` mostra a linha `Permission mode:`.
+- **Restart:** o modo não sobrevive a um restart do OpenPoet. A sessão
+  retomada volta ao modo de lançamento (o `defaultMode` do settings). Depois de
+  um deploy, troque de novo se precisar.
+- Mesma operação: REST `POST /api/sessions/{id}/permission-mode`
+  `{mode, authorization_ref, reason}`, tool `set_session_permission_mode` no
+  assistente e `openpoet_set_session_permission_mode` no MCP (sujeitos à mesma
+  regra de ator).
+
 **Parar a sessão de outra pessoa exige grant** (fluxo do broker de aprovações,
 que já existe hoje):
 
@@ -722,6 +782,10 @@ projetada terá de honrar quando entregar.
    ficam no histórico da task (`session_closed_completed`) e no outbox
    (`platform.session.closure_recorded`). Qualquer outro caso continua em
    `sessions.stop`.
+   Outra exceção: `sessions.set_permission_mode` troca o modo de permissão
+   (`auto`/`acceptEdits`/`default`/`plan`, nunca `bypassPermissions`) sem grant,
+   com `reason` e `correlation_id` de autorização obrigatórios e registro de
+   quem, de qual modo, para qual e por quê. Agentes de sessão não podem usá-lo.
 3. **Superfícies spoofáveis só recebem verbos aditivos.** MCP com identidade
    de sessão e REST de sessão criam e listam; remover, mergear e aprovar
    manifesto vivem apenas no plano de automação autenticado.
