@@ -131,6 +131,8 @@ type API struct {
 	workspaceService     *application.WorkspaceService
 	platformServices     *PlatformApplicationServices
 	providerBridge       *providerbridge.Manager
+	// restartRecovery resumes sessions a server restart interrupted.
+	restartRecovery *restartRecovery
 
 	// ReinitAIProvider is called when legacy AI settings change (kept for backward compat).
 	ReinitAIProvider func()

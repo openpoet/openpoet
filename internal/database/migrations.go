@@ -93,6 +93,7 @@ var migrations = []Migration{
 	{Version: 75, Description: "mcp: per-OS command variants on global servers (command_windows/args_windows/env_windows) so one logical server serves a mixed Linux/Windows fleet", Up: migrateV75},
 	{Version: 76, Description: "sessions: add error_reason and last_output so an errored session explains itself after its runtime is gone", Up: migrateV76},
 	{Version: 77, Description: "automation_commands: record command_id and capability so a client can look a command up by either (automation.commands.get)", Up: migrateV77},
+	{Version: 78, Description: "sessions: session_restart_state keeps each live session's turn (open/closed) and pending question across a server restart, so an interrupted turn can be resumed", Up: migrateV78},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2083,6 +2084,25 @@ func migrateV77(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV77 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func migrateV78(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS session_restart_state (
+			session_id     TEXT PRIMARY KEY,
+			turn_open      INTEGER NOT NULL DEFAULT 0,
+			turn_since     TIMESTAMP,
+			turn_reason    TEXT NOT NULL DEFAULT '',
+			awaiting_input INTEGER NOT NULL DEFAULT 0,
+			updated_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV78 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

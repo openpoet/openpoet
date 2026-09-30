@@ -1238,6 +1238,9 @@ func main() {
 		}
 	}()
 
+	deployWatchCtx, stopDeployWatch := context.WithCancel(context.Background())
+	defer stopDeployWatch()
+
 	// Auto-restore previously active sessions, then sweep orphaned workspace
 	// leases (crash strands, failed restores). The sweep runs even with zero
 	// sessions to restore — that is exactly the case after a crash whose
@@ -1245,20 +1248,10 @@ func main() {
 	go func() {
 		time.Sleep(2 * time.Second) // let server start first
 		restoreCtx := context.Background()
-		if len(sessionsToRestore) > 0 {
-			log.Printf("[AutoRestore] Restoring %d active session(s) from before restart...", len(sessionsToRestore))
-			restored := 0
-			for _, sess := range sessionsToRestore {
-				sess := sess // capture loop var
-				if err := api.AutoRestoreSession(restoreCtx, &sess); err != nil {
-					log.Printf("[AutoRestore] Failed to restore session %s: %v", sess.ID, err)
-				} else {
-					restored++
-					log.Printf("[AutoRestore] Session %s restored successfully", sess.ID)
-				}
-			}
-			log.Printf("[AutoRestore] Done: %d/%d sessions restored", restored, len(sessionsToRestore))
-		}
+		// Restores, then resumes the sessions whose turn the restart cut and
+		// reports the deploy that caused it (platform.deploy.*).
+		api.RestoreSessionsAfterRestart(restoreCtx, sessionsToRestore)
+		go api.WatchDeploys(deployWatchCtx)
 		if freed, err := db.ReleaseOrphanWorkspaceLeases(restoreCtx); err != nil {
 			log.Printf("[Workspace] orphan lease sweep failed: %v", err)
 		} else if freed > 0 {
@@ -1284,6 +1277,11 @@ func main() {
 
 	// Stop structured view watchers
 	svHandler.StopAllWatchers()
+
+	// Record which sessions are mid-turn before stopping them: the agents'
+	// SessionEnd hooks during the stop must not read as finished turns.
+	stopDeployWatch()
+	api.SnapshotSessionsForRestart()
 
 	// Stop all sessions (preserve DB state for auto-restore on next startup)
 	sessionMgr.StopAllForRestart()
