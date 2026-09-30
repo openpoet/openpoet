@@ -75,21 +75,21 @@ into one — that was the bug that made isolation useless.
   behaviour, `internal/coordinator/gate.go`).
 - **Lane divergence** — the same logical file in **different** trees (main
   checkout vs a `.openpoet/worktrees/<lane>` worktree, or two lanes). Each side
-  owns its own checkout, nothing can be lost, and git arbitrates at merge time,
-  so this is **never denied**: it emits a `conflict.divergence` event for merge
-  sequencing and opens no incident. `workspaces.PredictMerge` is the
-  authoritative merge-risk check.
+  owns its own checkout, nothing can be lost, and git arbitrates when the lane
+  is integrated, so this is **never denied**: it emits a `conflict.divergence`
+  event (integration risk) and opens no incident.
 
 Claims expire (`claimTTL`, 30 min from the last write to that path) — a claim is
 evidence of live contention, not a permanent lock.
 
-Sessions choose their tree with `isolation` on `sessions.create` / `start_worker`
-/ `POST /api/sessions`: `never` (default, main checkout), `auto` (main checkout
+Sessions choose their tree with `isolation` on `sessions.create` /
+`POST /api/sessions`: `never` (default, main checkout), `auto` (main checkout
 while free, an isolated lane once busy), `always` (its own lane unconditionally).
 Lanes are **provisioned on demand** — nothing needs pre-provisioning — and the
-create response carries `workspace_id`/`work_dir` so the caller can later
-`predict_merge` that lane. Merging it back is a human-approved
-`workspaces.merge` from the UI, not a session-initiated act.
+create response carries `workspace_id`/`work_dir` so the caller can find the
+lane later. OpenPoet does not merge lanes: the lane is an ordinary git branch
+(`openpoet/<name>`), integrated with plain git by whoever owns the work, then
+released with `workspaces.remove` or `workspaces.discard`.
 
 A session that is ALREADY running can be moved into a lane with the
 `sessions.isolate` capability (destructive tier). A runner cannot change working
@@ -101,14 +101,6 @@ encoded cwd, so `--resume` cannot cross the change — the caller supplies a
 refused (`session_has_uncommitted_work`), because a lane branches from HEAD and
 would leave that work behind. It is cheapest right after a gate denial, when the
 losing session has usually written nothing yet.
-
-Integration is ordered by `workspaces.plan_merges` (read-only; MCP `plan_merges`,
-coordinator route `GET /api/coordinator/projects/{id}/merge_plan`). It exists
-because per-lane prediction cannot see lane-vs-lane: two lanes that each rewrote
-`util.go` both predict clean against main while being guaranteed to collide. The
-plan compares lanes to EACH OTHER, schedules the ones touching nobody else's
-files first, and sets `revalidate_before_each_merge` — the ORDER stays valid, but
-every merge moves HEAD, so `predict_merge` must be re-run before each one.
 
 E2E harness: `ops/lanes/e2e.sh` (real server + real git repos + fresh DB on port
 8793; $0 — synthetic sessions via the `OPENPOET_TEST_MODE` endpoint).

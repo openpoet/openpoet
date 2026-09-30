@@ -94,6 +94,7 @@ var migrations = []Migration{
 	{Version: 76, Description: "sessions: add error_reason and last_output so an errored session explains itself after its runtime is gone", Up: migrateV76},
 	{Version: 77, Description: "automation_commands: record command_id and capability so a client can look a command up by either (automation.commands.get)", Up: migrateV77},
 	{Version: 78, Description: "sessions: session_restart_state keeps each live session's turn (open/closed) and pending question across a server restart, so an interrupted turn can be resumed", Up: migrateV78},
+	{Version: 79, Description: "retire the coordinator tier: delete the session-report skill and the coordinator lease/spawn blackboard keys (the conflict radar and lifecycle reports stay)", Up: migrateV79},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2103,6 +2104,31 @@ func migrateV78(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV78 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV79 — retires the Maestro coordinator tier (session-elected
+// coordinator, start_worker/send_to_worker, milestone reports) and workspace
+// merge. None of it was ever used in production: no lease was ever written to
+// the blackboard and every structured report is a system lifecycle report.
+//
+// Deleting the session-report skill row is what removes its materialized copy
+// from every synced project (the config syncer prunes skill directories with no
+// DB row). The blackboard keys are the tier's own: the group lease and the
+// start_worker idempotency fences. V70's milestone columns on
+// structured_session_reports stay (additive contract; nothing writes them).
+func migrateV79(tx *sqlx.Tx) error {
+	stmts := []string{
+		`DELETE FROM project_skill_config WHERE skill_id IN (SELECT id FROM skills WHERE name = 'session-report')`,
+		`DELETE FROM skill_versions WHERE skill_id IN (SELECT id FROM skills WHERE name = 'session-report')`,
+		`DELETE FROM skills WHERE name = 'session-report'`,
+		`DELETE FROM blackboard_entries WHERE scope_type = 'group' AND (key = 'coordinator-lease' OR key LIKE 'spawn:%')`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV79 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

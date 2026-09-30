@@ -234,8 +234,8 @@ func executionPlatformActor(definitions []PlatformCapabilityDefinition) Actor {
 
 func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := executionPlatformDefinitionsForTest()
-	if len(definitions) != 69 {
-		t.Fatalf("execution surface has %d capabilities, want 69", len(definitions))
+	if len(definitions) != 67 {
+		t.Fatalf("execution surface has %d capabilities, want 67", len(definitions))
 	}
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -245,11 +245,11 @@ func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 		seen[definition.Name] = struct{}{}
 	}
 	capabilities, registry := executionPlatformTestRegistry(t, &executionPlatformFakePorts{})
-	if got := len(capabilities.List()); got != 69 {
-		t.Fatalf("application registry has %d execution capabilities, want 69", got)
+	if got := len(capabilities.List()); got != 67 {
+		t.Fatalf("application registry has %d execution capabilities, want 67", got)
 	}
-	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 69 {
-		t.Fatalf("platform discovery has %d execution capabilities, want 69", got)
+	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 67 {
+		t.Fatalf("platform discovery has %d execution capabilities, want 67", got)
 	}
 }
 
@@ -343,7 +343,7 @@ func TestExecutionPlatformReadSurfaceIsExplicit(t *testing.T) {
 		"files.list", "files.preview_metadata", "files.read", "git.branches", "git.diff", "git.log", "git.show", "git.status",
 		"sessions.active", "sessions.events_status", "sessions.file_activity", "sessions.get", "sessions.history", "sessions.list", "sessions.messages",
 		"tunnel.devices", "tunnel.status", "update.check", "update.status",
-		"workspaces.get", "workspaces.list", "workspaces.plan_merges",
+		"workspaces.get", "workspaces.list",
 		"compose.status", "compose.logs",
 		"automation.commands.get",
 	}
@@ -448,10 +448,8 @@ func executionDryRunCases() []executionDryRunCase {
 		{name: "sessions.file_activity", target: `{"type":"session","id":"s1"}`, payload: `{}`},
 		{name: "workspaces.list", target: `{"project_id":1}`, payload: `{}`},
 		{name: "workspaces.get", target: `{"type":"workspace","id":"ws-1"}`, payload: `{}`},
-		{name: "workspaces.plan_merges", target: `{"project_id":1}`, payload: `{}`},
 		{name: "workspaces.create", target: `{"project_id":1}`, payload: `{"name":"lane-a"}`},
 		{name: "workspaces.remove", target: `{"type":"workspace","id":"ws-1"}`, payload: `{}`},
-		{name: "workspaces.merge", target: `{"type":"workspace","id":"ws-1"}`, payload: `{}`},
 		{name: "workspaces.discard", target: `{"type":"workspace","id":"ws-1"}`, payload: `{}`},
 		{name: "update.apply", target: `{}`, payload: `{}`},
 		{name: "blackboard.get", target: `{}`, payload: `{"scope":"global","key":"k"}`},

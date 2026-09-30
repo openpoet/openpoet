@@ -167,27 +167,17 @@ curl -s -X POST "$AV1/commands" \
 curl -s "$AV1/events?consumer=meu-orquestrador" -H "Authorization: Bearer $OPAV1_TOKEN"
 ```
 
-Capabilities previstas: `workspaces.create` (escrita), `workspaces.list` /
-`workspaces.get` (leitura), `workspaces.remove` e `workspaces.merge`
-(**destrutivas — exigem grant de aprovação**, como `sessions.stop` já hoje).
-Escopos novos: `workspaces:read` / `workspaces:write`. Eventos previstos no
-outbox: `workspace.created`, `workspace.ready`, `workspace.needs_merge`,
-`workspace.removed`, além dos resultados de merge.
+Capabilities: `workspaces.create` (escrita), `workspaces.list` /
+`workspaces.get` (leitura), `workspaces.remove` e `workspaces.discard`
+(**destrutivas — exigem grant de aprovação**, como `sessions.stop`).
+Escopos: `workspaces:read` / `workspaces:write`. Eventos no outbox:
+`workspace.created`, `workspace.ready`, `workspace.removed`.
 
-**Merge-back — trazendo o trabalho de volta.** O merge é deliberadamente
-simples e assistido por sessão, não mágico:
-
-1. Ao fim de cada sessão, o OpenPoet calcula `{dirty_files, ahead, behind}` da
-   lane e publica um resumo (evento `workspace.needs_merge` quando há trabalho
-   pendente).
-2. `workspaces.merge` *(destrutiva, requer aprovação)* pré-condiciona o
-   checkout principal limpo e faz `git merge --no-ff openpoet/<nome>` **no
-   worktree principal**.
-3. Em conflito, o merge é abortado (o principal fica limpo, sem `MERGE_HEAD`)
-   e a resposta traz **a lista de arquivos conflitados + um payload pronto de
-   `sessions.create` com `custom_prompt`** para você spawnar, em um clique/um
-   comando, uma sessão normal no worktree principal encarregada de resolver o
-   conflito e rodar os testes.
+**Trazendo o trabalho de volta.** O OpenPoet não faz merge de lanes (a
+capability `workspaces.merge` e as previsões `predict_merge`/`plan_merges`
+foram removidas em 30/09/2026). A lane é uma branch git comum
+(`openpoet/<nome>`): integre com git como qualquer outra branch e depois
+libere a lane com `workspaces.remove` ou `workspaces.discard`.
 
 **Ciclo de vida e limpeza (GC).** Sem daemon novo: ao fim da sessão, lanes
 *provadamente inertes* (árvore limpa E zero commits à frente da base, ou branch
@@ -206,7 +196,7 @@ reconcilia banco × `git worktree list`, e lanes sujas paradas há dias viram
   projeto, quando o hardening SSH permitir).
 - Superfícies "spoofáveis" (MCP com identidade de sessão, REST de sessão) só
   alcançam verbos **aditivos** (criar, listar). `workspaces.remove` e
-  `workspaces.merge` existem apenas na automação com bearer + aprovação
+  `workspaces.discard` existem apenas na automação com bearer + aprovação
   explícita. Pior caso de uma sessão confusa: bagunça de disco, nunca
   destruição do trabalho de outra lane.
 - Nomes de workspace com escape de path (`../…`) são rejeitados; todo `path`
@@ -330,8 +320,7 @@ curl -s -X POST "$AV1/commands" -H "Authorization: Bearer $OPAV1_TOKEN" \
   resposta.
 - **Via MCP**, `openpoet_send_to_session` aceita `if_idle` (recusa com o turno
   aberto) e `await_ack` (informa se o agente aceitou), e
-  `openpoet_get_session` mostra a linha `Turn:`. `openpoet_send_to_worker`
-  aplica a mesma regra de turno aberto.
+  `openpoet_get_session` mostra a linha `Turn:`.
 
 **Restart ou deploy do OpenPoet no meio do turno** *(real hoje)*. Todo
 restart do `openpoet-prod` (deploy, crash, reboot, `update.apply`) mata os

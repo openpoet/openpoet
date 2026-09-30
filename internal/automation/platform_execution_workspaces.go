@@ -13,12 +13,8 @@ func workspacePlatformDefinitions() []PlatformCapabilityDefinition {
 	return []PlatformCapabilityDefinition{
 		executionReadCapability("workspaces.list", "workspaces", "workspaces:read"),
 		executionReadCapability("workspaces.get", "workspaces", "workspaces:read"),
-		// Read-only: plans an integration ORDER for a project's open lanes without
-		// touching any tree.
-		executionReadCapability("workspaces.plan_merges", "workspaces", "workspaces:read"),
 		executionWriteCapability("workspaces.create", "workspaces", "workspaces:write"),
 		executionDestructiveCapability("workspaces.remove", "workspaces", "workspaces:write"),
-		executionDestructiveCapability("workspaces.merge", "workspaces", "workspaces:write"),
 		executionDestructiveCapability("workspaces.discard", "workspaces", "workspaces:write"),
 	}
 }
@@ -156,17 +152,6 @@ func (e *workspacePlatformExecutor) Validate(_ context.Context, input PlatformEx
 			}
 			return map[string]any{"workspaces": views}, nil
 		}}, nil
-	case "workspaces.plan_merges":
-		if err := requireEmptyExecutionPayload(input.Payload); err != nil {
-			return nil, err
-		}
-		projectID := target.ProjectID
-		if projectID <= 0 {
-			return nil, platformFailure("platform_target_invalid", "project_id must be positive", false)
-		}
-		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"project_id": projectID}), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
-			return e.service.PlanMerges(ctx, projectID)
-		}}, nil
 	case "workspaces.get":
 		if err := requireEmptyExecutionPayload(input.Payload); err != nil {
 			return nil, err
@@ -217,32 +202,6 @@ func (e *workspacePlatformExecutor) Validate(_ context.Context, input PlatformEx
 				return nil, err
 			}
 			return map[string]any{"workspace": workspaceView(*ws), "discarded": true}, nil
-		}}, nil
-	case "workspaces.merge":
-		if err := requireEmptyExecutionPayload(input.Payload); err != nil {
-			return nil, err
-		}
-		workspaceID, err := executionStringID(target, "workspace id")
-		if err != nil {
-			return nil, err
-		}
-		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"workspace_id": workspaceID}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
-			result, err := e.service.Merge(ctx, application.MergeWorkspaceCommand{
-				WorkspaceID:   workspaceID,
-				Authorization: authorization,
-			})
-			if err != nil {
-				return nil, err
-			}
-			out := map[string]any{"merged": result.Merged}
-			if result.Workspace != nil {
-				out["workspace"] = workspaceView(*result.Workspace)
-			}
-			if !result.Merged {
-				out["code"] = "workspace_merge_conflict"
-				out["conflict_files"] = result.ConflictFiles
-			}
-			return out, nil
 		}}, nil
 	}
 	return nil, platformFailure("platform_capability_unknown", "unknown workspace capability", false)

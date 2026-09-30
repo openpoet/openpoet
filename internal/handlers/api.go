@@ -595,17 +595,6 @@ func (a *API) CapabilityRegistry() *application.CapabilityRegistry {
 	return a.capabilities
 }
 
-// WorkspaceService exposes the workspace application service (merge
-// prediction for the coordinator tier, Phase 7.5).
-func (a *API) WorkspaceService() *application.WorkspaceService {
-	if a == nil {
-		return nil
-	}
-	a.platformMu.RLock()
-	defer a.platformMu.RUnlock()
-	return a.workspaceService
-}
-
 func (a *API) PlatformCapabilityRegistry() *automation.PlatformCapabilityRegistry {
 	if a == nil {
 		return nil
