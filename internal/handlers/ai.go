@@ -3128,6 +3128,37 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		return fmt.Sprintf("Session history: %s | source: %s | mode: %s | lines: %d/%d | offset: %d%s\n\n%s",
 			result.SessionID, result.Source, result.Mode, result.ReturnedLines, result.TotalLines, result.Offset, truncated, result.Content), nil
 
+	case "session_messages":
+		sessionID, _ := input["session_id"].(string)
+		if sessionID == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		if _, err := h.getAllowedSession(ctx, conversationID, sessionID); err != nil {
+			return "", err
+		}
+		services, ok := h.api.platformApplicationServices()
+		if !ok {
+			return "", errors.New("platform application services unavailable")
+		}
+		result, err := services.Execution.SessionMessages.Read(ctx, application.SessionMessagesQuery{
+			SessionID: sessionID,
+			Role:      stringInput(input, "role"),
+			LastN:     intInput(input, "last_n", 0),
+			BeforeID:  stringInput(input, "before_id"),
+			Search:    stringInput(input, "search"),
+			Expand:    stringInput(input, "expand"),
+			Offset:    intInput(input, "offset", 0),
+			MaxChars:  intInput(input, "max_chars", 0),
+		})
+		if err != nil {
+			return "", err
+		}
+		body, err := json.Marshal(result)
+		if err != nil {
+			return "", err
+		}
+		return mcp.FormatSessionMessages(body)
+
 	case "send_to_session":
 		sessionID, _ := input["session_id"].(string)
 		text, _ := input["text"].(string)

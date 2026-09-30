@@ -1489,6 +1489,31 @@ func (a *API) GetSessionHistory(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, result)
 }
 
+// GetSessionMessages reads the session's conversation as clean text from its
+// structured transcript: latest messages, a search, or one message expanded.
+func (a *API) GetSessionMessages(w http.ResponseWriter, r *http.Request) {
+	services, ok := requirePlatformApplicationServices(a, w)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	result, err := services.Execution.SessionMessages.Read(r.Context(), application.SessionMessagesQuery{
+		SessionID: chi.URLParam(r, "id"),
+		Role:      q.Get("role"),
+		LastN:     parseIntQuery(q.Get("last_n"), 0),
+		BeforeID:  q.Get("before_id"),
+		Search:    q.Get("search"),
+		Expand:    q.Get("expand"),
+		Offset:    parseIntQuery(q.Get("offset"), 0),
+		MaxChars:  parseIntQuery(q.Get("max_chars"), 0),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, result)
+}
+
 func parseBoolQuery(v string) bool {
 	v = strings.ToLower(strings.TrimSpace(v))
 	return v == "1" || v == "true" || v == "yes" || v == "on"

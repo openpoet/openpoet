@@ -913,7 +913,7 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:        "read_session_history",
-			Description: "Read a compact slice of a session's terminal/message history without loading the full transcript. Supports tail, head, window, and search modes.",
+			Description: "Read a compact slice of a session's terminal/message history without loading the full transcript. Supports tail, head, window, and search modes. To read what was said in the conversation, prefer session_messages.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
@@ -927,6 +927,28 @@ func AllToolDefs() []ToolDef {
 					"case_sensitive": {Type: "boolean", Description: "Use case-sensitive search. Default false."},
 					"context":        {Type: "string", Description: "Context lines before/after each search match. Default: 2."},
 					"max_chars":      {Type: "string", Description: "Maximum returned characters. Default: 12000, hard cap: 50000."},
+				},
+				Required: []string{"session_id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name: "session_messages",
+			Description: "Read a session's conversation as clean text from its structured transcript (never the terminal screen): user prompts and assistant replies, without tool calls, tool output or thinking. " +
+				"Default: the last_n latest messages (short id, role, time, size, text cut to max_chars); page back with before_id = the reported next_before_id. " +
+				"With search: up to 10 matching messages as short snippets (case- and accent-insensitive). With expand: one message in full, in 8000-character chunks (offset = next_offset). " +
+				"Not available for copilot, codex or opencode sessions.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"session_id": {Type: "string", Description: "Session ID"},
+					"role":       {Type: "string", Description: "Only user or only assistant messages. Default: both."},
+					"last_n":     {Type: "string", Description: "Messages per page, 1-20. Default: 10. Search returns at most 10."},
+					"before_id":  {Type: "string", Description: "Cursor: only messages older than this message id (next_before_id of the previous page)."},
+					"search":     {Type: "string", Description: "Text to find (at most 200 characters). Returns snippets instead of messages."},
+					"expand":     {Type: "string", Description: "Id of one message to read in full."},
+					"offset":     {Type: "string", Description: "With expand: character offset of the chunk (next_offset of the previous one). Default: 0."},
+					"max_chars":  {Type: "string", Description: "Characters kept per message in the list, 80-1500. Default: 500."},
 				},
 				Required: []string{"session_id"},
 			},
