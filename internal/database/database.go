@@ -2150,11 +2150,20 @@ func (d *DB) ListTaskHistory(ctx context.Context, taskID int64, limit int) ([]Ta
 	return history, err
 }
 
+// ReopenSession moves an ended session (stopped, completed or error) back to
+// starting. It fails when no row moved — a live or missing session — so the
+// caller never launches a runner against a row still marked ended.
 func (d *DB) ReopenSession(ctx context.Context, id string) error {
-	_, err := d.ExecContext(ctx,
-		"UPDATE sessions SET status='starting', end_time=NULL, start_time=?, pid=NULL, error_reason='', last_output='' WHERE id=? AND status IN ('stopped', 'completed')",
+	result, err := d.ExecContext(ctx,
+		"UPDATE sessions SET status='starting', end_time=NULL, start_time=?, pid=NULL, error_reason='', last_output='' WHERE id=? AND status IN ('stopped', 'completed', 'error')",
 		time.Now(), id)
-	return err
+	if err != nil {
+		return err
+	}
+	if rows, err := result.RowsAffected(); err == nil && rows == 0 {
+		return fmt.Errorf("session %s is not in a reopenable state", id)
+	}
+	return nil
 }
 
 // AISuggestion operations

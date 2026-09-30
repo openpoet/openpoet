@@ -667,6 +667,9 @@ func (s *SessionService) CloseCompleted(ctx context.Context, command CloseComple
 	return stored, nil
 }
 
+// reopenableSessionStatuses are the ended states; starting and running are live.
+var reopenableSessionStatuses = map[string]bool{"stopped": true, "completed": true, "error": true}
+
 type ReopenSessionCommand struct {
 	SessionID                  string
 	DangerouslySkipPermissions bool
@@ -681,8 +684,11 @@ func (s *SessionService) Reopen(ctx context.Context, command ReopenSessionComman
 	if err != nil {
 		return nil, err
 	}
-	if session.Status != "stopped" && session.Status != "completed" {
-		return nil, conflictError("session_not_reopenable", "Only stopped or completed sessions can be reopened")
+	// Every ended state resumes its transcript. An error session is usually one
+	// whose runner could not come back (e.g. an SSH timeout during the
+	// post-deploy restore) and its conversation is intact.
+	if !reopenableSessionStatuses[session.Status] {
+		return nil, conflictError("session_not_reopenable", "Only stopped, completed or error sessions can be reopened; this one is "+session.Status)
 	}
 	if s.manager == nil {
 		return nil, validationError("session_manager_unavailable", "Session manager is unavailable")
