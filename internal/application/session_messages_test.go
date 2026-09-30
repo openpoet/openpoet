@@ -266,6 +266,10 @@ func TestSessionMessagesFailures(t *testing.T) {
 	if _, err := runMessages(t, messagesExecutor(fakeTranscripts{err: errors.New("sftp down")}, session), `{}`); !hasFailureCode(err, "session_transcript_unavailable") {
 		t.Fatalf("read failure err = %v", err)
 	}
+	slow := fakeTranscripts{err: fmt.Errorf("reading the remote session transcript: %w", context.DeadlineExceeded)}
+	if _, err := runMessages(t, messagesExecutor(slow, session), `{}`); !hasFailureCode(err, "session_transcript_timeout") {
+		t.Fatalf("remote timeout err = %v", err)
+	}
 	if _, err := runMessages(t, messagesExecutor(nil, session), `{}`); err == nil {
 		t.Fatal("missing transcript port was accepted")
 	}
