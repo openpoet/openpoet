@@ -279,6 +279,58 @@ openpoet_send_to_session {"session_id": "<alvo>", "text": "rode os testes e repo
 → {"submitted": true, "acknowledged": true}
 ```
 
+**Enviar texto a outra sessão sem perder nem duplicar** *(real hoje)*. Pela
+automação, `sessions.send_input` digita o texto e espera até 8 s o agente
+aceitar o prompt (hook `UserPromptSubmit`):
+
+```bash
+curl -s -X POST "$AV1/commands" -H "Authorization: Bearer $OPAV1_TOKEN" \
+  -H 'Content-Type: application/json' --max-time 15 \
+  -d '{"command_id": "cmd-ain238", "idempotency_key": "mylifeos:helena:ain238",
+       "capability": "sessions.send_input", "correlation_id": "ain:238",
+       "target": {"type": "session", "id": "d1f920bb"},
+       "payload": {"text": "leia o doc e responda"}}'
+# → result: {"sent": true, "acknowledged": true, "await_ack": true, ...}
+```
+
+- **Sessão ocupada = turno aberto.** O envio é recusado com `session_busy`
+  enquanto o turno da sessão-alvo está aberto: do prompt aceito até o `Stop`,
+  por mais que um tool demore. Um turno interrompido (Esc) não manda `Stop`, e
+  quem o fecha é a notificação de ociosidade do Claude Code, cerca de 1 min
+  depois. `sessions.get` mostra `turn {open, since, reason}`. `force: true`
+  digita mesmo assim.
+- **O cliente desistir não muda nada no servidor.** Timeout ou desconexão do
+  cliente não cortam a espera pelo ack: o comando termina e grava o resultado
+  real. Use timeout de cliente de pelo menos 15 s (a chamada leva de 2 a 10 s).
+- **Depois de um timeout, nunca troque a key.** Uma key nova é uma execução
+  nova: o texto chega duas vezes, e no `sessions.create` nasce uma segunda
+  sessão. Reenvie o **mesmo envelope** (mesma `idempotency_key` e mesmo
+  `command_id`). Se o comando ainda estiver rodando, o reenvio espera até 12 s
+  pelo resultado e devolve a resposta gravada (`Idempotency-Replayed: true`)
+  sem executar de novo. Outra saída é perguntar:
+
+```bash
+curl -s -X POST "$AV1/commands" -H "Authorization: Bearer $OPAV1_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"command_id": "q-'"$(uuidgen)"'", "idempotency_key": "q-'"$(uuidgen)"'",
+       "capability": "automation.commands.get", "target": {},
+       "payload": {"idempotency_key": "mylifeos:helena:ain238"}}'
+# → {"found": true, "state": "applied", "acknowledged": true, "result": {...}}
+```
+
+  `state` pode ser `pending` (ainda rodando), `applied`, `failed` ou
+  `indeterminate`. Este último aparece quando o servidor reiniciou no meio do
+  comando e o resultado é desconhecido: confira o estado do alvo antes de agir
+  de novo. `found: false` quer dizer que o comando nunca chegou, e aí é seguro
+  reenviar o mesmo envelope. A consulta só enxerga comandos do próprio cliente
+  (escopo `events:read`) e aceita `command_id` no lugar da key. Cada consulta
+  precisa de uma key nova, porque uma consulta repetida devolve a primeira
+  resposta.
+- **Via MCP**, `openpoet_send_to_session` aceita `if_idle` (recusa com o turno
+  aberto) e `await_ack` (informa se o agente aceitou), e
+  `openpoet_get_session` mostra a linha `Turn:`. `openpoet_send_to_worker`
+  aplica a mesma regra de turno aberto.
+
 **Parar a sessão de outra pessoa exige grant** (fluxo do broker de aprovações,
 que já existe hoje):
 
