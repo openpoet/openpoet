@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"openpoet/internal/llm"
 	"openpoet/internal/sessionmeta"
@@ -1140,12 +1141,32 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		if sid == "" || text == "" {
 			return "", fmt.Errorf("session_id and text are required")
 		}
-		payload, _ := json.Marshal(map[string]string{"text": text})
-		_, err := client.Post(fmt.Sprintf("/api/sessions/%s/input", sid), string(payload))
+		body := map[string]any{"text": text}
+		ifIdle, _ := params["if_idle"].(bool)
+		awaitAck, _ := params["await_ack"].(bool)
+		if ifIdle {
+			body["if_idle"] = true
+		}
+		if awaitAck {
+			body["await_ack"] = true
+		}
+		payload, _ := json.Marshal(body)
+		respBody, err := client.Post(fmt.Sprintf("/api/sessions/%s/input", sid), string(payload))
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Sent to session %s: %s", shortID(sid), truncate(text, 100)), nil
+		sent := fmt.Sprintf("Sent to session %s: %s", shortID(sid), truncate(text, 100))
+		if awaitAck {
+			var result struct {
+				Acknowledged bool `json:"acknowledged"`
+			}
+			if json.Unmarshal(respBody, &result) == nil && result.Acknowledged {
+				sent += "\nAcknowledged: the agent accepted the prompt."
+			} else {
+				sent += "\nNot acknowledged: the agent did not confirm the prompt within 8 s. Check openpoet_get_session (turn) before sending again."
+			}
+		}
+		return sent, nil
 
 	case "openpoet_link_session_task":
 		sid, _ := params["session_id"].(string)
@@ -1540,6 +1561,11 @@ func formatSessionDetail(client *APIClient, body []byte) (string, error) {
 		RequestedModel string `json:"requested_model"`
 		Effort         string `json:"effort"`
 		Harness        string `json:"harness"`
+		Turn           *struct {
+			Open   bool      `json:"open"`
+			Since  time.Time `json:"since"`
+			Reason string    `json:"reason"`
+		} `json:"turn"`
 	}
 	if err := json.Unmarshal(body, &sess); err != nil {
 		return string(body), nil
@@ -1553,6 +1579,13 @@ func formatSessionDetail(client *APIClient, body []byte) (string, error) {
 		requestedModel = meta.Model
 	}
 	sb.WriteString(fmt.Sprintf("Effective model: %s\nRequested model: %s\nEffort: %s\nHarness: %s\n", meta.Model, requestedModel, meta.Effort, meta.Harness))
+	if sess.Turn != nil {
+		state := "idle (between turns)"
+		if sess.Turn.Open {
+			state = "open (mid-turn)"
+		}
+		sb.WriteString(fmt.Sprintf("Turn: %s since %s (%s)\n", state, sess.Turn.Since.Local().Format("2006-01-02 15:04:05"), sess.Turn.Reason))
+	}
 	if meta.HarnessDetails != "" {
 		sb.WriteString(fmt.Sprintf("Harness details: %s\n", meta.HarnessDetails))
 	}

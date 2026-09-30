@@ -140,20 +140,21 @@ type HookHandler struct {
 	HasRecentSuggestions func(sessionID string) bool
 
 	mu                sync.Mutex
-	pending           map[string]*pendingPermission     // sessionID -> pending permission
-	alwaysAllow       map[string]map[string]bool        // sessionID -> toolName -> true
-	toolEvents        map[string][]toolEventEntry       // sessionID -> recent tool events buffer
-	lastPushSent      map[string]time.Time              // sessionID -> last push timestamp (for rate-limiting)
-	userStopped       map[string]bool                   // sessionID -> true if user explicitly stopped
-	lastEvaluation    map[string]time.Time              // sessionID -> last evaluation timestamp (3-min cooldown)
-	taskNotifs        map[string]map[string]interface{} // sessionID -> task notification data (pending until user responds)
-	lastActivityTouch map[string]time.Time              // sessionID -> last DB touch for activity debounce
-	sessionMode       map[string]string                 // sessionID -> "plan_mode" | "executing" | "idle"
-	modeIdleTimers    map[string]*time.Timer            // sessionID -> inactivity timer that sets mode to idle
-	imagePromptMeta   map[string]string                 // sessionID -> user's text prompt when images were included
-	evalTimers        map[string]*time.Timer            // sessionID -> debounced evaluation timer
-	acpUsage          map[string]*ACPUsageInfo          // sessionID -> ACP usage tracking (model, premium requests)
-	promptWaiters     map[string][]chan struct{}        // sessionID -> awaiters woken by the next UserPromptSubmit (send ack)
+	pending           map[string]*pendingPermission           // sessionID -> pending permission
+	alwaysAllow       map[string]map[string]bool              // sessionID -> toolName -> true
+	toolEvents        map[string][]toolEventEntry             // sessionID -> recent tool events buffer
+	lastPushSent      map[string]time.Time                    // sessionID -> last push timestamp (for rate-limiting)
+	userStopped       map[string]bool                         // sessionID -> true if user explicitly stopped
+	lastEvaluation    map[string]time.Time                    // sessionID -> last evaluation timestamp (3-min cooldown)
+	taskNotifs        map[string]map[string]interface{}       // sessionID -> task notification data (pending until user responds)
+	lastActivityTouch map[string]time.Time                    // sessionID -> last DB touch for activity debounce
+	sessionMode       map[string]string                       // sessionID -> "plan_mode" | "executing" | "idle"
+	modeIdleTimers    map[string]*time.Timer                  // sessionID -> inactivity timer that sets mode to idle
+	imagePromptMeta   map[string]string                       // sessionID -> user's text prompt when images were included
+	evalTimers        map[string]*time.Timer                  // sessionID -> debounced evaluation timer
+	acpUsage          map[string]*ACPUsageInfo                // sessionID -> ACP usage tracking (model, premium requests)
+	promptWaiters     map[string][]chan struct{}              // sessionID -> awaiters woken by the next UserPromptSubmit (send ack)
+	turns             map[string]application.SessionTurnState // sessionID -> open/closed turn (UserPromptSubmit .. Stop)
 }
 
 // ACPUsageInfo holds Copilot ACP usage tracking data for a session.
@@ -191,6 +192,7 @@ func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, ses
 		evalTimers:        make(map[string]*time.Timer),
 		acpUsage:          make(map[string]*ACPUsageInfo),
 		promptWaiters:     make(map[string][]chan struct{}),
+		turns:             make(map[string]application.SessionTurnState),
 	}
 }
 
@@ -327,6 +329,66 @@ func (h *HookHandler) GetSessionMode(sessionID string) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.sessionMode[sessionID]
+}
+
+// SessionTurnState reports whether the session is inside a turn. The bool is
+// false until a turn signal has been seen for the session.
+func (h *HookHandler) SessionTurnState(sessionID string) (application.SessionTurnState, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	turn, ok := h.turns[sessionID]
+	return turn, ok
+}
+
+// trackTurnFromEvent opens the turn when the agent accepts a prompt and
+// closes it only on a signal that the agent is back at its prompt. Tool
+// events and silence never close it: a long Bash run is still the same turn.
+// An interrupted turn (Esc) sends no Stop; Claude Code's idle notification
+// ("waiting for your input", about a minute later) closes it instead.
+func (h *HookHandler) trackTurnFromEvent(sessionID, eventName string, hookEvent map[string]interface{}) {
+	open, reason := false, eventName
+	switch eventName {
+	case "UserPromptSubmit":
+		open = true
+	case "Stop", "SessionEnd":
+	case "SessionStart":
+		// A compaction restarts the transcript in the middle of a turn.
+		if source, _ := hookEvent["source"].(string); source == "compact" {
+			return
+		}
+	case "Notification":
+		msg, _ := hookEvent["message"].(string)
+		if !strings.Contains(msg, "waiting for your input") {
+			return
+		}
+		reason = "Notification(idle)"
+	case "mode_changed":
+		mode, _ := hookEvent["mode"].(string)
+		if mode == "" {
+			return
+		}
+		open = mode != "idle"
+		reason = "mode_changed=" + mode
+	default:
+		return
+	}
+	h.setSessionTurn(sessionID, open, reason)
+}
+
+func (h *HookHandler) setSessionTurn(sessionID string, open bool, reason string) {
+	h.mu.Lock()
+	previous, known := h.turns[sessionID]
+	if known && previous.Open == open {
+		h.mu.Unlock()
+		return
+	}
+	h.turns[sessionID] = application.SessionTurnState{Open: open, Since: time.Now(), Reason: reason}
+	h.mu.Unlock()
+	shortID := sessionID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	log.Printf("[hooks] Turn %s: session=%s (%s)", map[bool]string{true: "opened", false: "closed"}[open], shortID, reason)
 }
 
 // trackModeFromEvent reads the permission_mode field from a hook event,
@@ -1268,6 +1330,8 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	h.trackTurnFromEvent(sessionID, eventName, hookEvent)
+
 	// Track execution mode changes
 	switch eventName {
 	case "Stop":
@@ -1574,6 +1638,7 @@ func (h *HookHandler) ClearSession(sessionID string) {
 	delete(h.lastEvaluation, sessionID)
 	delete(h.lastActivityTouch, sessionID)
 	delete(h.sessionMode, sessionID)
+	delete(h.turns, sessionID)
 	delete(h.imagePromptMeta, sessionID)
 	delete(h.acpUsage, sessionID)
 	// Drop any prompt waiters WITHOUT signaling them: a torn-down session never

@@ -1178,17 +1178,18 @@ func (a *API) ListSessions(w http.ResponseWriter, r *http.Request) {
 // ActiveSessionDetail is the enriched response for a single active session.
 type ActiveSessionDetail struct {
 	database.Session
-	ProjectName          string        `json:"project_name"`
-	ProjectType          string        `json:"project_type"`
-	ProjectSSHHost       string        `json:"project_ssh_host,omitempty"`
-	TaskTitle            string        `json:"task_title,omitempty"`
-	TotalInputTokens     int64         `json:"total_input_tokens"`
-	TotalOutputTokens    int64         `json:"total_output_tokens"`
-	TotalCost            float64       `json:"total_cost"`
-	HasPendingPermission bool          `json:"has_pending_permission"`
-	ExecutionMode        string        `json:"execution_mode"`
-	CodexRuntime         string        `json:"codex_runtime,omitempty"`
-	ACPUsage             *ACPUsageInfo `json:"acp_usage,omitempty"`
+	ProjectName          string           `json:"project_name"`
+	ProjectType          string           `json:"project_type"`
+	ProjectSSHHost       string           `json:"project_ssh_host,omitempty"`
+	TaskTitle            string           `json:"task_title,omitempty"`
+	TotalInputTokens     int64            `json:"total_input_tokens"`
+	TotalOutputTokens    int64            `json:"total_output_tokens"`
+	TotalCost            float64          `json:"total_cost"`
+	HasPendingPermission bool             `json:"has_pending_permission"`
+	ExecutionMode        string           `json:"execution_mode"`
+	Turn                 *sessionTurnJSON `json:"turn,omitempty"`
+	CodexRuntime         string           `json:"codex_runtime,omitempty"`
+	ACPUsage             *ACPUsageInfo    `json:"acp_usage,omitempty"`
 }
 
 func (a *API) GetActiveSessionDetails(w http.ResponseWriter, r *http.Request) {
@@ -1252,6 +1253,7 @@ func (a *API) GetActiveSessionDetails(w http.ResponseWriter, r *http.Request) {
 		if a.hookHandler != nil {
 			d.HasPendingPermission = a.hookHandler.HasPendingPermission(s.ID)
 			d.ExecutionMode = a.hookHandler.GetSessionMode(s.ID)
+			d.Turn = a.sessionTurn(s.ID)
 			d.ACPUsage = a.hookHandler.GetACPUsage(s.ID)
 		}
 
@@ -1445,7 +1447,29 @@ func (a *API) GetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondJSON(w, http.StatusOK, sess)
+	respondJSON(w, http.StatusOK, struct {
+		*database.Session
+		Turn *sessionTurnJSON `json:"turn,omitempty"`
+	}{sess, a.sessionTurn(sess.ID)})
+}
+
+// sessionTurnJSON says whether the agent is inside a turn (prompt accepted,
+// reply not finished); see application.SessionTurnState.
+type sessionTurnJSON struct {
+	Open   bool      `json:"open"`
+	Since  time.Time `json:"since"`
+	Reason string    `json:"reason,omitempty"`
+}
+
+func (a *API) sessionTurn(sessionID string) *sessionTurnJSON {
+	if a.hookHandler == nil {
+		return nil
+	}
+	turn, known := a.hookHandler.SessionTurnState(sessionID)
+	if !known {
+		return nil
+	}
+	return &sessionTurnJSON{Open: turn.Open, Since: turn.Since.UTC(), Reason: turn.Reason}
 }
 
 // GetSessionOutput returns the buffered terminal output for a session
@@ -3546,6 +3570,11 @@ func (a *API) SendSessionInput(w http.ResponseWriter, r *http.Request) {
 
 	var input struct {
 		Text string `json:"text"`
+		// IfIdle refuses the send (409 session_busy) while the session's turn
+		// is open, and AwaitAck waits for the agent to accept the prompt.
+		// Both are for agents sending to other sessions; the UI sends neither.
+		IfIdle   bool `json:"if_idle"`
+		AwaitAck bool `json:"await_ack"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
@@ -3556,12 +3585,20 @@ func (a *API) SendSessionInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := services.Execution.Sessions.SendInput(platformUIContext(r), application.SendSessionInputCommand{SessionID: id, Text: input.Text, Authorization: platformUIAuthorization(r)}); err != nil {
+	result, err := services.Execution.Sessions.SendInputWithAck(platformUIContext(r), application.SendSessionInputCommand{
+		SessionID: id, Text: input.Text, Authorization: platformUIAuthorization(r),
+		RejectIfBusy: input.IfIdle, AwaitAck: input.AwaitAck,
+	})
+	if err != nil {
 		respondApplicationError(w, err)
 		return
 	}
 
-	respondJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+	response := map[string]any{"status": "sent"}
+	if input.AwaitAck {
+		response["acknowledged"] = result.Acknowledged
+	}
+	respondJSON(w, http.StatusOK, response)
 }
 
 // SetSessionModel changes the model used by future turns of an active session.

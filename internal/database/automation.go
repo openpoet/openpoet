@@ -42,6 +42,8 @@ type AutomationCommand struct {
 	CreatedAt           time.Time    `db:"created_at" json:"created_at"`
 	UpdatedAt           time.Time    `db:"updated_at" json:"updated_at"`
 	ExpiresAt           sql.NullTime `db:"expires_at" json:"expires_at,omitempty"`
+	CommandID           string       `db:"command_id" json:"command_id"`
+	Capability          string       `db:"capability" json:"capability"`
 }
 
 func (d *DB) CreateAutomationClient(ctx context.Context, client *AutomationClient) error {
@@ -122,10 +124,11 @@ func (d *DB) ClaimAutomationCommand(ctx context.Context, command *AutomationComm
 
 	result, err := tx.ExecContext(ctx, `
 		INSERT OR IGNORE INTO automation_commands
-			(id, client_id, idempotency_key, request_fingerprint, operation, status, expires_at)
-		VALUES (?, ?, ?, ?, ?, 'processing', ?)`,
+			(id, client_id, idempotency_key, request_fingerprint, operation, status, expires_at, command_id, capability)
+		VALUES (?, ?, ?, ?, ?, 'processing', ?, ?, ?)`,
 		command.ID, command.ClientID, command.IdempotencyKey,
-		command.RequestFingerprint, command.Operation, command.ExpiresAt)
+		command.RequestFingerprint, command.Operation, command.ExpiresAt,
+		command.CommandID, command.Capability)
 	if err != nil {
 		return nil, false, err
 	}
@@ -223,4 +226,42 @@ func (d *DB) GetAutomationCommand(ctx context.Context, id string) (*AutomationCo
 		return nil, err
 	}
 	return &command, nil
+}
+
+// FindAutomationCommand returns the client's command with the given
+// idempotency key or, when the key is empty, its most recent command with the
+// given command_id. It returns sql.ErrNoRows when there is none: a command
+// only ever lives under the client that sent it.
+func (d *DB) FindAutomationCommand(ctx context.Context, clientID, idempotencyKey, commandID string) (*AutomationCommand, error) {
+	var command AutomationCommand
+	var err error
+	if idempotencyKey != "" {
+		err = d.GetContext(ctx, &command, `
+			SELECT * FROM automation_commands WHERE client_id = ? AND idempotency_key = ?`,
+			clientID, idempotencyKey)
+	} else {
+		err = d.GetContext(ctx, &command, `
+			SELECT * FROM automation_commands WHERE client_id = ? AND command_id = ?
+			ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+			clientID, commandID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &command, nil
+}
+
+// MarkInterruptedAutomationCommands closes every command still processing
+// when the server starts: the process that ran it is gone, so its outcome is
+// unknown. Left as processing, a retry with the same key would be told
+// "still processing" forever.
+func (d *DB) MarkInterruptedAutomationCommands(ctx context.Context) (int64, error) {
+	result, err := d.ExecContext(ctx, `
+		UPDATE automation_commands
+		SET status = 'indeterminate', error_code = 'server_restarted', updated_at = CURRENT_TIMESTAMP
+		WHERE status = 'processing'`)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

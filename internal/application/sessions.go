@@ -185,6 +185,7 @@ type SessionService struct {
 	decrypt    func(string, string) (string, error)
 	effects    SessionEffects
 	creation   SessionCreationCollaborators
+	inputs     sessionInputGate
 }
 
 func NewSessionService(
@@ -632,6 +633,14 @@ func (s *SessionService) CloseCompleted(ctx context.Context, command CloseComple
 	if s.creation.Signals != nil {
 		mode = s.creation.Signals.GetSessionMode(session.ID)
 	}
+	// A known turn state wins over the mode, whose inactivity timer reads a
+	// long tool run as idle.
+	if turn, known := s.TurnState(session.ID); known {
+		mode = "idle"
+		if turn.Open {
+			mode = "turn_open"
+		}
+	}
 	switch mode {
 	case "idle":
 	case "":
@@ -942,11 +951,19 @@ func (s *SessionService) SendInputWithAck(ctx context.Context, command SendSessi
 	if len([]byte(text)) > maxSessionInputBytes {
 		return SendInputResult{}, validationError("session_input_too_large", "Session input exceeds 16 KiB")
 	}
-	if command.RejectIfBusy && s.creation.Signals != nil {
-		if s.creation.Signals.GetSessionMode(command.SessionID) == "executing" {
-			return SendInputResult{}, conflictError("session_busy", "Session is mid-turn; retry when it is idle or send with force")
+	if command.RejectIfBusy {
+		if !s.inputs.acquire(command.SessionID) {
+			return SendInputResult{}, conflictError("session_busy", "Another input to this session is still being delivered; retry after it is acknowledged")
+		}
+		defer s.inputs.release(command.SessionID)
+		if reason := s.sessionBusyReason(command.SessionID); reason != "" {
+			return SendInputResult{}, conflictError("session_busy", reason)
 		}
 	}
+	// Once the text is typed the outcome must not depend on the caller staying
+	// connected: an aborted request still waits for the ack, so the recorded
+	// result (and automation.commands.get) tells whether the agent took it.
+	ctx = context.WithoutCancel(ctx)
 	// Register the ack waiter BEFORE writing, so a fast UserPromptSubmit can't
 	// slip between the write and the wait (lost-wakeup race).
 	var ackCh <-chan struct{}
@@ -961,11 +978,12 @@ func (s *SessionService) SendInputWithAck(ctx context.Context, command SendSessi
 	s.publish(ctx, SessionChange{Action: "input_sent", ID: command.SessionID, Actor: command.Authorization.Actor})
 	result := SendInputResult{Submitted: true}
 	if ackCh != nil {
+		timer := time.NewTimer(sessionAckTimeout)
+		defer timer.Stop()
 		select {
 		case <-ackCh:
 			result.Acknowledged = true
-		case <-time.After(sessionAckTimeout):
-		case <-ctx.Done():
+		case <-timer.C:
 		}
 	}
 	return result, nil

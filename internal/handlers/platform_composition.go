@@ -27,9 +27,11 @@ const (
 	// Container lifecycle added compose.status/logs (reads) and
 	// compose.approve/up/down/restart (mutations): +6 capabilities,
 	// +4 mutations, +2 reads.
-	expectedPlatformCapabilities = 181
+	// automation.commands.get (read) lets a client learn a command's outcome
+	// after a timeout: +1 capability, +1 read.
+	expectedPlatformCapabilities = 182
 	expectedPlatformMutations    = 120
-	expectedPlatformReads        = 61
+	expectedPlatformReads        = 62
 )
 
 // PlatformServices is the explicit runtime composition root for Automation.
@@ -139,6 +141,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		Blackboard:         services.DB,
 		Environments:       application.NewEnvironmentService(services.DB),
 		Compose:            application.NewComposeApplicationService(projectService, NewComposeRunnerAdapter(), services.DB),
+		Commands:           services.DB,
 	}
 
 	collaboration := automation.CollaborationPlatformServices{

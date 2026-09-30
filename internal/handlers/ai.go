@@ -3171,10 +3171,33 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if _, err := h.getAllowedSession(ctx, conversationID, sessionID); err != nil {
 			return "", err
 		}
+		ifIdle, _ := input["if_idle"].(bool)
+		awaitAck, _ := input["await_ack"].(bool)
+		hooks := h.api.hookHandler
+		if ifIdle && hooks != nil {
+			if turn, known := hooks.SessionTurnState(sessionID); known && turn.Open {
+				return "", fmt.Errorf("session_busy: session %s is mid-turn (open since %s); retry after its turn completes", sessionID, turn.Since.Format("15:04:05"))
+			}
+		}
+		var ackCh <-chan struct{}
+		if awaitAck && hooks != nil {
+			ch, cancel := hooks.RegisterPromptWaiter(sessionID)
+			defer cancel()
+			ackCh = ch
+		}
 		if err := h.api.submitSessionLine(sessionID, text); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Sent to session %s: %s", sessionID, truncateForTool(text, 100)), nil
+		sent := fmt.Sprintf("Sent to session %s: %s", sessionID, truncateForTool(text, 100))
+		if ackCh != nil {
+			select {
+			case <-ackCh:
+				sent += "\nAcknowledged: the agent accepted the prompt."
+			case <-time.After(8 * time.Second):
+				sent += "\nNot acknowledged: the agent did not confirm the prompt within 8 s."
+			}
+		}
+		return sent, nil
 
 	case "link_session_task":
 		sessionID, _ := input["session_id"].(string)
