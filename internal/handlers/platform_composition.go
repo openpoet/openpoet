@@ -129,7 +129,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		SessionQueries:     services.DB,
 		SessionRuntime:     services.SessionManager,
 		SessionEvents:      platformSessionEventReader{handler: services.StructuredView},
-		SessionTranscripts: platformSessionEventReader{handler: services.StructuredView},
+		SessionMessages:    application.NewSessionMessageService(services.DB, platformSessionEventReader{handler: services.StructuredView}),
 		Files:              platformFileReader{handler: services.FileHandler},
 		Git:                platformGitReader{handler: services.GitHandler},
 		Tunnel:             platformTunnelReader{api: a},

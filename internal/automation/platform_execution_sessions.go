@@ -173,8 +173,8 @@ type sessionPlatformExecutor struct {
 	questions *application.SessionQuestionService
 	queries   SessionOperationalReadPort
 	runtime   SessionRuntimeReadPort
-	// transcripts backs sessions.messages (optional).
-	transcripts SessionTranscriptReadPort
+	// messages backs sessions.messages (optional).
+	messages *application.SessionMessageService
 }
 
 type sessionListPayload struct {

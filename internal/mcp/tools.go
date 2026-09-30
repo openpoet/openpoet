@@ -1110,6 +1110,27 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		}
 		return formatSessionHistory(body)
 
+	case "openpoet_session_messages":
+		sid, _ := params["session_id"].(string)
+		if sid == "" {
+			return "", fmt.Errorf("session_id is required")
+		}
+		q := url.Values{}
+		for _, key := range []string{"role", "last_n", "before_id", "search", "expand", "offset", "max_chars"} {
+			if v, ok := params[key]; ok && fmt.Sprintf("%v", v) != "" {
+				q.Set(key, fmt.Sprintf("%v", v))
+			}
+		}
+		endpoint := fmt.Sprintf("/api/sessions/%s/messages", sid)
+		if encoded := q.Encode(); encoded != "" {
+			endpoint += "?" + encoded
+		}
+		body, err := client.Get(endpoint)
+		if err != nil {
+			return "", err
+		}
+		return FormatSessionMessages(body)
+
 	case "openpoet_send_to_session":
 		sid, _ := params["session_id"].(string)
 		text, _ := params["text"].(string)
@@ -1603,6 +1624,81 @@ func formatSessionHistory(body []byte) (string, error) {
 		truncated,
 		result.Content,
 	), nil
+}
+
+// FormatSessionMessages renders a GET /api/sessions/{id}/messages result as
+// compact text. The AI chat's session_messages tool shares it.
+func FormatSessionMessages(body []byte) (string, error) {
+	type message struct {
+		ID         string `json:"id"`
+		Role       string `json:"role"`
+		Model      string `json:"model"`
+		At         string `json:"at"`
+		Chars      int    `json:"chars"`
+		Text       string `json:"text"`
+		Truncated  bool   `json:"truncated"`
+		Matches    int    `json:"matches"`
+		Offset     int    `json:"offset"`
+		Snippet    string `json:"snippet"`
+		NextOffset *int   `json:"next_offset"`
+	}
+	var result struct {
+		SessionID    string    `json:"session_id"`
+		Source       string    `json:"source"`
+		Mode         string    `json:"mode"`
+		Total        int       `json:"total"`
+		Search       string    `json:"search"`
+		Messages     []message `json:"messages"`
+		Hits         []message `json:"hits"`
+		Message      *message  `json:"message"`
+		HasMore      bool      `json:"has_more"`
+		NextBeforeID string    `json:"next_before_id"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return string(body), nil
+	}
+	label := func(m message) string {
+		at := m.At
+		if len(at) >= 16 {
+			at = strings.Replace(at[:16], "T", " ", 1)
+		}
+		return fmt.Sprintf("[%s] %s · %s UTC · %d chars", m.ID, m.Role, at, m.Chars)
+	}
+	var sb strings.Builder
+	switch result.Mode {
+	case "expand":
+		if result.Message == nil {
+			return string(body), nil
+		}
+		m := *result.Message
+		fmt.Fprintf(&sb, "Session messages: %s | source: %s | mode: expand\n\n%s · offset %d-%d", result.SessionID, result.Source, label(m), m.Offset, m.Offset+len([]rune(m.Text)))
+		if m.NextOffset != nil {
+			fmt.Fprintf(&sb, " · next_offset: %d", *m.NextOffset)
+		}
+		sb.WriteString("\n\n" + m.Text)
+		return sb.String(), nil
+	case "search":
+		fmt.Fprintf(&sb, "Session messages: %s | source: %s | mode: search %q | hits: %d", result.SessionID, result.Source, result.Search, len(result.Hits))
+		if result.HasMore {
+			fmt.Fprintf(&sb, " | older hits: before_id=%s", result.NextBeforeID)
+		}
+		for _, m := range result.Hits {
+			fmt.Fprintf(&sb, "\n\n%s · %d match(es), first at offset %d\n%s", label(m), m.Matches, m.Offset, m.Snippet)
+		}
+		return sb.String(), nil
+	}
+	fmt.Fprintf(&sb, "Session messages: %s | source: %s | mode: list | showing %d of %d", result.SessionID, result.Source, len(result.Messages), result.Total)
+	if result.HasMore {
+		fmt.Fprintf(&sb, " | older: before_id=%s", result.NextBeforeID)
+	}
+	for _, m := range result.Messages {
+		sb.WriteString("\n\n" + label(m))
+		if m.Truncated {
+			sb.WriteString(" (truncated; expand for full text)")
+		}
+		sb.WriteString("\n" + m.Text)
+	}
+	return sb.String(), nil
 }
 
 func shortID(id string) string {
