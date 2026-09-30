@@ -148,3 +148,14 @@ func stringsJoinLines(lines ...string) string {
 	}
 	return buf.String()
 }
+
+func TestParseLineKeepsMetaAndCompactSummaryFlags(t *testing.T) {
+	meta, err := ParseLine([]byte(`{"type":"user","uuid":"u1","isMeta":true,"message":{"role":"user","content":"Base directory for this skill"}}`))
+	if err != nil || !meta.IsMeta || meta.IsSummary {
+		t.Fatalf("meta event = %+v, %v", meta, err)
+	}
+	summary, err := ParseLine([]byte(`{"type":"user","uuid":"u2","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued"}}`))
+	if err != nil || !summary.IsSummary || summary.IsMeta {
+		t.Fatalf("summary event = %+v, %v", summary, err)
+	}
+}

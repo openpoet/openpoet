@@ -55,6 +55,9 @@ type ExecutionPlatformServices struct {
 	Blackboard     BlackboardPort
 	Environments   EnvironmentManifestApprover
 	Compose        ComposeLifecyclePort
+
+	// SessionTranscripts is optional: sessions.messages reports it unavailable without it.
+	SessionTranscripts SessionTranscriptReadPort
 }
 
 func RegisterExecutionPlatformCapabilities(registry *PlatformCapabilityRegistry, services ExecutionPlatformServices) error {
@@ -74,7 +77,7 @@ func RegisterExecutionPlatformCapabilities(registry *PlatformCapabilityRegistry,
 		definitions []PlatformCapabilityDefinition
 		executor    PlatformDomainExecutor
 	}{
-		{sessionPlatformDefinitions(), &sessionPlatformExecutor{service: services.Sessions, questions: services.SessionQuestions, queries: services.SessionQueries, runtime: services.SessionRuntime}},
+		{sessionPlatformDefinitions(), &sessionPlatformExecutor{service: services.Sessions, questions: services.SessionQuestions, queries: services.SessionQueries, runtime: services.SessionRuntime, transcripts: services.SessionTranscripts}},
 		{sessionWatcherPlatformDefinitions(), &sessionWatcherPlatformExecutor{service: services.SessionWatchers, statuses: services.SessionEvents}},
 		{sessionSuggestionPlatformDefinitions(), &sessionSuggestionPlatformExecutor{service: services.SessionSuggestions}},
 		{fileExecutionPlatformDefinitions(), &fileExecutionPlatformExecutor{service: services.FileMutations, reader: services.Files}},

@@ -19,6 +19,8 @@ type rawEvent struct {
 	Timestamp   string          `json:"timestamp"`
 	SessionID   string          `json:"sessionId"`
 	IsSidechain bool            `json:"isSidechain"`
+	IsMeta      bool            `json:"isMeta"`
+	IsSummary   bool            `json:"isCompactSummary"`
 	Message     json.RawMessage `json:"message"`
 	Data        json.RawMessage `json:"data"`
 }
@@ -82,6 +84,8 @@ func ParseLine(line []byte) (*SessionEvent, error) {
 		Timestamp:   ts,
 		SessionID:   raw.SessionID,
 		IsSidechain: raw.IsSidechain,
+		IsMeta:      raw.IsMeta,
+		IsSummary:   raw.IsSummary,
 	}
 	if raw.ParentUUID != nil {
 		event.ParentUUID = *raw.ParentUUID

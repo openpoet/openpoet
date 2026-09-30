@@ -27,9 +27,9 @@ const (
 	// Container lifecycle added compose.status/logs (reads) and
 	// compose.approve/up/down/restart (mutations): +6 capabilities,
 	// +4 mutations, +2 reads.
-	expectedPlatformCapabilities = 180
+	expectedPlatformCapabilities = 181
 	expectedPlatformMutations    = 120
-	expectedPlatformReads        = 60
+	expectedPlatformReads        = 61
 )
 
 // PlatformServices is the explicit runtime composition root for Automation.
@@ -129,6 +129,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		SessionQueries:     services.DB,
 		SessionRuntime:     services.SessionManager,
 		SessionEvents:      platformSessionEventReader{handler: services.StructuredView},
+		SessionTranscripts: platformSessionEventReader{handler: services.StructuredView},
 		Files:              platformFileReader{handler: services.FileHandler},
 		Git:                platformGitReader{handler: services.GitHandler},
 		Tunnel:             platformTunnelReader{api: a},
