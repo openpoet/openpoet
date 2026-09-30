@@ -178,7 +178,9 @@ func sessionPlatformDefinitions() []PlatformCapabilityDefinition {
 		withPayloadSchema(executionReadCapability("sessions.list", "sessions", "sessions:read"), "{}", sessionListPayload{}, "", ""),
 		withPayloadSchema(executionReadCapability("sessions.get", "sessions", "sessions:read"), session, nil, "", sessionStateNotes),
 		withPayloadSchema(executionReadCapability("sessions.history", "sessions", "sessions:read"), session, sessionHistoryPayload{}, "",
-			"Live sessions return the terminal buffer in content and the currently displayed screen in screen (source=runtime). Ended sessions return the last screen recorded at exit plus error_reason (source=persisted) instead of failing."),
+			"A terminal capture, not the conversation: for an interactive agent session content and screen are what the terminal shows (TUI frames, status lines, cut-off text). "+
+				"To read what was said, use sessions.messages. Live sessions return the terminal buffer in content and the currently displayed screen in screen (source=runtime). "+
+				"Ended sessions return the last screen recorded at exit plus error_reason (source=persisted) instead of failing."),
 		withPayloadSchema(executionPayloadLimit(executionReadCapability("sessions.messages", "sessions", "sessions:read"), 4<<10), session, sessionMessagesPayload{},
 			`{"last_n":5,"max_chars":400}`, sessionMessagesNotes),
 		withPayloadSchema(executionReadCapability("sessions.active", "sessions", "sessions:read"), "{}", nil, "", sessionStateNotes),
@@ -192,8 +194,8 @@ func sessionPlatformDefinitions() []PlatformCapabilityDefinition {
 		withPayloadSchema(executionDestructiveCapability("sessions.isolate", "sessions", "sessions:write"), session, sessionIsolatePayload{}, "", ""),
 		withPayloadSchema(executionWriteCapability("sessions.reopen", "sessions", "sessions:write"), session, sessionReopenPayload{}, "", ""),
 		withPayloadSchema(executionPayloadLimit(executionWriteCapability("sessions.send_input", "sessions", "sessions:write"), 20<<10), session, sessionInputPayload{}, "", sessionSendInputNotes),
-		withPayloadSchema(executionWriteCapability("sessions.set_model", "sessions", "sessions:write"), session, sessionModelPayload{}, "", ""),
-		withPayloadSchema(executionWriteCapability("sessions.set_effort", "sessions", "sessions:write"), session, sessionEffortPayload{}, "", ""),
+		withPayloadSchema(executionWriteCapability("sessions.set_model", "sessions", "sessions:write"), session, sessionModelPayload{}, `{"model":"opus"}`, sessionSetModelNotes),
+		withPayloadSchema(executionWriteCapability("sessions.set_effort", "sessions", "sessions:write"), session, sessionEffortPayload{}, `{"effort":"high"}`, sessionSetEffortNotes),
 		withPayloadSchema(executionWriteCapability("sessions.set_permission_mode", "sessions", "sessions:write"), session, sessionPermissionModePayload{},
 			`{"mode":"acceptEdits"}`, sessionSetPermissionModeNotes),
 		withPayloadSchema(executionWriteCapability("sessions.evaluate", "sessions", "sessions:write", "tasks:write"), session, nil, "", ""),
@@ -219,21 +221,21 @@ type sessionListPayload struct {
 }
 
 type sessionCreatePayload struct {
-	ProjectID                  int64             `json:"project_id,omitempty"`
-	TaskID                     *int64            `json:"task_id,omitempty"`
-	Environment                map[string]string `json:"environment,omitempty"`
-	DangerouslySkipPermissions bool              `json:"dangerously_skip_permissions,omitempty"`
-	AutoStartTaskPrompt        *bool             `json:"auto_start_task_prompt,omitempty"`
-	PlanningMode               bool              `json:"planning_mode,omitempty"`
-	CustomPrompt               string            `json:"custom_prompt,omitempty"`
-	WorkspaceID                string            `json:"workspace_id,omitempty"`
+	ProjectID                  int64             `json:"project_id,omitempty" doc:"project to start the session in, when the target does not carry it"`
+	TaskID                     *int64            `json:"task_id,omitempty" doc:"task of that project to link (from tasks.create); the agent is told to work on it and reads its brief"`
+	Environment                map[string]string `json:"environment,omitempty" doc:"extra environment variables for the agent (at most 64, 64 KiB in all)"`
+	DangerouslySkipPermissions bool              `json:"dangerously_skip_permissions,omitempty" doc:"start in bypass-permissions mode"`
+	AutoStartTaskPrompt        *bool             `json:"auto_start_task_prompt,omitempty" doc:"legacy, ignored: automation sessions always start their prompt"`
+	PlanningMode               bool              `json:"planning_mode,omitempty" doc:"ask the agent to plan the linked task before changing anything (not with custom_prompt)"`
+	CustomPrompt               string            `json:"custom_prompt,omitempty" doc:"initial prompt instead of the task prompt (at most 16 KiB)"`
+	WorkspaceID                string            `json:"workspace_id,omitempty" doc:"run in this workspace lane instead of the project's main path"`
 	// Backend, when set, must name a known backend; the session runs with it
 	// even when it differs from the project's backend (Phase 7.3 heterogeneous
 	// fan-out).
-	Backend string `json:"backend,omitempty"`
+	Backend string `json:"backend,omitempty" doc:"claude_code, copilot, acp, codex or opencode (default: the project's backend)"`
 	// Isolation:"auto" leases an idle pooled workspace when the project's main
 	// path is busy (Phase 6 pooling), instead of requiring an explicit workspace_id.
-	Isolation string `json:"isolation,omitempty"`
+	Isolation string `json:"isolation,omitempty" doc:"auto: lease an idle pooled workspace when the project's main path is busy"`
 }
 
 // knownSessionBackends mirrors internal/session BackendType constants (kept local
@@ -263,11 +265,11 @@ type sessionInputPayload struct {
 }
 
 type sessionModelPayload struct {
-	Model string `json:"model"`
+	Model string `json:"model" doc:"claude_code: default, best, opus, sonnet, haiku, opusplan, fable or a claude-* model id, optionally with [1m]; codex: a model from its catalog; reset = default"`
 }
 
 type sessionEffortPayload struct {
-	Effort string `json:"effort"`
+	Effort string `json:"effort" doc:"default, minimal, low, medium, high, xhigh or max; reset = default"`
 }
 
 type sessionPermissionModePayload struct {
@@ -288,7 +290,13 @@ const sessionStateNotes = "Session views carry interaction_state: awaiting_input
 
 const sessionCreateNotes = "Returns as soon as the agent process is running (status running, interaction_state starting); it never waits for the agent to be ready. " +
 	"The initial prompt (task, planning or custom_prompt) is delivered in the background and is held back while a question is open, so it can never answer a dialog by accident. " +
-	"A client timeout or disconnect never stops the session; after one, resend the identical envelope (same idempotency_key and command_id) or check automation.commands.get, never a new key (that creates a second session). Poll sessions.get: startup_state becomes ready once the prompt is delivered, or awaiting_input when a question (e.g. workspace_trust) needs an answer via sessions.answer_prompt."
+	"A client timeout or disconnect never stops the session; after one, resend the identical envelope (same idempotency_key and command_id) or check automation.commands.get, never a new key (that creates a second session). " +
+	"To run a task, create it with tasks.create and pass its id as task_id; the agent is told to start on it and reads its title and description. " +
+	"Verify the start by polling sessions.get every few seconds for about 75 s: " +
+	"interaction_state running (startup_state ready, or absent without an initial prompt) is the only state that confirms the session is up; " +
+	"interaction_state awaiting_input means it is blocked on a question: awaiting_input carries kind, text, options (numbered from 1) and question_id, answer it with sessions.answer_prompt and keep polling; " +
+	"status error means it failed (error_reason and last_output say why); interaction_state ended means the process exited; startup_state failed means the prompt was not delivered (startup_detail). " +
+	"Still starting when the window closes is unknown: re-read sessions.get before acting and never create a replacement blindly."
 
 const sessionSendInputNotes = "Types text into the session's agent and, by default (await_ack true), waits up to 8 s for the agent to accept it: acknowledged true means the agent took the prompt; false means it did not confirm in time (the text may still be in its input). " +
 	"Refused with session_busy while the session's turn is open (from the accepted prompt until the turn completes, however long its tools run) or while another guarded send to it is still being delivered; retry after turn.open is false, or send force true to type anyway. " +
@@ -302,6 +310,13 @@ const sessionSetPermissionModeNotes = "Switches a running Claude Code session's 
 	"Refused with session_awaiting_input while a question is open (answer it first); session_setting_unsupported when the target is not offered by the session's cycle (e.g. auto mode unavailable; the error names the mode it ended in) or the backend is not claude_code; " +
 	"permission_mode_unconfirmed when no indicator repainted (re-read sessions.get permission_mode). Already in the mode returns changed false with no key pressed. The current mode is permission_mode in sessions.get."
 
+const sessionSetModelNotes = "Switches a running session's model. claude_code accepts default, best, opus, sonnet, haiku, opusplan, fable, or a claude-* model id (e.g. claude-opus-5-5), each optionally suffixed [1m]; " +
+	"Claude Code with OpenAI OAuth needs an explicit model id; codex accepts only models from its own catalog; other backends cannot change model in a live session (session_setting_unsupported). " +
+	"reset means default. An unaccepted value fails with session_setting_invalid naming the accepted ones."
+
+const sessionSetEffortNotes = "Switches a running session's reasoning effort: default, minimal, low, medium, high, xhigh or max (reset means default). " +
+	"Only claude_code and the codex app-server runtime support it (session_setting_unsupported otherwise); codex also refuses an effort its current model does not offer (session_setting_invalid)."
+
 const sessionStopNotes = "Stops any starting or running session; needs an explicit approval_token. " +
 	"For an idle session whose linked task is already done, use sessions.close_completed instead (no per-session approval)."
 
@@ -311,8 +326,9 @@ const sessionCloseCompletedNotes = "Closes a session whose work is finished, wit
 	"silent for 10 minutes (session_busy). A refused session can still be stopped with sessions.stop. An already stopped session is returned unchanged. " +
 	"Who closed it and the reason are recorded in the task history (session_closed_completed) and the event outbox (platform.session.closure_recorded)."
 
-const sessionAnswerPromptNotes = "Answers the question in the session's awaiting_input. question_id must be the current one (a stale id fails with session_question_changed). " +
-	"Send option (1-based index from awaiting_input.options); text where accepts_text is true (deny reason, plan feedback, free-text answer, y/n text; text alone on a tool_permission denies with that reason); " +
+const sessionAnswerPromptNotes = "Answers the question in the session's awaiting_input. question_id must be the current one: read it from sessions.get (awaiting_input.question_id, with interaction_state awaiting_input) right before answering; " +
+	"questions change as the agent moves on, and an old id fails with session_question_changed (re-read sessions.get and answer the new question). " +
+	"Send option (1-based index from awaiting_input.options); text only where accepts_text is true (deny reason, plan feedback, free-text answer, y/n text; text alone on a tool_permission denies with that reason); " +
 	"options for a single multi-select ask_user_question; answers {question text: label or free text} for ask_user_question with several questions. " +
 	"Risk: options with grants_permission (allow a tool, accept bypass-permissions mode) or ends_session require a command reason; accepting bypass-permissions mode also requires a session created with dangerously_skip_permissions."
 

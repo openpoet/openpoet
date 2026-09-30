@@ -36,6 +36,11 @@ const sessionTargetDescription = `{"type":"session","id":"<session id or unique 
 // withPayloadSchema attaches a schema derived from the payload struct the
 // executor decodes into. A nil prototype declares an empty payload.
 func withPayloadSchema(definition PlatformCapabilityDefinition, target string, prototype any, example, notes string) PlatformCapabilityDefinition {
+	definition.Payload = newPayloadSchema(target, prototype, example, notes)
+	return definition
+}
+
+func newPayloadSchema(target string, prototype any, example, notes string) *PlatformPayloadSchema {
 	schema := &PlatformPayloadSchema{Target: target, Fields: []PlatformPayloadField{}, Notes: notes}
 	if prototype != nil {
 		schema.Fields = payloadFields(reflect.TypeOf(prototype))
@@ -43,8 +48,7 @@ func withPayloadSchema(definition PlatformCapabilityDefinition, target string, p
 	if example != "" {
 		schema.Example = json.RawMessage(example)
 	}
-	definition.Payload = schema
-	return definition
+	return schema
 }
 
 func payloadFields(t reflect.Type) []PlatformPayloadField {
