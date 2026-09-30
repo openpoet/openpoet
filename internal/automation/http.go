@@ -35,9 +35,6 @@ type Dependencies struct {
 	SessionIDs     SessionIDResolver
 	ApprovalRandom io.Reader
 	Now            func() time.Time
-	// MergePredictor (Phase 7.5): the workspace merge-prediction port for the
-	// coordinator tier.
-	MergePredictor MergePredictor
 }
 
 func NewHandler(store Store, dependencies ...Dependencies) http.Handler {

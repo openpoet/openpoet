@@ -257,8 +257,7 @@ func TestResolveForSessionReservationHandshake(t *testing.T) {
 }
 
 // TestIsolatedLaneRoundTrip walks the whole point of the feature on real git:
-// an isolated lane's edits are invisible to the main checkout, the merge is
-// predicted clean, and merging folds the work back in.
+// an isolated lane's edits are invisible to the main checkout.
 func TestIsolatedLaneRoundTrip(t *testing.T) {
 	_, project, service, ctx := newIsolationFixture(t)
 	decision, err := service.ResolveIsolation(ctx, project.ID, IsolationAlways, testActor())
@@ -284,48 +283,4 @@ func TestIsolatedLaneRoundTrip(t *testing.T) {
 	if strings.Contains(string(mainContent), "isolated work") {
 		t.Fatal("lane work leaked into the main checkout")
 	}
-
-	// The orchestrator can forecast the integration for free.
-	prediction, err := service.PredictMerge(ctx, ws.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !prediction.Clean {
-		t.Fatalf("lane-only work should predict clean: %+v", prediction)
-	}
-
-	// Merging needs the lane free (the session ended) and explicit approval.
-	if err := releaseLaneReservation(ctx, service, ws.ID); err != nil {
-		t.Fatal(err)
-	}
-	result, err := service.Merge(ctx, MergeWorkspaceCommand{
-		WorkspaceID: ws.ID,
-		Authorization: ActionAuthorization{
-			Actor: Actor{Type: "test", ID: "t"}, Approved: true, ApprovedBy: "test", Reason: "integration test",
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result.Merged {
-		t.Fatalf("clean lane failed to merge: %+v", result)
-	}
-	merged, err := os.ReadFile(filepath.Join(project.Path, "a.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(merged), "isolated work") {
-		t.Fatal("merge reported success but the work is not in the main checkout")
-	}
-}
-
-// releaseLaneReservation clears a lane's pending reservation so the destructive
-// operations (which refuse a leased lane) can run.
-func releaseLaneReservation(ctx context.Context, service *WorkspaceService, workspaceID string) error {
-	ws, err := service.Get(ctx, workspaceID)
-	if err != nil {
-		return err
-	}
-	token := strings.TrimPrefix(ws.LeasedBySessionID.String, "pending:")
-	return service.ReleaseReservation(ctx, workspaceID, token)
 }

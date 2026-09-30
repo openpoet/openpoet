@@ -135,7 +135,7 @@ func TestApprovalsWaivedDiscoveryReportsNoApprovalRequired(t *testing.T) {
 }
 
 func TestCoordinatorScopesNeverWaiveApprovals(t *testing.T) {
-	for _, scope := range append(append([]Scope(nil), coordinatorScopes...), coordinatorSessionScopes...) {
+	for _, scope := range coordinatorScopes {
 		if scope == ScopeApprovalsWaived || scope == ScopeApprovalsGrant || scope == ScopeApprovalsSelf {
 			t.Fatalf("coordinator holds approvals scope %s", scope)
 		}

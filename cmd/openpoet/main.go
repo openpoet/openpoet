@@ -465,12 +465,6 @@ func main() {
 		log.Printf("[Coordinator] ensure coordinator client: %v", err)
 	}
 
-	// Phase 7.2: worker-side milestone-report skill (materialized to every
-	// project by config sync; users may edit it — never overwritten).
-	if err := configsync.EnsureSessionReportSkill(context.Background(), db); err != nil {
-		log.Printf("[Coordinator] ensure session-report skill: %v", err)
-	}
-
 	// Phase 7.4: TOFU host-key ledger for every SSH surface.
 	sshauth.SetKnownHostStore(db)
 
@@ -703,17 +697,7 @@ func main() {
 	if reportService != nil {
 		automationDeps.Reports = reportService
 	}
-	automationDeps.MergePredictor = api.WorkspaceService()
 	r.Mount("/api/automation/v1", automation.NewHandler(db, automationDeps))
-
-	// Coordinator tier (Phase 7.1 — Maestro): token-authed (opst1) surface that
-	// lets an ELECTED session coordinate a group cross-project. Reuses the same
-	// dependencies; authority never rests on the legacy localhost surface.
-	r.Mount("/api/coordinator", automation.NewCoordinatorHandler(db, automationDeps))
-
-	// Worker self-report surface (Phase 7.2): a session emits its own dense
-	// milestone report, authenticated by its opst1 bearer.
-	r.Mount("/api/session", automation.NewSessionReportHandler(db, reportService))
 
 	// API routes
 	// DEBUG: Client error reporting endpoint

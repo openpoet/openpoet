@@ -32,9 +32,11 @@ const (
 	// automation.commands.get (read) lets a client learn a command's outcome
 	// after a timeout: +1 capability, +1 read.
 	// sessions.set_permission_mode (mutation): +1 capability, +1 mutation.
-	expectedPlatformCapabilities = 183
-	expectedPlatformMutations    = 121
-	expectedPlatformReads        = 62
+	// workspaces.merge (mutation) and workspaces.plan_merges (read) retired
+	// with workspace merge: -2 capabilities, -1 mutation, -1 read.
+	expectedPlatformCapabilities = 181
+	expectedPlatformMutations    = 120
+	expectedPlatformReads        = 61
 )
 
 // PlatformServices is the explicit runtime composition root for Automation.
