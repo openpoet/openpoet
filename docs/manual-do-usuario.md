@@ -87,7 +87,9 @@ credencial de dispositivo pareado do túnel). Os hooks das sessões autenticam c
 token por sessão (`X-Hook-Token`, prefixo `opht1_`); o MCP injetado executa como
 o **ator real** da sessão pelo pipeline de capabilities (com erro estruturado
 `approval_required` para verbos destrutivos); e o broker de aprovações proíbe
-auto-concessão (`deny_self_grant`, salvo escopo explícito `approvals:self`). É
+auto-concessão (`deny_self_grant`, salvo escopo explícito `approvals:self`).
+Um cliente provisionado com `approvals:waived` dispensa o grant e se autoaprova
+com o próprio `authorization_ref`. É
 esse alicerce — **identidade verificada + sinal durável** — que torna seguro
 tudo o que vem a seguir.
 
@@ -775,6 +777,14 @@ projetada terá de honrar quando entregar.
    Auto-grant é negado por padrão (`deny_self_grant`); `approvals:self` é uma
    decisão de provisionamento sua, nunca um acidente. *(o broker já existe hoje;
    os verbos projetados aderem a ele)*
+   Clientes com o escopo `approvals:waived` (hoje só `helena-mylifeos`, por
+   decisão do presidente: "a única coisa que precisa de aprovação é ligar pra
+   terceiros") executam esses verbos sem `approval_token`: o próprio cliente
+   é o aprovador, e `correlation_id` de autorização, `reason` (em destrutivos),
+   idempotência e o log de comandos (`automation_commands`) continuam
+   obrigatórios. `/capabilities` mostra `approval_required: false` para ele.
+   Se o cliente ainda enviar um token, ele é validado e consumido normalmente.
+   O coordenador e os atores de sessão nunca recebem esse escopo.
    Exceção deliberada: `sessions.close_completed` encerra, sem grant, uma sessão
    cuja task vinculada está `done`, que não está no meio de um turno (modo
    `idle`, ou 10 min sem atividade quando o modo é desconhecido) e que não está
@@ -806,7 +816,7 @@ projetada terá de honrar quando entregar.
 O que continua exigindo **você**, sempre: aprovar manifesto de ambiente;
 conceder (ou delegar a um warden) grants destrutivos; subir os dials
 (`conflict_policy`, `coordinator_mode`) por projeto; e decidir se algum
-cliente merece `approvals:self`.
+cliente merece `approvals:self` ou `approvals:waived`.
 
 ---
 
