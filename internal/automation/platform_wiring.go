@@ -217,7 +217,7 @@ func (r *PlatformCapabilityRegistry) ListForActor(actor Actor) []PlatformCapabil
 			Risk: binding.definition.Risk, Approval: binding.definition.Approval, Mutation: binding.definition.Mutation,
 			Handler: binding.definition.Handler, Service: binding.definition.Service,
 			Allowed:          actorHasPlatformScopes(actor, scopes),
-			ApprovalRequired: binding.definition.Approval == application.ApprovalExplicit,
+			ApprovalRequired: binding.definition.Approval == application.ApprovalExplicit && !actor.Scopes.Has(ScopeApprovalsWaived),
 			MaxPayloadBytes:  binding.definition.Limits.MaxPayloadBytes,
 			Payload:          binding.definition.Payload,
 		})

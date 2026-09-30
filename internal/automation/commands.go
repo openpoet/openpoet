@@ -157,12 +157,17 @@ func (a *commandAPI) executeCommand(w http.ResponseWriter, r *http.Request) {
 		a.writeCommandError(w, command, &commandFailure{status: http.StatusBadRequest, code: "correlation_id_required", message: "a valid authorization correlation_id is required for this capability"})
 		return
 	}
-	if !command.DryRun && capability.Approval == application.ApprovalExplicit && strings.TrimSpace(command.ApprovalToken) == "" {
+	// A client holding approvals:waived self-approves explicit capabilities
+	// under its authorization_ref (still required above) instead of
+	// presenting a one-time grant. A token it still sends is consumed as usual.
+	approvalWaived := capability.Approval == application.ApprovalExplicit &&
+		actor.Scopes.Has(ScopeApprovalsWaived) && strings.TrimSpace(command.ApprovalToken) == ""
+	if !command.DryRun && capability.Approval == application.ApprovalExplicit && !approvalWaived && strings.TrimSpace(command.ApprovalToken) == "" {
 		a.writeCommandError(w, command, &commandFailure{status: http.StatusConflict, code: "approval_required", message: "approval_token is required for this capability"})
 		return
 	}
 	var consumedApproval *database.AutomationApprovalGrant
-	if !command.DryRun && capability.Approval == application.ApprovalExplicit {
+	if !command.DryRun && capability.Approval == application.ApprovalExplicit && !approvalWaived {
 		if a.approvals == nil {
 			a.writeCommandError(w, command, &commandFailure{status: http.StatusServiceUnavailable, code: "approval_unavailable", message: "approval grant validation is unavailable", retryable: true})
 			return
@@ -181,6 +186,10 @@ func (a *commandAPI) executeCommand(w http.ResponseWriter, r *http.Request) {
 			case application.ApprovalByPolicy:
 				approver = actor.ClientID
 			case application.ApprovalExplicit:
+				if approvalWaived {
+					approver = actor.ClientID
+					break
+				}
 				if consumedApproval == nil {
 					a.writeCommandError(w, command, &commandFailure{status: http.StatusServiceUnavailable, code: "approval_unavailable", message: "consumed approval metadata is unavailable", retryable: true})
 					return
