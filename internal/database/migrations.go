@@ -92,6 +92,7 @@ var migrations = []Migration{
 	{Version: 74, Description: "retire missions: drop missions/mission_workers/mission_grants and the mission-coordinator skill (the coordinator tier stays)", Up: migrateV74},
 	{Version: 75, Description: "mcp: per-OS command variants on global servers (command_windows/args_windows/env_windows) so one logical server serves a mixed Linux/Windows fleet", Up: migrateV75},
 	{Version: 76, Description: "sessions: add error_reason and last_output so an errored session explains itself after its runtime is gone", Up: migrateV76},
+	{Version: 77, Description: "automation_commands: record command_id and capability so a client can look a command up by either (automation.commands.get)", Up: migrateV77},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2064,6 +2065,24 @@ func migrateV76(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV76 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV77 — lets automation.commands.get find a command by the envelope's
+// command_id, and report which capability it ran, without parsing the stored
+// response. Rows from before this migration keep empty values and are still
+// found by idempotency_key.
+func migrateV77(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE automation_commands ADD COLUMN command_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE automation_commands ADD COLUMN capability TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_automation_commands_client_command ON automation_commands(client_id, command_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV77 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

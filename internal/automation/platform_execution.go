@@ -58,6 +58,8 @@ type ExecutionPlatformServices struct {
 
 	// SessionMessages is optional: sessions.messages reports it unavailable without it.
 	SessionMessages *application.SessionMessageService
+	// Commands is optional: automation.commands.get reports it unavailable without it.
+	Commands AutomationCommandLedgerPort
 }
 
 func RegisterExecutionPlatformCapabilities(registry *PlatformCapabilityRegistry, services ExecutionPlatformServices) error {
@@ -91,6 +93,7 @@ func RegisterExecutionPlatformCapabilities(registry *PlatformCapabilityRegistry,
 		{blackboardPlatformDefinitions(), &blackboardPlatformExecutor{port: services.Blackboard}},
 		{environmentPlatformDefinitions(), &environmentPlatformExecutor{service: services.Environments}},
 		{composePlatformDefinitions(), &composePlatformExecutor{service: services.Compose}},
+		{automationCommandPlatformDefinitions(), &automationCommandPlatformExecutor{ledger: services.Commands}},
 	}
 	for _, group := range groups {
 		for _, definition := range group.definitions {

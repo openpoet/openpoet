@@ -956,13 +956,15 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:        "send_to_session",
-			Description: "Send a prompt or text input to a running OpenPoet session terminal. Enter is appended automatically. Provide either text or prompt.",
+			Description: "Send a prompt or text input to a running OpenPoet session terminal. Enter is appended automatically. Provide either text or prompt. When sending to another agent's session, set if_idle and await_ack: text typed while its turn is open (even during a long tool run) can be lost.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
 					"session_id": {Type: "string", Description: "Session ID"},
 					"text":       {Type: "string", Description: "Text or prompt to send (Enter appended automatically)"},
 					"prompt":     {Type: "string", Description: "Prompt to send. Alias for text."},
+					"if_idle":    {Type: "boolean", Description: "Refuse (session_busy) while the session's turn is open, from the prompt it accepted until its turn completes. Default false."},
+					"await_ack":  {Type: "boolean", Description: "Wait up to 8 s for the agent to accept the prompt and report whether it did. Default false."},
 				},
 				Required: []string{"session_id"},
 			},
@@ -1125,7 +1127,7 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:        "send_to_worker",
-			Description: "Send steering input to a worker session of the coordinated group, awaiting the prompt ack. Requires the current fence_version.",
+			Description: "Send steering input to a worker session of the coordinated group, awaiting the prompt ack. Requires the current fence_version. Refused with session_busy while the worker's turn is open (prompt accepted, turn not completed), however long its tools run.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{

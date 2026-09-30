@@ -81,6 +81,20 @@ type SessionAutomationView struct {
 	// ErrorReason and LastOutput explain a session whose status is error.
 	ErrorReason string `json:"error_reason,omitempty"`
 	LastOutput  string `json:"last_output,omitempty"`
+	// Turn says whether the agent is inside a turn (prompt accepted, reply
+	// not finished). Omitted while no turn signal has been seen.
+	Turn *SessionTurnView `json:"turn,omitempty"`
+}
+
+// SessionTurnView is the automation shape of application.SessionTurnState.
+type SessionTurnView struct {
+	Open   bool      `json:"open"`
+	Since  time.Time `json:"since"`
+	Reason string    `json:"reason,omitempty"`
+}
+
+func sessionTurnView(turn application.SessionTurnState) *SessionTurnView {
+	return &SessionTurnView{Open: turn.Open, Since: turn.Since.UTC(), Reason: turn.Reason}
 }
 
 func sessionAutomationView(session database.Session, runtime SessionRuntimeReadPort) SessionAutomationView {
@@ -123,6 +137,11 @@ func (e *sessionPlatformExecutor) view(ctx context.Context, session database.Ses
 	if startup, ok := e.runtime.(SessionStartupReadPort); ok {
 		view.StartupState, view.StartupDetail = startup.SessionStartupState(session.ID)
 	}
+	if e.service != nil {
+		if turn, known := e.service.TurnState(session.ID); known {
+			view.Turn = sessionTurnView(turn)
+		}
+	}
 	view.InteractionState = interactionIdle
 	if view.StartupState == "starting" {
 		view.InteractionState = interactionStarting
@@ -158,7 +177,7 @@ func sessionPlatformDefinitions() []PlatformCapabilityDefinition {
 		// conversation (a runner cannot change working directory in place).
 		withPayloadSchema(executionDestructiveCapability("sessions.isolate", "sessions", "sessions:write"), session, sessionIsolatePayload{}, "", ""),
 		withPayloadSchema(executionWriteCapability("sessions.reopen", "sessions", "sessions:write"), session, sessionReopenPayload{}, "", ""),
-		withPayloadSchema(executionPayloadLimit(executionWriteCapability("sessions.send_input", "sessions", "sessions:write"), 20<<10), session, sessionInputPayload{}, "", ""),
+		withPayloadSchema(executionPayloadLimit(executionWriteCapability("sessions.send_input", "sessions", "sessions:write"), 20<<10), session, sessionInputPayload{}, "", sessionSendInputNotes),
 		withPayloadSchema(executionWriteCapability("sessions.set_model", "sessions", "sessions:write"), session, sessionModelPayload{}, "", ""),
 		withPayloadSchema(executionWriteCapability("sessions.set_effort", "sessions", "sessions:write"), session, sessionEffortPayload{}, "", ""),
 		withPayloadSchema(executionWriteCapability("sessions.evaluate", "sessions", "sessions:write", "tasks:write"), session, nil, "", ""),
@@ -244,11 +263,17 @@ const sessionStateNotes = "Session views carry interaction_state: awaiting_input
 	"When awaiting_input, the awaiting_input object describes the question: question_id, source (hook|terminal), kind (workspace_trust, bypass_permissions, tool_permission, ask_user_question, plan_approval, confirm, selection; treat unknown kinds as selection), " +
 	"text, options[{index,label,description,grants_permission,ends_session}], selected_index, accepts_text, questions (ask_user_question), tool_name, tool_input, detected_at. Answer it with sessions.answer_prompt. " +
 	"startup_state (starting|awaiting_input|ready|failed) tracks the initial prompt; error_reason and last_output explain a session with status error. " +
+	"turn {open, since, reason} says whether the agent is inside a turn: it opens when the agent accepts a prompt and closes on Stop (or the agent's idle notification after an interrupt); a long tool run is still an open turn. It is omitted until a turn signal has been seen. " +
 	"Events platform.session.awaiting_input and platform.session.input_resolved (aggregate id = session id) signal changes; re-read sessions.get for details."
 
 const sessionCreateNotes = "Returns as soon as the agent process is running (status running, interaction_state starting); it never waits for the agent to be ready. " +
 	"The initial prompt (task, planning or custom_prompt) is delivered in the background and is held back while a question is open, so it can never answer a dialog by accident. " +
-	"A client timeout or disconnect never stops the session. Poll sessions.get: startup_state becomes ready once the prompt is delivered, or awaiting_input when a question (e.g. workspace_trust) needs an answer via sessions.answer_prompt."
+	"A client timeout or disconnect never stops the session; after one, resend the identical envelope (same idempotency_key and command_id) or check automation.commands.get, never a new key (that creates a second session). Poll sessions.get: startup_state becomes ready once the prompt is delivered, or awaiting_input when a question (e.g. workspace_trust) needs an answer via sessions.answer_prompt."
+
+const sessionSendInputNotes = "Types text into the session's agent and, by default (await_ack true), waits up to 8 s for the agent to accept it: acknowledged true means the agent took the prompt; false means it did not confirm in time (the text may still be in its input). " +
+	"Refused with session_busy while the session's turn is open (from the accepted prompt until the turn completes, however long its tools run) or while another guarded send to it is still being delivered; retry after turn.open is false, or send force true to type anyway. " +
+	"A call takes about 2-10 s, so use a client timeout of at least 15 s. The command finishes and records its real result even if the client times out or disconnects. " +
+	"After a timeout NEVER resend with a new idempotency_key (that delivers the text twice): resend the identical envelope (same idempotency_key and command_id), which returns the recorded result or waits for it, or read it with automation.commands.get."
 
 const sessionStopNotes = "Stops any starting or running session; needs an explicit approval_token. " +
 	"For an idle session whose linked task is already done, use sessions.close_completed instead (no per-session approval)."
@@ -619,7 +644,7 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"sent": result.Submitted, "acknowledged": result.Acknowledged, "session_id": sessionID}, nil
+			return map[string]any{"sent": result.Submitted, "acknowledged": result.Acknowledged, "await_ack": awaitAck, "session_id": sessionID}, nil
 		}}, nil
 	case "sessions.set_model":
 		sessionID, err := executionStringID(target, "session id")

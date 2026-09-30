@@ -25,11 +25,24 @@ const (
 	defaultIdempotencyTTL    = 24 * time.Hour
 	defaultMaxCachedResponse = 1 << 20
 	maxIdempotencyKeyLength  = 200
+	// defaultReplayWait is how long a retry of a command that is still
+	// running waits for its result before answering idempotency_in_progress.
+	// It covers the slowest ordinary command, sessions.send_input (typing
+	// delay plus the 8 s ack wait).
+	defaultReplayWait  = 12 * time.Second
+	replayPollInterval = 200 * time.Millisecond
 )
 
 type IdempotencyStore interface {
 	ClaimAutomationCommand(ctx context.Context, command *database.AutomationCommand) (*database.AutomationCommand, bool, error)
 	CompleteAutomationCommandWithEvent(ctx context.Context, id, status string, responseStatus int, contentType string, body []byte, errorCode string, event *database.EventOutboxAppend) error
+}
+
+// idempotencyCommandReader lets a retry re-read a claim that is still
+// processing. Optional: without it a retry answers idempotency_in_progress
+// at once.
+type idempotencyCommandReader interface {
+	GetAutomationCommand(ctx context.Context, id string) (*database.AutomationCommand, error)
 }
 
 type IdempotencyOptions struct {
@@ -38,6 +51,9 @@ type IdempotencyOptions struct {
 	Random            io.Reader
 	Now               func() time.Time
 	IsMutation        func(string) bool
+	// ReplayWait bounds how long a retry waits for a processing command.
+	// Zero uses defaultReplayWait; negative disables the wait.
+	ReplayWait time.Duration
 }
 
 type Idempotency struct {
@@ -47,6 +63,7 @@ type Idempotency struct {
 	random            io.Reader
 	now               func() time.Time
 	isMutation        func(string) bool
+	replayWait        time.Duration
 }
 
 type idempotencyKeyContextKey struct{}
@@ -96,6 +113,9 @@ func NewIdempotency(store IdempotencyStore, options IdempotencyOptions) *Idempot
 	if options.IsMutation == nil {
 		options.IsMutation = func(string) bool { return false }
 	}
+	if options.ReplayWait == 0 {
+		options.ReplayWait = defaultReplayWait
+	}
 	return &Idempotency{
 		store:             store,
 		ttl:               options.TTL,
@@ -103,6 +123,7 @@ func NewIdempotency(store IdempotencyStore, options IdempotencyOptions) *Idempot
 		random:            options.Random,
 		now:               options.Now,
 		isMutation:        options.IsMutation,
+		replayWait:        options.ReplayWait,
 	}
 }
 
@@ -130,7 +151,8 @@ func (i *Idempotency) Middleware(next http.Handler) http.Handler {
 		}
 
 		key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-		bodyKey, bodyKeyErr := requestBodyIdempotencyKey(r)
+		envelope, bodyKeyErr := requestBodyLedgerFields(r)
+		bodyKey := envelope.IdempotencyKey
 		if bodyKeyErr != nil && key == "" {
 			var tooLarge *http.MaxBytesError
 			if errors.As(bodyKeyErr, &tooLarge) {
@@ -178,6 +200,8 @@ func (i *Idempotency) Middleware(next http.Handler) http.Handler {
 			RequestFingerprint: fingerprint,
 			Operation:          r.Method + " " + r.URL.Path,
 			ExpiresAt:          sql.NullTime{Time: expiresAt, Valid: true},
+			CommandID:          envelope.CommandID,
+			Capability:         envelope.Capability,
 		})
 		if err != nil {
 			writeError(w, http.StatusServiceUnavailable, "idempotency_unavailable", "idempotency claim could not be persisted", true)
@@ -188,15 +212,19 @@ func (i *Idempotency) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		if !created {
-			i.replay(w, claimed)
+			i.replay(w, i.awaitCompletion(r.Context(), claimed))
 			return
 		}
 		successEvent := requestAutomationCommandSuccessEvent(r, actor, claimed.ID, i.now().UTC(), i.isMutation)
 
 		capture := newBufferedResponse(i.maxCachedResponse)
-		r = r.WithContext(context.WithValue(r.Context(), idempotencyKeyContextKey{}, key))
-		next.ServeHTTP(capture, r)
+		// The claim is taken: from here the command runs to completion and
+		// records its real outcome even if the client times out or
+		// disconnects. The client learns it by retrying the same envelope or
+		// with automation.commands.get.
 		completionContext := context.WithoutCancel(r.Context())
+		r = r.WithContext(context.WithValue(completionContext, idempotencyKeyContextKey{}, key))
+		next.ServeHTTP(capture, r)
 		if capture.overflow {
 			if err := i.store.CompleteAutomationCommandWithEvent(completionContext, claimed.ID, "failed",
 				http.StatusInternalServerError, "application/json", nil, "response_too_large", nil); err != nil {
@@ -362,25 +390,73 @@ func hasAutomationAuditControl(value string) bool {
 	return false
 }
 
-func requestBodyIdempotencyKey(r *http.Request) (string, error) {
+// ledgerEnvelopeFields are the envelope fields the ledger records. Values the
+// command handler would reject are recorded anyway (bounded): the ledger
+// describes what was sent.
+type ledgerEnvelopeFields struct {
+	IdempotencyKey string `json:"idempotency_key"`
+	CommandID      string `json:"command_id"`
+	Capability     string `json:"capability"`
+}
+
+func requestBodyLedgerFields(r *http.Request) (ledgerEnvelopeFields, error) {
+	var envelope ledgerEnvelopeFields
 	if r.Body == nil {
-		return "", nil
+		return envelope, nil
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		return "", err
+		return envelope, err
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	if len(bytes.TrimSpace(body)) == 0 {
-		return "", io.EOF
-	}
-	var envelope struct {
-		IdempotencyKey string `json:"idempotency_key"`
+		return envelope, io.EOF
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		return "", err
+		return ledgerEnvelopeFields{}, err
 	}
-	return strings.TrimSpace(envelope.IdempotencyKey), nil
+	envelope.IdempotencyKey = strings.TrimSpace(envelope.IdempotencyKey)
+	envelope.CommandID = boundedLedgerField(envelope.CommandID)
+	envelope.Capability = boundedLedgerField(envelope.Capability)
+	return envelope, nil
+}
+
+func boundedLedgerField(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > maxCommandFieldLength || hasAutomationAuditControl(value) {
+		return ""
+	}
+	return value
+}
+
+// awaitCompletion lets a retry of a command that is still running receive
+// its result instead of idempotency_in_progress, so a client that timed out
+// can simply resend the same envelope.
+func (i *Idempotency) awaitCompletion(ctx context.Context, command *database.AutomationCommand) *database.AutomationCommand {
+	reader, ok := i.store.(idempotencyCommandReader)
+	if !ok || command.Status != "processing" || i.replayWait <= 0 {
+		return command
+	}
+	deadline := time.NewTimer(i.replayWait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(replayPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return command
+		case <-deadline.C:
+			return command
+		case <-ticker.C:
+			current, err := reader.GetAutomationCommand(ctx, command.ID)
+			if err != nil {
+				return command
+			}
+			if current.Status != "processing" {
+				return current
+			}
+		}
+	}
 }
 
 func (i *Idempotency) replay(w http.ResponseWriter, command *database.AutomationCommand) {

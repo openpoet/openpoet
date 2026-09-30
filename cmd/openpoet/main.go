@@ -193,6 +193,11 @@ func main() {
 
 	// Collect active sessions for auto-restore after server is fully initialized
 	ctx := context.Background()
+	if interrupted, err := db.MarkInterruptedAutomationCommands(ctx); err != nil {
+		log.Printf("Warning: could not close interrupted automation commands: %v", err)
+	} else if interrupted > 0 {
+		log.Printf("[Automation] %d command(s) interrupted by the restart marked indeterminate", interrupted)
+	}
 	sessionsToRestore, _ := db.ListActiveSessions(ctx)
 	reportService, reportServiceErr := application.NewReportService(db)
 	if reportServiceErr != nil {
