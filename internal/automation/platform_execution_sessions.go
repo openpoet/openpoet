@@ -146,6 +146,8 @@ func sessionPlatformDefinitions() []PlatformCapabilityDefinition {
 		withPayloadSchema(executionReadCapability("sessions.get", "sessions", "sessions:read"), session, nil, "", sessionStateNotes),
 		withPayloadSchema(executionReadCapability("sessions.history", "sessions", "sessions:read"), session, sessionHistoryPayload{}, "",
 			"Live sessions return the terminal buffer in content and the currently displayed screen in screen (source=runtime). Ended sessions return the last screen recorded at exit plus error_reason (source=persisted) instead of failing."),
+		withPayloadSchema(executionPayloadLimit(executionReadCapability("sessions.messages", "sessions", "sessions:read"), 4<<10), session, sessionMessagesPayload{},
+			`{"last_n":5,"max_chars":400}`, sessionMessagesNotes),
 		withPayloadSchema(executionReadCapability("sessions.active", "sessions", "sessions:read"), "{}", nil, "", sessionStateNotes),
 		withPayloadSchema(executionPayloadLimit(executionWriteCapability("sessions.create", "sessions", "sessions:write"), 128<<10), projectTargetDescription, sessionCreatePayload{}, "", sessionCreateNotes),
 		withPayloadSchema(executionPayloadLimit(executionWriteCapability("sessions.answer_prompt", "sessions", "sessions:write"), 64<<10), session, sessionAnswerPromptPayload{},
@@ -171,6 +173,8 @@ type sessionPlatformExecutor struct {
 	questions *application.SessionQuestionService
 	queries   SessionOperationalReadPort
 	runtime   SessionRuntimeReadPort
+	// transcripts backs sessions.messages (optional).
+	transcripts SessionTranscriptReadPort
 }
 
 type sessionListPayload struct {
@@ -381,6 +385,8 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 			}
 			return view, nil
 		}}, nil
+	case "sessions.messages":
+		return e.validateMessages(input, target)
 	case "sessions.active":
 		if err := requireEmptyExecutionPayload(input.Payload); err != nil {
 			return nil, err

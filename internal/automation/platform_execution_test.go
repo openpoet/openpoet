@@ -234,8 +234,8 @@ func executionPlatformActor(definitions []PlatformCapabilityDefinition) Actor {
 
 func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := executionPlatformDefinitionsForTest()
-	if len(definitions) != 66 {
-		t.Fatalf("execution surface has %d capabilities, want 66", len(definitions))
+	if len(definitions) != 67 {
+		t.Fatalf("execution surface has %d capabilities, want 67", len(definitions))
 	}
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -245,11 +245,11 @@ func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 		seen[definition.Name] = struct{}{}
 	}
 	capabilities, registry := executionPlatformTestRegistry(t, &executionPlatformFakePorts{})
-	if got := len(capabilities.List()); got != 66 {
-		t.Fatalf("application registry has %d execution capabilities, want 66", got)
+	if got := len(capabilities.List()); got != 67 {
+		t.Fatalf("application registry has %d execution capabilities, want 67", got)
 	}
-	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 66 {
-		t.Fatalf("platform discovery has %d execution capabilities, want 66", got)
+	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 67 {
+		t.Fatalf("platform discovery has %d execution capabilities, want 67", got)
 	}
 }
 
@@ -341,7 +341,7 @@ func TestExecutionPlatformReadSurfaceIsExplicit(t *testing.T) {
 		"blackboard.get",
 		"conflicts.get", "conflicts.list",
 		"files.list", "files.preview_metadata", "files.read", "git.branches", "git.diff", "git.log", "git.show", "git.status",
-		"sessions.active", "sessions.events_status", "sessions.file_activity", "sessions.get", "sessions.history", "sessions.list",
+		"sessions.active", "sessions.events_status", "sessions.file_activity", "sessions.get", "sessions.history", "sessions.list", "sessions.messages",
 		"tunnel.devices", "tunnel.status", "update.check", "update.status",
 		"workspaces.get", "workspaces.list", "workspaces.plan_merges",
 		"compose.status", "compose.logs",
@@ -396,6 +396,7 @@ func executionDryRunCases() []executionDryRunCase {
 		{name: "sessions.list", target: `{}`, payload: `{}`},
 		{name: "sessions.get", target: `{"id":"s1"}`, payload: `{}`},
 		{name: "sessions.history", target: `{"id":"s1"}`, payload: `{"max_bytes":1024}`},
+		{name: "sessions.messages", target: `{"id":"s1"}`, payload: `{"last_n":5,"search":"deploy"}`},
 		{name: "sessions.active", target: `{}`, payload: `{}`},
 		{name: "sessions.create", target: `{"project_id":1}`, payload: `{"environment":{"API_KEY":"session-secret"}}`, secretText: []string{"session-secret"}},
 		{name: "sessions.answer_prompt", target: `{"id":"s1"}`, payload: `{"question_id":"t_1","option":1,"text":"answer-secret"}`, secretText: []string{"answer-secret"}},

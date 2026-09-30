@@ -332,6 +332,22 @@ func (h *StructuredViewHandler) resolveJSONLSourceContext(ctx context.Context, s
 	}, ""
 }
 
+// ReadSessionTranscript parses a session's complete transcript, locally or
+// over SFTP. reason is set (not_found, unsupported_backend) when the session
+// has no transcript to read; a transcript not written yet yields no events.
+func (h *StructuredViewHandler) ReadSessionTranscript(ctx context.Context, sessionID string) ([]*jsonlview.SessionEvent, string, error) {
+	source, reason := h.resolveJSONLSourceContext(ctx, sessionID)
+	if reason != "" {
+		return nil, reason, nil
+	}
+	if source.isRemote {
+		events, err := h.readRemoteEvents(source)
+		return events, "", err
+	}
+	events, err := jsonlview.ParseFile(source.localPath)
+	return events, "", err
+}
+
 // readRemoteEvents reads and parses the full JSONL file from a remote host via SFTP.
 func (h *StructuredViewHandler) readRemoteEvents(source *jsonlSource) ([]*jsonlview.SessionEvent, error) {
 	fm := files.NewRemoteFileManager(source.project, h.decryptFunc)

@@ -16,6 +16,7 @@ import (
 	"openpoet/internal/automation"
 	"openpoet/internal/database"
 	"openpoet/internal/files"
+	"openpoet/internal/jsonlview"
 	"openpoet/internal/llm"
 	"openpoet/internal/session"
 )
@@ -240,6 +241,13 @@ func (r platformSessionEventReader) SessionEventStatus(ctx context.Context, sess
 		return automation.SessionEventStatusView{SessionID: sessionID, Status: "unavailable", Reason: reason}, nil
 	}
 	return automation.SessionEventStatusView{SessionID: sessionID, Status: "available"}, nil
+}
+
+func (r platformSessionEventReader) SessionTranscript(ctx context.Context, sessionID string) ([]*jsonlview.SessionEvent, string, error) {
+	if r.handler == nil {
+		return nil, "", errors.New("session transcript reader unavailable")
+	}
+	return r.handler.ReadSessionTranscript(ctx, sessionID)
 }
 
 type platformSessionSuggestionProvider struct{ handler *AIHandler }

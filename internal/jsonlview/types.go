@@ -4,14 +4,18 @@ import "time"
 
 // SessionEvent is a parsed JSONL event sent to the frontend.
 type SessionEvent struct {
-	Type        string        `json:"type"` // "user", "assistant", "progress"
-	UUID        string        `json:"uuid"`
-	ParentUUID  string        `json:"parent_uuid,omitempty"`
-	Timestamp   time.Time     `json:"timestamp"`
-	SessionID   string        `json:"session_id"`
-	IsSidechain bool          `json:"isSidechain,omitempty"`
-	Message     *EventMessage `json:"message,omitempty"`
-	Progress    *ProgressData `json:"progress,omitempty"`
+	Type        string    `json:"type"` // "user", "assistant", "progress"
+	UUID        string    `json:"uuid"`
+	ParentUUID  string    `json:"parent_uuid,omitempty"`
+	Timestamp   time.Time `json:"timestamp"`
+	SessionID   string    `json:"session_id"`
+	IsSidechain bool      `json:"isSidechain,omitempty"`
+	// IsMeta marks harness-injected user lines (skill bodies, command
+	// caveats, image notes); IsSummary marks a compaction summary.
+	IsMeta    bool          `json:"isMeta,omitempty"`
+	IsSummary bool          `json:"isCompactSummary,omitempty"`
+	Message   *EventMessage `json:"message,omitempty"`
+	Progress  *ProgressData `json:"progress,omitempty"`
 }
 
 // EventMessage represents a parsed message from the JSONL.
