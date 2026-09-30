@@ -192,7 +192,7 @@ func sessionPlatformDefinitions() []PlatformCapabilityDefinition {
 		// Destructive: isolating restarts a live session, which discards its
 		// conversation (a runner cannot change working directory in place).
 		withPayloadSchema(executionDestructiveCapability("sessions.isolate", "sessions", "sessions:write"), session, sessionIsolatePayload{}, "", ""),
-		withPayloadSchema(executionWriteCapability("sessions.reopen", "sessions", "sessions:write"), session, sessionReopenPayload{}, "", ""),
+		withPayloadSchema(executionWriteCapability("sessions.reopen", "sessions", "sessions:write"), session, sessionReopenPayload{}, "", sessionReopenNotes),
 		withPayloadSchema(executionPayloadLimit(executionWriteCapability("sessions.send_input", "sessions", "sessions:write"), 20<<10), session, sessionInputPayload{}, "", sessionSendInputNotes),
 		withPayloadSchema(executionWriteCapability("sessions.set_model", "sessions", "sessions:write"), session, sessionModelPayload{}, `{"model":"opus"}`, sessionSetModelNotes),
 		withPayloadSchema(executionWriteCapability("sessions.set_effort", "sessions", "sessions:write"), session, sessionEffortPayload{}, `{"effort":"high"}`, sessionSetEffortNotes),
@@ -319,6 +319,12 @@ const sessionSetEffortNotes = "Switches a running session's reasoning effort: de
 
 const sessionStopNotes = "Stops any starting or running session; needs an explicit approval_token. " +
 	"For an idle session whose linked task is already done, use sessions.close_completed instead (no per-session approval)."
+
+const sessionReopenNotes = "Restarts an ended session and resumes the same conversation from its transcript (--resume), as the post-deploy restore does. " +
+	"Accepts sessions in stopped, completed or error — error covers a runner that could not come back, e.g. an SSH timeout during restore; " +
+	"starting and running sessions are refused with session_not_reopenable (session_already_running if the runner is live). " +
+	"If the transcript no longer exists the reopen ends in error again with the reason in sessions.get. " +
+	"A workspace session reopens in its lane (workspace_gone if the lane directory was removed)."
 
 const sessionCloseCompletedNotes = "Closes a session whose work is finished, with policy approval (no approval_token). " +
 	"Requires a command reason and correlation_id. Refuses unless ALL hold: the session has a linked task whose status is done (session_task_missing, session_task_not_done); " +

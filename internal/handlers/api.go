@@ -2011,8 +2011,8 @@ func (a *API) AutoRestoreSession(ctx context.Context, sess *database.Session) er
 		envVars["OPENPOET_DANGEROUSLY_SKIP_PERMISSIONS"] = "true"
 	}
 
-	// Mark session as "stopped" first so ReopenSession SQL works
-	// (it requires status IN ('stopped', 'completed'))
+	// The row is still "running" from before the restart; end it first so
+	// ReopenSession SQL works (it requires an ended status)
 	a.db.EndSession(ctx, sessionID, "stopped")
 
 	// Reopen the session
