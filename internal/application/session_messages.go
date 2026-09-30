@@ -180,6 +180,8 @@ func (s *SessionMessageService) Read(ctx context.Context, query SessionMessagesQ
 		return nil, notFoundError("session_not_found", "session not found", nil)
 	case reason != "":
 		return nil, conflictError("session_transcript_unavailable", "this session has no structured transcript ("+reason+", backend "+item.Backend+")")
+	case errors.Is(err, context.DeadlineExceeded):
+		return nil, &Error{Kind: ErrorConflict, Code: "session_transcript_timeout", Message: "the session's remote host did not deliver the transcript in time (slow or unreachable); try again later", Cause: err}
 	case err != nil:
 		return nil, &Error{Kind: ErrorConflict, Code: "session_transcript_unavailable", Message: "the session transcript could not be read", Cause: err}
 	}

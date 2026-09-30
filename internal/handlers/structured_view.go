@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -10,8 +11,10 @@ import (
 	"openpoet/internal/jsonlview"
 	"openpoet/internal/websocket"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/pkg/sftp"
@@ -28,7 +31,25 @@ type StructuredViewHandler struct {
 	mu                    sync.Mutex
 	watchers              map[string]*watcherEntry // sessionID → watcher
 	nextWatcherGeneration uint64
+
+	// endedTranscripts caches the parsed transcripts of ended remote
+	// sessions: they no longer change, and each read otherwise costs an SSH
+	// connection plus the whole file.
+	transcriptMu     sync.Mutex
+	endedTranscripts []endedTranscript
 }
+
+type endedTranscript struct {
+	key    string
+	events []*jsonlview.SessionEvent
+}
+
+const (
+	// remoteTranscriptTimeout bounds one remote transcript read, so a slow or
+	// unreachable host fails the caller in time instead of holding it for minutes.
+	remoteTranscriptTimeout = 20 * time.Second
+	maxEndedTranscripts     = 4
+)
 
 func (h *StructuredViewHandler) SetEffectiveModelRecorder(recorder func(context.Context, string, string) error) {
 	h.recordEffectiveModel = recorder
@@ -45,6 +66,9 @@ type jsonlSource struct {
 	localPath string            // set when isRemote=false
 	project   *database.Project // set when isRemote=true
 	sessionID string
+	// endedKey identifies the finished transcript of an ended session (empty
+	// while the session can still write to it).
+	endedKey string
 }
 
 func NewStructuredViewHandler(db *database.DB, hub *websocket.Hub, decryptFunc func(string, string) (string, error)) *StructuredViewHandler {
@@ -73,7 +97,7 @@ func (h *StructuredViewHandler) GetSessionEvents(w http.ResponseWriter, r *http.
 	var err error
 
 	if source.isRemote {
-		events, err = h.readRemoteEvents(source)
+		events, err = h.readRemoteEvents(r.Context(), source)
 	} else {
 		events, err = jsonlview.ParseFile(source.localPath)
 	}
@@ -325,11 +349,15 @@ func (h *StructuredViewHandler) resolveJSONLSourceContext(ctx context.Context, s
 	}
 
 	// Remote project
-	return &jsonlSource{
+	source := &jsonlSource{
 		isRemote:  true,
 		project:   project,
 		sessionID: providerSessionID,
-	}, ""
+	}
+	if sess.EndTime.Valid && sess.Status != "running" && sess.Status != "starting" {
+		source.endedKey = sessionID + "|" + providerSessionID + "|" + strconv.FormatInt(sess.EndTime.Time.UnixNano(), 10)
+	}
+	return source, ""
 }
 
 // ReadSessionTranscript parses a session's complete transcript, locally or
@@ -340,16 +368,71 @@ func (h *StructuredViewHandler) ReadSessionTranscript(ctx context.Context, sessi
 	if reason != "" {
 		return nil, reason, nil
 	}
-	if source.isRemote {
-		events, err := h.readRemoteEvents(source)
+	if !source.isRemote {
+		events, err := jsonlview.ParseFile(source.localPath)
 		return events, "", err
 	}
-	events, err := jsonlview.ParseFile(source.localPath)
-	return events, "", err
+	if events, ok := h.cachedEndedTranscript(source.endedKey); ok {
+		return events, "", nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, remoteTranscriptTimeout)
+	defer cancel()
+	type read struct {
+		events []*jsonlview.SessionEvent
+		err    error
+	}
+	done := make(chan read, 1)
+	go func() {
+		events, err := h.readRemoteEvents(ctx, source)
+		done <- read{events, err}
+	}()
+	select {
+	case result := <-done:
+		if result.err == nil && result.events != nil {
+			h.cacheEndedTranscript(source.endedKey, result.events)
+		}
+		return result.events, "", result.err
+	case <-ctx.Done():
+		// The SSH dial cannot be interrupted; readRemoteEvents closes the
+		// connection as soon as it is made.
+		return nil, "", fmt.Errorf("reading the remote session transcript: %w", ctx.Err())
+	}
 }
 
-// readRemoteEvents reads and parses the full JSONL file from a remote host via SFTP.
-func (h *StructuredViewHandler) readRemoteEvents(source *jsonlSource) ([]*jsonlview.SessionEvent, error) {
+func (h *StructuredViewHandler) cachedEndedTranscript(key string) ([]*jsonlview.SessionEvent, bool) {
+	if key == "" {
+		return nil, false
+	}
+	h.transcriptMu.Lock()
+	defer h.transcriptMu.Unlock()
+	for _, entry := range h.endedTranscripts {
+		if entry.key == key {
+			return entry.events, true
+		}
+	}
+	return nil, false
+}
+
+func (h *StructuredViewHandler) cacheEndedTranscript(key string, events []*jsonlview.SessionEvent) {
+	if key == "" {
+		return
+	}
+	h.transcriptMu.Lock()
+	defer h.transcriptMu.Unlock()
+	for _, entry := range h.endedTranscripts {
+		if entry.key == key {
+			return
+		}
+	}
+	if len(h.endedTranscripts) >= maxEndedTranscripts {
+		h.endedTranscripts = h.endedTranscripts[1:]
+	}
+	h.endedTranscripts = append(h.endedTranscripts, endedTranscript{key: key, events: events})
+}
+
+// readRemoteEvents reads and parses the full JSONL file from a remote host via
+// SFTP. Canceling ctx closes the connection, aborting the transfer.
+func (h *StructuredViewHandler) readRemoteEvents(ctx context.Context, source *jsonlSource) ([]*jsonlview.SessionEvent, error) {
 	fm := files.NewRemoteFileManager(source.project, h.decryptFunc)
 	connector := fm.NewSFTPConnector()
 
@@ -359,6 +442,11 @@ func (h *StructuredViewHandler) readRemoteEvents(source *jsonlSource) ([]*jsonlv
 	}
 	defer sftpClient.Close()
 	defer sshClient.Close()
+	stop := context.AfterFunc(ctx, func() { _ = sshClient.Close() })
+	defer stop()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	remotePath, err := remoteJSONLPath(sshClient, sftpClient, source)
 	if err != nil {
@@ -372,7 +460,11 @@ func (h *StructuredViewHandler) readRemoteEvents(source *jsonlSource) ([]*jsonlv
 	}
 	defer file.Close()
 
-	return jsonlview.ParseReader(file)
+	events, err := jsonlview.ParseReader(file)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr // a cut-off transfer is never a complete transcript
+	}
+	return events, err
 }
 
 // remoteJSONLPath resolves the session transcript path on the remote host,
