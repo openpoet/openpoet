@@ -242,7 +242,7 @@ func TestCoordinatorTierScopeFromGroup(t *testing.T) {
 	if actor.Type != "session" || actor.ID != "sess-x" {
 		t.Fatalf("actor identity wrong: %+v", actor)
 	}
-	if actor.Scopes.Has(ScopeApprovalsGrant) || actor.Scopes.Has(ScopeApprovalsSelf) {
+	if actor.Scopes.Has(ScopeApprovalsGrant) || actor.Scopes.Has(ScopeApprovalsSelf) || actor.Scopes.Has(ScopeApprovalsWaived) {
 		t.Fatal("coordinator session actor must never hold approvals scopes")
 	}
 	scope := resolveActorProjectScope(context.Background(), f.db, actor)
