@@ -317,7 +317,32 @@
           "handler": {"type": "string"},
           "service": {"type": "string"},
           "allowed": {"type": "boolean"},
-          "approval_required": {"type": "boolean", "description": "Whether this client must present an approval_token. False for explicit capabilities when the client holds approvals:waived."}
+          "approval_required": {"type": "boolean", "description": "Whether this client must present an approval_token. False for explicit capabilities when the client holds approvals:waived."},
+          "mutation": {"type": "boolean", "description": "Whether the capability changes state (it then goes through the command ledger's mutation audit)."},
+          "max_payload_bytes": {"type": "integer", "minimum": 1, "description": "Largest accepted payload, when the capability sets its own limit."},
+          "payload": {"$ref": "#/components/schemas/CapabilityPayload"}
+        }
+      },
+      "CapabilityPayload": {
+        "type": "object",
+        "description": "The request contract of a capability: what the target must identify, the accepted payload fields (unknown fields are rejected), an example payload and usage notes (result shape, follow-up capabilities, error codes). Published for platform capabilities and for tasks.list, tasks.get, tasks.create, tasks.update, tasks.change_status, tasks.delete, tasks.duplicate and tasks.add_comment.",
+        "required": ["fields"],
+        "properties": {
+          "target": {"type": "string", "description": "Accepted target shapes, e.g. {\"type\":\"session\",\"id\":\"<session id>\"}."},
+          "fields": {"type": "array", "items": {"$ref": "#/components/schemas/CapabilityPayloadField"}},
+          "example": {"description": "An example payload."},
+          "notes": {"type": "string"}
+        }
+      },
+      "CapabilityPayloadField": {
+        "type": "object",
+        "required": ["name", "type", "required"],
+        "properties": {
+          "name": {"type": "string"},
+          "type": {"type": "string", "description": "string, integer, number, boolean, object, array<...>, object<string,...> or any."},
+          "required": {"type": "boolean"},
+          "description": {"type": "string", "description": "Meaning and accepted values."},
+          "fields": {"type": "array", "items": {"$ref": "#/components/schemas/CapabilityPayloadField"}, "description": "Fields of a nested object or of an array's objects."}
         }
       },
       "CapabilitiesResponse": {

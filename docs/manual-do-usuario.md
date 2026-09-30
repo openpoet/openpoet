@@ -413,6 +413,51 @@ curl -s -X POST "$AV1/commands" -H "Authorization: Bearer $OPAV1_TOKEN" \
   assistente e `openpoet_set_session_permission_mode` no MCP (sujeitos à mesma
   regra de ator).
 
+**O contrato de cada capability está no catálogo** *(real hoje)*. Em
+`GET $AV1/capabilities`, cada item traz `payload`: `target` (o que o alvo
+precisa identificar), `fields` (nome, tipo, se é obrigatório e valores
+aceitos), `example` e `notes` (formato do resultado, próximo passo, códigos de
+erro). Um cliente como a Helena não precisa copiar nada disso para o prompt,
+porque o catálogo é a fonte. Além das capabilities de plataforma, `tasks.list`,
+`tasks.get`, `tasks.create`, `tasks.update`, `tasks.change_status`,
+`tasks.delete`, `tasks.duplicate` e `tasks.add_comment` também publicam o
+contrato. O fluxo típico para pôr trabalho numa sessão:
+
+1. `tasks.create` com alvo `{"project_id": 7}` e payload `{title,
+   description, priority}` (`title` é o único obrigatório; `priority` aceita
+   `low`, `medium`, `high` ou `urgent`). O `id` devolvido é o `task_id`.
+2. `sessions.create` com o mesmo projeto e `{"task_id": <id>}`. Retorna na
+   hora, com `interaction_state: starting`; o agente recebe "comece a task" e
+   lê título e descrição.
+3. `sessions.get` a cada poucos segundos, por uns 75 s. Só `running` confirma
+   que a sessão está de pé. `awaiting_input` traz a pergunta (`kind`, `text`,
+   `options` numeradas a partir de 1, `question_id`), que se responde com
+   `sessions.answer_prompt` usando o `question_id` **lido agora** (um id velho
+   falha com `session_question_changed`). `status: error` vem com
+   `error_reason` e `last_output`, e `ended` quer dizer que o processo saiu.
+   Se ainda estiver `starting` no fim da janela, o resultado é desconhecido:
+   releia antes de criar outra sessão.
+
+`tasks.update` é parcial (só os campos enviados mudam), mas o alvo precisa de
+**projeto e task**: `{"type":"task","id":123,"project_id":7}`. Sem um dos dois,
+o erro é `target_invalid`, inclusive em `dry_run`.
+
+**Ler a conversa de uma sessão remota** *(real hoje)*. `sessions.messages` lê
+o transcript estruturado. `sessions.history` é captura de tela e, numa sessão
+interativa, devolve quadros do TUI e não a conversa. Numa sessão de projeto
+SSH (ex.: o Mac), o transcript vem do host remoto a cada leitura:
+
+- A leitura tem prazo de 20 s. Host lento ou fora do ar falha com
+  `session_transcript_timeout` em vez de prender o comando por minutos.
+- Sessão remota **encerrada** é lida uma vez e depois servida da memória
+  (guardamos as últimas 4), então paginar com `expand`/`offset` ou buscar fica
+  instantâneo.
+- Cada leitura precisa de uma `idempotency_key` nova. Reenviar a mesma key
+  devolve a primeira resposta, ou `idempotency_in_progress` enquanto ela ainda
+  roda. Foi o que aconteceu em 30/09: as leituras da 9ea28276 (projeto remoto)
+  levaram de 2 a 4 min, o cliente desistia e o retry com a mesma key voltava
+  `idempotency_in_progress`.
+
 **Parar a sessão de outra pessoa exige grant** (fluxo do broker de aprovações,
 que já existe hoje):
 
