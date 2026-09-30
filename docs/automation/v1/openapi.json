@@ -90,7 +90,7 @@
     "/commands": {
       "post": {
         "operationId": "executeAutomationCommand",
-        "description": "Executes a discovered legacy or platform capability. Platform policy approvals require a canonical correlation_id; explicit approvals require a matching consumed one-time grant. Dry runs validate but neither consume grants nor execute domain mutations.",
+        "description": "Executes a discovered legacy or platform capability. Platform policy approvals require a canonical correlation_id; explicit approvals require a matching consumed one-time grant, unless the client holds approvals:waived, in which case it self-approves under its canonical correlation_id (reason and idempotency still apply). Dry runs validate but neither consume grants nor execute domain mutations.",
         "parameters": [
           {
             "name": "Idempotency-Key",
@@ -317,7 +317,7 @@
           "handler": {"type": "string"},
           "service": {"type": "string"},
           "allowed": {"type": "boolean"},
-          "approval_required": {"type": "boolean"}
+          "approval_required": {"type": "boolean", "description": "Whether this client must present an approval_token. False for explicit capabilities when the client holds approvals:waived."}
         }
       },
       "CapabilitiesResponse": {
