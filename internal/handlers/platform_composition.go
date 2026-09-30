@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 
 	"openpoet/internal/application"
 	"openpoet/internal/automation"
 	"openpoet/internal/configsync"
 	"openpoet/internal/database"
+	"openpoet/internal/deployrecord"
 	"openpoet/internal/notifications"
 	"openpoet/internal/security"
 	runtime "openpoet/internal/session"
@@ -193,8 +195,71 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		decryptor.SetSecretDecryptor(services.Encryptor.Decrypt)
 	}
 	services.ConfigSync.SetSecretEncryptor(services.Encryptor)
+	a.configureRestartRecovery(services, questions, effects)
 	a.startSessionQuestionMonitor(questions, effects)
 	return nil
+}
+
+// configureRestartRecovery wires the restart recovery to the live runtime:
+// hook turn changes are persisted as they happen, restores go through
+// AutoRestoreSession and prompts through the initial-prompt path, which waits
+// for the resumed agent to be ready and for any open question.
+func (a *API) configureRestartRecovery(services PlatformServices, questions platformSessionQuestions, effects *platformEffects) {
+	recovery := newRestartRecovery(services.DB, deployrecord.DefaultPath())
+	recovery.restore = a.AutoRestoreSession
+	submitter := platformSessionInitialPromptSubmitter{api: a, questions: questions}
+	recovery.submit = submitter.SubmitInitialSessionPrompt
+	recovery.isRunning = services.SessionManager.IsSessionRunning
+	recovery.turnState = services.HookHandler.SessionTurnState
+	recovery.pendingQuestion = func(ctx context.Context, sessionID string) bool {
+		q, _ := questions.PendingQuestion(ctx, sessionID)
+		return q != nil
+	}
+	recovery.publish = func(ctx context.Context, domain, action, aggregateID string, fields map[string]any) {
+		effects.auditPayload(ctx, domain, action, nonEmptyAggregateID(aggregateID), application.Actor{Type: "system", ID: "restart-recovery"}, fields)
+	}
+	services.HookHandler.setTurnObserver(recovery.PersistTurn)
+	a.platformMu.Lock()
+	a.restartRecovery = recovery
+	a.platformMu.Unlock()
+}
+
+func (a *API) recovery() *restartRecovery {
+	a.platformMu.RLock()
+	defer a.platformMu.RUnlock()
+	return a.restartRecovery
+}
+
+// RestoreSessionsAfterRestart restores the sessions that were live before
+// this process started and resumes the ones whose turn the restart cut. It
+// returns after the restores; the resume prompts are delivered in the
+// background.
+func (a *API) RestoreSessionsAfterRestart(ctx context.Context, sessions []database.Session) {
+	if recovery := a.recovery(); recovery != nil {
+		recovery.RunBoot(ctx, sessions)
+		return
+	}
+	for i := range sessions {
+		if err := a.AutoRestoreSession(ctx, &sessions[i]); err != nil {
+			log.Printf("[AutoRestore] Failed to restore session %s: %v", sessions[i].ID, err)
+		}
+	}
+}
+
+// SnapshotSessionsForRestart records every running session's turn before the
+// shutdown stops them; call it before StopAllForRestart.
+func (a *API) SnapshotSessionsForRestart() {
+	if recovery := a.recovery(); recovery != nil && a.sessionMgr != nil {
+		recovery.SnapshotForShutdown(a.sessionMgr.ListRunningSessions())
+	}
+}
+
+// WatchDeploys publishes deploys that finish while the server runs (see
+// restartRecovery.WatchDeploys) until ctx ends.
+func (a *API) WatchDeploys(ctx context.Context) {
+	if recovery := a.recovery(); recovery != nil {
+		recovery.WatchDeploys(ctx)
+	}
 }
 
 func (a *API) clearPlatformComposition() {

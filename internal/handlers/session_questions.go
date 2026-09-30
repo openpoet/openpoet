@@ -365,6 +365,7 @@ func (a *API) startSessionQuestionMonitor(questions platformSessionQuestions, ef
 						effects.PublishSessionChange(ctx, application.SessionChange{Action: "input_resolved", ID: id, Actor: actor})
 						delete(last, id)
 					}
+					a.recovery().PersistAwaitingInput(id, current != "")
 				}
 				for id := range last {
 					if !running[id] {

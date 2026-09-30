@@ -155,6 +155,7 @@ type HookHandler struct {
 	acpUsage          map[string]*ACPUsageInfo                // sessionID -> ACP usage tracking (model, premium requests)
 	promptWaiters     map[string][]chan struct{}              // sessionID -> awaiters woken by the next UserPromptSubmit (send ack)
 	turns             map[string]application.SessionTurnState // sessionID -> open/closed turn (UserPromptSubmit .. Stop)
+	turnObserver      func(sessionID string, turn application.SessionTurnState)
 }
 
 // ACPUsageInfo holds Copilot ACP usage tracking data for a session.
@@ -331,6 +332,14 @@ func (h *HookHandler) GetSessionMode(sessionID string) string {
 	return h.sessionMode[sessionID]
 }
 
+// setTurnObserver registers the callback told about every turn change (the
+// restart recovery persists them). It runs on the hook path, outside h.mu.
+func (h *HookHandler) setTurnObserver(observer func(sessionID string, turn application.SessionTurnState)) {
+	h.mu.Lock()
+	h.turnObserver = observer
+	h.mu.Unlock()
+}
+
 // SessionTurnState reports whether the session is inside a turn. The bool is
 // false until a turn signal has been seen for the session.
 func (h *HookHandler) SessionTurnState(sessionID string) (application.SessionTurnState, bool) {
@@ -382,8 +391,13 @@ func (h *HookHandler) setSessionTurn(sessionID string, open bool, reason string)
 		h.mu.Unlock()
 		return
 	}
-	h.turns[sessionID] = application.SessionTurnState{Open: open, Since: time.Now(), Reason: reason}
+	turn := application.SessionTurnState{Open: open, Since: time.Now(), Reason: reason}
+	h.turns[sessionID] = turn
+	observer := h.turnObserver
 	h.mu.Unlock()
+	if observer != nil {
+		observer(sessionID, turn)
+	}
 	shortID := sessionID
 	if len(shortID) > 8 {
 		shortID = shortID[:8]
