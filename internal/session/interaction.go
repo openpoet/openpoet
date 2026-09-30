@@ -43,6 +43,8 @@ type interactionRegistry struct {
 	screens   map[string]*sessionprompt.Screen
 	startup   map[string]StartupState
 	firstSeen map[string]map[string]time.Time // sessionID -> questionID -> first detection
+	// permissionModes is each session's last observed permission mode.
+	permissionModes map[string]sessionprompt.PermissionModeState
 }
 
 const (
@@ -55,6 +57,7 @@ func (r *interactionRegistry) lazyInit() {
 		r.screens = make(map[string]*sessionprompt.Screen)
 		r.startup = make(map[string]StartupState)
 		r.firstSeen = make(map[string]map[string]time.Time)
+		r.permissionModes = make(map[string]sessionprompt.PermissionModeState)
 	}
 }
 
@@ -66,6 +69,7 @@ func (m *Manager) resetScreen(sessionID string, rows, cols int) {
 	m.interaction.lazyInit()
 	m.interaction.screens[sessionID] = sessionprompt.NewScreen(rows, cols)
 	delete(m.interaction.firstSeen, sessionID)
+	delete(m.interaction.permissionModes, sessionID)
 }
 
 func (m *Manager) screen(sessionID string) *sessionprompt.Screen {
@@ -95,6 +99,7 @@ func (m *Manager) forgetInteraction(sessionID string) {
 	delete(m.interaction.screens, sessionID)
 	delete(m.interaction.startup, sessionID)
 	delete(m.interaction.firstSeen, sessionID)
+	delete(m.interaction.permissionModes, sessionID)
 }
 
 // SetStartupState records the initial-prompt progress of a session.

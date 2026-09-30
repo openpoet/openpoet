@@ -405,6 +405,18 @@ func (h *HookHandler) setSessionTurn(sessionID string, open bool, reason string)
 	log.Printf("[hooks] Turn %s: session=%s (%s)", map[bool]string{true: "opened", false: "closed"}[open], shortID, reason)
 }
 
+// recordPermissionMode keeps a Claude Code hook event's permission_mode as the
+// session's last reported mode (sessions.get shows it when the mode indicator
+// is not on screen).
+func (h *HookHandler) recordPermissionMode(sessionID string, hookEvent map[string]interface{}) {
+	if h.sessionMgr == nil {
+		return
+	}
+	if permMode, _ := hookEvent["permission_mode"].(string); permMode != "" {
+		h.sessionMgr.RecordHookPermissionMode(sessionID, permMode)
+	}
+}
+
 // trackModeFromEvent reads the permission_mode field from a hook event,
 // updates the session mode, and resets the inactivity timer.
 func (h *HookHandler) trackModeFromEvent(sessionID string, hookEvent map[string]interface{}) {
@@ -452,6 +464,7 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		hookEvent["backend"] = backend
 	}
 	h.trackClaudeProviderSessionID(sessionID, hookEvent, backend)
+	h.recordPermissionMode(sessionID, hookEvent)
 
 	// Normalize Copilot event names
 	if isCopilot {
@@ -1344,6 +1357,7 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	h.recordPermissionMode(sessionID, hookEvent)
 	h.trackTurnFromEvent(sessionID, eventName, hookEvent)
 
 	// Track execution mode changes

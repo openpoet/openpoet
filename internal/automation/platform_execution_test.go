@@ -234,8 +234,8 @@ func executionPlatformActor(definitions []PlatformCapabilityDefinition) Actor {
 
 func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := executionPlatformDefinitionsForTest()
-	if len(definitions) != 68 {
-		t.Fatalf("execution surface has %d capabilities, want 68", len(definitions))
+	if len(definitions) != 69 {
+		t.Fatalf("execution surface has %d capabilities, want 69", len(definitions))
 	}
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -245,11 +245,11 @@ func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 		seen[definition.Name] = struct{}{}
 	}
 	capabilities, registry := executionPlatformTestRegistry(t, &executionPlatformFakePorts{})
-	if got := len(capabilities.List()); got != 68 {
-		t.Fatalf("application registry has %d execution capabilities, want 68", got)
+	if got := len(capabilities.List()); got != 69 {
+		t.Fatalf("application registry has %d execution capabilities, want 69", got)
 	}
-	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 68 {
-		t.Fatalf("platform discovery has %d execution capabilities, want 68", got)
+	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 69 {
+		t.Fatalf("platform discovery has %d execution capabilities, want 69", got)
 	}
 }
 
@@ -330,9 +330,9 @@ func TestExecutionPlatformMutationMetadataMatchesManifest(t *testing.T) {
 		checked++
 	}
 	// 28: voice.transcribe is reachable from both /voice/transcribe and the
-	// chunked /voice/uploads/{id}/complete route.
-	if checked != 28 {
-		t.Fatalf("checked %d execution mutations, want 28", checked)
+	// chunked /voice/uploads/{id}/complete route; 29 with sessions.set_permission_mode.
+	if checked != 29 {
+		t.Fatalf("checked %d execution mutations, want 29", checked)
 	}
 }
 
@@ -409,6 +409,7 @@ func executionDryRunCases() []executionDryRunCase {
 		{name: "sessions.send_input", target: `{"id":"s1"}`, payload: `{"text":"input-secret"}`, secretText: []string{"input-secret"}},
 		{name: "sessions.set_model", target: `{"id":"s1"}`, payload: `{"model":"gpt-test"}`},
 		{name: "sessions.set_effort", target: `{"id":"s1"}`, payload: `{"effort":"high"}`},
+		{name: "sessions.set_permission_mode", target: `{"id":"s1"}`, payload: `{"mode":"acceptEdits"}`},
 		{name: "sessions.evaluate", target: `{"id":"s1"}`, payload: `{}`},
 		{name: "sessions.image_prompt_hint", target: `{"id":"s1"}`, payload: `{"user_prompt":"prompt-secret","image_count":1}`, secretText: []string{"prompt-secret"}},
 		{name: "sessions.events_status", target: `{"id":"s1"}`, payload: `{}`},

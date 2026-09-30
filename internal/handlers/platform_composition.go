@@ -31,8 +31,9 @@ const (
 	// +4 mutations, +2 reads.
 	// automation.commands.get (read) lets a client learn a command's outcome
 	// after a timeout: +1 capability, +1 read.
-	expectedPlatformCapabilities = 182
-	expectedPlatformMutations    = 120
+	// sessions.set_permission_mode (mutation): +1 capability, +1 mutation.
+	expectedPlatformCapabilities = 183
+	expectedPlatformMutations    = 121
 	expectedPlatformReads        = 62
 )
 

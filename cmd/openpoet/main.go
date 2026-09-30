@@ -897,6 +897,7 @@ func main() {
 		r.Post("/sessions/{id}/input", api.SendSessionInput)
 		r.Post("/sessions/{id}/model", api.SetSessionModel)
 		r.Post("/sessions/{id}/effort", api.SetSessionEffort)
+		r.Post("/sessions/{id}/permission-mode", api.SetSessionPermissionMode)
 		r.Get("/sessions/{id}/tools", api.GetResolvedSessionTools)
 
 		// Session-Task integration

@@ -9,7 +9,7 @@ verificado para o mesmo Application Service usado pela UI e pela Automation API.
 
 | Item | Quantidade |
 | --- | ---: |
-| Rotas mutáveis `/api` | 120 |
+| Rotas mutáveis `/api` | 121 |
 | Ações inline de negócio | 57 |
 | Ações `presentation_only` | 49 |
 | Listeners estáticos de negócio | 19 |
@@ -18,7 +18,7 @@ verificado para o mesmo Application Service usado pela UI e pela Automation API.
 
 | Estado | Quantidade | Significado |
 | --- | ---: | --- |
-| `implemented` | 118 | UI e Automation compartilham Application Service/invariantes |
+| `implemented` | 119 | UI e Automation compartilham Application Service/invariantes |
 | `application_service_ready` | 0 | Nenhuma rota permanece em caminho intermediário |
 | `gap` | 0 | Nenhum gap de Application Service |
 | `internal_only` | 2 | Ingestão de hooks, não ação autônoma de usuário |
@@ -39,7 +39,7 @@ verificado para o mesmo Application Service usado pela UI e pela Automation API.
 | notifications | 6 | 6 | 0 | 0 | 0 | R1, R2, R3 |
 | projects | 8 | 8 | 0 | 0 | 0 | R1, R2, R3, R4 |
 | proposals | 9 | 9 | 0 | 0 | 0 | R1, R2, R3, R4 |
-| sessions | 9 | 9 | 0 | 0 | 0 | R1, R2, R3 |
+| sessions | 10 | 10 | 0 | 0 | 0 | R1, R2, R3 |
 | settings | 1 | 1 | 0 | 0 | 0 | R4 |
 | skills | 10 | 10 | 0 | 0 | 0 | R2, R3 |
 | tags | 4 | 4 | 0 | 0 | 0 | R2, R3 |
