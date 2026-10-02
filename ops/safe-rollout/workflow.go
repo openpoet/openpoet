@@ -37,18 +37,28 @@ func NewWorkflow(output io.Writer) Workflow {
 	}
 }
 
+// deployGate runs the mandatory deploy gate (ops/deploy-gate/gate.sh): the
+// worktree must be clean and commit (HEAD when empty) must be on main and on
+// origin/main. safe-rollout offers no bypass; see docs/deploy-gate.md.
+func (workflow Workflow) deployGate(ctx context.Context, repoDir, commit, label string) error {
+	args := []string{filepath.Join(repoDir, "ops", "deploy-gate", "gate.sh"), "--repo", repoDir, "--context", label}
+	if commit != "" {
+		args = append(args, "--commit", commit)
+	}
+	if _, err := workflow.Runner.Run(ctx, repoDir, "bash", args...); err != nil {
+		return fmt.Errorf("%s recusado pelo deploy gate: %w", label, err)
+	}
+	return nil
+}
+
 func (workflow Workflow) Prepare(ctx context.Context, config Config) (Manifest, string, error) {
 	var empty Manifest
 	if err := validatePrepareConfig(config); err != nil {
 		return empty, "", err
 	}
 
-	status, err := workflow.Runner.Run(ctx, config.RepoDir, "git", "status", "--porcelain")
-	if err != nil {
+	if err := workflow.deployGate(ctx, config.RepoDir, "", "safe-rollout prepare"); err != nil {
 		return empty, "", err
-	}
-	if strings.TrimSpace(string(status)) != "" {
-		return empty, "", errors.New("prepare recusado: worktree contém alterações não commitadas")
 	}
 	shaOutput, err := workflow.Runner.Run(ctx, config.RepoDir, "git", "rev-parse", "--short=12", "HEAD")
 	if err != nil {
@@ -210,6 +220,12 @@ func (workflow Workflow) Apply(ctx context.Context, config Config) (ApplyResult,
 	}
 	if config.BackupDir == "" {
 		return result, errors.New("backup-dir é obrigatório")
+	}
+	if config.RepoDir == "" {
+		return result, errors.New("repo é obrigatório (deploy gate)")
+	}
+	if err := workflow.deployGate(ctx, config.RepoDir, manifest.GitSHA, "safe-rollout apply"); err != nil {
+		return result, err
 	}
 
 	manifest, err = workflow.Preflight(ctx, config)

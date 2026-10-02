@@ -18,6 +18,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Mandatory deploy gate (docs/deploy-gate.md): a release is only built
+      # from a clean checkout of a commit that is on main and on origin/main.
+      # There is no bypass here.
+      - name: Deploy gate
+        run: |
+          git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main
+          git branch --force main origin/main
+          ./ops/deploy-gate/gate.sh --context "release ${GITHUB_REF_NAME}"
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
