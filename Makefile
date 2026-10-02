@@ -1,4 +1,4 @@
-.PHONY: all build run clean test test-web test-deploy-gate deploy-gate deps vendor-js provider-helper setup format
+.PHONY: all build run clean test test-web test-deploy-gate deploy-gate test-publish-guard publish-guard secret-scan deps vendor-js provider-helper setup format
 
 # Variables
 BINARY_NAME=openpoet
@@ -87,6 +87,20 @@ test-deploy-gate:
 	bash ops/deploy-gate/gate_test.sh
 	bash ops/deploy-gate/deploy_sh_test.sh
 
+# Publication guard (OpenPoet is open source): check every commit not yet on
+# origin before pushing — gitleaks + internal IPs/paths, the local denylist
+# and forbidden files. The pre-commit/pre-push hooks (make setup) run it too.
+# See docs/publish-guard.md.
+publish-guard:
+	@./ops/publish-guard/guard.sh unpushed origin
+
+# Full-history scan with the same rules.
+secret-scan:
+	@./ops/publish-guard/guard.sh history
+
+test-publish-guard:
+	bash ops/publish-guard/guard_test.sh
+
 # Run tests with coverage
 test-coverage:
 	go test -v -coverprofile=coverage.out ./...
@@ -145,6 +159,7 @@ setup:
 # Install development tools
 tools:
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+	go install github.com/zricethezav/gitleaks/v8@v8.30.1
 
 # Show help
 help:
@@ -165,12 +180,15 @@ help:
 	@echo "  test-web     Run the Playwright browser/DOM tests"
 	@echo "  deploy-gate  Check the deploy gate (clean tree, HEAD on main + origin/main)"
 	@echo "  test-deploy-gate Run the deploy gate tests"
+	@echo "  publish-guard Check unpushed commits before pushing (secrets, IPs, denylist)"
+	@echo "  secret-scan  Scan the whole history with the publish guard"
+	@echo "  test-publish-guard Run the publish guard tests"
 	@echo "  test-coverage Run tests with coverage"
 	@echo "  clean        Remove build artifacts"
 	@echo "  fmt          Format code (go fmt)"
 	@echo "  format       Format Go files and stage changes"
 	@echo "  lint         Lint code"
 	@echo "  icons        Generate PWA icons"
-	@echo "  setup        Configure git hooks"
+	@echo "  setup        Configure git hooks (pre-commit + pre-push publish guard)"
 	@echo "  tools        Install development tools"
 	@echo "  help         Show this help"

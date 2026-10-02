@@ -1,0 +1,11 @@
+#!/bin/sh
+
+# Pre-push hook: OpenPoet is open source. Every commit that is not on the
+# remote yet goes through the publication guard (gitleaks + internal IPs,
+# paths, local denylist, forbidden files) before it leaves this machine.
+# If it finds something, rewrite the LOCAL history first. See
+# docs/publish-guard.md.
+
+remote="$1"
+echo "Running publish guard on the commits being pushed to $remote..."
+exec "$(git rev-parse --show-toplevel)/ops/publish-guard/guard.sh" pre-push "$remote"
