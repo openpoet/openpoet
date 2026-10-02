@@ -1,0 +1,5 @@
+# gitleaks false positives (reviewed): minified xterm.js identifiers and a fake
+# test fixture key. Add a fingerprint here only after reviewing the finding.
+35929c70592cab75391be9cfc93bcd39cb2f0197:web/static/vendor/xterm.js:generic-api-key:1
+805a0267d2dec68fc4aaeeced74e4b0282508608:internal/automation/platform_collaboration_test.go:generic-api-key:279
+dd5a6dd4637e538341714cbf2711f38c3f5dc03f:web/static/vendor/xterm.js:generic-api-key:7

@@ -18,3 +18,13 @@ if [ $? -ne 0 ]; then
     echo "go vet failed. Commit aborted."
     exit 1
 fi
+
+# Publication guard: OpenPoet is open source. Secrets (gitleaks), internal
+# IPs/paths, the local denylist and forbidden files never get committed.
+# See docs/publish-guard.md.
+echo "Running publish guard..."
+./ops/publish-guard/guard.sh staged
+if [ $? -ne 0 ]; then
+    echo "Publish guard failed. Commit aborted."
+    exit 1
+fi
