@@ -111,7 +111,7 @@ International contributors will not know how to set up the environment, what the
 **File:** `internal/config/config.go`
 
 ```go
-VAPIDEmail: getEnv("VAPID_EMAIL", "admin@example.com"),
+VAPIDEmail: getEnv("VAPID_EMAIL", "<personal domain>"),
 ```
 
 **Risk:** Exposes a personal domain in the public code.
@@ -422,7 +422,7 @@ All dependencies are stable and well-maintained. No licensing concerns.
 - [ ] Create `README.md` in English with description, features, install, and screenshots
 - [ ] Translate the 7 Portuguese strings to English in `index.html`
 - [ ] Translate `migrationErrorPageHTML` in `main.go` to English
-- [ ] Remove hardcoded personal domain from `config.go`
+- [x] Remove hardcoded personal domain from `config.go` (default is now `admin@example.com`; set `VAPID_EMAIL`)
 - [ ] Remove or disable debug endpoints and verbose logging middleware
 - [ ] Rewrite `CLAUDE.md` in English (or create a bilingual version)
 - [ ] Clean up stray files in the root (`hello-world.txt`, `baby-names.txt`, `nohup*.out`, `plan.md`)
