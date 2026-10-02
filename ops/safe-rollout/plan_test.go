@@ -145,7 +145,7 @@ func TestPrepareRunsTestsBeforeBuildAndPublishesManifest(t *testing.T) {
 	}
 
 	runner := &fakeRunner{run: func(_ context.Context, _ string, name string, args ...string) ([]byte, error) {
-		if name == "git" && reflect.DeepEqual(args, []string{"status", "--porcelain"}) {
+		if isDeployGate(name, args) {
 			return nil, nil
 		}
 		if name == "git" && reflect.DeepEqual(args, []string{"rev-parse", "--short=12", "HEAD"}) {
@@ -189,6 +189,38 @@ func TestPrepareRunsTestsBeforeBuildAndPublishesManifest(t *testing.T) {
 
 	if runner.indexOf("go", "test") >= runner.indexOf("go", "build") {
 		t.Fatalf("commands out of order: %v", runner.calls)
+	}
+	if runner.gateIndex() >= runner.indexOf("go", "test") {
+		t.Fatalf("deploy gate must run before tests and build: %v", runner.calls)
+	}
+}
+
+func TestPrepareRefusedByDeployGateRunsNothingElse(t *testing.T) {
+	directory := t.TempDir()
+	repoDir := filepath.Join(directory, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "go.mod"), []byte("module test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{run: func(_ context.Context, _ string, name string, args ...string) ([]byte, error) {
+		if isDeployGate(name, args) {
+			return []byte("DEPLOY GATE FAILED\n    M a.go"), errors.New("exit status 1\nDEPLOY GATE FAILED\n    M a.go")
+		}
+		return nil, fmt.Errorf("must not run after a gate refusal: %s %v", name, args)
+	}}
+	workflow := NewWorkflow(os.Stdout)
+	workflow.Runner = runner
+
+	_, _, err := workflow.Prepare(context.Background(), Config{
+		RepoDir: repoDir, ReleasesDir: filepath.Join(directory, "releases"), ReleaseID: "release-gate",
+	})
+	if err == nil || !strings.Contains(err.Error(), "deploy gate") || !strings.Contains(err.Error(), "M a.go") {
+		t.Fatalf("expected a deploy gate refusal listing the file, got %v", err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("commands ran after the gate refused: %v", runner.calls)
 	}
 }
 
@@ -249,6 +281,12 @@ func TestApplyUsesFakeLaunchdAndPassesHealthGates(t *testing.T) {
 	defer server.Close()
 
 	runner := &fakeRunner{run: func(_ context.Context, _ string, name string, args ...string) ([]byte, error) {
+		if isDeployGate(name, args) {
+			if !reflect.DeepEqual(args[len(args)-2:], []string{"--commit", manifest.GitSHA}) {
+				return nil, fmt.Errorf("gate must check the manifest commit, got %v", args)
+			}
+			return nil, nil
+		}
 		if name != "launchctl" {
 			return nil, fmt.Errorf("unexpected command: %s", name)
 		}
@@ -279,6 +317,7 @@ func TestApplyUsesFakeLaunchdAndPassesHealthGates(t *testing.T) {
 		PlistPath:      plistPath,
 		ServiceLabel:   "test.openpoet",
 		LaunchDomain:   "gui/501",
+		RepoDir:        directory,
 		HealthURL:      server.URL,
 		StopTimeout:    time.Second,
 		HealthTimeout:  time.Second,
@@ -295,6 +334,34 @@ func TestApplyUsesFakeLaunchdAndPassesHealthGates(t *testing.T) {
 	if runner.indexOf("launchctl", "bootout") >= runner.indexOf("launchctl", "bootstrap") {
 		t.Fatalf("launchctl commands out of order: %v", runner.calls)
 	}
+	if runner.gateIndex() >= runner.indexOf("launchctl", "bootout") {
+		t.Fatalf("deploy gate must run before production is stopped: %v", runner.calls)
+	}
+}
+
+func TestApplyRefusedByDeployGateLeavesProductionAlone(t *testing.T) {
+	directory := t.TempDir()
+	manifestPath, manifest := writeTestRelease(t, directory, "release-gate-apply", "token-gate")
+	runner := &fakeRunner{run: func(_ context.Context, _ string, name string, args ...string) ([]byte, error) {
+		if isDeployGate(name, args) {
+			return nil, errors.New("exit status 1\ncommit abc123 is not on 'origin/main'")
+		}
+		return nil, fmt.Errorf("must not run after a gate refusal: %s %v", name, args)
+	}}
+	workflow := NewWorkflow(os.Stdout)
+	workflow.Runner = runner
+
+	_, err := workflow.Apply(context.Background(), Config{
+		Execute: true, ConfirmToken: manifest.ConfirmationToken, ManifestPath: manifestPath,
+		BackupDir: filepath.Join(directory, "backups"), ServiceLabel: "test.openpoet",
+		LaunchDomain: "gui/501", RepoDir: directory,
+	})
+	if err == nil || !strings.Contains(err.Error(), "deploy gate") {
+		t.Fatalf("expected a deploy gate refusal, got %v", err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("commands ran after the gate refused: %v", runner.calls)
+	}
 }
 
 type commandCall struct {
@@ -310,6 +377,19 @@ type fakeRunner struct {
 func (runner *fakeRunner) Run(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
 	runner.calls = append(runner.calls, commandCall{name: name, args: append([]string(nil), args...)})
 	return runner.run(ctx, dir, name, args...)
+}
+
+func isDeployGate(name string, args []string) bool {
+	return name == "bash" && len(args) > 0 && strings.HasSuffix(args[0], filepath.Join("ops", "deploy-gate", "gate.sh"))
+}
+
+func (runner *fakeRunner) gateIndex() int {
+	for index, call := range runner.calls {
+		if isDeployGate(call.name, call.args) {
+			return index
+		}
+	}
+	return len(runner.calls) + 1
 }
 
 func (runner *fakeRunner) indexOf(name, firstArg string) int {
