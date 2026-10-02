@@ -32,9 +32,25 @@ allowed-tools: Bash(git *)
    - `chore:` - maintenance tasks, dependencies, configs
    - `perf:` - performance improvements
 
+5. **Open source — nothing compromising is committed** (`docs/publish-guard.md`):
+   OpenPoet is public. Never commit secrets, tokens, keys, passwords,
+   internal IPs/hosts, personal data (machine user/home paths, client or
+   client-project names, private e-mails), debug images/screenshots,
+   internal docs (incident reports, assessments, internal session/task IDs),
+   dumps, logs, `.db`, `.env` or binaries. Test fixtures use neutral values
+   (`example.com`, `192.0.2.x`, `/home/dev`, `C:\Users\dev`).
+   - **Before every commit, review the staged diff** (`git diff --staged`)
+     with this rule. The pre-commit hook runs `ops/publish-guard/guard.sh
+     staged` (gitleaks + IPs/paths/local denylist/forbidden files); a
+     failure means fix the content, not bypass.
+   - What is in `.gitignore` stays in `.gitignore` (`.scripts/`,
+     `CLAUDE.md`, `.claude/`, `.run/`, local DBs): never `git add -f`.
+   - Never `--no-verify` without an explicit order from the user.
+
 ## Process
 
 1. Run `git status` and `git diff --staged` to understand staged changes. If nothing is staged, run `git diff` to see unstaged changes.
+   Review every added line against rule 5 before going on.
 2. Run `git log --oneline -5` to see recent commit style for consistency.
 3. Analyze the changes and draft an appropriate commit message.
 4. Stage relevant files individually (avoid `git add -A` or `git add .`).
