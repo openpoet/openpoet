@@ -19,6 +19,24 @@ Production runs as the systemd user unit `openpoet-prod.service` on the producti
 - Use `./.scripts/deploy.sh --pull` quando o commit a publicar já está no `origin/main` e a árvore local está limpa (faz `git pull --ff-only` antes do build).
 - O deploy faz health check em `/api/version` e, se o binário novo não responder, **volta sozinho** para `.run/openpoet.previous`. Rollback manual: `./.scripts/deploy.sh --rollback`.
 
+## REGRA CRÍTICA — Deploy gate: nada sem estar commitado
+
+Regra: **nunca há deploy sem tudo commitado.** O
+`deploy.sh` (inclusive `--pull` e `--rollback`) roda o gate
+`ops/deploy-gate/gate.sh` antes de agir e **falha** quando:
+
+- o working tree não está limpo (`git status --porcelain` não vazio, inclusive
+  arquivo untracked). O erro lista os arquivos;
+- o commit não está na `main` local;
+- o commit não está em `origin/main` (faltou `git push`), ou o fetch falhou.
+
+Antes de chamar o deploy: `make deploy-gate`. Se reprovar, commite tudo em
+commits coerentes por assunto e faça push (com autorização do usuário). Nunca
+use stash, nunca descarte trabalho alheio e nunca contorne com passos manuais.
+O bypass `--emergency-bypass "<motivo>"` é explícito e fica logado em
+`.run/deploy-gate-bypass.log`. **Só use com ordem expressa do usuário para
+este deploy.** Detalhes: `docs/deploy-gate.md`.
+
 ## REGRA CRÍTICA — O deploy é SEMPRE o último passo do turno
 
 O processo desta sessão é filho do `openpoet-prod`. Cerca de 1 s depois de o
@@ -28,7 +46,7 @@ sozinha com `claude --resume`). Nada que você planejar para depois do
 
 Por isso, **antes** de chamar o `deploy.sh`:
 
-1. Commit feito, testes rodados, relatório/task/docs já atualizados com o que
+1. Tudo commitado e empurrado (`make deploy-gate` passa), testes rodados, relatório/task/docs já atualizados com o que
    foi entregue (deixe claro que o deploy foi disparado e que a verificação
    vem a seguir).
 2. Nada de `sleep`, `--status` ou "vou verificar" depois do deploy no mesmo
@@ -51,9 +69,10 @@ outbox como `platform.deploy.completed` / `platform.deploy.failed`.
 
 O script faz tudo automaticamente:
 
-- (opcional `--pull`) `git pull --ff-only`, recusando árvore suja
+- Roda o deploy gate (árvore limpa, commit na `main` e em `origin/main`); se reprovar, não faz nada e lista os arquivos
+- (opcional `--pull`) `git pull --ff-only`, recusando árvore suja, e roda o gate de novo no commit puxado
 - Roda `make build` ANTES de parar a produção (build quebrado não derruba nada)
-- Para `openpoet-prod.service` (nunca toca no 8080)
+- Roda o gate uma última vez (nada pode ter mudado durante o build) e só então para `openpoet-prod.service` (nunca toca no 8080)
 - Guarda o binário atual em `.run/openpoet.previous` e instala o novo
 - Inicia `openpoet-prod.service` e espera `/api/version` responder (até 60 s)
 - Se não responder, restaura o binário anterior e religa (rollback automático)
@@ -70,6 +89,7 @@ O comando retorna imediatamente — o deploy roda em background. Encerre o turno
 ```
 
 - `SUCCESS`: fazer a verificação pedida e reportar sucesso.
+- `FAILED (deploy gate…)`: nada foi parado. Commitar e fazer push do que estiver pendente e repetir.
 - `FAILED` / `ROLLED BACK`: checar `./.scripts/deploy.sh --log`, mostrar as
   linhas relevantes e reportar o erro.
 

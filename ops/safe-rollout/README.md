@@ -5,6 +5,11 @@ parar produção. O utilitário é **dry-run por padrão**. Nenhum comando mutan
 executado sem `--execute`; `apply` também exige o token exato gerado pelo
 `prepare`.
 
+`prepare` e `apply` passam pelo deploy gate obrigatório
+(`ops/deploy-gate/gate.sh`, ver `docs/deploy-gate.md`): worktree limpo e commit
+(HEAD no `prepare`, `git_sha` do manifest no `apply`) na `main` e em
+`origin/main`. Aqui não há bypass.
+
 Este utilitário não substitui aprovação humana. As regras do `AGENTS.md`
 continuam valendo: deploy em `8081` só pode acontecer depois de autorização
 direta e explícita do usuário.

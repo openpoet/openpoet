@@ -37,6 +37,7 @@ OpenPoet is a web application that orchestrates Claude Code sessions across mult
 ### Deployment
 
 - Production runs on port 8081 (`.run/openpoet -port 8081`)
+- Deploy: `./.scripts/deploy.sh [--pull|--rollback]`, always behind the mandatory deploy gate (`ops/deploy-gate/gate.sh`, see `docs/deploy-gate.md`)
 - Build command: `make build`
 - Service Worker provides offline capability and PWA features
 
@@ -109,6 +110,7 @@ E2E harness: `ops/lanes/e2e.sh` (real server + real git repos + fresh DB on port
 
 - **Port 8081 is PRODUCTION** — never use for testing or debugging
 - **NEVER deploy without explicit user approval** — The deploy action (killing production process on port 8081, rebuilding, and restarting) must ONLY be executed when the user has given direct, express approval to deploy. Claude Code sessions must NEVER autonomously decide to deploy. If a task description mentions "deploy", the session must still ask the user for confirmation before executing. This applies to all contexts: task completion, commit workflows, and any other scenario.
+- **DEPLOY GATE — nunca há deploy sem tudo commitado** — Todo deploy/release/restart da produção (`.scripts/deploy.sh`, `--pull`, `--rollback`, `ops/safe-rollout`, `release.yml`) passa pelo gate obrigatório `ops/deploy-gate/gate.sh`: working tree limpo (`git status --porcelain` vazio, untracked inclusive) e o commit implantado na `main` **e** em `origin/main`. Se o gate reprovar, o deploy FALHA listando os arquivos: commite (e faça push de) tudo, em commits coerentes, e tente de novo. Nunca contorne o gate com passos manuais (`cp`, `kill`, `systemctl`) nem com stash. O único bypass é `./.scripts/deploy.sh --emergency-bypass "<motivo>"`, que é explícito e registrado em `.run/deploy-gate-bypass.log`. Agentes só o usam com ordem expressa do usuário para aquele deploy. Detalhes: `docs/deploy-gate.md`. Conferir sem deploy: `make deploy-gate`.
 - Database migrations must be additive (never alter existing migrations)
 - All dependencies must use MIT-compatible licenses
 - Mobile terminal submit logic must follow 3-step sequence (see CLAUDE.md)

@@ -382,6 +382,7 @@ Deploy the OpenPoet service to the `.run/` directory on port 8081 using the depl
 - **NUNCA** executar os passos de deploy manualmente (kill, build, cp, nohup).
 - **SEMPRE** usar o script `.scripts/deploy.sh` que já encapsula toda a lógica de deploy.
 - O script se daemoniza automaticamente — sobrevive mesmo se o Claude Code ou o terminal cair.
+- **Deploy gate obrigatório:** o script recusa deploy/rollback se o working tree não estiver limpo ou se o commit não estiver na `main` e em `origin/main`, e lista os arquivos pendentes. Commitar e fazer push antes. Bypass só com `--emergency-bypass "<motivo>"`, que fica logado, e com ordem expressa do usuário. Ver `docs/deploy-gate.md`.
 
 ## Steps
 
