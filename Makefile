@@ -1,4 +1,4 @@
-.PHONY: all build run clean test test-web deps vendor-js provider-helper setup format
+.PHONY: all build run clean test test-web test-deploy-gate deploy-gate deps vendor-js provider-helper setup format
 
 # Variables
 BINARY_NAME=openpoet
@@ -74,6 +74,18 @@ node_modules: package.json
 	npm install
 	npx playwright install chromium
 	@touch node_modules
+
+# Mandatory pre-deploy gate: clean tree, HEAD on main and on origin/main.
+# .scripts/deploy.sh, ops/safe-rollout and the release workflow all run it
+# before acting. See docs/deploy-gate.md.
+deploy-gate:
+	@./ops/deploy-gate/gate.sh
+
+# Tests for the deploy gate and its wiring into .scripts/deploy.sh (also part
+# of `go test ./...` via ops/deploy-gate/gate_test.go).
+test-deploy-gate:
+	bash ops/deploy-gate/gate_test.sh
+	bash ops/deploy-gate/deploy_sh_test.sh
 
 # Run tests with coverage
 test-coverage:
@@ -151,6 +163,8 @@ help:
 	@echo "  provider-helper Install the pinned OpenAI OAuth provider bridge"
 	@echo "  test         Run tests"
 	@echo "  test-web     Run the Playwright browser/DOM tests"
+	@echo "  deploy-gate  Check the deploy gate (clean tree, HEAD on main + origin/main)"
+	@echo "  test-deploy-gate Run the deploy gate tests"
 	@echo "  test-coverage Run tests with coverage"
 	@echo "  clean        Remove build artifacts"
 	@echo "  fmt          Format code (go fmt)"
