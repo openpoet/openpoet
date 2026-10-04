@@ -112,6 +112,11 @@ type HookHandler struct {
 	// Implementations must only enqueue — this runs on the hook response path.
 	OnToolEvent func(sessionID, eventName string, hookEvent map[string]interface{})
 
+	// OnAttention reports a question parked here for a backend whose terminal
+	// never paints it (Codex app-server), where the PTY attention sentinel
+	// cannot see it. Wired to the conflict radar (session.awaiting_input).
+	OnAttention func(sessionID, kind, excerpt string)
+
 	// ConsultConflict is called SYNCHRONOUSLY in HandlePermission before parking
 	// a write permission. Returns (deny, reason) — a non-empty reason when
 	// another live session holds a write claim on the same path. Must not block
@@ -586,6 +591,11 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 		createdAt:  time.Now(),
 	}
 	h.mu.Unlock()
+	if backend == "codex" && h.OnAttention != nil {
+		if q := h.pendingHookQuestion(sessionID); q != nil {
+			h.OnAttention(sessionID, q.Kind, attentionExcerpt(q.Text))
+		}
+	}
 
 	// Broadcast to browser via WebSocket
 	if isAskUser {
@@ -1308,6 +1318,12 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	toolName, _ := hookEvent["tool_name"].(string)
 	log.Printf("[hooks] Event received: session=%s event=%s tool=%s", shortID, eventName, toolName)
 
+	// The agent's final reply rides the Stop hook (Claude Code, Codex) into
+	// the browser and the session.turn_completed excerpt: mask secrets first.
+	if message, ok := hookEvent["last_assistant_message"].(string); ok && eventName == "Stop" {
+		hookEvent["last_assistant_message"] = application.RedactSecrets(message)
+	}
+
 	// Map hook event to the appropriate WebSocket message type
 	var msgType websocket.MessageType
 	switch eventName {
@@ -1427,9 +1443,10 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	h.mu.Unlock()
 	if eventName == "Stop" && h.notifService != nil && !stoppedByUser && h.shouldSendPush(sessionID, false) {
 		log.Printf("[hooks] Sending push for Stop event on session %s", sessionID)
+		agentName := hookBackendDisplayName(backend)
 		go func() {
 			if err := h.notifService.Send(context.Background(), sessionID, "info",
-				"Claude Stopped", "Claude Code finished execution", ""); err != nil {
+				agentName+" Stopped", agentName+" finished execution", ""); err != nil {
 				log.Printf("[hooks] Push failed for Stop: %v", err)
 			}
 		}()
@@ -1904,4 +1921,15 @@ func (h *HookHandler) HandleTaskNotificationRespond(w http.ResponseWriter, r *ht
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// attentionExcerptMaxRunes matches the PTY sentinel's excerpt bound.
+const attentionExcerptMaxRunes = 200
+
+func attentionExcerpt(text string) string {
+	runes := []rune(strings.Join(strings.Fields(application.RedactSecrets(text)), " "))
+	if len(runes) > attentionExcerptMaxRunes {
+		runes = runes[:attentionExcerptMaxRunes]
+	}
+	return string(runes)
 }

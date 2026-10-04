@@ -956,7 +956,7 @@ func AllToolDefs() []ToolDef {
 			Description: "Read a session's conversation as clean text from its structured transcript (never the terminal screen): user prompts and assistant replies, without tool calls, tool output or thinking. " +
 				"Default: the last_n latest messages (short id, role, time, size, text cut to max_chars); page back with before_id = the reported next_before_id. " +
 				"With search: up to 10 matching messages as short snippets (case- and accent-insensitive). With expand: one message in full, in 8000-character chunks (offset = next_offset). " +
-				"Not available for copilot, codex or opencode sessions.",
+				"Not available for copilot, opencode or codex tui-runtime sessions.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{

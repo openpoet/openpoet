@@ -81,6 +81,9 @@ type CodexRunner struct {
 	lastErrorMessage     string
 	modelDefaults        codexModelDefaults
 	modelDefaultsByID    map[string]codexModelDefaults
+	turnTranscriptSeq    int
+	turnHooksOnce        sync.Once
+	turnHooks            chan map[string]interface{}
 }
 
 type codexCommandProcess struct {
@@ -2025,7 +2028,9 @@ func (r *CodexRunner) handleNotification(method string, params json.RawMessage) 
 			r.lastErrorMessage = ""
 			r.mu.Unlock()
 			r.resetCodexTranscriptStream()
+			r.markTurnTranscriptStart()
 			r.setCodexPhase("thinking", "Starting turn")
+			r.postTurnStarted(id)
 		}
 	case "turn/completed", "turn/failed":
 		// app-server no longer emits turn/failed: a failed turn arrives as
@@ -2054,6 +2059,7 @@ func (r *CodexRunner) handleNotification(method string, params json.RawMessage) 
 			r.resetCodexTranscriptStream()
 			r.addCodexTranscriptBlock("status", "Turn interrupted.", "Codex", "", "interrupted")
 			r.setCodexPhase("idle", "Turn interrupted")
+			r.postTurnStopped(turnID, "interrupted")
 			return
 		}
 		if method == "turn/failed" || turnStatus == "failed" {
@@ -2067,15 +2073,18 @@ func (r *CodexRunner) handleNotification(method string, params json.RawMessage) 
 				r.setCodexPhase("error", msg)
 				r.write([]byte("\r\n"))
 				r.writePrompt()
+				r.postTurnStopped(turnID, "failed")
 				return
 			}
 			r.addCodexTranscriptBlock("error", msg, "Codex turn failed", "", "failed")
 			r.write([]byte(fmt.Sprintf("\r\n\x1b[31mCodex turn failed: %s\x1b[0m\r\n", msg)))
 			r.setCodexPhase("error", msg)
 			r.noteCodexTurnError(turnID, msg)
+			r.postTurnStopped(turnID, "failed")
 		} else {
 			r.resetCodexTranscriptStream()
 			r.setCodexPhase("idle", "Waiting for instructions")
+			r.postTurnStopped(turnID, "completed")
 		}
 		r.write([]byte("\r\n"))
 		r.writePrompt()

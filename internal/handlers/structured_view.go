@@ -365,6 +365,11 @@ func (h *StructuredViewHandler) resolveJSONLSourceContext(ctx context.Context, s
 // has no transcript to read; a transcript not written yet yields no events.
 func (h *StructuredViewHandler) ReadSessionTranscript(ctx context.Context, sessionID string) ([]*jsonlview.SessionEvent, string, error) {
 	source, reason := h.resolveJSONLSourceContext(ctx, sessionID)
+	if reason == "unsupported_backend" {
+		if sess, err := h.db.GetSession(ctx, sessionID); err == nil && sess.Backend == "codex" {
+			return h.readCodexTranscript(ctx, sess)
+		}
+	}
 	if reason != "" {
 		return nil, reason, nil
 	}

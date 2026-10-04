@@ -46,6 +46,17 @@ Current Codex support includes:
   `functionCallOutput`, `webSearch`, `subAgentActivity`, and `contextCompaction`
   items, plus the matching agent phases (`running_tool`, `searching`,
   `waiting_approval`, `waiting_input`).
+- Structured transcript for automation: the user and assistant messages the
+  runner persists in `codex_transcript_events` are served by `sessions.messages`
+  (list, search, expand), the same as a Claude Code JSONL transcript. Sessions on
+  the `tui` runtime record no transcript and still answer
+  `session_transcript_unavailable`.
+- Turn signals: the runner posts `mode_changed` (executing) to
+  `/api/hooks/event` when a turn starts and `Stop` when it ends (`turn_status`
+  completed, failed or interrupted, with `last_assistant_message`). That closes
+  the session's turn, idles its mode and emits `session.turn_completed` with a
+  `last_message` excerpt. An approval or question parked on the permission hook
+  emits `session.awaiting_input`.
 - Project memory sync between `CLAUDE.md`, `AGENTS.md`, and the OpenPoet memory doc.
 - Project skills synced under `.agents/skills`.
 - Project MCP config synced under `.codex/config.toml`.
