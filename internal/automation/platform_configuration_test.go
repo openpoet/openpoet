@@ -409,3 +409,76 @@ func TestConfigurationAutomationViewsNeverSerializeStoredSecrets(t *testing.T) {
 		t.Fatalf("redacted metadata was lost: project=%#v ai=%#v", project, ai)
 	}
 }
+
+func TestConfigurationProjectTargetAcceptsTypedProjectID(t *testing.T) {
+	definitions := configurationPlatformDefinitionsForTest()
+	_, registry := configurationPlatformTestRegistry(t)
+	actor := configurationPlatformActor(definitions)
+	dispatch := func(capability, target, payload string) (map[string]any, error) {
+		t.Helper()
+		result, err := DispatchPlatformCapability(context.Background(), registry, PlatformDispatchRequest{
+			Capability: application.CapabilityName(capability), Actor: actor, DryRun: true,
+			Target: json.RawMessage(target), Payload: json.RawMessage(payload),
+		})
+		if err != nil {
+			return nil, err
+		}
+		preview, _ := result.Result.(map[string]any)
+		return preview, nil
+	}
+	for _, testCase := range []struct{ capability, target, payload string }{
+		{"projects.get_shares", `{"type":"project","id":"42"}`, `{}`},
+		{"projects.get_shares", `{"type":"project","id":42}`, `{}`},
+		{"projects.get_shares", `{"kind":"project","id":42}`, `{}`},
+		{"projects.get_shares", `{"project_id":42}`, `{}`},
+		{"projects.update_shares", `{"type":"project","id":"42"}`, `{"shared_project_ids":[26]}`},
+		{"projects.update_shares", `{}`, `{"project_id":42,"shared_project_ids":[26]}`},
+		{"tools.get_project_policy", `{"type":"project","id":42}`, `{}`},
+		{"tags.list_project", `{"type":"project","id":42}`, `{}`},
+		{"skills.list_project", `{"type":"project","id":42}`, `{}`},
+		{"mcp.list_project", `{"type":"project","id":42}`, `{}`},
+		{"projects.sync_config", `{"type":"project","id":42}`, `{}`},
+	} {
+		preview, err := dispatch(testCase.capability, testCase.target, testCase.payload)
+		if err != nil {
+			t.Fatalf("%s target=%s: %v", testCase.capability, testCase.target, err)
+		}
+		if preview["project_id"] != int64(42) {
+			t.Fatalf("%s target=%s resolved project_id=%v, want 42", testCase.capability, testCase.target, preview["project_id"])
+		}
+	}
+	for _, target := range []string{`{}`, `{"type":"project"}`, `{"type":"project","id":"abc"}`, `{"type":"project","id":0}`, `{"type":"skill","id":42}`} {
+		_, err := dispatch("projects.get_shares", target, `{}`)
+		var dispatchErr *PlatformDispatchError
+		if !errors.As(err, &dispatchErr) || dispatchErr.Code != "platform_target_invalid" {
+			t.Fatalf("target=%s: err=%T %v, want platform_target_invalid", target, err, err)
+		}
+	}
+}
+
+func TestConfigurationProjectSharesPublishPayloadContract(t *testing.T) {
+	definitions := configurationPlatformDefinitionsForTest()
+	_, registry := configurationPlatformTestRegistry(t)
+	descriptors := map[application.CapabilityName]PlatformCapabilityDescriptor{}
+	for _, descriptor := range registry.ListForActor(configurationPlatformActor(definitions)) {
+		descriptors[descriptor.Name] = descriptor
+	}
+	get := descriptors["projects.get_shares"].Payload
+	if get == nil || get.Target != projectTargetDescription || len(get.Fields) != 0 || string(get.Example) != `{}` || get.Notes == "" {
+		t.Fatalf("projects.get_shares contract = %+v", get)
+	}
+	update := descriptors["projects.update_shares"].Payload
+	if update == nil || update.Target != projectTargetDescription || len(update.Example) == 0 || update.Notes == "" {
+		t.Fatalf("projects.update_shares contract = %+v", update)
+	}
+	fields := map[string]PlatformPayloadField{}
+	for _, field := range update.Fields {
+		fields[field.Name] = field
+	}
+	if ids := fields["shared_project_ids"]; !ids.Required || ids.Type != "array<integer>" || ids.Description == "" {
+		t.Fatalf("shared_project_ids = %+v", ids)
+	}
+	if fields["project_id"].Required {
+		t.Fatalf("project_id must be optional: %+v", fields["project_id"])
+	}
+}
