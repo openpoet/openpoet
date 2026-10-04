@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -269,14 +270,18 @@ func awaitingInputEvent(sessionID string, projectID int64, kind, excerpt string,
 // structured milestone report (Phase 7.2), a report_ref pointer — the event is
 // the wake-up, the report is the payload; the coordinator never needs the
 // transcript to know what happened. reportRef == "" omits the field (additive,
-// SchemaVersion stays 1).
-func turnCompletedEvent(sessionID string, projectID int64, files []string, reportRef string, ts time.Time) database.EventOutboxAppend {
+// SchemaVersion stays 1). lastMessage, when the Stop hook carried the agent's
+// final reply, is its opening excerpt (additive as well).
+func turnCompletedEvent(sessionID string, projectID int64, files []string, reportRef, lastMessage string, ts time.Time) database.EventOutboxAppend {
 	if files == nil {
 		files = []string{}
 	}
 	body := map[string]interface{}{"session_id": sessionID, "project_id": projectID, "files_touched": files}
 	if reportRef != "" {
 		body["report_ref"] = reportRef
+	}
+	if lastMessage != "" {
+		body["last_message"] = lastMessage
 	}
 	payload, _ := json.Marshal(body)
 	return database.EventOutboxAppend{
@@ -289,4 +294,18 @@ func turnCompletedEvent(sessionID string, projectID int64, files []string, repor
 		PayloadJSON:   string(payload),
 		OccurredAt:    ts.UTC(),
 	}
+}
+
+// turnExcerptMaxRunes bounds the last_message excerpt of session.turn_completed;
+// the full reply is read with sessions.messages.
+const turnExcerptMaxRunes = 500
+
+// turnExcerpt flattens a message to one line and keeps its opening, marked
+// with … when cut. The hook handler redacts secrets before it gets here.
+func turnExcerpt(message string) string {
+	runes := []rune(strings.Join(strings.Fields(message), " "))
+	if len(runes) <= turnExcerptMaxRunes {
+		return string(runes)
+	}
+	return strings.TrimSpace(string(runes[:turnExcerptMaxRunes])) + "…"
 }

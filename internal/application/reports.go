@@ -613,6 +613,12 @@ func boundedReportText(value string, limit int, field string) (string, error) {
 	return value, nil
 }
 
+// RedactSecrets masks credentials (tokens, keys, authorization headers) in
+// free text before it leaves OpenPoet.
+func RedactSecrets(value string) string {
+	return redactReportSecrets(value)
+}
+
 func redactReportSecrets(value string) string {
 	for _, pattern := range reportSecretPatterns {
 		if strings.Contains(strings.ToLower(pattern.String()), "authorization") {

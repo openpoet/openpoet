@@ -425,6 +425,7 @@ func main() {
 
 	coord.Start()
 	hookHandler.OnToolEvent = coord.OnHookEvent
+	hookHandler.OnAttention = coord.RecordAttention
 	sessionMgr.OnSessionAttention = coord.RecordAttention
 	// Phase 3: the radar's first synchronous hand — deny a write permission
 	// when the file is contested by another live session, and drop the denied

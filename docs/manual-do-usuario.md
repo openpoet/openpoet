@@ -219,8 +219,10 @@ reconcilia banco × `git worktree list`, e lanes sujas paradas há dias viram
 Parar de fazer *polling* de histórico de sessão. A plataforma ganha primitivas
 temporais e "mãos" determinísticas:
 
-- **Eventos de turno**: `session.turn_completed {session_id, files_touched}`
-  quando uma sessão termina um turno (hook `Stop`), e
+- **Eventos de turno**: `session.turn_completed {session_id, files_touched,
+  last_message?}` quando uma sessão termina um turno (hook `Stop`; o codex
+  app-server emite o mesmo `Stop` pelo runner, e `last_message` é o começo da
+  última resposta do agente), e
   `session.awaiting_input` quando o sentinela de PTY detecta uma pergunta ou
   uma permissão parqueada. (Esses dois tipos de evento já começam a existir na
   base atual; a projeção os enriquece — p.ex. `files_touched` no
@@ -445,7 +447,10 @@ o erro é `target_invalid`, inclusive em `dry_run`.
 **Ler a conversa de uma sessão remota** *(real hoje)*. `sessions.messages` lê
 o transcript estruturado. `sessions.history` é captura de tela e, numa sessão
 interativa, devolve quadros do TUI e não a conversa. Numa sessão de projeto
-SSH (ex.: o Mac), o transcript vem do host remoto a cada leitura:
+SSH (ex.: o Mac), o transcript vem do host remoto a cada leitura. Sessões
+codex (runtime app-server) são lidas do transcript que o OpenPoet grava para
+elas no próprio banco, sem acesso ao host; codex no runtime `tui` não tem
+transcript estruturado:
 
 - A leitura tem prazo de 20 s. Host lento ou fora do ar falha com
   `session_transcript_timeout` em vez de prender o comando por minutos.

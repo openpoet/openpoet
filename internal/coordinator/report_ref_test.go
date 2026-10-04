@@ -10,7 +10,7 @@ import (
 // when the session has one, and omits the field entirely when it does not
 // (additive payload — SchemaVersion stays 1).
 func TestTurnCompletedCarriesReportRef(t *testing.T) {
-	withRef := turnCompletedEvent("sess-1", 7, []string{"a.go"}, "rep-42", time.Now())
+	withRef := turnCompletedEvent("sess-1", 7, []string{"a.go"}, "rep-42", "", time.Now())
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(withRef.PayloadJSON), &payload); err != nil {
 		t.Fatal(err)
@@ -22,7 +22,7 @@ func TestTurnCompletedCarriesReportRef(t *testing.T) {
 		t.Fatalf("additive field must not bump schema version (got %d)", withRef.SchemaVersion)
 	}
 
-	without := turnCompletedEvent("sess-1", 7, []string{"a.go"}, "", time.Now())
+	without := turnCompletedEvent("sess-1", 7, []string{"a.go"}, "", "", time.Now())
 	payload = map[string]any{}
 	if err := json.Unmarshal([]byte(without.PayloadJSON), &payload); err != nil {
 		t.Fatal(err)
