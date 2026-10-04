@@ -764,3 +764,22 @@ func (f *executionPlatformFakePorts) Logs(context.Context, int64, string, int) (
 	f.readCalls++
 	return "", nil
 }
+
+func TestExecutionProjectTargetAcceptsNumericStringID(t *testing.T) {
+	for _, target := range []string{`{"type":"project","id":"42"}`, `{"type":"project","id":42}`, `{"kind":"project","id":"42"}`} {
+		decoded, err := decodeExecutionTarget(json.RawMessage(target))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id, err := executionProjectID(decoded, 0); err != nil || id != 42 {
+			t.Fatalf("target=%s: id=%d err=%v", target, id, err)
+		}
+	}
+	decoded, err := decodeExecutionTarget(json.RawMessage(`{"type":"project","id":"abc"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executionProjectID(decoded, 0); err == nil {
+		t.Fatal("non-numeric project id was accepted")
+	}
+}

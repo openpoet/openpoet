@@ -11,7 +11,8 @@ func configurationPlatformDefinitions() []PlatformCapabilityDefinition {
 		readConfigurationCapability("settings.get", "configuration", "settings:read"),
 		readConfigurationCapability("tools.get_policies", "configuration", "tools:read"),
 		readConfigurationCapability("tools.get_project_policy", "configuration", "tools:read", "projects:read"),
-		readConfigurationCapability("projects.get_shares", "configuration", "projects:read"),
+		withPayloadSchema(readConfigurationCapability("projects.get_shares", "configuration", "projects:read"),
+			projectTargetDescription, nil, `{}`, projectSharesGetNotes),
 		readConfigurationCapability("mcp_api_key.status", "configuration", "credentials:read"),
 		unsafeConfigurationCapability("settings.update", "configuration", "settings:write"),
 		unsafeConfigurationCapability("projects.sync_config", "configuration", "projects:write", "config:write"),
@@ -20,7 +21,8 @@ func configurationPlatformDefinitions() []PlatformCapabilityDefinition {
 		unsafeConfigurationCapability("mcp_api_key.revoke", "configuration", "credentials:write"),
 		unsafeConfigurationCapability("tools.update_policies", "configuration", "tools:policy"),
 		unsafeConfigurationCapability("tools.update_project_policy", "configuration", "tools:policy", "projects:write"),
-		writeConfigurationCapability("projects.update_shares", "configuration", "projects:write"),
+		withPayloadSchema(writeConfigurationCapability("projects.update_shares", "configuration", "projects:write"),
+			projectTargetDescription, projectSharesPayload{}, `{"shared_project_ids":[26]}`, projectSharesUpdateNotes),
 	}
 }
 
@@ -39,9 +41,15 @@ type projectPolicyPayload struct {
 	Policy    string `json:"policy"`
 }
 type projectSharesPayload struct {
-	ProjectID        int64   `json:"project_id,omitempty"`
-	SharedProjectIDs []int64 `json:"shared_project_ids"`
+	ProjectID        int64   `json:"project_id,omitempty" doc:"project whose shares are replaced, when the target does not carry it"`
+	SharedProjectIDs []int64 `json:"shared_project_ids" doc:"complete list of project IDs shared with the target project; [] removes every share"`
 }
+
+const projectSharesGetNotes = "Returns the projects shared with the target project as [{project_id, name, path, type}]. " +
+	"The payload is always {}; the project comes from the target."
+
+const projectSharesUpdateNotes = "Replaces the whole share list (not a merge): read projects.get_shares first and send every ID to keep. " +
+	"IDs must be positive, unique, existing and different from the target project."
 
 func (e *configurationPlatformExecutor) Validate(_ context.Context, input PlatformExecutionInput) (PlatformValidatedCommand, error) {
 	target, err := decodeConfigurationTarget(input.Target)

@@ -180,8 +180,7 @@ func executionProjectID(target executionCommandTarget, fallback int64) (int64, e
 		return fallback, nil
 	}
 	if len(bytes.TrimSpace(target.ID)) > 0 && (target.Type == "project" || target.Kind == "project") {
-		var id int64
-		if err := json.Unmarshal(target.ID, &id); err == nil && id > 0 {
+		if id, ok := rawInt64(target.ID); ok {
 			return id, nil
 		}
 	}

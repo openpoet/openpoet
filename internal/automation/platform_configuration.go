@@ -147,6 +147,11 @@ func configurationProjectID(target configurationCommandTarget, fallback int64) (
 	if fallback > 0 {
 		return fallback, nil
 	}
+	// {"type":"project","id":42} is the target shape shared with tasks.* and
+	// sessions.create; the id may be a number or a numeric string.
+	if target.Type == "project" || target.Kind == "project" {
+		return configurationTargetID(target, 0, "project_id")
+	}
 	return 0, platformFailure("platform_target_invalid", "project_id is required", false)
 }
 
