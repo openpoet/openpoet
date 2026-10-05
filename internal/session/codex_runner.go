@@ -50,6 +50,7 @@ type CodexRunner struct {
 	pending              map[int]chan codexRPCResponse
 	inputBuffer          []rune
 	inputLineVisible     bool
+	inputPasting         bool // inside a bracketed paste: line breaks are text, not Enter
 	providerThreadID     string
 	activeTurnID         string
 	initialized          bool
@@ -408,6 +409,20 @@ func (r *CodexRunner) Write(data []byte) (int, error) {
 		var typed []byte
 		var typedRune rune
 
+		if b == 0x1b && bytes.HasPrefix(data[i:], []byte(bracketedPasteStart)) {
+			i += len(bracketedPasteStart)
+			r.mu.Lock()
+			r.inputPasting = true
+			r.mu.Unlock()
+			continue
+		}
+		if b == 0x1b && bytes.HasPrefix(data[i:], []byte(bracketedPasteEnd)) {
+			i += len(bracketedPasteEnd)
+			r.mu.Lock()
+			r.inputPasting = false
+			r.mu.Unlock()
+			continue
+		}
 		if b == 0x1b {
 			next, bareEscape := consumeCodexTerminalEscape(data, i)
 			i = next
@@ -416,6 +431,7 @@ func (r *CodexRunner) Write(data []byte) (int, error) {
 				r.mu.Lock()
 				r.inputBuffer = nil
 				r.inputLineVisible = false
+				r.inputPasting = false
 				r.emit([]byte("^ESC\r\n"))
 				r.emitPromptLocked(false)
 				r.mu.Unlock()
@@ -443,10 +459,24 @@ func (r *CodexRunner) Write(data []byte) (int, error) {
 
 		r.terminalMu.Lock()
 		r.mu.Lock()
+		if r.inputPasting && (b == '\r' || b == '\n') {
+			// A pasted line break: keep it in the prompt (a CRLF pair is one break).
+			if !(b == '\n' && i >= 2 && data[i-2] == '\r') {
+				if !r.inputLineVisible {
+					r.emitPromptLocked(true)
+				}
+				r.inputBuffer = append(r.inputBuffer, '\n')
+				r.emit([]byte("\r\n"))
+			}
+			r.mu.Unlock()
+			r.terminalMu.Unlock()
+			continue
+		}
 		switch b {
 		case 0x03: // Ctrl+C
 			r.inputBuffer = nil
 			r.inputLineVisible = false
+			r.inputPasting = false
 			r.emit([]byte("^C\r\n"))
 			r.emitPromptLocked(false)
 			interrupt = true

@@ -159,6 +159,7 @@ type HookHandler struct {
 	evalTimers        map[string]*time.Timer                  // sessionID -> debounced evaluation timer
 	acpUsage          map[string]*ACPUsageInfo                // sessionID -> ACP usage tracking (model, premium requests)
 	promptWaiters     map[string][]chan struct{}              // sessionID -> awaiters woken by the next UserPromptSubmit (send ack)
+	submittedPrompts  map[string]string                       // sessionID -> prompt text of the last UserPromptSubmit (delivery check)
 	turns             map[string]application.SessionTurnState // sessionID -> open/closed turn (UserPromptSubmit .. Stop)
 	turnObserver      func(sessionID string, turn application.SessionTurnState)
 }
@@ -198,6 +199,7 @@ func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, ses
 		evalTimers:        make(map[string]*time.Timer),
 		acpUsage:          make(map[string]*ACPUsageInfo),
 		promptWaiters:     make(map[string][]chan struct{}),
+		submittedPrompts:  make(map[string]string),
 		turns:             make(map[string]application.SessionTurnState),
 	}
 }
@@ -1474,6 +1476,13 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	// giving the evaluator richer context (especially for image inputs).
 	if eventName == "UserPromptSubmit" {
 		h.scheduleDebouncedEval(sessionID)
+		// Record the prompt BEFORE waking the waiters: a send-with-ack reads it
+		// as soon as it is woken to check what the agent actually received.
+		if prompt, ok := hookEvent["prompt"].(string); ok {
+			h.mu.Lock()
+			h.submittedPrompts[sessionID] = prompt
+			h.mu.Unlock()
+		}
 		h.wakePromptWaiters(sessionID)
 	}
 
@@ -1517,6 +1526,15 @@ func (h *HookHandler) wakePromptWaiters(sessionID string) {
 		default:
 		}
 	}
+}
+
+// SubmittedPrompt returns the prompt text the session's agent reported in its
+// last UserPromptSubmit hook, so a send can compare it with what was typed.
+func (h *HookHandler) SubmittedPrompt(sessionID string) (string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	prompt, ok := h.submittedPrompts[sessionID]
+	return prompt, ok
 }
 
 // WaitForPromptSubmit blocks until the session's next UserPromptSubmit hook or
@@ -1690,6 +1708,7 @@ func (h *HookHandler) ClearSession(sessionID string) {
 	// accepted the pending input, so the ack must time out to acknowledged=false
 	// rather than fabricate a true ack from teardown.
 	delete(h.promptWaiters, sessionID)
+	delete(h.submittedPrompts, sessionID)
 	if t, ok := h.evalTimers[sessionID]; ok {
 		t.Stop()
 		delete(h.evalTimers, sessionID)

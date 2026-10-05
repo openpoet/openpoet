@@ -3603,6 +3603,7 @@ func (a *API) SendSessionInput(w http.ResponseWriter, r *http.Request) {
 	response := map[string]any{"status": "sent"}
 	if input.AwaitAck {
 		response["acknowledged"] = result.Acknowledged
+		response["delivery"] = result.Delivery
 	}
 	respondJSON(w, http.StatusOK, response)
 }

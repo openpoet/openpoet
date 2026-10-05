@@ -119,6 +119,22 @@ func TestSessionMessagesKeepsOnlyTheCleanConversation(t *testing.T) {
 	}
 }
 
+// A long prompt sent as a bracketed paste is recorded inside Claude Code's
+// <pasted_content> tags; the reader gets the text as it was sent.
+func TestSessionMessagesUnwrapsPastedPrompt(t *testing.T) {
+	sent := "Confira a configuração.\nSegunda linha com ação."
+	events := []*jsonlview.SessionEvent{
+		transcriptEvent(1, "user", textBlock("\n\n<pasted_content id=\"3a55\">\n"+sent+"\n</pasted_content id=\"3a55\">\n")),
+	}
+	result, err := runMessages(t, messagesExecutor(fakeTranscripts{events: events}, &database.Session{ID: "s1"}), `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Messages) != 1 || result.Messages[0].Text != sent || result.Messages[0].Chars != len([]rune(sent)) {
+		t.Fatalf("messages = %+v, want the sent text unwrapped", result.Messages)
+	}
+}
+
 func conversation(n int) []*jsonlview.SessionEvent {
 	events := make([]*jsonlview.SessionEvent, 0, n)
 	for i := 1; i <= n; i++ {

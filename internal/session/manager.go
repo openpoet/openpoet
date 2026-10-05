@@ -950,8 +950,52 @@ func (m *Manager) writeToRunnerLocked(sessionID string, rs *runningSession, data
 	return err
 }
 
+// bracketedPasteMinBytes is the length above which a submitted line is typed
+// as one bracketed paste. Typed raw, a long line reaches the agent in several
+// reads (a macOS PTY delivers at most 1024 bytes per read), and Claude Code
+// takes a large read for an unbracketed paste: when the rest of the text
+// arrives in a later read it keeps only that rest and drops the pasted head.
+// Inside paste markers the agent buffers until the closing marker, however
+// the bytes are split. Short lines (slash commands) stay typed as before.
+const bracketedPasteMinBytes = 512
+
+const (
+	bracketedPasteStart = "\x1b[200~"
+	bracketedPasteEnd   = "\x1b[201~"
+)
+
+// bracketedPasteRunner is implemented by runners that know whether the
+// program on the other side can receive bracketed paste.
+type bracketedPasteRunner interface {
+	SupportsBracketedPaste() bool
+}
+
+// submitLinePayload is what SubmitLineToSession types before Enter: the
+// text itself, or the text inside paste markers when it is long or spans
+// lines and the backend reads bracketed paste.
+func submitLinePayload(rs *runningSession, text string) []byte {
+	if len(text) <= bracketedPasteMinBytes && !strings.ContainsAny(text, "\r\n") {
+		return []byte(text)
+	}
+	if rs == nil || rs.session == nil {
+		return []byte(text)
+	}
+	switch BackendType(rs.session.Backend) {
+	case BackendClaudeCode, BackendCodex:
+	default:
+		return []byte(text)
+	}
+	if runner, ok := rs.runner.(bracketedPasteRunner); ok && !runner.SupportsBracketedPaste() {
+		return []byte(text)
+	}
+	// A closing marker inside the text would end the paste early.
+	text = strings.NewReplacer(bracketedPasteStart, "", bracketedPasteEnd, "").Replace(text)
+	return []byte(bracketedPasteStart + text + bracketedPasteEnd)
+}
+
 // SubmitLineToSession sends a full prompt line as separate text and Enter writes.
 // Some terminal TUIs need time to ingest pasted input before Enter arrives.
+// Long or multi-line text goes as one bracketed paste (see bracketedPasteMinBytes).
 func (m *Manager) SubmitLineToSession(sessionID string, text string, textToEnterDelay time.Duration) error {
 	if strings.TrimSpace(text) == "" {
 		return nil
@@ -966,7 +1010,7 @@ func (m *Manager) SubmitLineToSession(sessionID string, text string, textToEnter
 	// into the text→Enter window (the time.Sleep below is exactly that gap).
 	rs.inputMu.Lock()
 	defer rs.inputMu.Unlock()
-	if err := m.writeToRunnerLocked(sessionID, rs, []byte(text)); err != nil {
+	if err := m.writeToRunnerLocked(sessionID, rs, submitLinePayload(rs, text)); err != nil {
 		return err
 	}
 	if textToEnterDelay > 0 {
@@ -1355,7 +1399,23 @@ func (m *Manager) isCodexTerminalSubmit(rs *runningSession, data []byte) bool {
 	if rs == nil || rs.session == nil || rs.session.Backend != string(BackendCodex) {
 		return false
 	}
-	return bytes.ContainsAny(data, "\r\n")
+	return bytes.ContainsAny(withoutBracketedPaste(data), "\r\n")
+}
+
+// withoutBracketedPaste drops the pasted content, whose line breaks are text,
+// not Enter.
+func withoutBracketedPaste(data []byte) []byte {
+	start := bytes.Index(data, []byte(bracketedPasteStart))
+	if start < 0 {
+		return data
+	}
+	rest := data[start+len(bracketedPasteStart):]
+	end := bytes.Index(rest, []byte(bracketedPasteEnd))
+	if end < 0 {
+		return data[:start]
+	}
+	out := append([]byte{}, data[:start]...)
+	return append(out, withoutBracketedPaste(rest[end+len(bracketedPasteEnd):])...)
 }
 
 func (m *Manager) notifyUserPromptSubmitted(sessionID string) {

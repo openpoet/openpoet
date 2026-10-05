@@ -930,10 +930,30 @@ type SendSessionInputCommand struct {
 }
 
 // SendInputResult reports whether the line reached the PTY and whether the
-// agent acknowledged it (UserPromptSubmit hook observed).
+// agent acknowledged it (UserPromptSubmit hook observed). Delivery says
+// whether the prompt the agent reported matches the text that was sent.
 type SendInputResult struct {
 	Submitted    bool
 	Acknowledged bool
+	// Delivery is SessionDeliveryVerified, SessionDeliveryMismatch or
+	// SessionDeliveryUnverified (no ack, or the agent does not report its prompt).
+	Delivery string
+	// SentChars and ReceivedChars count runes; ReceivedChars is set only when
+	// the agent reported its prompt.
+	SentChars     int
+	ReceivedChars int
+}
+
+const (
+	SessionDeliveryVerified   = "verified"
+	SessionDeliveryMismatch   = "mismatch"
+	SessionDeliveryUnverified = "unverified"
+)
+
+// sessionPromptReporter is implemented by signal ports that know the prompt
+// text the agent received (Claude Code's UserPromptSubmit hook carries it).
+type sessionPromptReporter interface {
+	SubmittedPrompt(sessionID string) (string, bool)
 }
 
 func (s *SessionService) SendInput(ctx context.Context, command SendSessionInputCommand) error {
@@ -982,7 +1002,7 @@ func (s *SessionService) SendInputWithAck(ctx context.Context, command SendSessi
 		return SendInputResult{}, err
 	}
 	s.publish(ctx, SessionChange{Action: "input_sent", ID: command.SessionID, Actor: command.Authorization.Actor})
-	result := SendInputResult{Submitted: true}
+	result := SendInputResult{Submitted: true, Delivery: SessionDeliveryUnverified, SentChars: utf8.RuneCountInString(text)}
 	if ackCh != nil {
 		timer := time.NewTimer(sessionAckTimeout)
 		defer timer.Stop()
@@ -992,7 +1012,52 @@ func (s *SessionService) SendInputWithAck(ctx context.Context, command SendSessi
 		case <-timer.C:
 		}
 	}
+	if result.Acknowledged {
+		s.verifyDelivery(command.SessionID, text, &result)
+	}
 	return result, nil
+}
+
+// verifyDelivery compares the prompt the agent reported with the text that
+// was typed. A prompt that lost part of the text is not an acknowledgement:
+// the agent took something else, so acknowledged turns false.
+func (s *SessionService) verifyDelivery(sessionID, text string, result *SendInputResult) {
+	reporter, ok := s.creation.Signals.(sessionPromptReporter)
+	if !ok {
+		return
+	}
+	received, ok := reporter.SubmittedPrompt(sessionID)
+	if !ok {
+		return
+	}
+	received = unwrapPastedPrompt(received)
+	result.ReceivedChars = utf8.RuneCountInString(strings.TrimSpace(received))
+	if PromptContainsInput(received, text) {
+		result.Delivery = SessionDeliveryVerified
+		return
+	}
+	result.Delivery = SessionDeliveryMismatch
+	result.Acknowledged = false
+	log.Printf("[Sessions] input to %s was not delivered intact: sent %d chars, agent received %d", sessionID, result.SentChars, result.ReceivedChars)
+}
+
+// pastedContentTagPattern matches the tags Claude Code wraps a pasted block
+// in when it records the prompt (<pasted_content id="..."> ... </pasted_content id="...">).
+var pastedContentTagPattern = regexp.MustCompile(`</?pasted_content(?:\s[^>]*)?>`)
+
+func unwrapPastedPrompt(prompt string) string {
+	return pastedContentTagPattern.ReplaceAllString(prompt, "")
+}
+
+// PromptContainsInput reports whether prompt holds the whole input, ignoring
+// differences in whitespace (terminals turn line breaks into \r and agents
+// trim or re-wrap them).
+func PromptContainsInput(prompt, input string) bool {
+	want := strings.Join(strings.Fields(input), " ")
+	if want == "" {
+		return true
+	}
+	return strings.Contains(strings.Join(strings.Fields(unwrapPastedPrompt(prompt)), " "), want)
 }
 
 type SetSessionModelCommand struct {
