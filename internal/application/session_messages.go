@@ -283,7 +283,10 @@ func transcriptBlocksText(blocks []jsonlview.ContentBlock, images bool) string {
 }
 
 func transcriptUserText(blocks []jsonlview.ContentBlock) string {
-	text := strings.TrimSpace(transcriptSystemReminderPattern.ReplaceAllString(transcriptBlocksText(blocks, true), ""))
+	text := transcriptSystemReminderPattern.ReplaceAllString(transcriptBlocksText(blocks, true), "")
+	// A long prompt typed as a bracketed paste is recorded inside
+	// <pasted_content> tags; the reader wants the text the user sent.
+	text = strings.TrimSpace(unwrapPastedPrompt(text))
 	for _, prefix := range transcriptHarnessPrefixes {
 		if strings.HasPrefix(text, prefix) {
 			return ""

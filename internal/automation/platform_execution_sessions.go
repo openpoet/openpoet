@@ -298,7 +298,8 @@ const sessionCreateNotes = "Returns as soon as the agent process is running (sta
 	"status error means it failed (error_reason and last_output say why); interaction_state ended means the process exited; startup_state failed means the prompt was not delivered (startup_detail). " +
 	"Still starting when the window closes is unknown: re-read sessions.get before acting and never create a replacement blindly."
 
-const sessionSendInputNotes = "Types text into the session's agent and, by default (await_ack true), waits up to 8 s for the agent to accept it: acknowledged true means the agent took the prompt; false means it did not confirm in time (the text may still be in its input). " +
+const sessionSendInputNotes = "Types text into the session's agent and, by default (await_ack true), waits up to 8 s for the agent to accept it: acknowledged true means the agent took the prompt; false means it did not confirm in time (the text may still be in its input) or took a different prompt. " +
+	"delivery compares the prompt the agent reported with the text sent: verified (it holds the whole text), mismatch (the agent took a prompt without the whole text; acknowledged is false and received_chars says how much arrived; check the session before resending) or unverified (no ack, or the backend does not report its prompt). " +
 	"Refused with session_busy while the session's turn is open (from the accepted prompt until the turn completes, however long its tools run) or while another guarded send to it is still being delivered; retry after turn.open is false, or send force true to type anyway. " +
 	"A call takes about 2-10 s, so use a client timeout of at least 15 s. The command finishes and records its real result even if the client times out or disconnects. " +
 	"After a timeout NEVER resend with a new idempotency_key (that delivers the text twice): resend the identical envelope (same idempotency_key and command_id), which returns the recorded result or waits for it, or read it with automation.commands.get."
@@ -693,7 +694,12 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"sent": result.Submitted, "acknowledged": result.Acknowledged, "await_ack": awaitAck, "session_id": sessionID}, nil
+			view := map[string]any{"sent": result.Submitted, "acknowledged": result.Acknowledged, "await_ack": awaitAck, "session_id": sessionID,
+				"delivery": result.Delivery, "sent_chars": result.SentChars}
+			if result.Delivery != application.SessionDeliveryUnverified {
+				view["received_chars"] = result.ReceivedChars
+			}
+			return view, nil
 		}}, nil
 	case "sessions.set_model":
 		sessionID, err := executionStringID(target, "session id")

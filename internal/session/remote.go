@@ -801,6 +801,12 @@ func (r *RemoteRunner) Write(data []byte) (int, error) {
 	return stdin.Write(data)
 }
 
+// SupportsBracketedPaste is false on Windows hosts: ConPTY's handling of
+// paste markers has not been verified there, so input is typed as before.
+func (r *RemoteRunner) SupportsBracketedPaste() bool {
+	return !r.isWindows
+}
+
 func (r *RemoteRunner) Resize(rows, cols uint16) error {
 	r.mu.Lock()
 	session := r.session

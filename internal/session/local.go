@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -216,6 +217,12 @@ func (r *LocalRunner) Write(data []byte) (int, error) {
 	}
 
 	return ptmx.Write(data)
+}
+
+// SupportsBracketedPaste is false on Windows, where ConPTY's handling of
+// paste markers has not been verified.
+func (r *LocalRunner) SupportsBracketedPaste() bool {
+	return runtime.GOOS != "windows"
 }
 
 func (r *LocalRunner) Resize(rows, cols uint16) error {

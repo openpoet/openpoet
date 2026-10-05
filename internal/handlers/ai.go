@@ -3218,7 +3218,11 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if ackCh != nil {
 			select {
 			case <-ackCh:
-				sent += "\nAcknowledged: the agent accepted the prompt."
+				if prompt, ok := hooks.SubmittedPrompt(sessionID); ok && !application.PromptContainsInput(prompt, text) {
+					sent += "\nNot delivered intact: the agent took a prompt that does not hold the whole text; check the session before resending."
+				} else {
+					sent += "\nAcknowledged: the agent accepted the prompt."
+				}
 			case <-time.After(8 * time.Second):
 				sent += "\nNot acknowledged: the agent did not confirm the prompt within 8 s."
 			}
