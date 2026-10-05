@@ -284,9 +284,27 @@ curl -s -X POST "$AV1/commands" -H "Authorization: Bearer $OPAV1_TOKEN" \
        "capability": "sessions.send_input", "correlation_id": "ain:238",
        "target": {"type": "session", "id": "d1f920bb"},
        "payload": {"text": "leia o doc e responda"}}'
-# → result: {"sent": true, "acknowledged": true, "await_ack": true, ...}
+# → result: {"sent": true, "acknowledged": true, "delivery": "verified",
+#             "sent_chars": 21, "received_chars": 21, "await_ack": true, ...}
 ```
 
+- **Texto longo chega inteiro.** Texto com mais de 512 bytes ou com quebras de
+  linha é digitado como um único *bracketed paste* (`ESC[200~ … ESC[201~`) nas
+  sessões Claude Code e Codex, seguido do Enter. Digitado cru, o PTY entrega o
+  texto em pedaços (no macOS, leituras de até 1024 bytes); o Claude Code
+  tomava o primeiro pedaço grande por uma colagem, e quando o resto chegava
+  noutra leitura ficava só com a cauda (~250 caracteres de um parágrafo de
+  ~1.300). Dentro dos marcadores o agente junta tudo até o fim da colagem, seja
+  qual for o fatiamento. Texto curto de uma linha (como `/model opus`) segue
+  digitado como antes. Hosts Windows continuam no modo antigo.
+- **O ack confere o que chegou.** `delivery` compara o prompt que o agente
+  informou no hook `UserPromptSubmit` com o texto enviado: `verified` (o
+  prompt tem o texto inteiro), `mismatch` (o agente aceitou um prompt sem o
+  texto inteiro; aí `acknowledged` vem `false` e `received_chars` diz quanto
+  chegou, então confira a sessão antes de reenviar) ou `unverified` (sem ack,
+  ou o backend não informa o prompt, como o Codex). `sessions.messages` mostra
+  o prompt sem as tags `<pasted_content>` que o Claude Code grava em volta de
+  uma colagem.
 - **Sessão ocupada = turno aberto.** O envio é recusado com `session_busy`
   enquanto o turno da sessão-alvo está aberto: do prompt aceito até o `Stop`,
   por mais que um tool demore. Um turno interrompido (Esc) não manda `Stop`, e
