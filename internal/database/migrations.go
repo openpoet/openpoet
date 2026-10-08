@@ -95,6 +95,7 @@ var migrations = []Migration{
 	{Version: 77, Description: "automation_commands: record command_id and capability so a client can look a command up by either (automation.commands.get)", Up: migrateV77},
 	{Version: 78, Description: "sessions: session_restart_state keeps each live session's turn (open/closed) and pending question across a server restart, so an interrupted turn can be resumed", Up: migrateV78},
 	{Version: 79, Description: "retire the coordinator tier: delete the session-report skill and the coordinator lease/spawn blackboard keys (the conflict radar and lifecycle reports stay)", Up: migrateV79},
+	{Version: 80, Description: "sessions: effective_effort (reported by the runtime) and model_source/effort_source (request, session, project or global) for explicit model/effort", Up: migrateV80},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2129,6 +2130,24 @@ func migrateV79(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV79 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV80 — sessions always run an explicit model and effort. The row keeps
+// where each came from (request, session, project, global) and the effort the
+// runtime itself reported; model already holds the runtime-reported model.
+// Older rows keep empty values: they ran before resolution existed.
+func migrateV80(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE sessions ADD COLUMN effective_effort TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN model_source TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN effort_source TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV80 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

@@ -683,6 +683,7 @@ func (r *CodexRunner) openThread(ctx context.Context) error {
 	if threadID == "" {
 		return fmt.Errorf("codex thread response did not include thread id")
 	}
+	r.reportEffectiveSettings(codexThreadSettingsFromResult(result))
 
 	r.mu.Lock()
 	r.providerThreadID = threadID
@@ -718,7 +719,16 @@ func (r *CodexRunner) threadParams() map[string]interface{} {
 	if r.cfg != nil && r.cfg.AppendSystemPrompt != "" {
 		params["developerInstructions"] = r.cfg.AppendSystemPrompt
 	}
-	if config := r.codexRuntimeConfig(); len(config) > 0 {
+	config := r.codexRuntimeConfig()
+	if cc.ReasoningEffort != "" {
+		// thread/start ignores an "effort" param; the config override is what
+		// makes the thread (and its reply) carry the explicit effort.
+		if config == nil {
+			config = map[string]interface{}{}
+		}
+		config["model_reasoning_effort"] = cc.ReasoningEffort
+	}
+	if len(config) > 0 {
 		params["config"] = config
 	}
 	return params
@@ -2226,6 +2236,7 @@ func (r *CodexRunner) handleNotification(method string, params json.RawMessage) 
 	case "model/rerouted":
 		from := extractString(params, "fromModel")
 		to := extractString(params, "toModel")
+		r.reportEffectiveSettings(to, "")
 		if from == "" || to == "" {
 			return
 		}
@@ -3488,4 +3499,35 @@ func extractMap(raw json.RawMessage, dotted string) map[string]interface{} {
 	}
 	m, _ := cur.(map[string]interface{})
 	return m
+}
+
+// codexThreadSettingsFromResult reads the model and reasoning effort Codex
+// reports for a started or resumed thread: what it actually runs.
+func codexThreadSettingsFromResult(result json.RawMessage) (model, effort string) {
+	var reply struct {
+		Model           string `json:"model"`
+		ReasoningEffort string `json:"reasoningEffort"`
+		Thread          struct {
+			Model           string `json:"model"`
+			ReasoningEffort string `json:"reasoningEffort"`
+		} `json:"thread"`
+	}
+	if json.Unmarshal(result, &reply) != nil {
+		return "", ""
+	}
+	model, effort = reply.Model, reply.ReasoningEffort
+	if model == "" {
+		model = reply.Thread.Model
+	}
+	if effort == "" {
+		effort = reply.Thread.ReasoningEffort
+	}
+	return strings.TrimSpace(model), strings.TrimSpace(effort)
+}
+
+func (r *CodexRunner) reportEffectiveSettings(model, effort string) {
+	if r.cfg == nil || r.cfg.OnEffectiveSettings == nil || (model == "" && effort == "") {
+		return
+	}
+	r.cfg.OnEffectiveSettings(model, effort)
 }

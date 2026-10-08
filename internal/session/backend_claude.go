@@ -14,6 +14,8 @@ type claudeCodeConfig struct {
 	ProviderConfigID int64  `json:"provider_config_id"`
 	Model            string `json:"model"`
 	SmallModel       string `json:"small_model"`
+	ReasoningEffort  string `json:"reasoning_effort"`
+	LegacyEffort     string `json:"effort"`
 }
 
 func parseClaudeCodeConfig(raw string) claudeCodeConfig {
@@ -24,6 +26,10 @@ func parseClaudeCodeConfig(raw string) claudeCodeConfig {
 	cfg.Model = strings.TrimSpace(cfg.Model)
 	cfg.Provider = strings.ToLower(strings.TrimSpace(cfg.Provider))
 	cfg.SmallModel = strings.TrimSpace(cfg.SmallModel)
+	cfg.ReasoningEffort = strings.ToLower(strings.TrimSpace(cfg.ReasoningEffort))
+	if cfg.ReasoningEffort == "" {
+		cfg.ReasoningEffort = strings.ToLower(strings.TrimSpace(cfg.LegacyEffort))
+	}
 	return cfg
 }
 
@@ -64,6 +70,9 @@ func (b *ClaudeCodeBackend) BuildCLIArgs(cfg *SessionConfig) []string {
 
 	if cc.Model != "" && !strings.EqualFold(cc.Model, "default") {
 		args = append(args, "--model", cc.Model)
+	}
+	if cc.ReasoningEffort != "" && !strings.EqualFold(cc.ReasoningEffort, "default") {
+		args = append(args, "--effort", cc.ReasoningEffort)
 	}
 
 	return args

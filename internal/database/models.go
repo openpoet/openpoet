@@ -82,8 +82,14 @@ type Session struct {
 	SkipPermissions   bool          `db:"skip_permissions" json:"skip_permissions"`
 	Model             string        `db:"model" json:"model"` // effective model reported by the runtime; "unknown" until observed
 	RequestedModel    string        `db:"requested_model" json:"requested_model"`
-	Effort            string        `db:"effort" json:"effort"`
-	Harness           string        `db:"harness" json:"harness"`
+	Effort            string        `db:"effort" json:"effort"` // configured (explicit) effort the session was started or switched with
+	// V80: the effort the runtime reported (empty until observed) and where
+	// the configured model and effort came from: request, session, project
+	// or global.
+	EffectiveEffort string `db:"effective_effort" json:"effective_effort"`
+	ModelSource     string `db:"model_source" json:"model_source"`
+	EffortSource    string `db:"effort_source" json:"effort_source"`
+	Harness         string `db:"harness" json:"harness"`
 	// SHA-256 hex digests of the per-session credentials (opst1_ MCP/REST
 	// bearer and hook bridge token). Never serialized; cleared on EndSession.
 	McpTokenHash  sql.NullString `db:"mcp_token_hash" json:"-"`

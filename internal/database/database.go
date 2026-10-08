@@ -371,8 +371,8 @@ func (d *DB) ReplaceProjectTagIDs(ctx context.Context, projectID int64, tagIDs [
 
 // Session operations
 func (d *DB) CreateSession(ctx context.Context, s *Session) error {
-	query := `INSERT INTO sessions (id, project_id, status, pid, name, task_id, start_time, backend, skip_permissions, model, requested_model, effort, harness, work_dir, workspace_id, parent_session_id, spawned_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.ExecContext(ctx, query, s.ID, s.ProjectID, s.Status, s.PID, s.Name, s.TaskID, s.StartTime, s.Backend, s.SkipPermissions, s.Model, s.RequestedModel, s.Effort, s.Harness, s.WorkDir, s.WorkspaceID, s.ParentSessionID, s.SpawnedBy)
+	query := `INSERT INTO sessions (id, project_id, status, pid, name, task_id, start_time, backend, skip_permissions, model, requested_model, effort, harness, work_dir, workspace_id, parent_session_id, spawned_by, effective_effort, model_source, effort_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.ExecContext(ctx, query, s.ID, s.ProjectID, s.Status, s.PID, s.Name, s.TaskID, s.StartTime, s.Backend, s.SkipPermissions, s.Model, s.RequestedModel, s.Effort, s.Harness, s.WorkDir, s.WorkspaceID, s.ParentSessionID, s.SpawnedBy, s.EffectiveEffort, s.ModelSource, s.EffortSource)
 	return err
 }
 
@@ -392,6 +392,36 @@ func (d *DB) UpdateSessionRuntimeMetadata(ctx context.Context, id, model, effort
 
 func (d *DB) UpdateSessionRequestedModel(ctx context.Context, id, requestedModel string) error {
 	_, err := d.ExecContext(ctx, "UPDATE sessions SET requested_model=? WHERE id=?", requestedModel, id)
+	return err
+}
+
+// UpdateSessionResolvedSettings records the explicit model and effort a
+// session (re)starts with and where each came from. The runtime-reported
+// values are reset: they must be observed again for this run.
+func (d *DB) UpdateSessionResolvedSettings(ctx context.Context, id, requestedModel, effort, modelSource, effortSource, effectiveModel string) error {
+	_, err := d.ExecContext(ctx,
+		`UPDATE sessions SET requested_model=?, effort=?, model_source=?, effort_source=?, model=?, effective_effort='' WHERE id=?`,
+		requestedModel, effort, modelSource, effortSource, effectiveModel, id)
+	return err
+}
+
+// UpdateSessionSettingSources records where a live session's model and/or
+// effort now come from; an empty source leaves that column unchanged. A new
+// effort also drops the previously observed one until the runtime reports it.
+func (d *DB) UpdateSessionSettingSources(ctx context.Context, id, modelSource, effortSource string) error {
+	_, err := d.ExecContext(ctx,
+		`UPDATE sessions SET
+			model_source = CASE WHEN ? = '' THEN model_source ELSE ? END,
+			effort_source = CASE WHEN ? = '' THEN effort_source ELSE ? END,
+			effective_effort = CASE WHEN ? = '' THEN effective_effort ELSE '' END
+		WHERE id = ?`,
+		modelSource, modelSource, effortSource, effortSource, effortSource, id)
+	return err
+}
+
+// UpdateSessionEffectiveEffort persists the effort the runtime reported.
+func (d *DB) UpdateSessionEffectiveEffort(ctx context.Context, id, effectiveEffort string) error {
+	_, err := d.ExecContext(ctx, "UPDATE sessions SET effective_effort=? WHERE id=?", effectiveEffort, id)
 	return err
 }
 
