@@ -70,8 +70,8 @@ func configurationPlatformActor(definitions []PlatformCapabilityDefinition) Acto
 
 func TestConfigurationPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := configurationPlatformDefinitionsForTest()
-	if len(definitions) != 66 {
-		t.Fatalf("configuration surface has %d capabilities, want 66", len(definitions))
+	if len(definitions) != 67 {
+		t.Fatalf("configuration surface has %d capabilities, want 67", len(definitions))
 	}
 
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
@@ -182,7 +182,7 @@ func TestConfigurationPlatformMutationMetadataMatchesManifest(t *testing.T) {
 func TestConfigurationPlatformReadSurfaceIsExplicit(t *testing.T) {
 	want := []string{
 		"agents.list", "ai_configs.list", "ai_configs.list_assignments", "mcp.list", "mcp.list_project",
-		"mcp_api_key.status", "projects.get", "projects.get_shares", "projects.list", "projects.scaffold_root", "settings.get",
+		"mcp_api_key.status", "models.list", "projects.get", "projects.get_shares", "projects.list", "projects.scaffold_root", "settings.get",
 		"skills.list", "skills.list_project", "skills.list_project_config", "skills.list_versions", "tags.list",
 		"groups.list", "tags.list_project", "tools.get_policies", "tools.get_project_policy", "tools.list_project",
 	}
@@ -235,6 +235,7 @@ func configurationDryRunCases() []configurationDryRunCase {
 	return []configurationDryRunCase{
 		{name: "projects.list", target: `{}`, payload: `{}`},
 		{name: "projects.get", target: `{"id":1}`, payload: `{}`},
+		{name: "models.list", target: `{}`, payload: `{"backend":"codex"}`},
 		{name: "projects.create", target: `{}`, payload: `{"name":"demo","path":"/tmp/demo","type":"local","ssh_credential":"project-secret"}`, secretText: []string{"project-secret"}},
 		{name: "projects.update", target: `{"id":1}`, payload: `{"name":"demo","path":"/tmp/demo","type":"local","ssh_credential":"project-secret"}`, secretText: []string{"project-secret"}},
 		{name: "projects.delete", target: `{"id":1}`, payload: `{}`},
@@ -400,7 +401,12 @@ func TestConfigurationAutomationViewsNeverSerializeStoredSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{projectSecret, "project-iv-marker", backendSecret, aiSecret, "ai-iv-marker", `"backend_config":`, `"api_key_encrypted":`, `"api_key_iv":`} {
+	// backend_config is published (models and efforts are read from it) but
+	// any secret-looking value is masked.
+	if !strings.Contains(string(encoded), `"backend_config":{"token":"********"}`) {
+		t.Fatalf("backend_config was not published masked: %s", encoded)
+	}
+	for _, forbidden := range []string{projectSecret, "project-iv-marker", backendSecret, aiSecret, "ai-iv-marker", `"api_key_encrypted":`, `"api_key_iv":`} {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Fatalf("automation view serialized forbidden secret material %q: %s", forbidden, encoded)
 		}

@@ -10,6 +10,7 @@ import (
 
 	"openpoet/internal/application"
 	"openpoet/internal/database"
+	"openpoet/internal/sessionmeta"
 	"openpoet/internal/sessionprompt"
 )
 
@@ -60,20 +61,25 @@ const (
 )
 
 type SessionAutomationView struct {
-	ID              string     `json:"id"`
-	ProjectID       int64      `json:"project_id"`
-	Status          string     `json:"status"`
-	Name            string     `json:"name"`
-	TaskID          *int64     `json:"task_id,omitempty"`
-	StartTime       time.Time  `json:"start_time"`
-	EndTime         *time.Time `json:"end_time,omitempty"`
-	LastActivityAt  *time.Time `json:"last_activity_at,omitempty"`
-	Backend         string     `json:"backend,omitempty"`
-	Model           string     `json:"model,omitempty"`
-	Effort          string     `json:"effort,omitempty"`
-	Harness         string     `json:"harness,omitempty"`
-	RuntimeActive   bool       `json:"runtime_active"`
-	SkipPermissions bool       `json:"skip_permissions"`
+	ID             string     `json:"id"`
+	ProjectID      int64      `json:"project_id"`
+	Status         string     `json:"status"`
+	Name           string     `json:"name"`
+	TaskID         *int64     `json:"task_id,omitempty"`
+	StartTime      time.Time  `json:"start_time"`
+	EndTime        *time.Time `json:"end_time,omitempty"`
+	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
+	Backend        string     `json:"backend,omitempty"`
+	// Model and Effort are what the session runs: the runtime's own report
+	// when there is one (model_verified/effort_verified true), else the
+	// explicit value it was started or switched with.
+	Model   string `json:"model,omitempty"`
+	Effort  string `json:"effort,omitempty"`
+	Harness string `json:"harness,omitempty"`
+	// RuntimeSettings details configured vs. effective model and effort.
+	RuntimeSettings *SessionRuntimeSettingsView `json:"runtime_settings,omitempty"`
+	RuntimeActive   bool                        `json:"runtime_active"`
+	SkipPermissions bool                        `json:"skip_permissions"`
 	// InteractionState is awaiting_input | starting | running | ended.
 	InteractionState string `json:"interaction_state,omitempty"`
 	// StartupState tracks the initial prompt: starting | awaiting_input |
@@ -106,12 +112,95 @@ func sessionTurnView(turn application.SessionTurnState) *SessionTurnView {
 	return &SessionTurnView{Open: turn.Open, Since: turn.Since.UTC(), Reason: turn.Reason}
 }
 
+// SessionRuntimeSettingsView is a session's configured model and effort
+// (with where each came from: request, session, project, global) and what
+// the runtime reported. Warnings flag a runtime running something else.
+type SessionRuntimeSettingsView struct {
+	ConfiguredModel  string   `json:"configured_model,omitempty"`
+	ConfiguredEffort string   `json:"configured_effort,omitempty"`
+	ModelSource      string   `json:"model_source,omitempty"`
+	EffortSource     string   `json:"effort_source,omitempty"`
+	EffectiveModel   string   `json:"effective_model,omitempty"`
+	EffectiveEffort  string   `json:"effective_effort,omitempty"`
+	ModelVerified    bool     `json:"model_verified"`
+	EffortVerified   bool     `json:"effort_verified"`
+	Warnings         []string `json:"warnings,omitempty"`
+}
+
+func sessionRuntimeSettingsView(session database.Session) (*SessionRuntimeSettingsView, string, string) {
+	view := &SessionRuntimeSettingsView{
+		ConfiguredModel: strings.TrimSpace(session.RequestedModel), ConfiguredEffort: strings.TrimSpace(session.Effort),
+		ModelSource: session.ModelSource, EffortSource: session.EffortSource,
+		EffectiveEffort: strings.TrimSpace(session.EffectiveEffort),
+	}
+	if model := strings.TrimSpace(session.Model); model != "" && !strings.EqualFold(model, "unknown") {
+		view.EffectiveModel = model
+	}
+	// Rows from before requested_model kept the configured model in model.
+	if view.ConfiguredModel == "" && session.Backend != "claude_code" {
+		view.ConfiguredModel = view.EffectiveModel
+	}
+	view.ModelVerified = view.EffectiveModel != "" && session.Backend != "opencode"
+	view.EffortVerified = view.EffectiveEffort != ""
+	if view.ConfiguredModel == "" && view.ConfiguredEffort == "" && view.EffectiveModel == "" && view.EffectiveEffort == "" {
+		return nil, "", ""
+	}
+	if view.ModelVerified && view.ConfiguredModel != "" && !sessionmeta.Explicit(view.ConfiguredModel) {
+		view.Warnings = append(view.Warnings, "configured model is \""+view.ConfiguredModel+"\" (started before explicit settings): the runtime runs "+view.EffectiveModel)
+	} else if view.ModelVerified && view.ConfiguredModel != "" && !sameModel(view.ConfiguredModel, view.EffectiveModel) {
+		view.Warnings = append(view.Warnings, "runtime runs model "+view.EffectiveModel+", configured "+view.ConfiguredModel)
+	}
+	if view.EffortVerified && view.ConfiguredEffort != "" && !strings.EqualFold(view.ConfiguredEffort, view.EffectiveEffort) {
+		view.Warnings = append(view.Warnings, "runtime runs effort "+view.EffectiveEffort+", configured "+view.ConfiguredEffort)
+	}
+	if !view.EffortVerified && view.ConfiguredEffort != "" && !sessionmeta.Explicit(view.ConfiguredEffort) {
+		view.Warnings = append(view.Warnings, "configured effort is \""+view.ConfiguredEffort+"\" (started before explicit settings) and the runtime has not reported it; reopen the session or set an effort with sessions.set_effort")
+	}
+	// Never "default": an unreported, non-explicit value is unknown.
+	model, effort := view.EffectiveModel, view.EffectiveEffort
+	if model == "" {
+		model = explicitOrUnknown(view.ConfiguredModel)
+	}
+	if effort == "" {
+		effort = explicitOrUnknown(view.ConfiguredEffort)
+	}
+	return view, model, effort
+}
+
+func explicitOrUnknown(value string) string {
+	if value == "" || sessionmeta.Explicit(value) {
+		return value
+	}
+	return "unknown"
+}
+
+// sameModel compares a configured model with the one the runtime reports,
+// accepting Claude Code aliases ("opus" runs claude-opus-…) and the [1m]
+// context suffix.
+func sameModel(configured, effective string) bool {
+	norm := func(v string) string {
+		v = strings.ToLower(strings.TrimSpace(v))
+		return strings.TrimSuffix(v, "[1m]")
+	}
+	c, e := norm(configured), norm(effective)
+	if c == e {
+		return true
+	}
+	switch c {
+	case "opus", "sonnet", "haiku", "fable":
+		return strings.HasPrefix(e, "claude-"+c+"-")
+	case "best", "opusplan":
+		return strings.HasPrefix(e, "claude-")
+	}
+	return false
+}
+
 func sessionAutomationView(session database.Session, runtime SessionRuntimeReadPort) SessionAutomationView {
 	view := SessionAutomationView{
 		ID: session.ID, ProjectID: session.ProjectID, Status: session.Status, Name: session.Name,
-		StartTime: session.StartTime, Backend: session.Backend, Model: session.Model,
-		Effort: session.Effort, Harness: session.Harness, SkipPermissions: session.SkipPermissions,
+		StartTime: session.StartTime, Backend: session.Backend, Harness: session.Harness, SkipPermissions: session.SkipPermissions,
 	}
+	view.RuntimeSettings, view.Model, view.Effort = sessionRuntimeSettingsView(session)
 	if session.TaskID.Valid {
 		id := session.TaskID.Int64
 		view.TaskID = &id
@@ -236,6 +325,8 @@ type sessionCreatePayload struct {
 	// Isolation:"auto" leases an idle pooled workspace when the project's main
 	// path is busy (Phase 6 pooling), instead of requiring an explicit workspace_id.
 	Isolation string `json:"isolation,omitempty" doc:"auto: lease an idle pooled workspace when the project's main path is busy"`
+	Model     string `json:"model,omitempty" doc:"model for this session (default: the project's, else the global default; see models.list)"`
+	Effort    string `json:"effort,omitempty" doc:"reasoning effort for this session (default: the project's, else the global default; see models.list)"`
 }
 
 // knownSessionBackends mirrors internal/session BackendType constants (kept local
@@ -245,7 +336,9 @@ var knownSessionBackends = map[string]struct{}{
 }
 
 type sessionReopenPayload struct {
-	DangerouslySkipPermissions bool `json:"dangerously_skip_permissions,omitempty"`
+	DangerouslySkipPermissions bool   `json:"dangerously_skip_permissions,omitempty"`
+	Model                      string `json:"model,omitempty" doc:"model to resume with (default: the one the session ran with)"`
+	Effort                     string `json:"effort,omitempty" doc:"reasoning effort to resume with (default: the one the session ran with)"`
 }
 
 // sessionIsolatePayload carries the two things the moved session cannot know on
@@ -265,11 +358,11 @@ type sessionInputPayload struct {
 }
 
 type sessionModelPayload struct {
-	Model string `json:"model" doc:"claude_code: default, best, opus, sonnet, haiku, opusplan, fable or a claude-* model id, optionally with [1m]; codex: a model from its catalog; reset = default"`
+	Model string `json:"model" doc:"claude_code: best, opus, sonnet, haiku, opusplan, fable or a claude-* model id, optionally with [1m]; codex: a model from its catalog (models.list); default/reset are refused"`
 }
 
 type sessionEffortPayload struct {
-	Effort string `json:"effort" doc:"default, minimal, low, medium, high, xhigh or max; reset = default"`
+	Effort string `json:"effort" doc:"minimal, low, medium, high, xhigh, max or ultra, as the model offers (models.list); default/reset are refused"`
 }
 
 type sessionPermissionModePayload struct {
@@ -289,6 +382,9 @@ const sessionStateNotes = "Session views carry interaction_state: awaiting_input
 	"Events platform.session.awaiting_input and platform.session.input_resolved (aggregate id = session id) signal changes; re-read sessions.get for details."
 
 const sessionCreateNotes = "Returns as soon as the agent process is running (status running, interaction_state starting); it never waits for the agent to be ready. " +
+	"The session always runs an explicit model and effort, each taken from the payload, else the project's backend_config, else the global default (settings default_model_<backend>, default_effort_<backend>); " +
+	"with none it is refused with session_settings_unresolved, and a model or effort the backend's CLI does not offer fails with runtime_setting_invalid (models.list shows what is accepted). " +
+	"The view's model/effort are what the runtime runs and runtime_settings says where they came from and whether the runtime confirmed them. " +
 	"The initial prompt (task, planning or custom_prompt) is delivered in the background and is held back while a question is open, so it can never answer a dialog by accident. " +
 	"A client timeout or disconnect never stops the session; after one, resend the identical envelope (same idempotency_key and command_id) or check automation.commands.get, never a new key (that creates a second session). " +
 	"To run a task, create it with tasks.create and pass its id as task_id; the agent is told to start on it and reads its title and description. " +
@@ -311,17 +407,19 @@ const sessionSetPermissionModeNotes = "Switches a running Claude Code session's 
 	"Refused with session_awaiting_input while a question is open (answer it first); session_setting_unsupported when the target is not offered by the session's cycle (e.g. auto mode unavailable; the error names the mode it ended in) or the backend is not claude_code; " +
 	"permission_mode_unconfirmed when no indicator repainted (re-read sessions.get permission_mode). Already in the mode returns changed false with no key pressed. The current mode is permission_mode in sessions.get."
 
-const sessionSetModelNotes = "Switches a running session's model. claude_code accepts default, best, opus, sonnet, haiku, opusplan, fable, or a claude-* model id (e.g. claude-opus-5-5), each optionally suffixed [1m]; " +
-	"Claude Code with OpenAI OAuth needs an explicit model id; codex accepts only models from its own catalog; other backends cannot change model in a live session (session_setting_unsupported). " +
-	"reset means default. An unaccepted value fails with session_setting_invalid naming the accepted ones."
+const sessionSetModelNotes = "Switches a running session's model to an explicit one. claude_code accepts best, opus, sonnet, haiku, opusplan, fable, or a claude-* model id (e.g. claude-opus-5-5), each optionally suffixed [1m]; " +
+	"Claude Code with OpenAI OAuth needs an OpenAI model id; codex accepts only models from its own catalog; other backends cannot change model in a live session (session_setting_unsupported). " +
+	"default and reset are refused (session_setting_invalid): a session never hands its model back to the CLI's account default. The session's runtime_settings.model_source becomes request."
 
-const sessionSetEffortNotes = "Switches a running session's reasoning effort: default, minimal, low, medium, high, xhigh or max (reset means default). " +
-	"Only claude_code and the codex app-server runtime support it (session_setting_unsupported otherwise); codex also refuses an effort its current model does not offer (session_setting_invalid)."
+const sessionSetEffortNotes = "Switches a running session's reasoning effort to an explicit level: minimal, low, medium, high, xhigh, max or ultra, as the model offers. " +
+	"Only claude_code and the codex app-server runtime support it (session_setting_unsupported otherwise); codex also refuses an effort its current model does not offer (session_setting_invalid). " +
+	"default and reset are refused. The session's runtime_settings.effort_source becomes request."
 
 const sessionStopNotes = "Stops any starting or running session; needs an explicit approval_token. " +
 	"For an idle session whose linked task is already done, use sessions.close_completed instead (no per-session approval)."
 
 const sessionReopenNotes = "Restarts an ended session and resumes the same conversation from its transcript (--resume), as the post-deploy restore does. " +
+	"It resumes with the model and effort it ran with unless model/effort are sent; a session started before explicit settings resolves like a new one (project, then global default) and is refused with session_settings_unresolved when neither has a value. " +
 	"Accepts sessions in stopped, completed or error — error covers a runner that could not come back, e.g. an SSH timeout during restore; " +
 	"starting and running sessions are refused with session_not_reopenable (session_already_running if the runner is live). " +
 	"If the transcript no longer exists the reopen ends in error again with the reason in sessions.get. " +
@@ -517,6 +615,10 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if len(payload.WorkspaceID) > 128 {
 			return nil, platformFailure("platform_payload_invalid", "workspace_id is too large", false)
 		}
+		payload.Model, payload.Effort = strings.TrimSpace(payload.Model), strings.TrimSpace(payload.Effort)
+		if utf8.RuneCountInString(payload.Model) > 200 || utf8.RuneCountInString(payload.Effort) > 50 {
+			return nil, platformFailure("platform_payload_invalid", "session model must not exceed 200 characters and effort 50", false)
+		}
 		payload.Backend = strings.TrimSpace(payload.Backend)
 		if payload.Backend != "" {
 			if _, ok := knownSessionBackends[payload.Backend]; !ok {
@@ -532,7 +634,7 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{
 			"project_id": projectID, "has_task": payload.TaskID != nil, "environment_count": len(payload.Environment),
 			"unsafe_permissions": payload.DangerouslySkipPermissions, "start_mode": startMode,
-			"workspace_id": payload.WorkspaceID, "backend": payload.Backend,
+			"workspace_id": payload.WorkspaceID, "backend": payload.Backend, "model": payload.Model, "effort": payload.Effort,
 		}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
 			authorization.AllowEnvironment = len(payload.Environment) > 0
 			authorization.AllowUnsafePermissions = payload.DangerouslySkipPermissions
@@ -548,6 +650,8 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 				WorkspaceID:         payload.WorkspaceID,
 				Isolation:           payload.Isolation,
 				Backend:             payload.Backend,
+				Model:               payload.Model,
+				Effort:              payload.Effort,
 				Authorization:       authorization,
 			})
 			if err != nil {
@@ -660,9 +764,16 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if err := decodeExecutionPayload(input.Payload, &payload); err != nil {
 			return nil, err
 		}
-		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"session_id": sessionID, "unsafe_permissions": payload.DangerouslySkipPermissions}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+		payload.Model, payload.Effort = strings.TrimSpace(payload.Model), strings.TrimSpace(payload.Effort)
+		if utf8.RuneCountInString(payload.Model) > 200 || utf8.RuneCountInString(payload.Effort) > 50 {
+			return nil, platformFailure("platform_payload_invalid", "session model must not exceed 200 characters and effort 50", false)
+		}
+		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"session_id": sessionID, "unsafe_permissions": payload.DangerouslySkipPermissions, "model": payload.Model, "effort": payload.Effort}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
 			authorization.AllowUnsafePermissions = payload.DangerouslySkipPermissions
-			item, err := e.service.Reopen(ctx, application.ReopenSessionCommand{SessionID: sessionID, DangerouslySkipPermissions: payload.DangerouslySkipPermissions, Authorization: authorization})
+			item, err := e.service.Reopen(ctx, application.ReopenSessionCommand{
+				SessionID: sessionID, DangerouslySkipPermissions: payload.DangerouslySkipPermissions,
+				Model: payload.Model, Effort: payload.Effort, Authorization: authorization,
+			})
 			if err != nil {
 				return nil, err
 			}

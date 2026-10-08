@@ -34,9 +34,11 @@ const (
 	// sessions.set_permission_mode (mutation): +1 capability, +1 mutation.
 	// workspaces.merge (mutation) and workspaces.plan_merges (read) retired
 	// with workspace merge: -2 capabilities, -1 mutation, -1 read.
-	expectedPlatformCapabilities = 181
+	// models.list (read) publishes each backend's models and the efforts
+	// they accept: +1 capability, +1 read.
+	expectedPlatformCapabilities = 182
 	expectedPlatformMutations    = 120
-	expectedPlatformReads        = 61
+	expectedPlatformReads        = 62
 )
 
 // PlatformServices is the explicit runtime composition root for Automation.
@@ -88,6 +90,10 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 	effects := &platformEffects{api: a, db: services.DB, hub: services.Hub}
 	reinitializer := platformAIReinitializer{callback: services.ReinitializeAI}
 	projectService := application.NewProjectService(services.DB, services.Encryptor, effects, platformProjectPathValidator{})
+	runtimeSettings := application.NewRuntimeSettingsValidator(modelCatalog, services.DB)
+	projectService.SetRuntimeSettingsValidator(runtimeSettings)
+	configurationService := application.NewConfigurationService(services.DB, services.Encryptor, effects, reinitializer, services.ConfigSync)
+	configurationService.SetRuntimeSettingsValidator(runtimeSettings)
 	configuration := automation.ConfigurationPlatformServices{
 		Projects: projectService,
 		ProjectOperations: application.NewProjectOperationService(
@@ -99,7 +105,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		AIConfigs:       application.NewAIConfigService(services.DB, services.Encryptor, effects, reinitializer),
 		MCP:             application.NewMCPService(services.DB, services.Encryptor, effects),
 		CustomTools:     application.NewCustomToolService(services.DB, services.Encryptor, effects),
-		Configuration:   application.NewConfigurationService(services.DB, services.Encryptor, effects, reinitializer, services.ConfigSync),
+		Configuration:   configurationService,
 		ProjectScaffold: application.NewProjectScaffoldService(services.DB, projectService),
 	}
 
@@ -111,15 +117,16 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		services.DB, services.SessionManager, services.ConfigSync, a.taskService,
 		services.HookHandler, services.HookHandler, a.DecryptFunc(), effects,
 		application.SessionCreationCollaborators{
-			Environment:  platformSessionEnvironmentProvider{handler: services.AIHandler},
-			Names:        platformSessionNameStore{db: services.DB},
-			Tasks:        platformSessionTaskNotifier{hook: services.HookHandler},
-			Input:        platformSessionInputSubmitter{api: a},
-			InitialInput: platformSessionInitialPromptSubmitter{api: a, questions: questions},
-			Settings:     platformSessionRuntimeSettings{api: a},
-			Workspaces:   workspaceService,
-			Signals:      services.HookHandler,
-			WorkRuns:     workRunService,
+			Environment:     platformSessionEnvironmentProvider{handler: services.AIHandler},
+			Names:           platformSessionNameStore{db: services.DB},
+			Tasks:           platformSessionTaskNotifier{hook: services.HookHandler},
+			Input:           platformSessionInputSubmitter{api: a},
+			InitialInput:    platformSessionInitialPromptSubmitter{api: a, questions: questions},
+			Settings:        platformSessionRuntimeSettings{api: a},
+			Workspaces:      workspaceService,
+			Signals:         services.HookHandler,
+			WorkRuns:        workRunService,
+			RuntimeSettings: runtimeSettings,
 		},
 	)
 	execution := automation.ExecutionPlatformServices{
