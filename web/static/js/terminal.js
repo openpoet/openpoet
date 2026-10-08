@@ -2183,7 +2183,7 @@ class CodexSlashPalette {
         const result = await this.manager.requestCodexCommand(this.sessionId, 'model/list', { limit: 100 });
         const models = Array.isArray(result?.data) ? result.data : [];
         this.sourceItems = [
-            { id: 'default', label: 'Default', description: 'Use the configured Codex default model', model: null },
+            { id: 'default', label: 'Session model', description: 'Back to the model and effort this session was started with (request, project or global setting)', model: null },
             ...models.map(model => ({
                 id: model.model || model.id,
                 label: model.displayName || model.model || model.id,
@@ -2201,7 +2201,7 @@ class CodexSlashPalette {
     async chooseModel(item) {
         if (!item.model) {
             await this.manager.requestCodexCommand(this.sessionId, 'model/set', { model: 'default' });
-            this.finish('Model reset to default');
+            this.finish('Model back to the session setting');
             return;
         }
         this.selectedModel = item.model;
@@ -2213,8 +2213,8 @@ class CodexSlashPalette {
             this.sourceItems = [
                 {
                     id: 'default',
-                    label: item.model.defaultReasoningEffort ? `Default (${item.model.defaultReasoningEffort})` : 'Default',
-                    description: 'Use the model default reasoning effort',
+                    label: 'Session effort',
+                    description: 'Keep the effort this session was started with (request, project or global setting)',
                     value: ''
                 },
                 ...efforts.map(effort => ({

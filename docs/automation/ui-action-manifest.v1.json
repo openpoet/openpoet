@@ -154,7 +154,7 @@
     "app.saveAIConfig", "app.saveAIConfigAssignments", "app.saveAIGeneratedSkill", "app.saveAgent",
     "app.saveMCP", "app.saveMCPHTTPSettings", "app.saveProject", "app.saveProjectCustomTool",
     "app.saveProjectMCPServer", "app.saveProjectShares", "app.saveProjectSkill", "app.saveProjectSkillConfig",
-    "app.saveProjectToolsFromDetail", "app.saveProjectsRootPath", "app.saveSkill", "app.saveTask",
+    "app.saveProjectToolsFromDetail", "app.saveProjectsRootPath", "app.saveSessionDefaults", "app.saveSkill", "app.saveTask",
     "app.saveToolPolicies", "app.saveWhisperSettings", "app.scaffoldProject", "app.startSession",
     "app.startSessionFromTask", "app.stopAllMissionSessions", "app.stopSession", "app.syncAllConfig",
     "app.syncProjectConfig", "app.testAIConfig", "app.toggleTunnel"

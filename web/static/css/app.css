@@ -7451,3 +7451,36 @@ body {
     border-radius: 50%;
     animation: spin 0.6s linear infinite;
 }
+
+/* Settings → Session Model & Effort: one row per backend. */
+.session-defaults-row {
+    display: grid;
+    grid-template-columns: 110px minmax(0, 1fr) minmax(0, 200px);
+    gap: 12px;
+    align-items: start;
+    margin-bottom: 8px;
+}
+.session-defaults-backend {
+    padding-top: 30px;
+    font-weight: 600;
+    font-size: 13px;
+}
+.effort-select-hint {
+    display: block;
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--color-text-secondary, #999);
+}
+@media (max-width: 640px) {
+    .session-defaults-row {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 4px;
+    }
+    .session-defaults-backend {
+        padding-top: 8px;
+    }
+}
+
+.session-card-stat-warn {
+    color: var(--color-warning, #d29922);
+}

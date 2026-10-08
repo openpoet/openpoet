@@ -3695,10 +3695,47 @@ class OpenPoet {
                         ${tokenLabel}${costLabel ? ` (${costLabel})` : ''}
                     </span>` : ''}
                     ${isACP ? this.renderACPUsageStat(session) : ''}
+                    ${this._sessionRuntimeSettingsStat(session)}
                     ${lastActivity ? `<span class="session-card-stat" title="Last activity">${lastActivity}</span>` : ''}
                 </div>
             </div>
         `;
+    }
+
+    // Model · effort the session runs: what the runtime reported, else the
+    // explicit value it was started with. Never "default": a session from
+    // before explicit settings shows "?" until the runtime reports it.
+    _sessionRuntimeSettingsStat(session) {
+        const explicit = v => !!v && !['default', 'reset'].includes(String(v).toLowerCase());
+        const reportedModel = session.model && session.model !== 'unknown' ? session.model : '';
+        const configuredModel = session.requested_model || (session.backend !== 'claude_code' ? reportedModel : '');
+        const reportedEffort = session.effective_effort || '';
+        const configuredEffort = session.effort || '';
+        if (!reportedModel && !configuredModel && !reportedEffort && !configuredEffort) return '';
+        const model = reportedModel || (explicit(configuredModel) ? configuredModel : '?');
+        const effort = reportedEffort || (explicit(configuredEffort) ? configuredEffort : (configuredEffort ? '?' : ''));
+        const describe = (label, reported, configured, source) => {
+            const origin = configured ? `configured ${configured}${source ? ` from ${source}` : ''}` : 'not configured';
+            return `${label}: ${reported || configured || '?'} — ${reported ? 'reported by the runtime' : 'not yet reported by the runtime'}; ${origin}`;
+        };
+        const sameModel = (c, r) => {
+            const n = v => String(v).toLowerCase().replace(/\[1m\]$/, '');
+            const cc = n(c), rr = n(r);
+            return cc === rr || (['opus', 'sonnet', 'haiku', 'fable'].includes(cc) && rr.startsWith(`claude-${cc}-`)) || (['best', 'opusplan'].includes(cc) && rr.startsWith('claude-'));
+        };
+        const warnings = [];
+        if (!explicit(configuredModel) && configuredModel) warnings.push('Session started before explicit settings (account default)');
+        else if (reportedModel && configuredModel && !sameModel(configuredModel, reportedModel)) warnings.push(`Runtime runs ${reportedModel}, configured ${configuredModel}`);
+        if (reportedEffort && explicit(configuredEffort) && reportedEffort !== configuredEffort) warnings.push(`Runtime runs effort ${reportedEffort}, configured ${configuredEffort}`);
+        const title = [
+            describe('Model', reportedModel, configuredModel, session.model_source),
+            describe('Effort', reportedEffort, configuredEffort, session.effort_source),
+            ...warnings.map(w => `⚠ ${w}`),
+        ].join('\n');
+        const shortModel = model.replace(/^claude-/, '');
+        return `<span class="session-card-stat${warnings.length ? ' session-card-stat-warn' : ''}" title="${this.escapeHtml(title)}">
+                        ${warnings.length ? '⚠ ' : ''}${this.escapeHtml(shortModel)}${effort ? ` · ${this.escapeHtml(effort)}` : ''}
+                    </span>`;
     }
 
     async openTerminal(sessionId, sessionData = null, customName = null, options = {}) {
@@ -5757,6 +5794,7 @@ class OpenPoet {
                     </div>
                 </div>
             </div>
+            ${this._renderSessionDefaultsCard()}
             <div class="card" style="margin-bottom: 16px;">
                 <div class="card-header">
                     <div class="card-title">Project Creation</div>
@@ -5918,6 +5956,9 @@ class OpenPoet {
 
         // Populate settings after render
         setTimeout(() => {
+            const sessionDefaults = document.getElementById('session-defaults-form');
+            this.initModelPickers(sessionDefaults);
+            this.initEffortSelects(sessionDefaults);
             if (this.settings) {
                 const autoEvalCheckbox = document.getElementById('task-auto-eval');
                 if (autoEvalCheckbox) {
@@ -6040,13 +6081,14 @@ class OpenPoet {
 
     // ── Model picker ─────────────────────────────────────────────────────
     // A filterable combobox over the models the harness CLI itself reports
-    // (GET /api/models). Typing filters by name, ID or description; free text
-    // is still accepted for IDs the catalog does not list.
+    // (GET /api/models). Typing filters by name, ID or description. The
+    // server refuses a model the catalog does not list (local projects).
+    // An empty value means the backend's global default (data-backend).
 
     _modelPickerHTML(name, value, placeholder, harness, opts = {}) {
         const allowDefault = opts.allowDefault !== false;
         return `
-            <div class="model-picker" data-harness="${harness}" data-allow-default="${allowDefault ? '1' : ''}" data-1m="${opts.oneMillionVariants ? '1' : ''}">
+            <div class="model-picker" data-harness="${harness}" data-backend="${opts.backend || ''}" data-allow-default="${allowDefault ? '1' : ''}" data-1m="${opts.oneMillionVariants ? '1' : ''}">
                 <div class="model-picker-field">
                     <input type="text" class="form-input model-picker-input" name="${name}"
                         value="${this.escapeHtml(value || '')}" placeholder="${this.escapeHtml(placeholder)}"
@@ -6068,7 +6110,96 @@ class OpenPoet {
         return this._modelCatalogs[harness];
     }
 
-    _modelPickerEntries(picker, catalog) {
+    // Global default model/effort per backend (settings default_model_<b>,
+    // default_effort_<b>): what a session gets when neither the request nor
+    // the project names one. Sessions are refused without any.
+    _loadRuntimeDefaults(refresh = false) {
+        if (refresh || !this._runtimeDefaults) {
+            this._runtimeDefaults = this.api('GET', '/config/settings')
+                .then(settings => {
+                    const out = {};
+                    for (const [key, value] of Object.entries(settings || {})) {
+                        if (key.startsWith('default_model_') || key.startsWith('default_effort_')) out[key] = value;
+                    }
+                    return out;
+                })
+                .catch(() => ({}));
+        }
+        return this._runtimeDefaults;
+    }
+
+    _knownEfforts(harness, catalog) {
+        const seen = [];
+        for (const m of (catalog?.models || [])) {
+            for (const e of (m.efforts || [])) if (!seen.includes(e)) seen.push(e);
+        }
+        if (seen.length) return seen;
+        return harness === 'codex'
+            ? ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+            : ['low', 'medium', 'high', 'xhigh', 'max'];
+    }
+
+    // ── Effort select ────────────────────────────────────────────────────
+    // Its options follow the model in the paired model picker: the efforts
+    // the harness CLI reports for that model, else every level it knows.
+    // '' means the backend's global default (or "not set" in Settings).
+    _effortSelectHTML(name, value, harness, modelInputName, opts = {}) {
+        const allowDefault = opts.allowDefault !== false;
+        const current = value ? `<option value="${this.escapeHtml(value)}" selected>${this.escapeHtml(value)}</option>` : '';
+        return `
+            <select class="form-select effort-select" name="${name}" data-harness="${harness}" data-backend="${opts.backend || harness}"
+                data-model-input="${modelInputName}" data-allow-default="${allowDefault ? '1' : ''}" data-empty-label="${this.escapeHtml(opts.emptyLabel || '')}">
+                <option value="">${allowDefault ? 'Global default' : this.escapeHtml(opts.emptyLabel || 'Not set')}</option>
+                ${current}
+            </select>
+            <small class="effort-select-hint"></small>`;
+    }
+
+    initEffortSelects(root) {
+        if (!root) return;
+        root.querySelectorAll('.effort-select').forEach(select => this._initEffortSelect(root, select));
+    }
+
+    async _initEffortSelect(root, select) {
+        const harness = select.dataset.harness;
+        const backend = select.dataset.backend;
+        const modelInput = root.querySelector(`[name="${select.dataset.modelInput}"]`);
+        const hint = select.parentElement.querySelector('.effort-select-hint');
+        const [catalog, defaults] = await Promise.all([this._loadModelCatalog(harness), this._loadRuntimeDefaults()]);
+        const render = () => {
+            const current = select.value;
+            const typed = (modelInput?.value || '').trim();
+            const modelId = typed || (select.dataset.allowDefault ? (defaults[`default_model_${backend}`] || '') : '');
+            const entry = (catalog?.models || []).find(m => m.id === modelId || m.resolved_id === modelId || `${m.id}[1m]` === modelId);
+            const efforts = entry?.efforts?.length ? entry.efforts : this._knownEfforts(harness, catalog);
+            const options = [];
+            if (select.dataset.allowDefault) {
+                const globalEffort = defaults[`default_effort_${backend}`];
+                options.push(`<option value="">${globalEffort ? `Global default (${this.escapeHtml(globalEffort)})` : 'Global default (not set)'}</option>`);
+            } else {
+                options.push(`<option value="">${this.escapeHtml(select.dataset.emptyLabel || 'Not set')}</option>`);
+            }
+            for (const effort of efforts) {
+                const note = entry?.default_effort === effort ? ' (model default)' : '';
+                options.push(`<option value="${this.escapeHtml(effort)}">${this.escapeHtml(effort)}${note}</option>`);
+            }
+            if (current && !efforts.includes(current)) {
+                options.push(`<option value="${this.escapeHtml(current)}">${this.escapeHtml(current)} — not offered by this model</option>`);
+            }
+            select.innerHTML = options.join('');
+            select.value = current;
+            if (hint) {
+                hint.classList.toggle('model-picker-hint-warn', !!current && !efforts.includes(current));
+                hint.textContent = entry ? `Levels ${entry.label || entry.id} accepts: ${efforts.join(', ')}`
+                    : (catalog?.error ? `Model list unavailable: ${catalog.error}` : '');
+            }
+        };
+        render();
+        modelInput?.addEventListener('change', render);
+        modelInput?.addEventListener('input', render);
+    }
+
+    _modelPickerEntries(picker, catalog, defaults = {}) {
         let models = (catalog?.models || []).slice();
         if (picker.dataset['1m']) {
             // Claude Code on OpenAI: offer the 1M-context variant of each model first.
@@ -6078,7 +6209,12 @@ class OpenPoet {
             ]);
         }
         if (picker.dataset.allowDefault) {
-            models.unshift({ id: '', label: 'Harness default', description: 'Leave empty and let the CLI pick its default model' });
+            const globalModel = defaults[`default_model_${picker.dataset.backend}`];
+            models.unshift({
+                id: '',
+                label: globalModel ? `Global default (${globalModel})` : 'Global default (not set)',
+                description: globalModel ? 'Leave empty to use the global default from Settings' : 'No global default is set: sessions will be refused until one is set in Settings or here',
+            });
         }
         return models;
     }
@@ -6097,12 +6233,19 @@ class OpenPoet {
         let visible = [];
         let active = -1;
         let catalog = null;
+        let defaults = {};
 
         const updateHint = () => {
             const value = input.value.trim();
             hint.classList.remove('model-picker-hint-warn');
             if (!catalog) { hint.textContent = ''; return; }
             if (!value) {
+                const globalModel = picker.dataset.backend ? defaults[`default_model_${picker.dataset.backend}`] : '';
+                if (picker.dataset.allowDefault && picker.dataset.backend) {
+                    hint.textContent = globalModel ? `Uses the global default: ${globalModel}` : 'No global default set — sessions will be refused until a model is set here or in Settings';
+                    hint.classList.toggle('model-picker-hint-warn', !globalModel);
+                    return;
+                }
                 hint.textContent = catalog.error ? `Model list unavailable: ${catalog.error}` : '';
                 return;
             }
@@ -6110,7 +6253,7 @@ class OpenPoet {
             if (match) {
                 hint.textContent = match.resolved_id ? `${match.label} → currently ${match.resolved_id}` : match.label;
             } else if ((catalog.models || []).length) {
-                hint.textContent = 'Not in the list reported by the CLI — it will be passed as typed';
+                hint.textContent = 'Not in the list reported by the CLI — saving is refused for local projects';
                 hint.classList.add('model-picker-hint-warn');
             } else {
                 hint.textContent = catalog.error ? `Model list unavailable: ${catalog.error}` : '';
@@ -6172,8 +6315,11 @@ class OpenPoet {
         const load = async (refresh = false) => {
             catalog = null;
             if (!list.classList.contains('hidden')) render();
-            catalog = await this._loadModelCatalog(harness, refresh);
-            entries = this._modelPickerEntries(picker, catalog);
+            [catalog, defaults] = await Promise.all([
+                this._loadModelCatalog(harness, refresh),
+                picker.dataset.backend ? this._loadRuntimeDefaults() : Promise.resolve({}),
+            ]);
+            entries = this._modelPickerEntries(picker, catalog, defaults);
             if (!list.classList.contains('hidden')) render();
             updateHint();
         };
@@ -6241,7 +6387,11 @@ class OpenPoet {
                     </div>
                     <div class="form-group" id="claude-anthropic-model-group">
                         <label class="form-label">Model</label>
-                        ${this._modelPickerHTML('claude_anthropic_model', provider === 'anthropic' ? config.model : '', 'Claude Code default', 'claude_code')}
+                        ${this._modelPickerHTML('claude_anthropic_model', provider === 'anthropic' ? config.model : '', 'Global default', 'claude_code', { backend: 'claude_code' })}
+                    </div>
+                    <div class="form-group" id="claude-anthropic-effort-group">
+                        <label class="form-label">Effort</label>
+                        ${this._effortSelectHTML('claude_anthropic_effort', provider === 'anthropic' ? (config.reasoning_effort || '') : '', 'claude_code', 'claude_anthropic_model', { backend: 'claude_code' })}
                     </div>
                     <div class="form-group hidden" id="claude-openai-profile-group">
                         <label class="form-label">OpenAI OAuth Profile</label>
@@ -6254,6 +6404,10 @@ class OpenPoet {
                     <div class="form-group hidden" id="claude-openai-model-group">
                         <label class="form-label">OpenAI Model</label>
                         ${this._modelPickerHTML('claude_openai_model', provider === 'openai_oauth' ? config.model : '', 'e.g. gpt-5.6-sol[1m]', 'codex', { oneMillionVariants: true, allowDefault: false })}
+                    </div>
+                    <div class="form-group hidden" id="claude-openai-effort-group">
+                        <label class="form-label">Effort</label>
+                        ${this._effortSelectHTML('claude_openai_effort', provider === 'openai_oauth' ? (config.reasoning_effort || '') : '', 'codex', 'claude_openai_model', { backend: 'claude_code' })}
                     </div>
                     <div class="form-group hidden" id="claude-openai-small-model-group">
                         <label class="form-label">Small/Fast Model</label>
@@ -6299,18 +6453,11 @@ class OpenPoet {
                     </div>
                     <div class="form-group">
                         <label class="form-label">Model</label>
-                        ${this._modelPickerHTML('codex_model', config.model, 'Codex CLI default', 'codex')}
+                        ${this._modelPickerHTML('codex_model', config.model, 'Global default', 'codex', { backend: 'codex' })}
                     </div>
                     <div class="form-group">
                         <label class="form-label">Reasoning Effort</label>
-                        <select class="form-select" name="codex_reasoning_effort">
-                            ${this._codexOption('', effort, 'Default')}
-                            ${this._codexOption('minimal', effort, 'Minimal')}
-                            ${this._codexOption('low', effort, 'Low')}
-                            ${this._codexOption('medium', effort, 'Medium')}
-                            ${this._codexOption('high', effort, 'High')}
-                            ${this._codexOption('xhigh', effort, 'Extra High')}
-                        </select>
+                        ${this._effortSelectHTML('codex_reasoning_effort', effort, 'codex', 'codex_model', { backend: 'codex' })}
                     </div>
                     <div class="form-group">
                         <label class="form-label">Service Tier</label>
@@ -6355,7 +6502,7 @@ class OpenPoet {
                     </div>
                     <div class="form-group">
                         <label class="form-label">Model</label>
-                        ${this._modelPickerHTML('opencode_model', config.model, 'OpenCode default', 'opencode')}
+                        ${this._modelPickerHTML('opencode_model', config.model, 'Global default', 'opencode', { backend: 'opencode' })}
                     </div>
                     <div class="form-group">
                         <label class="form-label">Default Agent</label>
@@ -6674,6 +6821,7 @@ class OpenPoet {
         this.onProjectTypeChange(project?.type || 'local');
         this.onProjectBackendChange();
         this.initModelPickers(document.getElementById('project-form'));
+        this.initEffortSelects(document.getElementById('project-form'));
     }
 
     async _populateProjectToolPolicy(policyJson) {
@@ -6801,10 +6949,12 @@ class OpenPoet {
 		const isClaude = form.querySelector('[name="backend"]')?.value === 'claude_code';
 		const providerSelect = form.querySelector('[name="claude_provider"]');
 		const isOpenAI = isClaude && providerSelect?.value === 'openai_oauth';
-		for (const id of ['claude-openai-profile-group', 'claude-openai-model-group', 'claude-openai-small-model-group', 'claude-openai-local-note']) {
+		for (const id of ['claude-openai-profile-group', 'claude-openai-model-group', 'claude-openai-effort-group', 'claude-openai-small-model-group', 'claude-openai-local-note']) {
 			document.getElementById(id)?.classList.toggle('hidden', !isOpenAI);
 		}
-		document.getElementById('claude-anthropic-model-group')?.classList.toggle('hidden', !isClaude || isOpenAI);
+		for (const id of ['claude-anthropic-model-group', 'claude-anthropic-effort-group']) {
+			document.getElementById(id)?.classList.toggle('hidden', !isClaude || isOpenAI);
+		}
 	}
 
     updateProjectBackendAvailability() {
@@ -6836,11 +6986,15 @@ class OpenPoet {
 				};
 				const smallModel = this._trimFormValue(formData, 'claude_openai_small_model');
 				if (smallModel) config.small_model = smallModel;
+				const openaiEffort = this._trimFormValue(formData, 'claude_openai_effort');
+				if (openaiEffort) config.reasoning_effort = openaiEffort;
 				return JSON.stringify(config);
 			}
 			const config = { provider: 'anthropic' };
 			const model = this._trimFormValue(formData, 'claude_anthropic_model');
 			if (model) config.model = model;
+			const effort = this._trimFormValue(formData, 'claude_anthropic_effort');
+			if (effort) config.reasoning_effort = effort;
 			return JSON.stringify(config);
 		}
         if (backend === 'codex') {
@@ -8874,6 +9028,62 @@ class OpenPoet {
         const mcp = this.mcpServers.find(m => m.id === mcpId);
         if (mcp) {
             await this.api('PUT', `/config/mcps/${mcpId}`, { ...mcp, enabled });
+        }
+    }
+
+    // Global session defaults: the model and effort a session gets when
+    // neither the request nor its project names one.
+    _renderSessionDefaultsCard() {
+        const settings = this.settings || {};
+        const rows = [
+            { backend: 'claude_code', label: 'Claude Code', harness: 'claude_code', effort: true },
+            { backend: 'codex', label: 'Codex', harness: 'codex', effort: true },
+            { backend: 'opencode', label: 'OpenCode', harness: 'opencode', effort: false },
+        ];
+        const body = rows.map(row => `
+            <div class="session-defaults-row">
+                <div class="session-defaults-backend">${row.label}</div>
+                <div class="form-group">
+                    <label class="form-label">Model</label>
+                    ${this._modelPickerHTML(`default_model_${row.backend}`, settings[`default_model_${row.backend}`] || '', 'Not set', row.harness, { allowDefault: false })}
+                </div>
+                ${row.effort ? `
+                <div class="form-group">
+                    <label class="form-label">Effort</label>
+                    ${this._effortSelectHTML(`default_effort_${row.backend}`, settings[`default_effort_${row.backend}`] || '', row.harness, `default_model_${row.backend}`, { allowDefault: false, backend: row.backend, emptyLabel: 'Not set' })}
+                </div>` : ''}
+            </div>`).join('');
+        return `
+            <div class="card" style="margin-bottom: 16px;">
+                <div class="card-header">
+                    <div class="card-title">Session Model &amp; Effort</div>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: 12px; color: var(--color-text-secondary, #999); font-size: 13px;">
+                        Every session runs an explicit model and effort: the one its start request names, else the project's, else these global defaults.
+                        A session with none of them is refused — it never falls back to the CLI account's default.
+                    </p>
+                    <form id="session-defaults-form" onsubmit="return false">${body}</form>
+                    <button class="btn btn-primary btn-sm" onclick="withLoading(this, () => app.saveSessionDefaults())">Save</button>
+                </div>
+            </div>`;
+    }
+
+    async saveSessionDefaults() {
+        const form = document.getElementById('session-defaults-form');
+        if (!form) return;
+        const formData = new FormData(form);
+        const values = {};
+        for (const key of ['default_model_claude_code', 'default_effort_claude_code', 'default_model_codex', 'default_effort_codex', 'default_model_opencode']) {
+            values[key] = this._trimFormValue(formData, key);
+        }
+        try {
+            await this.api('PUT', '/config/settings', values);
+            this.settings = { ...(this.settings || {}), ...values };
+            this._loadRuntimeDefaults(true);
+            this.showToast('Success', 'Session defaults saved', 'success');
+        } catch (error) {
+            this._showApiError(error);
         }
     }
 
