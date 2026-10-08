@@ -34,6 +34,57 @@ type Model struct {
 	Label       string `json:"label"`
 	Description string `json:"description,omitempty"`
 	IsDefault   bool   `json:"is_default,omitempty"`
+	// Efforts are the reasoning effort levels the harness accepts for this
+	// model, as it reports them; empty when the model takes no effort.
+	Efforts []string `json:"efforts,omitempty"`
+	// DefaultEffort is the effort the harness picks when none is passed
+	// (reported by Codex only).
+	DefaultEffort string `json:"default_effort,omitempty"`
+}
+
+// Find returns the entry whose ID (or, for an alias, resolved ID) is id.
+func (c Catalog) Find(id string) (Model, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Model{}, false
+	}
+	for _, m := range c.Models {
+		if m.ID == id {
+			return m, true
+		}
+	}
+	for _, m := range c.Models {
+		if m.ResolvedID == id {
+			return m, true
+		}
+	}
+	return Model{}, false
+}
+
+// fallbackEfforts are the effort levels each harness CLI documents, used when
+// its catalog cannot be read (CLI missing, probe failed).
+var fallbackEfforts = map[string][]string{
+	"claude_code": {"low", "medium", "high", "xhigh", "max"},
+	"codex":       {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"},
+}
+
+// KnownEfforts returns every effort level harness accepts for some model: the
+// union of its catalog's levels, or the documented set without a catalog.
+func KnownEfforts(harness string, catalog Catalog) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range catalog.Models {
+		for _, e := range m.Efforts {
+			if !seen[e] {
+				seen[e] = true
+				out = append(out, e)
+			}
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, fallbackEfforts[harness]...)
+	}
+	return out
 }
 
 // Catalog is the discovery result for one harness.
@@ -257,10 +308,29 @@ func probeClaude(ctx context.Context) ([]Model, error) {
 }
 
 type claudeModel struct {
-	Value         string `json:"value"`
-	ResolvedModel string `json:"resolvedModel"`
-	DisplayName   string `json:"displayName"`
-	Description   string `json:"description"`
+	Value                 string   `json:"value"`
+	ResolvedModel         string   `json:"resolvedModel"`
+	DisplayName           string   `json:"displayName"`
+	Description           string   `json:"description"`
+	SupportsEffort        bool     `json:"supportsEffort"`
+	SupportedEffortLevels []string `json:"supportedEffortLevels"`
+}
+
+func (m claudeModel) efforts() []string {
+	if !m.SupportsEffort {
+		return nil
+	}
+	return normalizeEfforts(m.SupportedEffortLevels)
+}
+
+func normalizeEfforts(in []string) []string {
+	var out []string
+	for _, e := range in {
+		if e = strings.ToLower(strings.TrimSpace(e)); e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // claudeModels maps the harness list to catalog entries. The "default" entry
@@ -285,7 +355,7 @@ func claudeModels(in []claudeModel) []Model {
 		if label == "" {
 			label = id
 		}
-		item := Model{ID: id, Label: label, Description: strings.TrimSpace(m.Description)}
+		item := Model{ID: id, Label: label, Description: strings.TrimSpace(m.Description), Efforts: m.efforts()}
 		if resolved == "" || resolved == id {
 			out = append(out, item)
 			continue
@@ -295,7 +365,7 @@ func claudeModels(in []claudeModel) []Model {
 		out = append(out, item)
 		if !listed[resolved] && !seen[resolved] {
 			seen[resolved] = true
-			out = append(out, Model{ID: resolved, Label: label, Description: item.Description})
+			out = append(out, Model{ID: resolved, Label: label, Description: item.Description, Efforts: item.Efforts})
 		}
 	}
 	return out
@@ -313,43 +383,63 @@ func probeCodex(ctx context.Context) ([]Model, error) {
 	}
 	var models []Model
 	err = runJSONLines(ctx, bin, []string{"app-server"}, requests, func(line []byte) (bool, error) {
-		var msg struct {
-			ID     json.RawMessage           `json:"id"`
-			Error  *struct{ Message string } `json:"error"`
-			Result struct {
-				Data []struct {
-					ID          string `json:"id"`
-					Model       string `json:"model"`
-					DisplayName string `json:"displayName"`
-					Description string `json:"description"`
-					Hidden      bool   `json:"hidden"`
-					IsDefault   bool   `json:"isDefault"`
-				} `json:"data"`
-			} `json:"result"`
-		}
-		if json.Unmarshal(line, &msg) != nil || string(msg.ID) != "2" {
-			return false, nil
-		}
-		if msg.Error != nil {
-			return false, fmt.Errorf("codex model/list failed: %s", msg.Error.Message)
-		}
-		for _, item := range msg.Result.Data {
-			id := strings.TrimSpace(item.Model)
-			if id == "" {
-				id = strings.TrimSpace(item.ID)
-			}
-			if id == "" || item.Hidden {
-				continue
-			}
-			label := strings.TrimSpace(item.DisplayName)
-			if label == "" {
-				label = id
-			}
-			models = append(models, Model{ID: id, Label: label, Description: strings.TrimSpace(item.Description), IsDefault: item.IsDefault})
-		}
-		return true, nil
+		var done bool
+		var parseErr error
+		models, done, parseErr = parseCodexModelList(line)
+		return done, parseErr
 	})
 	return models, err
+}
+
+// parseCodexModelList reads the app-server reply to model/list (request id 2);
+// done is false for any other line.
+func parseCodexModelList(line []byte) (models []Model, done bool, err error) {
+	var msg struct {
+		ID     json.RawMessage           `json:"id"`
+		Error  *struct{ Message string } `json:"error"`
+		Result struct {
+			Data []struct {
+				ID          string `json:"id"`
+				Model       string `json:"model"`
+				DisplayName string `json:"displayName"`
+				Description string `json:"description"`
+				Hidden      bool   `json:"hidden"`
+				IsDefault   bool   `json:"isDefault"`
+				Efforts     []struct {
+					ReasoningEffort string `json:"reasoningEffort"`
+				} `json:"supportedReasoningEfforts"`
+				DefaultReasoningEffort string `json:"defaultReasoningEffort"`
+			} `json:"data"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(line, &msg) != nil || string(msg.ID) != "2" {
+		return nil, false, nil
+	}
+	if msg.Error != nil {
+		return nil, false, fmt.Errorf("codex model/list failed: %s", msg.Error.Message)
+	}
+	for _, item := range msg.Result.Data {
+		id := strings.TrimSpace(item.Model)
+		if id == "" {
+			id = strings.TrimSpace(item.ID)
+		}
+		if id == "" || item.Hidden {
+			continue
+		}
+		label := strings.TrimSpace(item.DisplayName)
+		if label == "" {
+			label = id
+		}
+		efforts := make([]string, 0, len(item.Efforts))
+		for _, e := range item.Efforts {
+			efforts = append(efforts, e.ReasoningEffort)
+		}
+		models = append(models, Model{
+			ID: id, Label: label, Description: strings.TrimSpace(item.Description), IsDefault: item.IsDefault,
+			Efforts: normalizeEfforts(efforts), DefaultEffort: strings.ToLower(strings.TrimSpace(item.DefaultReasoningEffort)),
+		})
+	}
+	return models, true, nil
 }
 
 func probeOpenCode(ctx context.Context) ([]Model, error) {
