@@ -1306,6 +1306,15 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Codex TUI: the rollout's turn_context says which model and effort the
+	// turn really ran with (app-server sessions report it on their own). The
+	// TUI's hooks carry no X-Backend; the manager checks the session's backend.
+	if eventName == "Stop" && h.sessionMgr != nil {
+		if transcriptPath, ok := hookEvent["transcript_path"].(string); ok && transcriptPath != "" {
+			go h.sessionMgr.RefreshCodexRolloutSettings(context.Background(), sessionID, transcriptPath)
+		}
+	}
+
 	// Normalize Copilot/ACP event names to Claude Code equivalents
 	if r.Header.Get("X-Backend") == "copilot" || r.Header.Get("X-Backend") == "acp" {
 		eventName = normalizeCopilotEventName(eventName)

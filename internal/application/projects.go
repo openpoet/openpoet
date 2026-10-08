@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"openpoet/internal/database"
+	"openpoet/internal/sessionmeta"
 )
 
 type ProjectStore interface {
@@ -41,6 +42,18 @@ type ProjectService struct {
 	encryptor ProjectCredentialEncryptor
 	effects   ProjectEffects
 	paths     ProjectPathValidator
+	runtime   *RuntimeSettingsValidator
+}
+
+// SetRuntimeSettingsValidator makes project saves check the backend config's
+// model and effort against the harness CLI's catalog.
+func (s *ProjectService) SetRuntimeSettingsValidator(v *RuntimeSettingsValidator) {
+	s.runtime = v
+}
+
+// RuntimeSettings returns the validator (nil when not configured).
+func (s *ProjectService) RuntimeSettings() *RuntimeSettingsValidator {
+	return s.runtime
 }
 
 func NewProjectService(store ProjectStore, encryptor ProjectCredentialEncryptor, effects ProjectEffects, paths ...ProjectPathValidator) *ProjectService {
@@ -229,10 +242,43 @@ func (s *ProjectService) projectFromInput(ctx context.Context, input database.Pr
 	if err := validateProject(project); err != nil {
 		return nil, err
 	}
+	if err := s.validateRuntimeSettings(ctx, project, current); err != nil {
+		return nil, err
+	}
 	if err := s.validatePath(ctx, project.Path, project.Type); err != nil {
 		return nil, err
 	}
 	return project, nil
+}
+
+// validateRuntimeSettings checks the backend config's model and effort when
+// they change (or the backend does), so an unchanged legacy value never
+// blocks an unrelated edit.
+func (s *ProjectService) validateRuntimeSettings(ctx context.Context, project, current *database.Project) error {
+	next := sessionmeta.FromProjectConfig(project.Backend, project.BackendConfig)
+	if current != nil && current.Backend == project.Backend {
+		previous := sessionmeta.FromProjectConfig(current.Backend, current.BackendConfig)
+		if previous.Model == next.Model && previous.Effort == next.Effort {
+			return nil
+		}
+	}
+	if next.Model == "" && next.Effort == "" {
+		return nil
+	}
+	if next.Model != "" && !sessionmeta.Explicit(next.Model) {
+		return runtimeSettingError("model must be an explicit model id; %q hands the choice to the CLI's account default (leave it empty to use the global default)", next.Model)
+	}
+	if next.Effort != "" && !sessionmeta.Explicit(next.Effort) {
+		return runtimeSettingError("effort must be an explicit level; %q hands the choice to the CLI's account default (leave it empty to use the global default)", next.Effort)
+	}
+	if s.runtime == nil {
+		return nil
+	}
+	check := RuntimeSettingsCheck{Backend: project.Backend, Harness: next.Harness, Model: next.Model, Effort: next.Effort, Remote: project.Type == "remote"}
+	if check.Model == "" && check.Effort != "" && next.Harness != "claude_code/openai" {
+		check.Model = s.runtime.Defaults(ctx, project.Backend).Model // the effort must suit the model it will run with
+	}
+	return s.runtime.Validate(ctx, check)
 }
 
 // normalizeProjectBackendConfig enforces the persisted project boundary between
@@ -245,6 +291,8 @@ func normalizeProjectBackendConfig(backend, raw string) string {
 			ProviderConfigID int64  `json:"provider_config_id,omitempty"`
 			Model            string `json:"model,omitempty"`
 			SmallModel       string `json:"small_model,omitempty"`
+			ReasoningEffort  string `json:"reasoning_effort,omitempty"`
+			LegacyEffort     string `json:"effort,omitempty"`
 		}
 		if json.Unmarshal([]byte(raw), &input) != nil {
 			return "{}"
@@ -252,6 +300,11 @@ func normalizeProjectBackendConfig(backend, raw string) string {
 		input.Provider = strings.ToLower(strings.TrimSpace(input.Provider))
 		input.Model = strings.TrimSpace(input.Model)
 		input.SmallModel = strings.TrimSpace(input.SmallModel)
+		input.ReasoningEffort = strings.ToLower(strings.TrimSpace(input.ReasoningEffort))
+		if input.ReasoningEffort == "" {
+			input.ReasoningEffort = strings.ToLower(strings.TrimSpace(input.LegacyEffort))
+		}
+		input.LegacyEffort = ""
 		switch input.Provider {
 		case "anthropic":
 			input.ProviderConfigID = 0

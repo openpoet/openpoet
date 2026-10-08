@@ -104,8 +104,11 @@ done
 	if sess.Status != "running" {
 		t.Fatalf("session status = %q, want running", sess.Status)
 	}
-	if sess.Model != "unknown" || sess.RequestedModel != "default" || sess.Effort != "default" || sess.Harness != "claude_code" {
-		t.Fatalf("session runtime metadata = effective model %q requested model %q effort %q harness %q", sess.Model, sess.RequestedModel, sess.Effort, sess.Harness)
+	// Never "default": the project sets nothing, so the global defaults apply.
+	if sess.Model != "unknown" || sess.RequestedModel != "opus" || sess.Effort != "high" || sess.Harness != "claude_code" ||
+		sess.ModelSource != "global" || sess.EffortSource != "global" {
+		t.Fatalf("session runtime metadata = effective model %q requested model %q (%s) effort %q (%s) harness %q",
+			sess.Model, sess.RequestedModel, sess.ModelSource, sess.Effort, sess.EffortSource, sess.Harness)
 	}
 	linked, err := db.GetTaskForSession(ctx, sess.ID)
 	if err != nil {

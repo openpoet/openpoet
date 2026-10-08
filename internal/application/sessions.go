@@ -15,6 +15,7 @@ import (
 
 	"openpoet/internal/database"
 	runtime "openpoet/internal/session"
+	"openpoet/internal/sessionmeta"
 )
 
 const (
@@ -132,7 +133,11 @@ type SessionCreationCollaborators struct {
 	Workspaces   SessionWorkspaceProvider
 	Signals      SessionSignalPort
 	WorkRuns     WorkRunStarter
-	Now          func() time.Time
+	// RuntimeSettings resolves and validates the explicit model and effort
+	// a session starts with. Optional: without it only the session manager's
+	// own resolution (no catalog check) applies.
+	RuntimeSettings *RuntimeSettingsValidator
+	Now             func() time.Time
 }
 
 // WorkRunStarter records a durable work run for a programmatically-spawned
@@ -229,7 +234,12 @@ type CreateSessionCommand struct {
 	Isolation string
 	// Backend overrides the project's backend for THIS session (Phase 7.3 —
 	// heterogeneous fan-out: e.g. a codex worker inside a claude_code project).
-	Backend       string
+	Backend string
+	// Model and Effort override the project's (and the global default) for
+	// this session. Empty means "use the project's, else the global default";
+	// a session never starts without an explicit value for each.
+	Model         string
+	Effort        string
 	Authorization ActionAuthorization
 }
 
@@ -405,6 +415,9 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 	if s.manager == nil {
 		return nil, validationError("session_manager_unavailable", "Session manager is unavailable")
 	}
+	if err := s.prepareRuntimeSettings(ctx, project, command.Model, command.Effort, environment); err != nil {
+		return nil, err
+	}
 	var created *database.Session
 	if project.Type == "remote" {
 		if s.decrypt == nil {
@@ -415,7 +428,7 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 		created, err = s.manager.StartSession(ctx, project, environment)
 	}
 	if err != nil {
-		return nil, err
+		return nil, sessionStartSettingsError(err)
 	}
 	// From here on the process is running. Nothing a client does (timing out,
 	// disconnecting) may kill it: every remaining step runs detached from the
@@ -673,7 +686,10 @@ var reopenableSessionStatuses = map[string]bool{"stopped": true, "completed": tr
 type ReopenSessionCommand struct {
 	SessionID                  string
 	DangerouslySkipPermissions bool
-	Authorization              ActionAuthorization
+	// Model and Effort replace what the session ran with; empty keeps it.
+	Model         string
+	Effort        string
+	Authorization ActionAuthorization
 }
 
 func (s *SessionService) Reopen(ctx context.Context, command ReopenSessionCommand) (*database.Session, error) {
@@ -746,13 +762,19 @@ func (s *SessionService) Reopen(ctx context.Context, command ReopenSessionComman
 	if project.Type == "remote" && s.decrypt == nil {
 		return nil, validationError("session_decryptor_unavailable", "Remote session decryptor is unavailable")
 	}
+	if err := s.prepareReopenSettings(ctx, session, project, command.Model, command.Effort, environment); err != nil {
+		if laneReopen && session.WorkspaceID.Valid && s.creation.Workspaces != nil {
+			_ = s.creation.Workspaces.ReleaseForSession(ctx, session.ID)
+		}
+		return nil, err
+	}
 	if err := s.manager.ReopenSession(ctx, session, project, environment, s.decrypt); err != nil {
 		if laneReopen && session.WorkspaceID.Valid && s.creation.Workspaces != nil {
 			// Runner never started: give the lease back so the lane isn't
 			// stranded 'leased' by a stopped session.
 			_ = s.creation.Workspaces.ReleaseForSession(ctx, session.ID)
 		}
-		return nil, err
+		return nil, sessionStartSettingsError(err)
 	}
 	stored, err := s.store.GetSession(ctx, session.ID)
 	if err != nil {
@@ -1114,6 +1136,77 @@ func (s *SessionService) SetEffort(ctx context.Context, command SetSessionEffort
 	}
 	s.publish(ctx, SessionChange{Action: "effort_changed", Session: updated, ID: command.SessionID, Actor: command.Authorization.Actor})
 	return updated, nil
+}
+
+// prepareRuntimeSettings validates a new session's model and effort (request,
+// then project, then global default) against the CLI's catalog and hands the
+// request's values to the session manager, which resolves them again as the
+// last line for every start path.
+func (s *SessionService) prepareRuntimeSettings(ctx context.Context, project *database.Project, model, effort string, environment map[string]string) error {
+	model, effort = strings.TrimSpace(model), strings.ToLower(strings.TrimSpace(effort))
+	if err := requireExplicitRequestSettings(model, effort); err != nil {
+		return err
+	}
+	if v := s.creation.RuntimeSettings; v != nil {
+		if _, err := v.Resolve(ctx, project.Backend, project.BackendConfig, model, effort, project.Type == "remote"); err != nil {
+			return err
+		}
+	}
+	setRuntimeRequestEnvironment(environment, model, effort)
+	return nil
+}
+
+// prepareReopenSettings validates the model/effort a reopen request names.
+// Without them the session keeps what it ran with (the manager resolves a
+// pre-explicit session like a new one).
+func (s *SessionService) prepareReopenSettings(ctx context.Context, session *database.Session, project *database.Project, model, effort string, environment map[string]string) error {
+	model, effort = strings.TrimSpace(model), strings.ToLower(strings.TrimSpace(effort))
+	if err := requireExplicitRequestSettings(model, effort); err != nil {
+		return err
+	}
+	if v := s.creation.RuntimeSettings; v != nil && (model != "" || effort != "") {
+		check := RuntimeSettingsCheck{Backend: session.Backend, Harness: session.Harness, Model: model, Effort: effort, Remote: project.Type == "remote"}
+		if check.Model == "" && sessionmeta.Explicit(session.RequestedModel) {
+			check.Model = session.RequestedModel // the effort must suit the model it keeps
+		}
+		if err := v.Validate(ctx, check); err != nil {
+			return err
+		}
+	}
+	setRuntimeRequestEnvironment(environment, model, effort)
+	return nil
+}
+
+func requireExplicitRequestSettings(model, effort string) error {
+	if model != "" && !sessionmeta.Explicit(model) {
+		return runtimeSettingError("model must be an explicit model id; %q hands the choice to the CLI's account default", model)
+	}
+	if effort != "" && !sessionmeta.Explicit(effort) {
+		return runtimeSettingError("effort must be an explicit level; %q hands the choice to the CLI's account default", effort)
+	}
+	return nil
+}
+
+func setRuntimeRequestEnvironment(environment map[string]string, model, effort string) {
+	if model != "" {
+		environment[runtime.RequestModelEnv] = model
+	}
+	if effort != "" {
+		environment[runtime.RequestEffortEnv] = effort
+	}
+}
+
+// sessionStartSettingsError maps the session manager's refusal to start
+// without an explicit model/effort (or with an invalid one) to a validation
+// error; other start failures pass through.
+func sessionStartSettingsError(err error) error {
+	switch {
+	case errors.Is(err, runtime.ErrSessionSettingsUnresolved):
+		return unresolvedSettingsError(err)
+	case errors.Is(err, runtime.ErrInvalidSessionSetting):
+		return &Error{Kind: ErrorValidation, Code: "runtime_setting_invalid", Message: err.Error(), Cause: err}
+	}
+	return err
 }
 
 func sessionSettingApplicationError(err error) error {

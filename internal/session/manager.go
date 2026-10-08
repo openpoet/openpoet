@@ -205,21 +205,20 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 	backend := GetBackend(project.Backend)
 	sessionID := uuid.New().String()
 	meta := sessionmeta.FromProjectConfig(project.Backend, project.BackendConfig)
-	requestedModel, effectiveModel, err := initialSessionModels(backend.Type(), meta.Model, meta.Harness)
+	requestModel, requestEffort := takeRuntimeRequest(envVars)
+	settings, err := m.resolveRuntimeSettings(ctx, project.Backend, project.BackendConfig, requestModel, requestEffort)
 	if err != nil {
 		return nil, err
 	}
 	session := &database.Session{
-		ID:             sessionID,
-		ProjectID:      project.ID,
-		Status:         "starting",
-		StartTime:      time.Now(),
-		Backend:        project.Backend,
-		Model:          effectiveModel,
-		RequestedModel: requestedModel,
-		Effort:         meta.Effort,
-		Harness:        meta.Harness,
+		ID:        sessionID,
+		ProjectID: project.ID,
+		Status:    "starting",
+		StartTime: time.Now(),
+		Backend:   project.Backend,
+		Harness:   meta.Harness,
 	}
+	applyResolvedSettings(session, backend.Type(), settings)
 
 	if err := m.db.CreateSession(ctx, session); err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
@@ -232,12 +231,14 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 		envVars = make(map[string]string)
 	}
 
-	// Build backend-agnostic session config
+	// Build backend-agnostic session config. The backend config carries the
+	// resolved model and effort, so every CLI gets them explicitly.
 	cfg := &SessionConfig{
-		SessionID:     sessionID,
-		ServerAddr:    m.serverAddr,
-		ExecPath:      m.execPath,
-		BackendConfig: project.BackendConfig,
+		SessionID:           sessionID,
+		ServerAddr:          m.serverAddr,
+		ExecPath:            m.execPath,
+		BackendConfig:       sessionmeta.ApplyRuntimeValues(project.BackendConfig, settings.Model, settings.Effort),
+		OnEffectiveSettings: m.effectiveSettingsRecorder(sessionID),
 	}
 
 	// Extract special env vars set by API handler before passing to backend
@@ -356,31 +357,21 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 	backend := GetBackend(session.Backend)
 	sessionID := session.ID
 	projectMeta := sessionmeta.FromProjectConfig(session.Backend, project.BackendConfig)
-	requestedModel := strings.TrimSpace(session.RequestedModel)
-	if requestedModel == "" {
-		requestedModel = projectMeta.Model
+	// A reopened session keeps the model and effort it ran with unless the
+	// request names others. Rows from before explicit settings (empty or
+	// "default") resolve like a new session: project, then global default.
+	requestModel, requestEffort := takeRuntimeRequest(envVars)
+	settings, err := m.resolveReopenSettings(ctx, session, project.BackendConfig, requestModel, requestEffort)
+	if err != nil {
+		return err
 	}
-	if backend.Type() == BackendClaudeCode {
-		var err error
-		requestedModel, err = validateClaudeCodeModelIDForHarness(requestedModel, projectMeta.Harness)
-		if err != nil {
-			return err
-		}
-		if strings.TrimSpace(session.Model) == "" {
-			session.Model = "unknown"
-		}
-	} else if strings.TrimSpace(session.Model) == "" {
-		session.Model = requestedModel
-	}
-	meta := sessionmeta.WithSessionValues(projectMeta, session.Model, session.Effort, session.Harness)
-	session.RequestedModel = requestedModel
-	session.Effort = meta.Effort
-	session.Harness = meta.Harness
+	applyResolvedSettings(session, backend.Type(), settings)
+	session.Harness = sessionmeta.WithSessionValues(projectMeta, "", "", session.Harness).Harness
 	if err := m.db.UpdateSessionRuntimeMetadata(ctx, sessionID, session.Model, session.Effort, session.Harness); err != nil {
 		return fmt.Errorf("failed to restore session runtime metadata: %w", err)
 	}
-	if err := m.db.UpdateSessionRequestedModel(ctx, sessionID, session.RequestedModel); err != nil {
-		return fmt.Errorf("failed to restore requested session model: %w", err)
+	if err := m.db.UpdateSessionResolvedSettings(ctx, sessionID, session.RequestedModel, session.Effort, session.ModelSource, session.EffortSource, session.Model); err != nil {
+		return fmt.Errorf("failed to restore session model and effort: %w", err)
 	}
 
 	// Check backend supports resume
@@ -425,17 +416,13 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 
 	// Build backend-agnostic session config
 	cfg := &SessionConfig{
-		SessionID:         sessionID,
-		ProviderSessionID: session.ProviderSessionID,
-		ServerAddr:        m.serverAddr,
-		ExecPath:          m.execPath,
-		IsReopen:          true,
-		BackendConfig:     project.BackendConfig,
-	}
-	if backend.Type() == BackendCodex {
-		cfg.BackendConfig = sessionmeta.ApplyRuntimeValues(project.BackendConfig, session.Model, session.Effort)
-	} else if backend.Type() == BackendClaudeCode {
-		cfg.BackendConfig = sessionmeta.ApplyRuntimeValues(project.BackendConfig, session.RequestedModel, "")
+		SessionID:           sessionID,
+		ProviderSessionID:   session.ProviderSessionID,
+		ServerAddr:          m.serverAddr,
+		ExecPath:            m.execPath,
+		IsReopen:            true,
+		BackendConfig:       sessionmeta.ApplyRuntimeValues(project.BackendConfig, settings.Model, settings.Effort),
+		OnEffectiveSettings: m.effectiveSettingsRecorder(sessionID),
 	}
 
 	// Extract special env vars set by API handler
@@ -509,7 +496,6 @@ func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, 
 
 	// Create runner based on project type
 	var runner Runner
-	var err error
 
 	dumperKind := "local"
 	if project.Type != "local" {
@@ -1030,6 +1016,9 @@ func (m *Manager) SetSessionModel(ctx context.Context, sessionID, model string, 
 	if err != nil {
 		return nil, err
 	}
+	if !sessionmeta.Explicit(model) {
+		return nil, fmt.Errorf("%w: model must be explicit; \"default\" and \"reset\" would hand the choice to the CLI's account default", ErrInvalidSessionSetting)
+	}
 
 	rs, err := m.runningSession(sessionID)
 	if err != nil {
@@ -1082,10 +1071,17 @@ func (m *Manager) SetSessionEffort(ctx context.Context, sessionID, effort string
 
 	if rs.session.Backend == string(BackendCodex) {
 		if handler, ok := rs.runner.(CodexCommandHandler); ok {
-			if err := setCodexSessionEffort(ctx, handler, rs.session.Model, effort); err != nil {
+			if err := setCodexSessionEffort(ctx, handler, sessionCurrentModel(rs.session), effort); err != nil {
 				return nil, err
 			}
-			return m.persistSessionRuntimeMetadata(ctx, sessionID, "", effort)
+			updated, err := m.persistSessionRuntimeMetadata(ctx, sessionID, "", effort)
+			if err != nil {
+				return nil, err
+			}
+			// The app-server applied it: that is the runtime's own answer.
+			m.RecordEffectiveSettings(ctx, sessionID, "", effort)
+			updated.EffectiveEffort = effort
+			return updated, nil
 		}
 		return nil, fmt.Errorf("%w: Codex TUI does not expose a non-interactive effort command; use the app-server runtime", ErrSessionSettingUnsupported)
 	}
@@ -1127,6 +1123,13 @@ func (m *Manager) persistSessionRuntimeMetadata(ctx context.Context, sessionID, 
 		currentEffort = effort
 	}
 
+	modelSource, effortSource := "", ""
+	if model != "" {
+		modelSource = sessionmeta.SourceRequest
+	}
+	if effort != "" {
+		effortSource = sessionmeta.SourceRequest
+	}
 	if m.db != nil {
 		if err := m.db.UpdateSessionRuntimeMetadata(ctx, sessionID, currentModel, currentEffort, harness); err != nil {
 			return nil, fmt.Errorf("failed to persist session runtime metadata: %w", err)
@@ -1135,6 +1138,9 @@ func (m *Manager) persistSessionRuntimeMetadata(ctx context.Context, sessionID, 
 			if err := m.db.UpdateSessionRequestedModel(ctx, sessionID, currentModel); err != nil {
 				return nil, fmt.Errorf("failed to persist requested session model: %w", err)
 			}
+		}
+		if err := m.db.UpdateSessionSettingSources(ctx, sessionID, modelSource, effortSource); err != nil {
+			return nil, fmt.Errorf("failed to persist session setting sources: %w", err)
 		}
 	}
 
@@ -1147,8 +1153,13 @@ func (m *Manager) persistSessionRuntimeMetadata(ctx context.Context, sessionID, 
 	rs.session.Model = currentModel
 	if model != "" {
 		rs.session.RequestedModel = currentModel
+		rs.session.ModelSource = modelSource
 	}
 	rs.session.Effort = currentEffort
+	if effort != "" {
+		rs.session.EffortSource = effortSource
+		rs.session.EffectiveEffort = ""
+	}
 	copy := *rs.session
 	return &copy, nil
 }
@@ -1158,6 +1169,9 @@ func (m *Manager) persistSessionRequestedModel(ctx context.Context, sessionID, r
 		if err := m.db.UpdateSessionRequestedModel(ctx, sessionID, requestedModel); err != nil {
 			return nil, fmt.Errorf("failed to persist requested session model: %w", err)
 		}
+		if err := m.db.UpdateSessionSettingSources(ctx, sessionID, sessionmeta.SourceRequest, ""); err != nil {
+			return nil, fmt.Errorf("failed to persist session setting sources: %w", err)
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1166,6 +1180,7 @@ func (m *Manager) persistSessionRequestedModel(ctx context.Context, sessionID, r
 		return nil, fmt.Errorf("%w: %s", ErrSessionNotRunning, sessionID)
 	}
 	rs.session.RequestedModel = requestedModel
+	rs.session.ModelSource = sessionmeta.SourceRequest
 	copy := *rs.session
 	return &copy, nil
 }
@@ -1193,21 +1208,6 @@ func (m *Manager) RecordEffectiveModel(ctx context.Context, sessionID, effective
 		})
 	}
 	return nil
-}
-
-func initialSessionModels(backend BackendType, configuredModel, harness string) (requestedModel, effectiveModel string, err error) {
-	configuredModel = strings.TrimSpace(configuredModel)
-	if configuredModel == "" {
-		configuredModel = "default"
-	}
-	if backend == BackendClaudeCode {
-		requestedModel, err = validateClaudeCodeModelIDForHarness(configuredModel, harness)
-		if err != nil {
-			return "", "", err
-		}
-		return requestedModel, "unknown", nil
-	}
-	return configuredModel, configuredModel, nil
 }
 
 func validateClaudeCodeModelIDForHarness(model, harness string) (string, error) {
@@ -1261,24 +1261,33 @@ func validateSessionModelID(model string) (string, error) {
 	return model, nil
 }
 
+// validateSessionEffort accepts the effort levels any supported CLI knows.
+// Whether a given model takes it is checked against the CLI's catalog.
+// "default"/"reset" are refused: sessions never run the account default.
 func validateSessionEffort(effort string) (string, error) {
 	effort = strings.ToLower(strings.TrimSpace(effort))
-	if effort == "reset" {
-		effort = "default"
-	}
 	allowed := map[string]bool{
-		"default": true,
 		"minimal": true,
 		"low":     true,
 		"medium":  true,
 		"high":    true,
 		"xhigh":   true,
 		"max":     true,
+		"ultra":   true,
 	}
 	if !allowed[effort] {
-		return "", fmt.Errorf("%w: effort must be one of default, minimal, low, medium, high, xhigh, or max", ErrInvalidSessionSetting)
+		return "", fmt.Errorf("%w: effort must be one of minimal, low, medium, high, xhigh, max or ultra (an explicit level; \"default\" is not accepted)", ErrInvalidSessionSetting)
 	}
 	return effort, nil
+}
+
+// sessionCurrentModel is the model a live session runs: the one its runtime
+// reported, else the one it was configured with.
+func sessionCurrentModel(session *database.Session) string {
+	if model := strings.TrimSpace(session.Model); model != "" && !strings.EqualFold(model, "unknown") {
+		return model
+	}
+	return strings.TrimSpace(session.RequestedModel)
 }
 
 type codexModelCatalog struct {
@@ -1391,6 +1400,19 @@ func (m *Manager) HandleCodexCommand(ctx context.Context, sessionID string, data
 	result, err := handler.HandleCodexCommand(ctx, data)
 	if err == nil && codexCommandAction(data) == "input/send" {
 		m.notifyUserPromptSubmitted(sessionID)
+	}
+	if err == nil && codexCommandAction(data) == "model/set" {
+		// The terminal's model picker: keep the session row on what the
+		// runner now uses, so sessions.get never shows a stale model.
+		if current, ok := result.(map[string]interface{}); ok {
+			model, _ := current["model"].(string)
+			effort, _ := current["reasoningEffort"].(string)
+			if _, perr := m.persistSessionRuntimeMetadata(ctx, sessionID, strings.TrimSpace(model), strings.ToLower(strings.TrimSpace(effort))); perr != nil {
+				log.Printf("[Codex] failed to persist model picked in session %s: %v", sessionID, perr)
+			} else {
+				m.RecordEffectiveSettings(ctx, sessionID, "", effort)
+			}
+		}
 	}
 	return result, err
 }
@@ -1619,6 +1641,7 @@ func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 	shuttingDown := m.shuttingDown
 	delete(m.sessions, sessionID)
 	m.mu.Unlock()
+	claudeEffortLastScan.Delete(sessionID)
 	if m.attention != nil {
 		m.attention.Forget(sessionID)
 	}
@@ -1708,6 +1731,7 @@ func (m *Manager) monitorSession(sessionID string, rs *runningSession) {
 func (m *Manager) checkForNotificationTriggers(sessionID string, data []byte) {
 	m.feedScreen(sessionID, data)
 	m.ScanOutputForAttention(sessionID, data)
+	m.observeClaudeEffort(sessionID)
 }
 
 // ScanOutputForAttention runs the PTY attention sentinel over one output
@@ -1910,21 +1934,20 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 	}
 	sessionID := uuid.New().String()
 	meta := sessionmeta.FromProjectConfig(project.Backend, project.BackendConfig)
-	requestedModel, effectiveModel, modelErr := initialSessionModels(backend.Type(), meta.Model, meta.Harness)
-	if modelErr != nil {
-		return nil, modelErr
+	requestModel, requestEffort := takeRuntimeRequest(envVars)
+	settings, settingsErr := m.resolveRuntimeSettings(ctx, project.Backend, project.BackendConfig, requestModel, requestEffort)
+	if settingsErr != nil {
+		return nil, settingsErr
 	}
 	session := &database.Session{
-		ID:             sessionID,
-		ProjectID:      project.ID,
-		Status:         "starting",
-		StartTime:      time.Now(),
-		Backend:        project.Backend,
-		Model:          effectiveModel,
-		RequestedModel: requestedModel,
-		Effort:         meta.Effort,
-		Harness:        meta.Harness,
+		ID:        sessionID,
+		ProjectID: project.ID,
+		Status:    "starting",
+		StartTime: time.Now(),
+		Backend:   project.Backend,
+		Harness:   meta.Harness,
 	}
+	applyResolvedSettings(session, backend.Type(), settings)
 
 	if err := m.db.CreateSession(ctx, session); err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
@@ -1936,10 +1959,11 @@ func (m *Manager) StartRemoteSession(ctx context.Context, project *database.Proj
 
 	// Build backend-agnostic session config
 	cfg := &SessionConfig{
-		SessionID:     sessionID,
-		ServerAddr:    m.serverAddr,
-		ExecPath:      m.execPath,
-		BackendConfig: project.BackendConfig,
+		SessionID:           sessionID,
+		ServerAddr:          m.serverAddr,
+		ExecPath:            m.execPath,
+		BackendConfig:       sessionmeta.ApplyRuntimeValues(project.BackendConfig, settings.Model, settings.Effort),
+		OnEffectiveSettings: m.effectiveSettingsRecorder(sessionID),
 	}
 
 	// Extract special env vars set by API handler

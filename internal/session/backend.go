@@ -30,7 +30,11 @@ type SessionConfig struct {
 	// Env var passthrough from API handler
 	AppendSystemPrompt         string // task context prompt
 	DangerouslySkipPermissions bool   // whether to skip permission prompts
-	BackendConfig              string // JSON blob with backend-specific settings
+	BackendConfig              string // JSON blob with backend-specific settings; carries the resolved model and effort
+
+	// OnEffectiveSettings receives the model and/or effort the runtime itself
+	// reports (Codex app-server thread responses). Optional.
+	OnEffectiveSettings func(model, effort string)
 }
 
 // BackendStrategy defines how a specific CLI backend builds its args and env vars.

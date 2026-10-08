@@ -60,6 +60,13 @@ type ConfigurationService struct {
 	effects       ApplicationEffects
 	reinitializer AIReinitializer
 	synchronizer  ConfigSynchronizer
+	runtime       *RuntimeSettingsValidator
+}
+
+// SetRuntimeSettingsValidator makes settings updates check the global
+// default model/effort keys against the harness CLI's catalog.
+func (s *ConfigurationService) SetRuntimeSettingsValidator(v *RuntimeSettingsValidator) {
+	s.runtime = v
 }
 
 func NewConfigurationService(store ConfigurationStore, codec SecretCodec, effects ApplicationEffects, reinitializer AIReinitializer, synchronizer ConfigSynchronizer) *ConfigurationService {
@@ -88,6 +95,11 @@ func (s *ConfigurationService) Settings(ctx context.Context) (map[string]string,
 func (s *ConfigurationService) UpdateSettings(ctx context.Context, boundary R4Boundary, input map[string]string) error {
 	if err := requireR4(boundary); err != nil {
 		return err
+	}
+	if s.runtime != nil {
+		if err := s.runtime.ValidateDefaultSettings(ctx, input); err != nil {
+			return err
+		}
 	}
 	values := make(map[string]string, len(input)*3)
 	reinitialize := false
