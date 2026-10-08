@@ -65,3 +65,54 @@ func TestServiceCachesAndReportsErrors(t *testing.T) {
 		t.Fatalf("failure catalog = %+v", c)
 	}
 }
+
+func TestClaudeModelsCarryEffortLevels(t *testing.T) {
+	got := claudeModels([]claudeModel{
+		{Value: "opus", ResolvedModel: "claude-opus-5-5", DisplayName: "Opus 5.5", SupportsEffort: true, SupportedEffortLevels: []string{"low", "High", "max"}},
+		{Value: "claude-haiku-4-5-20251001", ResolvedModel: "claude-haiku-4-5-20251001", DisplayName: "Haiku 4.5"},
+	})
+	if len(got) != 3 {
+		t.Fatalf("got %+v", got)
+	}
+	for _, m := range got[:2] { // the alias and the pinned id it resolves to
+		if len(m.Efforts) != 3 || m.Efforts[1] != "high" {
+			t.Fatalf("%s efforts = %v", m.ID, m.Efforts)
+		}
+	}
+	if got[2].Efforts != nil {
+		t.Fatalf("a model without effort support must list none, got %v", got[2].Efforts)
+	}
+}
+
+func TestParseCodexModelList(t *testing.T) {
+	line := []byte(`{"id":2,"result":{"data":[` +
+		`{"id":"gpt-6.1-sol","model":"gpt-6.1-sol","displayName":"GPT-6.1-Sol","isDefault":true,"defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"ultra"}]},` +
+		`{"id":"secret","model":"secret","hidden":true}]}}`)
+	models, done, err := parseCodexModelList(line)
+	if err != nil || !done || len(models) != 1 {
+		t.Fatalf("models=%+v done=%v err=%v", models, done, err)
+	}
+	m := models[0]
+	if m.ID != "gpt-6.1-sol" || !m.IsDefault || m.DefaultEffort != "low" || len(m.Efforts) != 2 || m.Efforts[1] != "ultra" {
+		t.Fatalf("model = %+v", m)
+	}
+	if _, done, _ := parseCodexModelList([]byte(`{"id":1,"result":{}}`)); done {
+		t.Fatal("a reply to another request must not end the scan")
+	}
+}
+
+func TestCatalogFindAndKnownEfforts(t *testing.T) {
+	c := Catalog{Models: []Model{{ID: "opus", ResolvedID: "claude-opus-5-5", Efforts: []string{"low", "high"}}, {ID: "x", Efforts: []string{"high", "max"}}}}
+	if m, ok := c.Find("claude-opus-5-5"); !ok || m.ID != "opus" {
+		t.Fatalf("resolved-id lookup = %+v %v", m, ok)
+	}
+	if _, ok := c.Find("nope"); ok {
+		t.Fatal("unknown id found")
+	}
+	if got := KnownEfforts("claude_code", c); len(got) != 3 {
+		t.Fatalf("union = %v", got)
+	}
+	if got := KnownEfforts("codex", Catalog{}); len(got) == 0 || got[len(got)-1] != "ultra" {
+		t.Fatalf("fallback = %v", got)
+	}
+}
