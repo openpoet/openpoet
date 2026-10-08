@@ -2,9 +2,11 @@ package automation
 
 import (
 	"context"
+	"strings"
 
 	"openpoet/internal/application"
 	"openpoet/internal/database"
+	"openpoet/internal/sessionmeta"
 )
 
 type ProjectAutomationView struct {
@@ -23,10 +25,18 @@ type ProjectAutomationView struct {
 	TaskAutoApproveVerification string `json:"task_auto_approve_verification"`
 	Backend                     string `json:"backend"`
 	HasBackendConfig            bool   `json:"has_backend_config"`
+	// BackendConfig is the backend settings object (secret-looking values
+	// masked); Model and Effort are the project's own (empty: the global
+	// default applies).
+	BackendConfig map[string]any `json:"backend_config"`
+	Model         string         `json:"model,omitempty"`
+	Effort        string         `json:"effort,omitempty"`
+	// SessionDefaults is what a new session starts with (projects.get only).
+	SessionDefaults *ProjectSessionDefaultsView `json:"session_defaults,omitempty"`
 }
 
 func projectAutomationView(project database.Project) ProjectAutomationView {
-	return ProjectAutomationView{
+	view := ProjectAutomationView{
 		ID: project.ID, Name: project.Name, Path: project.Path, Type: project.Type,
 		SSHHost: project.SSHHost.String, SSHPort: project.SSHPort.Int64,
 		SSHUser: project.SSHUser.String, SSHAuthType: project.SSHAuthType.String,
@@ -35,7 +45,18 @@ func projectAutomationView(project database.Project) ProjectAutomationView {
 		DangerouslySkipPermissions:  project.DangerouslySkipPermissions,
 		TaskAutoApproveVerification: project.TaskAutoApproveVerification,
 		Backend:                     project.Backend, HasBackendConfig: project.BackendConfig != "" && project.BackendConfig != "{}",
+		BackendConfig: maskedBackendConfig(project.BackendConfig),
 	}
+	meta := sessionmeta.FromProjectConfig(project.Backend, project.BackendConfig)
+	view.Model, view.Effort = meta.Model, meta.Effort
+	return view
+}
+
+// detailedProjectView adds what a new session of the project starts with.
+func (e *projectPlatformExecutor) detailedProjectView(ctx context.Context, project database.Project) ProjectAutomationView {
+	view := projectAutomationView(project)
+	view.SessionDefaults = projectSessionDefaults(ctx, e.service.RuntimeSettings(), project)
+	return view
 }
 
 func projectAutomationViews(projects []database.Project) []ProjectAutomationView {
@@ -49,9 +70,12 @@ func projectAutomationViews(projects []database.Project) []ProjectAutomationView
 func projectPlatformDefinitions() []PlatformCapabilityDefinition {
 	return []PlatformCapabilityDefinition{
 		readConfigurationCapability("projects.list", "projects", "projects:read"),
-		readConfigurationCapability("projects.get", "projects", "projects:read"),
+		withPayloadSchema(readConfigurationCapability("projects.get", "projects", "projects:read"), projectTargetDescription, nil, "", projectsGetNotes),
+		withPayloadSchema(readConfigurationCapability("models.list", "projects", "projects:read"), `{} with payload backend, or `+projectTargetDescription,
+			modelsListPayload{}, `{"backend":"codex"}`, modelsListNotes),
 		unsafeConfigurationCapability("projects.create", "projects", "projects:write", "credentials:write"),
-		unsafeConfigurationCapability("projects.update", "projects", "projects:write", "credentials:write"),
+		withPayloadSchema(unsafeConfigurationCapability("projects.update", "projects", "projects:write", "credentials:write"), projectTargetDescription,
+			projectUpdatePayload{}, `{"model":"gpt-6.1-sol","effort":"high"}`, projectsUpdateNotes),
 		destructiveConfigurationCapability("projects.delete", "projects", "projects:write"),
 		unsafeConfigurationCapability("projects.duplicate", "projects", "projects:write", "credentials:write"),
 	}
@@ -94,7 +118,37 @@ func (e *projectPlatformExecutor) Validate(_ context.Context, input PlatformExec
 				if err != nil {
 					return nil, err
 				}
-				return projectAutomationView(*project), nil
+				return e.detailedProjectView(ctx, *project), nil
+			},
+		}, nil
+	case "models.list":
+		var payload modelsListPayload
+		if err := decodeConfigurationPayload(input.Payload, &payload); err != nil {
+			return nil, err
+		}
+		payload.Backend = strings.TrimSpace(payload.Backend)
+		projectID, _ := configurationProjectID(target, 0)
+		if projectID == 0 && len(target.ID) > 0 {
+			projectID, _ = configurationTargetID(target, 0, "project id")
+		}
+		if payload.Backend == "" && projectID == 0 {
+			return nil, missingPayloadField("backend", "claude_code, codex or opencode, or a project target")
+		}
+		return &configurationValidatedCommand{
+			preview: configurationPreview(input.Handler, map[string]any{"backend": payload.Backend, "project_id": projectID, "refresh": payload.Refresh}),
+			execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
+				backend, harness := payload.Backend, ""
+				if projectID > 0 {
+					project, err := e.service.Get(ctx, projectID)
+					if err != nil {
+						return nil, err
+					}
+					if backend == "" || backend == project.Backend {
+						backend = project.Backend
+						harness = sessionmeta.FromProjectConfig(project.Backend, project.BackendConfig).Harness
+					}
+				}
+				return e.service.RuntimeSettings().ListModels(ctx, backend, harness, payload.Refresh)
 			},
 		}, nil
 	case "projects.create":
@@ -117,18 +171,39 @@ func (e *projectPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		if err != nil {
 			return nil, err
 		}
-		var payload database.ProjectInput
+		var payload projectUpdatePayload
 		if err := decodeConfigurationPayload(input.Payload, &payload); err != nil {
 			return nil, err
 		}
+		preview := map[string]any{"project_id": id, "has_credential": payload.SSHCredential != nil && *payload.SSHCredential != ""}
+		if payload.Backend != nil {
+			preview["backend"] = *payload.Backend
+		}
+		if payload.Model != nil {
+			preview["model"] = *payload.Model
+		}
+		if payload.Effort != nil {
+			preview["effort"] = *payload.Effort
+		}
+		if len(payload.BackendConfig) > 0 {
+			preview["backend_config"] = true
+		}
 		return &configurationValidatedCommand{
-			preview: configurationPreview(input.Handler, map[string]any{"project_id": id, "has_credential": payload.SSHCredential != ""}),
+			preview: configurationPreview(input.Handler, preview),
 			execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
-				project, err := e.service.Update(ctx, id, payload)
+				current, err := e.service.Get(ctx, id)
 				if err != nil {
 					return nil, err
 				}
-				return projectAutomationView(*project), nil
+				merged, err := mergeProjectUpdate(current, payload)
+				if err != nil {
+					return nil, err
+				}
+				project, err := e.service.Update(ctx, id, merged)
+				if err != nil {
+					return nil, err
+				}
+				return e.detailedProjectView(ctx, *project), nil
 			},
 		}, nil
 	case "projects.delete":

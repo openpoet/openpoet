@@ -888,7 +888,7 @@ func AllToolDefs() []ToolDef {
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
 					"session_id": {Type: "string", Description: "Active OpenPoet session ID"},
-					"model":      {Type: "string", Description: "Harness-compatible model ID or alias; Claude Code examples: fable, claude-opus-4-5, or default"},
+					"model":      {Type: "string", Description: "Explicit harness-compatible model ID or alias (default/reset are refused); Claude Code examples: fable, opus, claude-opus-5-5"},
 				},
 				Required: []string{"session_id", "model"},
 			},
@@ -896,7 +896,7 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:        "set_session_effort",
-			Description: "Change the reasoning/thinking effort used by future turns of an active OpenPoet session. Accepted levels are default, minimal, low, medium, high, xhigh, and max; backend/model support is validated before applying when the live catalog is available.",
+			Description: "Change the reasoning/thinking effort used by future turns of an active OpenPoet session. Accepted levels are minimal, low, medium, high, xhigh, max and ultra (default/reset are refused: sessions never fall back to the account default); backend/model support is validated before applying when the live catalog is available.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
@@ -904,7 +904,7 @@ func AllToolDefs() []ToolDef {
 					"effort": {
 						Type:        "string",
 						Description: "Reasoning/thinking level for future turns",
-						Enum:        []string{"default", "minimal", "low", "medium", "high", "xhigh", "max"},
+						Enum:        []string{"minimal", "low", "medium", "high", "xhigh", "max", "ultra"},
 					},
 				},
 				Required: []string{"session_id", "effort"},

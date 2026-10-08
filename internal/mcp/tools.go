@@ -805,16 +805,14 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 			RequestedModel string `json:"requested_model"`
 			Effort         string `json:"effort"`
 			Harness        string `json:"harness"`
+			sessionSettingColumns
 		}
 		if err := json.Unmarshal(body, &sess); err != nil {
 			return string(body), nil
 		}
-		meta := sessionmeta.WithSessionValues(fetchSessionMetadata(client, sess.ProjectID, sess.Backend), sess.Model, sess.Effort, sess.Harness)
-		requestedModel := sess.RequestedModel
-		if requestedModel == "" {
-			requestedModel = meta.Model
-		}
-		result := fmt.Sprintf("Session: %s\nName: %s\nProject ID: %d\nStatus: %s\nEffective model: %s\nRequested model: %s\nEffort: %s\nHarness: %s", sess.ID, sess.Name, sess.ProjectID, sess.Status, meta.Model, requestedModel, meta.Effort, meta.Harness)
+		meta := sessionmeta.WithSessionValues(fetchSessionMetadata(client, sess.ProjectID, sess.Backend), "", "", sess.Harness)
+		values := sess.values(sess.Backend, sess.Model, sess.RequestedModel, sess.Effort).WithProjectFallback(fetchSessionMetadata(client, sess.ProjectID, sess.Backend))
+		result := fmt.Sprintf("Session: %s\nName: %s\nProject ID: %d\nStatus: %s\nModel: %s\nEffort: %s\nHarness: %s", sess.ID, sess.Name, sess.ProjectID, sess.Status, values.ModelLine(), values.EffortLine(), meta.Harness)
 		// Try to get linked task
 		taskBody, taskErr := client.Get(fmt.Sprintf("/api/sessions/%s/task", sessionID))
 		if taskErr == nil {
@@ -1402,7 +1400,8 @@ func formatSessionsList(client *APIClient, body []byte, params map[string]interf
 		RequestedModel string `json:"requested_model"`
 		Effort         string `json:"effort"`
 		Harness        string `json:"harness"`
-		TaskID         *struct {
+		sessionSettingColumns
+		TaskID *struct {
 			Int64 int64 `json:"Int64"`
 			Valid bool  `json:"Valid"`
 		} `json:"task_id"`
@@ -1439,13 +1438,11 @@ func formatSessionsList(client *APIClient, body []byte, params map[string]interf
 		if s.TaskID != nil && s.TaskID.Valid {
 			task = fmt.Sprintf("%d", s.TaskID.Int64)
 		}
-		meta := sessionmeta.WithSessionValues(fetchSessionMetadata(client, s.ProjectID, s.Backend), s.Model, s.Effort, s.Harness)
-		requestedModel := s.RequestedModel
-		if requestedModel == "" {
-			requestedModel = meta.Model
-		}
-		result += fmt.Sprintf("- %s | %s | project: %d | status: %s | task: %s | model: %s | requested_model: %s | effort: %s | harness: %s\n",
-			s.ID, name, s.ProjectID, s.Status, task, meta.Model, requestedModel, meta.Effort, meta.Harness)
+		projectMeta := fetchSessionMetadata(client, s.ProjectID, s.Backend)
+		meta := sessionmeta.WithSessionValues(projectMeta, "", "", s.Harness)
+		values := s.values(s.Backend, s.Model, s.RequestedModel, s.Effort).WithProjectFallback(projectMeta)
+		result += fmt.Sprintf("- %s | %s | project: %d | status: %s | task: %s | model: %s | effort: %s | harness: %s\n",
+			s.ID, name, s.ProjectID, s.Status, task, values.ModelLine(), values.EffortLine(), meta.Harness)
 	}
 	if result == "" {
 		return "No sessions matching filter.", nil
@@ -1468,7 +1465,8 @@ func formatSessionDetail(client *APIClient, body []byte) (string, error) {
 		RequestedModel string `json:"requested_model"`
 		Effort         string `json:"effort"`
 		Harness        string `json:"harness"`
-		Turn           *struct {
+		sessionSettingColumns
+		Turn *struct {
 			Open   bool      `json:"open"`
 			Since  time.Time `json:"since"`
 			Reason string    `json:"reason"`
@@ -1484,12 +1482,10 @@ func formatSessionDetail(client *APIClient, body []byte) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Session: %s\n", sess.ID))
 	sb.WriteString(fmt.Sprintf("Name: %s\nProject ID: %d\nStatus: %s\nBackend: %s\n", sess.Name, sess.ProjectID, sess.Status, sess.Backend))
-	meta := sessionmeta.WithSessionValues(fetchSessionMetadata(client, sess.ProjectID, sess.Backend), sess.Model, sess.Effort, sess.Harness)
-	requestedModel := sess.RequestedModel
-	if requestedModel == "" {
-		requestedModel = meta.Model
-	}
-	sb.WriteString(fmt.Sprintf("Effective model: %s\nRequested model: %s\nEffort: %s\nHarness: %s\n", meta.Model, requestedModel, meta.Effort, meta.Harness))
+	projectMeta := fetchSessionMetadata(client, sess.ProjectID, sess.Backend)
+	meta := sessionmeta.WithSessionValues(projectMeta, "", "", sess.Harness)
+	values := sess.values(sess.Backend, sess.Model, sess.RequestedModel, sess.Effort).WithProjectFallback(projectMeta)
+	sb.WriteString(fmt.Sprintf("Model: %s\nEffort: %s\nHarness: %s\n", values.ModelLine(), values.EffortLine(), meta.Harness))
 	if sess.Turn != nil {
 		state := "idle (between turns)"
 		if sess.Turn.Open {
@@ -2276,4 +2272,19 @@ func readmeFiles(params map[string]interface{}) map[string]string {
 		return nil
 	}
 	return map[string]string{"README.md": readme}
+}
+
+// sessionSettingColumns are the session row's explicit-settings columns
+// (V80) the text tools describe.
+type sessionSettingColumns struct {
+	EffectiveEffort string `json:"effective_effort"`
+	ModelSource     string `json:"model_source"`
+	EffortSource    string `json:"effort_source"`
+}
+
+func (c sessionSettingColumns) values(backend, model, requestedModel, effort string) sessionmeta.SessionValues {
+	return sessionmeta.SessionValues{
+		Backend: backend, Model: model, RequestedModel: requestedModel, Effort: effort,
+		EffectiveEffort: c.EffectiveEffort, ModelSource: c.ModelSource, EffortSource: c.EffortSource,
+	}
 }

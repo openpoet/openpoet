@@ -3039,8 +3039,9 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 				task = fmt.Sprintf("%d", s.TaskID.Int64)
 			}
 			meta := h.sessionMetadataForTool(ctx, &s)
+			values := sessionSettingValues(&s).WithProjectFallback(meta)
 			sb.WriteString(fmt.Sprintf("- %s | %s | project: %d | status: %s | task: %s | model: %s | effort: %s | harness: %s\n",
-				s.ID, s.Name, s.ProjectID, s.Status, task, meta.Model, meta.Effort, meta.Harness))
+				s.ID, s.Name, s.ProjectID, s.Status, task, values.ModelLine(), values.EffortLine(), meta.Harness))
 		}
 		if sb.Len() == 0 {
 			return "No sessions matching filter.", nil
@@ -4934,7 +4935,8 @@ func (h *AIHandler) formatSessionForTool(ctx context.Context, sess *database.Ses
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Session: %s\nName: %s\nProject ID: %d\nStatus: %s\nBackend: %s\n", sess.ID, sess.Name, sess.ProjectID, sess.Status, sess.Backend))
 	meta := h.sessionMetadataForTool(ctx, sess)
-	sb.WriteString(fmt.Sprintf("Model: %s\nEffort: %s\nHarness: %s\n", meta.Model, meta.Effort, meta.Harness))
+	values := sessionSettingValues(sess).WithProjectFallback(meta)
+	sb.WriteString(fmt.Sprintf("Model: %s\nEffort: %s\nHarness: %s\n", values.ModelLine(), values.EffortLine(), meta.Harness))
 	if mode := h.api.sessionPermissionMode(sess.ID); mode != nil {
 		sb.WriteString(fmt.Sprintf("Permission mode: %s (from %s)\n", mode.Mode, mode.Source))
 	}
@@ -4947,6 +4949,13 @@ func (h *AIHandler) formatSessionForTool(ctx context.Context, sess *database.Ses
 		sb.WriteString("Linked Task: none\n")
 	}
 	return sb.String()
+}
+
+func sessionSettingValues(sess *database.Session) sessionmeta.SessionValues {
+	return sessionmeta.SessionValues{
+		Backend: sess.Backend, Model: sess.Model, RequestedModel: sess.RequestedModel, Effort: sess.Effort,
+		EffectiveEffort: sess.EffectiveEffort, ModelSource: sess.ModelSource, EffortSource: sess.EffortSource,
+	}
 }
 
 func (h *AIHandler) sessionMetadataForTool(ctx context.Context, sess *database.Session) sessionmeta.Metadata {

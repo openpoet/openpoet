@@ -70,7 +70,7 @@ func TestFormatSessionsListDistinguishesRequestedAndEffectiveModels(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"model: claude-fable-5", "requested_model: fable", "harness: claude_code"} {
+	for _, want := range []string{"model: claude-fable-5 (reported by the runtime; configured fable)", "effort: xhigh", "harness: claude_code"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("formatted sessions missing %q:\n%s", want, got)
 		}
@@ -95,9 +95,8 @@ func TestFormatSessionDetailIncludesHarnessDetails(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"Effective model: gpt-5.1",
-		"Requested model: gpt-5.1",
-		"Effort: medium",
+		"Model: gpt-5.1 (configured gpt-5.1 from project; not yet reported by the runtime)",
+		"Effort: medium (configured medium from project",
 		"Harness: codex/tui",
 		"Harness details: runtime: tui | approval: never | sandbox: danger-full-access",
 		"Linked Task: none",
@@ -183,5 +182,29 @@ func TestSetSessionPermissionModeToolPostsModeReferenceAndReason(t *testing.T) {
 	}
 	if !strings.Contains(got, "changed from auto to acceptEdits") {
 		t.Fatalf("result = %q", got)
+	}
+}
+
+func TestFormatSessionDetailShowsExplicitSettingsAndRuntimeReport(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"backend":"codex","backend_config":"{\"runtime\":\"app-server\"}"}`)
+	}))
+	t.Cleanup(server.Close)
+	body := []byte(`{"id":"session-12345678","project_id":7,"status":"running","name":"Work","backend":"codex","model":"gpt-6.1-sol",` +
+		`"requested_model":"gpt-6-astra","effort":"high","effective_effort":"high","model_source":"global","effort_source":"request","task_id":null}`)
+	got, err := formatSessionDetail(NewAPIClient(server.URL), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Model: gpt-6.1-sol (reported by the runtime; configured gpt-6-astra from global)",
+		"Effort: high (configured high from request; reported by the runtime)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatted session detail missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "default") {
+		t.Fatalf("session detail must never say default:\n%s", got)
 	}
 }
