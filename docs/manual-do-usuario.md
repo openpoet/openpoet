@@ -93,6 +93,63 @@ com o próprio `authorization_ref`. É
 esse alicerce — **identidade verificada + sinal durável** — que torna seguro
 tudo o que vem a seguir.
 
+**Modelo e effort sempre explícitos.** Toda sessão roda com um modelo e um
+effort (nível de raciocínio) explícitos, nunca com o padrão da conta do CLI, que
+muda sem aviso (por exemplo, numa troca de login). Cada valor vem, nesta ordem,
+do pedido (`model`/`effort` em `sessions.create` e `sessions.reopen`), do
+`backend_config` do projeto (`model`, `reasoning_effort`) ou do padrão global do
+backend (Settings → *Session Model & Effort*, chaves `default_model_<backend>` e
+`default_effort_<backend>`). Sem nenhum dos três a sessão é recusada com
+`session_settings_unresolved`, e a mensagem diz qual chave configurar. Valem
+para `claude_code` e `codex` (modelo e effort) e `opencode` (só modelo);
+Copilot e ACP não aceitam seleção.
+
+- **Passados ao CLI.** Claude Code recebe `--model` e `--effort`; Codex recebe
+  `--model` e `model_reasoning_effort` (TUI) ou os mesmos valores no
+  `thread/start` (app-server).
+- **Validados contra o próprio CLI.** Projeto, padrão global e pedido são
+  conferidos com a lista que o CLI informa, a mesma do seletor da UI: modelo
+  fora da lista, effort que o modelo não oferece, `default` ou `reset` falham
+  com `runtime_setting_invalid`, que lista os valores aceitos. Projetos
+  remotos aceitam um modelo que o CLI local não lista, porque o CLI remoto pode
+  oferecê-lo.
+- **Efetivo × configurado.** `sessions.get`/`sessions.active` trazem em
+  `model`/`effort` o que o runtime informou (o Codex responde no `thread/start`;
+  o Claude Code informa o modelo no hook `SessionStart` e mostra o effort na
+  própria tela), ou o valor configurado enquanto o runtime não informou.
+  `runtime_settings` detalha `configured_model`, `configured_effort`,
+  `model_source`/`effort_source` (`request`, `session`, `project`, `global`),
+  `effective_model`, `effective_effort`, `model_verified`, `effort_verified` e
+  `warnings` quando o runtime roda outra coisa. Uma sessão anterior a esta
+  regra mostra `unknown` com aviso, nunca `default`. Na UI o cartão da sessão
+  mostra `modelo · effort`, com a origem no tooltip.
+- **Configurar por MCP.** `models.list` (`{"backend":"codex"}` ou alvo de
+  projeto) lista os modelos, os efforts de cada um e os padrões globais.
+  `projects.get` devolve `backend_config` (valores com cara de segredo
+  mascarados), `model`, `effort` e `session_defaults` (o que uma sessão nova
+  recebe e de onde). `projects.update` é parcial e aceita `model` e `effort`
+  direto; `""` remove o valor do projeto para valer o padrão global. Os
+  padrões globais mudam com `settings.update`.
+- **Reabrir mantém o que rodava.** `sessions.reopen` retoma com o modelo e o
+  effort da sessão, salvo se o pedido trouxer outros. `sessions.set_model` e
+  `sessions.set_effort` recusam `default`/`reset`.
+
+```bash
+# modelos e efforts aceitos pelo Codex, com os padrões globais
+curl -s -X POST "$AV1/commands" -H "Authorization: Bearer $OPAV1_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"command_id": "m-'"$(uuidgen)"'", "idempotency_key": "m-'"$(uuidgen)"'",
+       "capability": "models.list", "target": {}, "payload": {"backend": "codex"}}'
+
+# fixar modelo e effort de um projeto
+#   capability projects.update, target {"type":"project","id":7},
+#   payload {"model":"gpt-6.1-sol","effort":"high"}
+
+# uma sessão com modelo e effort só para ela
+#   capability sessions.create, target {"type":"project","id":7},
+#   payload {"model":"gpt-6-astra","effort":"xhigh"}
+```
+
 **Radar de conflitos, em observação.** A primeira geração do radar já está sendo
 assentada: um coordenador em processo observa o firehose de hooks e começa a
 manter um índice de claims — duas sessões vivas escrevendo o mesmo arquivo geram
