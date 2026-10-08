@@ -18,8 +18,11 @@ Select `OpenAI Codex` as the project backend to show Codex-specific settings:
 
 - `Codex Binary`: optional path to the `codex` executable.
 - `CODEX_HOME`: optional Codex home directory override.
-- `Model`: optional model override. Empty uses the Codex CLI default.
-- `Reasoning Effort`: optional reasoning effort override.
+- `Model`: the project's model, picked from the list `codex app-server` reports
+  (`model/list`). Empty uses the global default (Settings → Session Model &
+  Effort), never the Codex account default.
+- `Reasoning Effort`: the project's effort; the list follows the chosen model
+  (`supportedReasoningEfforts`). Empty uses the global default.
 - `Service Tier`: optional service tier, such as `flex` or `fast`.
 - `Approval Policy`: Codex approval policy. The OpenPoet default is `on-request`.
 - `Sandbox Mode`: Codex sandbox mode. The OpenPoet default is `workspace-write`.
@@ -27,6 +30,14 @@ Select `OpenAI Codex` as the project backend to show Codex-specific settings:
   runs the interactive Codex CLI in a PTY and keeps Codex prompts in the terminal.
 
 OpenPoet stores these values in the project `backend_config` JSON blob.
+
+Every session passes model and effort explicitly: `--model` and
+`-c model_reasoning_effort=...` for the TUI, and `model` plus
+`config.model_reasoning_effort` on `thread/start`/`thread/resume` for the
+app-server runtime (`thread/start` ignores an `effort` param). The model and
+effort Codex reports back for the thread are recorded as the session's effective
+values; native TUI sessions on this host read them from the rollout's last
+`turn_context`. See the user manual, "Modelo e effort sempre explícitos".
 Use `backend_config.runtime = "tui"` only when native Codex TUI menus and
 pickers are more important than OpenPoet modal handling.
 
