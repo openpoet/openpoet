@@ -98,6 +98,50 @@ func TestCodexSessionMessagesReadPersistedTranscript(t *testing.T) {
 	}
 }
 
+// TestCodexSessionMessagesKeepRestartedNumberingApart: rows a runner wrote
+// after restarting its numbering at 1 (it started without the saved history)
+// come after the older messages instead of merging into them.
+func TestCodexSessionMessagesKeepRestartedNumberingApart(t *testing.T) {
+	db, sess := newCodexTranscriptTest(t, "codex/app-server")
+	ctx := context.Background()
+	at := time.Date(2026, 10, 7, 9, 0, 0, 0, time.UTC)
+	rows := []database.CodexTranscriptEvent{
+		{EventID: 1, Kind: "user", Text: "old question"},
+		{EventID: 2, Kind: "assistant", Text: "old answer"},
+		{EventID: 1, Kind: "warning", Text: "MCP server failed to start"},
+		{EventID: 2, Kind: "user", Text: "new question"},
+		{EventID: 3, Kind: "assistant", Text: "new "},
+		{EventID: 3, Kind: "assistant", Text: "answer", Append: true},
+	}
+	for i := range rows {
+		rows[i].SessionID = sess.ID
+		rows[i].CreatedAt = at.Add(time.Duration(i) * time.Minute)
+		if err := db.InsertCodexTranscriptEvent(ctx, &rows[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := NewStructuredViewHandler(db, nil, nil)
+	service := application.NewSessionMessageService(db, platformSessionEventReader{handler: h})
+	result, err := service.Read(ctx, application.SessionMessagesQuery{SessionID: sess.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []struct{ role, text string }{
+		{"user", "old question"}, {"assistant", "old answer"}, {"user", "new question"}, {"assistant", "new answer"},
+	}
+	if len(result.Messages) != len(want) {
+		t.Fatalf("messages = %+v, want %d", result.Messages, len(want))
+	}
+	for i, message := range result.Messages {
+		if message.Role != want[i].role || message.Text != want[i].text {
+			t.Fatalf("message %d = %s %q, want %s %q", i, message.Role, message.Text, want[i].role, want[i].text)
+		}
+		if i > 0 && message.At.Before(result.Messages[i-1].At) {
+			t.Fatalf("message %d at %v is before message %d", i, message.At, i-1)
+		}
+	}
+}
+
 func TestCodexTUISessionHasNoStructuredTranscript(t *testing.T) {
 	db, sess := newCodexTranscriptTest(t, "codex/tui")
 	h := NewStructuredViewHandler(db, nil, nil)

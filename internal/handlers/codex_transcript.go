@@ -9,6 +9,7 @@ import (
 
 	"openpoet/internal/database"
 	"openpoet/internal/jsonlview"
+	"openpoet/internal/session"
 )
 
 // codexTranscriptReadLimit bounds the rows read for one codex transcript. Each
@@ -41,9 +42,18 @@ func codexTranscriptSessionEvents(sessionID string, rows []database.CodexTranscr
 		text strings.Builder
 		row  database.CodexTranscriptEvent
 	}
+	ids := make([]int, len(rows))
+	appends := make([]bool, len(rows))
+	for i, row := range rows {
+		ids[i], appends[i] = row.EventID, row.Append
+	}
+	// A runner that started without the saved history numbered from 1 again;
+	// those events must not merge into the older ones with the same number.
+	ids = session.CodexTranscriptSequenceIDs(ids, appends)
 	order := make([]*merged, 0, len(rows))
 	byID := make(map[int]*merged, len(rows))
-	for _, row := range rows {
+	for i, row := range rows {
+		row.EventID = ids[i]
 		item, ok := byID[row.EventID]
 		if !ok {
 			item = &merged{kind: row.Kind, row: row}

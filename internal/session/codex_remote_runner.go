@@ -63,6 +63,10 @@ func (r *RemoteCodexRunner) Start(ctx context.Context) error {
 	r.inner.cancel = cancel
 	r.inner.mu.Unlock()
 
+	// Like the local runner: a reopened session gets its saved history back
+	// and keeps numbering after it.
+	r.inner.loadPersistedCodexTranscript(ctx)
+
 	remote := &RemoteRunner{
 		project:       r.project,
 		envVars:       r.inner.envVars,

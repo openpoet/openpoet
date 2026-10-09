@@ -2805,14 +2805,47 @@ func (r *CodexRunner) codexTranscriptSnapshot() map[string]interface{} {
 	return map[string]interface{}{"events": merged, "truncated": truncated}
 }
 
+// CodexTranscriptSequenceIDs gives each transcript event (in write order) an
+// id unique across numbering sequences. Within one sequence a new event always
+// takes a number above every earlier one and only streamed chunks (append)
+// reuse a number, so a new event whose number does not grow starts a new
+// sequence: a runner that started without the saved history numbered from 1
+// again. Its events are shifted past everything before them instead of
+// merging into the old events with the same number. A single sequence keeps
+// its numbers unchanged.
+func CodexTranscriptSequenceIDs(ids []int, appends []bool) []int {
+	out := make([]int, len(ids))
+	offset, sequenceMax, maxOut := 0, 0, 0
+	for i, id := range ids {
+		if !appends[i] && id <= sequenceMax {
+			offset, sequenceMax = maxOut, 0
+		}
+		if id > sequenceMax {
+			sequenceMax = id
+		}
+		out[i] = id + offset
+		if out[i] > maxOut {
+			maxOut = out[i]
+		}
+	}
+	return out
+}
+
 // mergeCodexTranscriptEvents collapses streamed delta chunks (same ID with
 // Append set) into one complete event per ID, mirroring the client-side merge
 // in structured-view.js. Sending merged events lets the client render each
 // card exactly once instead of re-rendering per chunk.
 func mergeCodexTranscriptEvents(events []codexTranscriptEvent) []codexTranscriptEvent {
+	ids := make([]int, len(events))
+	appends := make([]bool, len(events))
+	for i, event := range events {
+		ids[i], appends[i] = event.ID, event.Append
+	}
+	ids = CodexTranscriptSequenceIDs(ids, appends)
 	merged := make([]codexTranscriptEvent, 0, len(events))
 	index := make(map[int]int, len(events))
-	for _, event := range events {
+	for n, event := range events {
+		event.ID = ids[n]
 		i, ok := index[event.ID]
 		if !ok {
 			event.Append = false
@@ -3262,13 +3295,20 @@ func (r *CodexRunner) loadPersistedCodexTranscript(ctx context.Context) {
 		return
 	}
 
+	ids := make([]int, len(events))
+	appends := make([]bool, len(events))
+	for i, persisted := range events {
+		ids[i], appends[i] = persisted.EventID, persisted.Append
+	}
+	ids = CodexTranscriptSequenceIDs(ids, appends)
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.transcript = r.transcript[:0]
 	maxEventID := 0
-	for _, persisted := range events {
+	for i, persisted := range events {
 		event := codexTranscriptEvent{
-			ID:        persisted.EventID,
+			ID:        ids[i],
 			Kind:      persisted.Kind,
 			Text:      persisted.Text,
 			Title:     persisted.Title,
