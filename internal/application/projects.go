@@ -245,10 +245,26 @@ func (s *ProjectService) projectFromInput(ctx context.Context, input database.Pr
 	if err := s.validateRuntimeSettings(ctx, project, current); err != nil {
 		return nil, err
 	}
-	if err := s.validatePath(ctx, project.Path, project.Type); err != nil {
-		return nil, err
+	if projectLocationChanged(project, current) {
+		if err := s.validatePath(ctx, project.Path, project.Type); err != nil {
+			return nil, err
+		}
 	}
 	return project, nil
+}
+
+// projectLocationChanged reports whether an update moves the project (path,
+// type or SSH target). Only then is the path checked again: a project whose
+// directory is gone must still accept unrelated edits such as model/effort.
+func projectLocationChanged(project, current *database.Project) bool {
+	if current == nil {
+		return true
+	}
+	if project.Path != current.Path || project.Type != current.Type {
+		return true
+	}
+	return project.Type == "remote" &&
+		(project.SSHHost != current.SSHHost || project.SSHPort != current.SSHPort || project.SSHUser != current.SSHUser)
 }
 
 // validateRuntimeSettings checks the backend config's model and effort when
