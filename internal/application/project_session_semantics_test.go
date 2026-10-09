@@ -42,6 +42,51 @@ func TestProjectServiceAppliesSharedPathValidationToLocalAndRemoteInputs(t *test
 	}
 }
 
+func TestProjectServiceUpdateRevalidatesPathOnlyWhenTheLocationChanges(t *testing.T) {
+	paths := &semanticPathValidator{}
+	service := NewProjectService(nil, nil, nil, paths)
+	current := &database.Project{
+		ID: 9, Name: "Gone", Path: "/definitely/not/present", Type: "local", Backend: "codex",
+		BackendConfig: `{"runtime":"app-server"}`,
+	}
+	updated, err := service.projectFromInput(context.Background(), database.ProjectInput{
+		Name: current.Name, Path: current.Path, Type: current.Type, Backend: current.Backend,
+		BackendConfig: `{"runtime":"app-server","model":"gpt-6-astra","reasoning_effort":"high"}`,
+	}, current)
+	if err != nil {
+		t.Fatalf("model/effort update of a project whose directory is gone must succeed, got %v", err)
+	}
+	if updated.BackendConfig != `{"runtime":"app-server","model":"gpt-6-astra","reasoning_effort":"high"}` {
+		t.Fatalf("backend config = %q", updated.BackendConfig)
+	}
+	if len(paths.calls) != 0 {
+		t.Fatalf("unchanged path must not be validated again, calls = %v", paths.calls)
+	}
+
+	moved := &database.Project{ID: 9, Name: "Gone", Path: "/somewhere/else", Type: "local", Backend: "codex"}
+	if _, err := service.projectFromInput(context.Background(), database.ProjectInput{
+		Name: moved.Name, Path: "/definitely/not/present", Type: "local", Backend: "codex",
+	}, moved); !ErrorIsKind(err, ErrorValidation) {
+		t.Fatalf("moving a project to a missing directory must be rejected, got %v", err)
+	}
+
+	remote := &database.Project{
+		ID: 10, Name: "Remote", Path: "/srv/app", Type: "remote", Backend: "codex",
+		SSHHost: sql.NullString{String: "old.example.com", Valid: true},
+		SSHPort: sql.NullInt64{Int64: 22, Valid: true}, SSHUser: sql.NullString{String: "dev", Valid: true},
+	}
+	paths.calls = nil
+	if _, err := service.projectFromInput(context.Background(), database.ProjectInput{
+		Name: remote.Name, Path: remote.Path, Type: "remote", Backend: "codex",
+		SSHHost: "new.example.com", SSHPort: 22, SSHUser: "dev", SSHAuthType: "key",
+	}, remote); err != nil {
+		t.Fatal(err)
+	}
+	if len(paths.calls) != 1 {
+		t.Fatalf("a new SSH host must revalidate the path, calls = %v", paths.calls)
+	}
+}
+
 func TestProjectServiceClearsBackendConfigWhenBackendChanges(t *testing.T) {
 	service := NewProjectService(nil, nil, nil)
 	current := &database.Project{
