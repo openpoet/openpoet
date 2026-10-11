@@ -172,6 +172,18 @@ func parseSSEStream(r io.Reader, callback StreamCallback) (*Response, error) {
 					}
 				case "input_json_delta":
 					inputJSONBuf.WriteString(event.Delta.PartialJSON)
+				case "thinking_delta":
+					if curBlockIdx >= 0 && curBlockIdx < len(blocks) {
+						text := event.Delta.Thinking
+						if prev := blocks[curBlockIdx].Thinking; prev != nil {
+							text = *prev + text
+						}
+						blocks[curBlockIdx].Thinking = &text
+					}
+				case "signature_delta":
+					if curBlockIdx >= 0 && curBlockIdx < len(blocks) {
+						blocks[curBlockIdx].Signature += event.Delta.Signature
+					}
 				}
 			}
 

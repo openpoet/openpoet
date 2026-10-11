@@ -322,7 +322,7 @@ func RunCLI(args []string) {
 	var cfg RunConfig
 	fs.StringVar(&cfg.APIKey, "api-key", os.Getenv("ANTHROPIC_API_KEY"), "Anthropic API key")
 	fs.StringVar(&cfg.Model, "model", llm.DefaultModel, "Model to benchmark")
-	fs.StringVar(&cfg.JudgeModel, "judge-model", "claude-haiku-4-5-20251001", "Judge model for evaluation")
+	fs.StringVar(&cfg.JudgeModel, "judge-model", "claude-haiku-5-5", "Judge model for evaluation")
 	fs.StringVar(&cfg.Scenarios, "scenarios", "all", "Scenario filter: all, tasks, skills, code, tools, memory, conversation")
 	fs.IntVar(&cfg.Runs, "runs", 1, "Runs per scenario (best score kept)")
 	fs.StringVar(&cfg.Output, "output", "", "Save results to JSON file")
