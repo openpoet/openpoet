@@ -8747,11 +8747,12 @@ class OpenPoet {
                 <div class="form-group" id="ai-config-model-group">
                     <label class="form-label">Model</label>
                     <input type="text" class="form-input" name="model"
-                        placeholder="e.g. claude-sonnet-4-5-20250929" list="ai-model-suggestions">
+                        placeholder="e.g. claude-sonnet-5-5" list="ai-model-suggestions">
                     <datalist id="ai-model-suggestions">
-                        <option value="claude-sonnet-4-5-20250929">
-                        <option value="claude-haiku-4-5-20251001">
-                        <option value="claude-opus-4-6">
+                        <option value="claude-haiku-5-5">
+                        <option value="claude-sonnet-5-5">
+                        <option value="claude-opus-5-5">
+                        <option value="claude-fable-5-1">
                     </datalist>
                 </div>
                 <div class="form-group" id="ai-config-baseurl-group" style="display:none">
@@ -8805,7 +8806,7 @@ class OpenPoet {
         }
 		if (testButton) testButton.style.display = type === 'openai_oauth' ? 'none' : '';
 		if (modelInput) {
-			modelInput.placeholder = type === 'openai_oauth' ? 'e.g. gpt-5.6-sol[1m]' : 'e.g. claude-sonnet-4-5-20250929';
+			modelInput.placeholder = type === 'openai_oauth' ? 'e.g. gpt-5.6-sol[1m]' : 'e.g. claude-sonnet-5-5';
 		}
     }
 

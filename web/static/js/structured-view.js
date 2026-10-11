@@ -1378,9 +1378,9 @@ class StructuredViewManager {
 
     _shortModel(model) {
         if (!model) return '';
-        // claude-opus-4-7-something → opus 4.7
-        const m = model.match(/claude-(opus|sonnet|haiku)-(\d+)-(\d+)/i);
-        if (m) return `${m[1].toLowerCase()} ${m[2]}.${m[3]}`;
+        // claude-opus-4-7-something → opus 4.7; claude-sonnet-5 → sonnet 5
+        const m = model.match(/claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2}))?(?!\d)/i);
+        if (m) return `${m[1].toLowerCase()} ${m[2]}${m[3] ? `.${m[3]}` : ''}`;
         return model.replace(/^claude-/, '');
     }
 
