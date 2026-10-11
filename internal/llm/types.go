@@ -1,7 +1,7 @@
 package llm
 
 // DefaultModel is the fallback model used when no model is configured.
-const DefaultModel = "claude-sonnet-4-5-20250929"
+const DefaultModel = "claude-sonnet-5-5"
 
 // Message represents a conversation message.
 type Message struct {
@@ -11,7 +11,7 @@ type Message struct {
 
 // ContentBlock represents a block of content in a message.
 type ContentBlock struct {
-	Type  string `json:"type"`            // "text", "tool_use", "tool_result"
+	Type  string `json:"type"`            // "text", "tool_use", "tool_result", "thinking", "redacted_thinking"
 	Text  string `json:"text,omitempty"`  // for type="text"
 	ID    string `json:"id,omitempty"`    // for type="tool_use"
 	Name  string `json:"name,omitempty"`  // for type="tool_use"
@@ -20,6 +20,15 @@ type ContentBlock struct {
 	// For tool_result
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   string `json:"content,omitempty"` // for type="tool_result" (stringified)
+
+	// For thinking / redacted_thinking. Models with thinking on by default
+	// (e.g. Claude Haiku 5.5) return these blocks, and they must be sent back
+	// unmodified alongside tool results. Thinking is a pointer because the API
+	// returns it as "" when the reasoning text is omitted, and the empty field
+	// must survive the round-trip.
+	Thinking  *string `json:"thinking,omitempty"`
+	Signature string  `json:"signature,omitempty"`
+	Data      string  `json:"data,omitempty"` // for type="redacted_thinking"
 }
 
 // TextContent returns the concatenated text from all text blocks.
@@ -89,9 +98,11 @@ type StreamEvent struct {
 
 // StreamDelta contains incremental content.
 type StreamDelta struct {
-	Type        string `json:"type,omitempty"`         // "text_delta", "input_json_delta"
+	Type        string `json:"type,omitempty"`         // "text_delta", "input_json_delta", "thinking_delta", "signature_delta"
 	Text        string `json:"text,omitempty"`         // for text_delta
 	PartialJSON string `json:"partial_json,omitempty"` // for input_json_delta
+	Thinking    string `json:"thinking,omitempty"`     // for thinking_delta
+	Signature   string `json:"signature,omitempty"`    // for signature_delta
 	StopReason  string `json:"stop_reason,omitempty"`  // for message_delta
 }
 
@@ -132,7 +143,7 @@ type Request struct {
 // Response is the output of a non-streaming provider call.
 type Response struct {
 	Content    []ContentBlock
-	StopReason string // "end_turn", "tool_use", "max_tokens"
+	StopReason string // "end_turn", "tool_use", "max_tokens", "refusal"
 	Usage      Usage
 	Model      string  // model used (populated by provider)
 	SessionID  string  // SDK session ID for resume (populated by SDK providers)

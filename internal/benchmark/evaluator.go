@@ -311,7 +311,7 @@ func evaluateWithJudge(ctx context.Context, judge *llm.AnthropicProvider, judgeM
 		Messages: []llm.Message{
 			llm.NewTextMessage("user", sb.String()),
 		},
-		MaxTokens: 1024,
+		MaxTokens: 4096, // room for adaptive thinking before the scores
 		Model:     judgeModel,
 	}
 

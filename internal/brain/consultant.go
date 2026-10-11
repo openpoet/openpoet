@@ -139,7 +139,7 @@ func (c *Consultant) consult(ctx context.Context, inc coordinator.Incident) erro
 	req := &llm.Request{
 		System:    c.personaFn(ctx),
 		Messages:  []llm.Message{{Role: "user", Content: []llm.ContentBlock{{Type: "text", Text: brief}}}},
-		MaxTokens: 512,
+		MaxTokens: 2048,  // thinking (on by default on Claude Haiku 5.5) counts toward the cap
 		Model:     model, // pin the slot's model (e.g. haiku) so the consult is cheap
 	}
 	var text strings.Builder

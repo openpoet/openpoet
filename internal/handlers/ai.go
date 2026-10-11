@@ -4774,9 +4774,10 @@ Rules:
 - Use English`, project.Name, sess.Name, sessionContext)
 
 	req := &llm.Request{
-		System:    "You are a task management assistant. Respond ONLY with valid JSON, no markdown.",
-		Messages:  []llm.Message{llm.NewTextMessage("user", prompt)},
-		MaxTokens: 256,
+		System:   "You are a task management assistant. Respond ONLY with valid JSON, no markdown.",
+		Messages: []llm.Message{llm.NewTextMessage("user", prompt)},
+		// Room for adaptive thinking (on by default on Claude Haiku 5.5) plus the JSON answer.
+		MaxTokens: 2048,
 		Model:     model,
 	}
 
