@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -138,8 +139,7 @@ func (h *HTTPHandler) handleGetStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	if _, ok := w.(http.Flusher); !ok {
 		http.Error(w, `{"error":"streaming unsupported"}`, http.StatusInternalServerError)
 		return
 	}
@@ -147,25 +147,53 @@ func (h *HTTPHandler) handleGetStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, ": mcp stream open\n\n") // first frame so the client sees the stream is live
-	flusher.Flush()
 
-	ticker := time.NewTicker(15 * time.Second)
+	// The stream lives as long as the client keeps it open — codex app-server
+	// holds it for the whole session, and a Windows codex does not reopen a
+	// stream the server closes. So no overall deadline here, and the server's
+	// WriteTimeout (sized for long-poll hooks) is replaced by a per-write
+	// deadline: each heartbeat must reach the peer within
+	// mcpStreamWriteTimeout, which is what detects a dead connection.
+	rc := http.NewResponseController(w)
+	if err := rc.SetReadDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		log.Printf("[MCP-HTTP] stream: clear read deadline: %v", err)
+	}
+	write := func(frame string) error {
+		if err := rc.SetWriteDeadline(time.Now().Add(mcpStreamWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+		if _, err := io.WriteString(w, frame); err != nil {
+			return err
+		}
+		return rc.Flush()
+	}
+
+	w.WriteHeader(http.StatusOK)
+	if err := write(": mcp stream open\n\n"); err != nil { // first frame so the client sees the stream is live
+		return
+	}
+
+	ticker := time.NewTicker(mcpStreamPingInterval)
 	defer ticker.Stop()
-	deadline := time.After(10 * time.Minute)
 	for {
 		select {
 		case <-ticker.C:
-			fmt.Fprint(w, ": ping\n\n")
-			flusher.Flush()
-		case <-deadline:
-			return
+			if err := write(": ping\n\n"); err != nil {
+				log.Printf("[MCP-HTTP] stream %s: heartbeat failed, closing: %v", r.URL.Query().Get("session_id"), err)
+				return
+			}
 		case <-r.Context().Done():
 			return
 		}
 	}
 }
+
+// Heartbeat cadence of the GET /mcp stream and how long one heartbeat may take
+// to reach the client before the connection is treated as dead.
+var (
+	mcpStreamPingInterval = 15 * time.Second
+	mcpStreamWriteTimeout = 30 * time.Second
+)
 
 func (h *HTTPHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB limit
