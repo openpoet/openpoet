@@ -91,6 +91,7 @@ func (r *RemoteCodexRunner) Start(ctx context.Context) error {
 	}
 	r.client = client
 	remote.client = client
+	startSSHKeepalive(client, sshKeepaliveConfigFromEnv(), "remote-codex "+addr)
 	r.isWindows = isWindowsServer(client)
 	remote.isWindows = r.isWindows
 	log.Printf("[remote-codex] SSH connection established to %s (server=%s, windows=%v)", addr, client.ServerVersion(), r.isWindows)
@@ -149,20 +150,7 @@ func (r *RemoteCodexRunner) Start(ctx context.Context) error {
 	go r.inner.readStdout(stdout)
 	go r.inner.readStderr(stderr)
 	go func() {
-		err := session.Wait()
-		exitMessage := "remote codex app-server exited"
-		if detail := r.inner.stderrSummary(); detail != "" {
-			exitMessage += ": " + detail
-		}
-		r.inner.failPending(&codexRPCError{Code: -32000, Message: exitMessage})
-		if err != nil && !r.inner.isShuttingDown() {
-			if detail := r.inner.stderrSummary(); detail != "" {
-				r.inner.write([]byte(fmt.Sprintf("\r\n\x1b[31mRemote Codex app-server exited: %v\r\n%s\x1b[0m\r\n", err, detail)))
-			} else {
-				r.inner.write([]byte(fmt.Sprintf("\r\n\x1b[31mRemote Codex app-server exited: %v\x1b[0m\r\n", err)))
-			}
-		}
-		close(r.inner.done)
+		r.inner.finishProcess("remote codex app-server", session.Wait())
 	}()
 
 	initCtx, initCancel := context.WithTimeout(ctx, 30*time.Second)

@@ -21,6 +21,8 @@ import (
 
 	"openpoet/internal/database"
 	"openpoet/internal/websocket"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // CodexRunner drives Codex through `codex app-server` and exposes it through
@@ -46,6 +48,7 @@ type CodexRunner struct {
 	ctx                  context.Context
 	cancel               context.CancelFunc
 	done                 chan struct{}
+	exitErr              error // why the app-server died unasked; set before done closes
 	nextID               int
 	pending              map[int]chan codexRPCResponse
 	inputBuffer          []rune
@@ -274,20 +277,7 @@ func (r *CodexRunner) Start(ctx context.Context) error {
 	go r.readStdout(stdout)
 	go r.readStderr(stderr)
 	go func() {
-		err := cmd.Wait()
-		exitMessage := "codex app-server exited"
-		if detail := r.stderrSummary(); detail != "" {
-			exitMessage += ": " + detail
-		}
-		r.failPending(&codexRPCError{Code: -32000, Message: exitMessage})
-		if err != nil && !r.isShuttingDown() {
-			if detail := r.stderrSummary(); detail != "" {
-				r.write([]byte(fmt.Sprintf("\r\n\x1b[31mCodex app-server exited: %v\r\n%s\x1b[0m\r\n", err, detail)))
-			} else {
-				r.write([]byte(fmt.Sprintf("\r\n\x1b[31mCodex app-server exited: %v\x1b[0m\r\n", err)))
-			}
-		}
-		close(r.done)
+		r.finishProcess("codex app-server", cmd.Wait())
 	}()
 
 	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -571,9 +561,57 @@ func consumeCodexTerminalEscape(data []byte, start int) (int, bool) {
 
 func (r *CodexRunner) Resize(rows, cols uint16) error { return nil }
 
+// Wait blocks until the app-server is gone. It reports an error when the
+// process died without a Stop — the manager then marks the session "error"
+// (with the reason) instead of "completed" and, for remote sessions, tries
+// to reconnect.
 func (r *CodexRunner) Wait() error {
 	<-r.done
-	return nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.exitErr
+}
+
+// finishProcess handles the app-server's exit: it fails the in-flight RPCs,
+// records why the process went away when nobody asked it to, and closes done.
+// Any exit outside Stop is unexpected — a non-zero code, a signal, an SSH
+// channel closed without an exit status, and a zero code alike: app-server
+// is a long-lived server and only quits on its own when something broke.
+func (r *CodexRunner) finishProcess(label string, waitErr error) {
+	detail := r.stderrSummary()
+	exitMessage := label + " exited"
+	if detail != "" {
+		exitMessage += ": " + detail
+	}
+	r.failPending(&codexRPCError{Code: -32000, Message: exitMessage})
+	if !r.isShuttingDown() {
+		exitErr := codexExitError(label, waitErr, detail)
+		log.Printf("[codex] %v", exitErr)
+		r.mu.Lock()
+		r.exitErr = exitErr
+		r.mu.Unlock()
+		r.write([]byte(fmt.Sprintf("\r\n\x1b[31m%v\x1b[0m\r\n", exitErr)))
+	}
+	close(r.done)
+}
+
+// codexExitError describes an unexpected app-server exit: the exit code or
+// signal, or the SSH channel closing without one (a dropped connection).
+func codexExitError(label string, waitErr error, detail string) error {
+	var reason string
+	var missing *ssh.ExitMissingError
+	switch {
+	case waitErr == nil:
+		reason = "exit code 0"
+	case errors.As(waitErr, &missing):
+		reason = "SSH channel closed without an exit status (connection lost)"
+	default:
+		reason = waitErr.Error()
+	}
+	if detail != "" {
+		return fmt.Errorf("%s exited unexpectedly (%s): %s", label, reason, detail)
+	}
+	return fmt.Errorf("%s exited unexpectedly (%s)", label, reason)
 }
 
 func (r *CodexRunner) PID() int {

@@ -88,6 +88,7 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to connect to SSH server: %w", err)
 	}
 	r.client = client
+	startSSHKeepalive(client, sshKeepaliveConfigFromEnv(), "remote "+addr)
 	r.isWindows = isWindowsServer(client)
 	log.Printf("[remote] SSH connection established to %s (server=%s, windows=%v)", addr, client.ServerVersion(), r.isWindows)
 
