@@ -1181,7 +1181,8 @@ func main() {
 	go runOutboxJanitorLoop(outboxJanitorCtx, db)
 
 	// Create server
-	// WriteTimeout is 600s to support long-polling hook permission requests (up to 590s)
+	// WriteTimeout is 600s to support long-polling hook permission requests (up to 590s).
+	// The GET /mcp SSE stream overrides it per write (see mcp.handleGetStream).
 	// ReadTimeout is 180s so large uploads (e.g. ~1MB voice recordings via the
 	// relay tunnel on slow uplinks) don't get cut mid-stream.
 	server := &http.Server{
