@@ -1,5 +1,16 @@
 package session
 
+import "openpoet/internal/database"
+
+// ProjectForReopen keeps the session's backend when the project default differs
+// (including sessions created with an override). Use the copy for both config
+// synchronization and runner selection; never change the saved project default.
+func ProjectForReopen(project *database.Project, sess *database.Session) *database.Project {
+	copy := *project
+	copy.Backend = string(GetBackend(sess.Backend).Type())
+	return &copy
+}
+
 // BackendType identifies the CLI backend for a session.
 type BackendType string
 

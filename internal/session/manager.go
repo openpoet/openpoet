@@ -354,6 +354,7 @@ func (m *Manager) StartSession(ctx context.Context, project *database.Project, e
 }
 
 func (m *Manager) ReopenSession(ctx context.Context, session *database.Session, project *database.Project, envVars map[string]string, decryptFunc func(string, string) (string, error)) error {
+	project = ProjectForReopen(project, session)
 	backend := GetBackend(session.Backend)
 	sessionID := session.ID
 	projectMeta := sessionmeta.FromProjectConfig(session.Backend, project.BackendConfig)

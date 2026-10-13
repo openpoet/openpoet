@@ -701,16 +701,17 @@ func (r *CodexRunner) openThread(ctx context.Context) error {
 	var result json.RawMessage
 	var err error
 
-	if r.cfg.IsReopen && r.cfg.ProviderSessionID != "" {
+	if r.cfg.IsReopen {
+		if strings.TrimSpace(r.cfg.ProviderSessionID) == "" {
+			return fmt.Errorf("cannot resume Codex thread: provider session id is missing")
+		}
 		params["threadId"] = r.cfg.ProviderSessionID
 		params["excludeTurns"] = true
 		result, err = r.request(ctx, "thread/resume", params)
 		if err != nil {
-			r.write([]byte(fmt.Sprintf("\x1b[33mCodex thread resume failed; starting a new thread: %v\x1b[0m\r\n", err)))
-			delete(params, "threadId")
+			return fmt.Errorf("resume codex thread %s: %w", r.cfg.ProviderSessionID, err)
 		}
-	}
-	if result == nil {
+	} else {
 		result, err = r.request(ctx, "thread/start", params)
 		if err != nil {
 			return fmt.Errorf("open codex thread: %w", err)

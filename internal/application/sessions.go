@@ -716,6 +716,7 @@ func (s *SessionService) Reopen(ctx context.Context, command ReopenSessionComman
 	if err != nil || project == nil {
 		return nil, notFoundError("project_not_found", "Project not found", err)
 	}
+	project = runtime.ProjectForReopen(project, session)
 	// A workspace session reopens back into its lane — or fails loudly if the
 	// lane directory vanished; silently reopening in the main checkout would
 	// dump the session into the wrong working tree.
