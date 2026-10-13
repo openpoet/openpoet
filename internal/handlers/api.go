@@ -1927,6 +1927,8 @@ func (a *API) AutoRestoreSession(ctx context.Context, sess *database.Session) er
 		return fmt.Errorf("project not found (may have been deleted): %w", err)
 	}
 
+	project = session.ProjectForReopen(project, sess)
+
 	// Check backend supports resume
 	backend := session.GetBackend(sess.Backend)
 	if !backend.SupportsResume() {
