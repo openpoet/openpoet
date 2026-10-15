@@ -229,15 +229,8 @@ func (a *commandAPI) waitForSession(w http.ResponseWriter, r *http.Request) {
 		if scanErr == nil {
 			after = next
 			for _, ev := range matched {
-				if ev.Aggregate.ID != sessionID {
-					continue
-				}
-				switch ev.EventType {
-				case "session.turn_completed":
-					writeJSON(w, http.StatusOK, sessionWaitResponse{SessionID: sessionID, State: "turn_complete", SignalQuality: "exact"})
-					return
-				case "session.awaiting_input":
-					writeJSON(w, http.StatusOK, sessionWaitResponse{SessionID: sessionID, State: "awaiting_input", SignalQuality: "exact"})
+				if response, settled := sessionWaitSettled(sessionID, ev); settled {
+					writeJSON(w, http.StatusOK, response)
 					return
 				}
 			}
@@ -287,6 +280,31 @@ type sessionWaitResponse struct {
 	SessionID     string `json:"session_id"`
 	State         string `json:"state"`
 	SignalQuality string `json:"signal_quality"`
+	// LastMessage is the opening of the agent's final reply (turn_complete);
+	// Excerpt is the question the agent is waiting on (awaiting_input).
+	LastMessage string `json:"last_message,omitempty"`
+	Excerpt     string `json:"excerpt,omitempty"`
+}
+
+// sessionWaitSettled reports whether ev settles the session being waited on,
+// carrying the event's excerpt so the caller does not need a second read.
+func sessionWaitSettled(sessionID string, ev automationEvent) (sessionWaitResponse, bool) {
+	if ev.Aggregate.ID != sessionID {
+		return sessionWaitResponse{}, false
+	}
+	payload, _ := ev.Payload.(map[string]any)
+	response := sessionWaitResponse{SessionID: sessionID, SignalQuality: "exact"}
+	switch ev.EventType {
+	case "session.turn_completed":
+		response.State = "turn_complete"
+		response.LastMessage, _ = payload["last_message"].(string)
+	case "session.awaiting_input":
+		response.State = "awaiting_input"
+		response.Excerpt, _ = payload["excerpt"].(string)
+	default:
+		return sessionWaitResponse{}, false
+	}
+	return response, true
 }
 
 func terminalSessionState(status string) (string, bool) {

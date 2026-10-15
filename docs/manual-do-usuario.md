@@ -332,6 +332,9 @@ temporais e "mãos" determinísticas:
   `turn_complete` / `awaiting_input` / `idle` / `stopped`. O resultado informa
   `signal_quality: exact|heuristic` — exato para codex (fase estruturada do
   app-server), heurístico (hook Stop + janela de idle) para os backends PTY.
+  Em `turn_complete` vem também `last_message` (início da resposta final do
+  agente) e, em `awaiting_input`, `excerpt` (a pergunta pendente); a resposta
+  inteira se lê com `sessions.messages`.
 - **`send_to_session` com ack** — enviar texto a outra sessão deixa de ser
   "torcer para chegar": o input é serializado por um mutex por sessão (que a
   base já garante) e o retorno traz `{submitted: true, acknowledged: true|false}`,
