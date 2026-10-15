@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -301,13 +302,10 @@ func ParseFile(path string) ([]*SessionEvent, error) {
 	// Track assistant messages by message ID for dedup
 	msgIDIndex := make(map[string]int) // messageID → index in events slice
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB max line
-
-	for scanner.Scan() {
-		event, err := ParseLine(scanner.Bytes())
+	err = forEachJSONLLine(f, func(line []byte) {
+		event, err := ParseLine(line)
 		if err != nil || event == nil {
-			continue
+			return
 		}
 
 		// Deduplicate assistant messages: Claude Code streams partial messages
@@ -319,15 +317,15 @@ func ParseFile(path string) ([]*SessionEvent, error) {
 			if idx, exists := msgIDIndex[msgID]; exists {
 				prev := events[idx]
 				mergeAssistantMessage(prev.Message, event.Message)
-				continue
+				return
 			}
 			msgIDIndex[msgID] = len(events)
 		}
 
 		events = append(events, event)
-	}
+	})
 
-	return events, scanner.Err()
+	return events, err
 }
 
 // ParseReader reads JSONL data from any io.Reader and returns all parsed events.
@@ -336,28 +334,62 @@ func ParseReader(r io.Reader) ([]*SessionEvent, error) {
 	var events []*SessionEvent
 	msgIDIndex := make(map[string]int)
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
-		event, err := ParseLine(scanner.Bytes())
+	err := forEachJSONLLine(r, func(line []byte) {
+		event, err := ParseLine(line)
 		if err != nil || event == nil {
-			continue
+			return
 		}
 
 		if event.Type == "assistant" && event.Message != nil && event.Message.MessageID != "" {
 			msgID := event.Message.MessageID
 			if idx, exists := msgIDIndex[msgID]; exists {
 				mergeAssistantMessage(events[idx].Message, event.Message)
-				continue
+				return
 			}
 			msgIDIndex[msgID] = len(events)
 		}
 
 		events = append(events, event)
-	}
+	})
 
-	return events, scanner.Err()
+	return events, err
+}
+
+// maxJSONLLineBytes bounds one transcript line. Claude Code writes a tool
+// result on a single line, screenshots included as base64, so lines past
+// 1 MiB are routine; a line past this bound is skipped, never fatal.
+const maxJSONLLineBytes = 64 << 20
+
+// forEachJSONLLine calls fn with each non-empty line (without its line
+// ending), whatever its length up to maxJSONLLineBytes. The slice is reused
+// between calls.
+func forEachJSONLLine(r io.Reader, fn func([]byte)) error {
+	reader := bufio.NewReaderSize(r, 64<<10)
+	var line []byte
+	oversized := false
+	for {
+		chunk, err := reader.ReadSlice('\n')
+		if !oversized {
+			if len(line)+len(chunk) > maxJSONLLineBytes {
+				oversized, line = true, line[:0]
+			} else {
+				line = append(line, chunk...)
+			}
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if trimmed := bytes.TrimRight(line, "\r\n"); !oversized && len(trimmed) > 0 {
+			fn(trimmed)
+		}
+		line, oversized = line[:0], false
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // ParseReaderFromOffset reads JSONL data from an io.ReadSeeker starting at
@@ -427,18 +459,12 @@ func parseCompleteOffsetData(data []byte, offset int64) ([]*SessionEvent, int64,
 
 	completeData := data[:consumeLen]
 	var events []*SessionEvent
-	scanner := bufio.NewScanner(bytes.NewReader(completeData))
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
-		event, err := ParseLine(scanner.Bytes())
-		if err != nil || event == nil {
-			continue
+	err := forEachJSONLLine(bytes.NewReader(completeData), func(line []byte) {
+		if event, err := ParseLine(line); err == nil && event != nil {
+			events = append(events, event)
 		}
-		events = append(events, event)
-	}
-
-	if err := scanner.Err(); err != nil {
+	})
+	if err != nil {
 		return events, offset, err
 	}
 
