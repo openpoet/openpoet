@@ -64,7 +64,8 @@ Verificações:
   `foo`, `example`…); links OAuth/OIDC com `code`, `state`, PKCE
   (`code_challenge`/`code_verifier`) ou token na URL; e o **denylist local**.
 - **Arquivos:** os que o configsync gera a partir do setup local de agentes
-  (`CLAUDE.md`, `AGENTS.md`, `.claude/`, `.agents/`, `.codex/`, `.mcp.json`),
+  (`CLAUDE.md`, `AGENTS.md`, `.claude/`, `.agents/`, `.codex/`, `.mcp.json`,
+  `.acp/instructions.md`, `.github/copilot-instructions.md`, `.github/hooks/`),
   que ficam no `.gitignore`; `.env*` (exceto `.env.example`/`.sample`/`.template`), chaves e
   certificados, bancos, logs, dumps/HAR/pcap, arquivos de token, backups e
   SQL. Imagens, vídeos e PDFs só em `docs/images/` e `web/static/`. Binário
@@ -100,7 +101,8 @@ repositórios descartáveis e um remoto bare local. Cobre:
   usuário em Linux/macOS/Windows (usuários de fixture passam), host interno
   (`host.docker.internal` passa), link OAuth (query string comum passa),
   denylist sem diferenciar maiúsculas, marcador de exceção;
-- arquivos: gerados pelo configsync (`AGENTS.md`, `.codex/`, `.agents/`), `.env` (com `.env.example` permitido), log, banco, imagem fora e
+- arquivos: gerados pelo configsync (`AGENTS.md`, `.codex/`, `.agents/`,
+  `.github/hooks/`, instruções do Copilot e do ACP; o resto de `.github/` passa), `.env` (com `.env.example` permitido), log, banco, imagem fora e
   dentro de `docs/images/`, binário grande, token detectado pelo gitleaks;
 - falha fechada sem gitleaks;
 - hooks: pre-commit bloqueando (IP privado e link OAuth, sem criar o commit),
