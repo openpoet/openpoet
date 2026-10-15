@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -157,5 +158,53 @@ func TestParseLineKeepsMetaAndCompactSummaryFlags(t *testing.T) {
 	summary, err := ParseLine([]byte(`{"type":"user","uuid":"u2","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued"}}`))
 	if err != nil || !summary.IsSummary || summary.IsMeta {
 		t.Fatalf("summary event = %+v, %v", summary, err)
+	}
+}
+
+// screenshotToolResultLine is a tool result carrying a base64 image, the way
+// Claude Code writes a browser screenshot: one line of well over 1 MiB.
+func screenshotToolResultLine(imageBytes int) string {
+	return `{"type":"user","uuid":"u2","timestamp":"2026-07-05T12:00:02Z","sessionId":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"` +
+		strings.Repeat("A", imageBytes) + `"}}]}]}}` + "\n"
+}
+
+func TestParsersReadTranscriptWithLinesOverOneMiB(t *testing.T) {
+	transcript := userLine + screenshotToolResultLine(3<<20) + "\r\n" + assistantLine("report after the screenshot")
+	assertEvents := func(t *testing.T, events []*SessionEvent, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		if len(events) != 3 || events[1].UUID != "u2" || events[2].Type != "assistant" ||
+			events[2].Message.ContentBlocks[0].Text != "report after the screenshot" {
+			t.Fatalf("events = %d, want user, screenshot result and the final reply", len(events))
+		}
+	}
+
+	events, err := ParseReader(strings.NewReader(transcript))
+	assertEvents(t, events, err)
+
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	events, err = ParseFile(path)
+	assertEvents(t, events, err)
+
+	events, offset, err := ParseFileFromOffset(path, 0)
+	assertEvents(t, events, err)
+	if offset != int64(len(transcript)) {
+		t.Fatalf("offset = %d, want %d: the watcher must move past a long line", offset, len(transcript))
+	}
+}
+
+func TestForEachJSONLLineSkipsOnlyLinesPastTheBound(t *testing.T) {
+	input := "first\n" + strings.Repeat("x", maxJSONLLineBytes+1) + "\nlast"
+	var lines []string
+	if err := forEachJSONLLine(strings.NewReader(input), func(line []byte) { lines = append(lines, string(line)) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 2 || lines[0] != "first" || lines[1] != "last" {
+		t.Fatalf("lines = %q, want first and last around the skipped one", lines)
 	}
 }
