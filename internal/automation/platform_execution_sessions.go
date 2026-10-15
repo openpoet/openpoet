@@ -10,6 +10,7 @@ import (
 
 	"openpoet/internal/application"
 	"openpoet/internal/database"
+	"openpoet/internal/sessioninput"
 	"openpoet/internal/sessionmeta"
 	"openpoet/internal/sessionprompt"
 )
@@ -99,6 +100,10 @@ type SessionAutomationView struct {
 	// PermissionMode is a running Claude Code session's permission mode as
 	// last observed (screen indicator, else hook report). Omitted when unknown.
 	PermissionMode *sessionprompt.PermissionModeState `json:"permission_mode,omitempty"`
+	// LastInput says who wrote the last prompt the agent accepted (human,
+	// automation or unknown). Omitted when none was seen since the server
+	// started.
+	LastInput *sessioninput.LastInput `json:"last_input,omitempty"`
 }
 
 // SessionTurnView is the automation shape of application.SessionTurnState.
@@ -228,6 +233,11 @@ const maxErrorLastOutputBytes = 4 << 10
 // view is sessionAutomationView plus the live interaction state.
 func (e *sessionPlatformExecutor) view(ctx context.Context, session database.Session) SessionAutomationView {
 	view := sessionAutomationView(session, e.runtime)
+	if e.service != nil {
+		if last, known := e.service.LastInput(session.ID); known {
+			view.LastInput = &last
+		}
+	}
 	if !view.RuntimeActive {
 		view.InteractionState = interactionEnded
 		return view
@@ -379,6 +389,7 @@ const sessionStateNotes = "Session views carry interaction_state: awaiting_input
 	"text, options[{index,label,description,grants_permission,ends_session}], selected_index, accepts_text, questions (ask_user_question), tool_name, tool_input, detected_at. Answer it with sessions.answer_prompt. " +
 	"startup_state (starting|awaiting_input|ready|failed) tracks the initial prompt; error_reason and last_output explain a session with status error. " +
 	"turn {open, since, reason} says whether the agent is inside a turn: it opens when the agent accepts a prompt and closes on Stop (or the agent's idle notification after an interrupt); a long tool run is still an open turn. It is omitted until a turn signal has been seen. " +
+	"last_input {source, actor, command_id, via, basis, at, sent_at} says who wrote the last prompt the agent accepted: source human (typed in the terminal or sent from the UI), automation (sessions.send_input, a text sessions.answer_prompt, the sessions.create initial prompt, OpenPoet's own agents; actor and command_id name the sender) or unknown; omitted until a prompt is seen since the server started. " +
 	"Events platform.session.awaiting_input and platform.session.input_resolved (aggregate id = session id) signal changes; re-read sessions.get for details."
 
 const sessionCreateNotes = "Returns as soon as the agent process is running (status running, interaction_state starting); it never waits for the agent to be ready. " +

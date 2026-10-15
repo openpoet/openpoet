@@ -206,6 +206,7 @@ func (a *commandAPI) executeCommand(w http.ResponseWriter, r *http.Request) {
 		}
 		commandContext := application.WithEventMetadata(r.Context(), application.EventMetadata{
 			Actor: application.Actor{Type: actor.Type, ID: actor.ClientID}, CorrelationID: command.CorrelationID,
+			CommandID: command.CommandID,
 		})
 		platformResult, dispatchErr := dispatchRegisteredPlatformCommand(commandContext, a.platform, command, actor, approval)
 		if dispatchErr != nil {

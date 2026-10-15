@@ -15,6 +15,7 @@ import (
 
 	"openpoet/internal/database"
 	runtime "openpoet/internal/session"
+	"openpoet/internal/sessioninput"
 	"openpoet/internal/sessionmeta"
 )
 
@@ -463,6 +464,7 @@ func (s *SessionService) Create(ctx context.Context, command CreateSessionComman
 		}
 	}
 	if initialPrompt != "" {
+		s.expectInput(ctx, created.ID, initialPrompt, command.Authorization.Actor, sessioninput.ViaInitialPrompt)
 		s.deliverInitialPrompt(ctx, created.ID, initialPrompt)
 	}
 	if workspace != nil {
@@ -908,6 +910,7 @@ func (s *SessionService) Isolate(ctx context.Context, command IsolateSessionComm
 		return nil, err
 	}
 	if brief := isolationBriefing(workspace, command); brief != "" {
+		s.expectInput(ctx, session.ID, brief, command.Authorization.Actor, sessioninput.ViaIsolation)
 		// Best-effort: the session is already in its lane, and a briefing that
 		// failed to land is a message the user can resend — not a reason to
 		// unwind a completed move.
@@ -1021,6 +1024,11 @@ func (s *SessionService) SendInputWithAck(ctx context.Context, command SendSessi
 		ackCh = ch
 		defer cancel()
 	}
+	via := sessioninput.ViaSendInput
+	if sessioninput.SourceForActorType(command.Authorization.Actor.Type) == sessioninput.SourceHuman {
+		via = sessioninput.ViaUI
+	}
+	s.expectInput(ctx, command.SessionID, text, command.Authorization.Actor, via)
 	if err := s.writeLine(ctx, command.SessionID, text); err != nil {
 		return SendInputResult{}, err
 	}

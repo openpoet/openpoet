@@ -37,8 +37,19 @@ func (e *platformEffects) PublishProjectOperation(ctx context.Context, change ap
 	e.publish(ctx, "project_operation", change.Action, numericAggregateID(change.ProjectID), change.Actor)
 }
 
+// PublishSessionChange adds last_input (who wrote the last prompt the agent
+// accepted) to the platform.session.* payload when it is known.
 func (e *platformEffects) PublishSessionChange(ctx context.Context, change application.SessionChange) {
-	e.publish(ctx, "session", change.Action, change.ID, change.Actor)
+	action := boundedEffectName(change.Action, "changed")
+	aggregateID := nonEmptyAggregateID(change.ID)
+	fields := map[string]any{"action": action}
+	if e.api != nil {
+		if last, ok := e.api.hookHandler.LastSessionInput(change.ID); ok {
+			fields["last_input"] = last
+		}
+	}
+	e.broadcastStateUpdate("session", action, aggregateID)
+	e.auditPayload(ctx, "session", action, aggregateID, change.Actor, fields)
 }
 
 func (e *platformEffects) PublishSessionWatcherChange(ctx context.Context, change application.SessionWatcherChange) {
@@ -84,6 +95,11 @@ func (e *platformEffects) publish(ctx context.Context, domain, action, aggregate
 	domain = boundedEffectName(domain, "platform")
 	action = boundedEffectName(action, "changed")
 	aggregateID = nonEmptyAggregateID(aggregateID)
+	e.broadcastStateUpdate(domain, action, aggregateID)
+	e.audit(ctx, domain, action, aggregateID, actor)
+}
+
+func (e *platformEffects) broadcastStateUpdate(domain, action, aggregateID string) {
 	if e.hub != nil {
 		// Do not forward application Meta or mutation payloads: they may contain
 		// credentials. Consumers receive a refresh signal with bounded identity.
@@ -92,7 +108,6 @@ func (e *platformEffects) publish(ctx context.Context, domain, action, aggregate
 			"id":     aggregateID,
 		})
 	}
-	e.audit(ctx, domain, action, aggregateID, actor)
 }
 
 // RecordSessionClosure keeps who closed a completed session and why, both in

@@ -75,6 +75,8 @@ func (p *TransactionalProjectTaskEventPublisher) PublishProjectTaskEvent(
 type EventMetadata struct {
 	Actor         Actor
 	CorrelationID string
+	// CommandID is the automation command being executed, when there is one.
+	CommandID string
 }
 
 type eventMetadataContextKey struct{}
