@@ -86,6 +86,7 @@ type CodexRunner struct {
 	modelDefaults        codexModelDefaults
 	modelDefaultsByID    map[string]codexModelDefaults
 	turnTranscriptSeq    int
+	turnPrompt           string // last user input not yet reported by a turn start
 	turnHooksOnce        sync.Once
 	turnHooks            chan map[string]interface{}
 }
@@ -512,6 +513,7 @@ func (r *CodexRunner) Write(data []byte) (int, error) {
 				go r.handleSlashCommand(text)
 			} else {
 				r.addCodexTranscriptBlock("user", text, "", "", "")
+				r.noteTurnPrompt(text)
 				go r.sendUserInput(text)
 			}
 		}

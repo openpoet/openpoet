@@ -12,6 +12,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"openpoet/internal/database"
+	"openpoet/internal/sessioninput"
 )
 
 // flushLoop ticks every 2s and drains dirty state into ONE transaction on the
@@ -247,13 +248,17 @@ func divergenceEvent(projectID int64, rel string, sessions, trees []string, ts t
 	}
 }
 
-func awaitingInputEvent(sessionID string, projectID int64, kind, excerpt string, ts time.Time) database.EventOutboxAppend {
-	payload, _ := json.Marshal(map[string]interface{}{
+func awaitingInputEvent(sessionID string, projectID int64, kind, excerpt string, lastInput *sessioninput.LastInput, ts time.Time) database.EventOutboxAppend {
+	body := map[string]interface{}{
 		"session_id": sessionID,
 		"project_id": projectID,
 		"kind":       kind,
 		"excerpt":    excerpt,
-	})
+	}
+	if lastInput != nil {
+		body["last_input"] = lastInput
+	}
+	payload, _ := json.Marshal(body)
 	return database.EventOutboxAppend{
 		EventID:       uuid.NewString(),
 		EventType:     "session.awaiting_input",
@@ -271,8 +276,9 @@ func awaitingInputEvent(sessionID string, projectID int64, kind, excerpt string,
 // the wake-up, the report is the payload; the coordinator never needs the
 // transcript to know what happened. reportRef == "" omits the field (additive,
 // SchemaVersion stays 1). lastMessage, when the Stop hook carried the agent's
-// final reply, is its opening excerpt (additive as well).
-func turnCompletedEvent(sessionID string, projectID int64, files []string, reportRef, lastMessage string, ts time.Time) database.EventOutboxAppend {
+// final reply, is its opening excerpt (additive as well). lastInput, when
+// known, says who wrote the prompt the turn answered (additive).
+func turnCompletedEvent(sessionID string, projectID int64, files []string, reportRef, lastMessage string, lastInput *sessioninput.LastInput, ts time.Time) database.EventOutboxAppend {
 	if files == nil {
 		files = []string{}
 	}
@@ -282,6 +288,9 @@ func turnCompletedEvent(sessionID string, projectID int64, files []string, repor
 	}
 	if lastMessage != "" {
 		body["last_message"] = lastMessage
+	}
+	if lastInput != nil {
+		body["last_input"] = lastInput
 	}
 	payload, _ := json.Marshal(body)
 	return database.EventOutboxAppend{

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"openpoet/internal/database"
+	"openpoet/internal/sessioninput"
 )
 
 const (
@@ -73,7 +74,8 @@ type ingestMsg struct {
 	sessionID string
 	tool      string
 	touches   []Touch
-	excerpt   string // turn: the start of the agent's last message
+	excerpt   string                  // turn: the start of the agent's last message
+	lastInput *sessioninput.LastInput // turn: who wrote the prompt it answered
 	ts        time.Time
 }
 
@@ -169,6 +171,10 @@ type Coordinator struct {
 	// concurrent incidents). Wired in main.go to the one-shot LLM brain, which
 	// re-validates the proposed action against the project dial/budget/policy.
 	OnBrainConsult func(inc Incident)
+
+	// LastInput says who wrote a session's last accepted prompt; its answer
+	// rides session.turn_completed and session.awaiting_input. Optional.
+	LastInput func(sessionID string) (sessioninput.LastInput, bool)
 }
 
 func New(db *database.DB) *Coordinator {
@@ -245,7 +251,7 @@ func (c *Coordinator) OnHookEvent(sessionID, eventName string, hookEvent map[str
 	switch eventName {
 	case "Stop":
 		message, _ := hookEvent["last_assistant_message"].(string)
-		c.enqueue(ingestMsg{kind: "turn", sessionID: sessionID, excerpt: turnExcerpt(message), ts: c.now()})
+		c.enqueue(ingestMsg{kind: "turn", sessionID: sessionID, excerpt: turnExcerpt(message), lastInput: c.lastInput(sessionID), ts: c.now()})
 	case "PreToolUse":
 		// Claims come from PreToolUse ONLY: it is the earliest signal and the
 		// one phase every tool call emits exactly once. Counting PostToolUse
@@ -270,10 +276,23 @@ func (c *Coordinator) RecordAttention(sessionID, kind, excerpt string) {
 	if si := c.session(sessionID); si != nil {
 		projectID = si.projectID
 	}
-	ev := awaitingInputEvent(sessionID, projectID, kind, excerpt, c.now())
+	ev := awaitingInputEvent(sessionID, projectID, kind, excerpt, c.lastInput(sessionID), c.now())
 	c.mu.Lock()
 	c.queueEventLocked(ev)
 	c.mu.Unlock()
+}
+
+// lastInput is read when the signal arrives, not when it is processed, so a
+// prompt accepted in between cannot be credited to the turn that just ended.
+func (c *Coordinator) lastInput(sessionID string) *sessioninput.LastInput {
+	if c.LastInput == nil {
+		return nil
+	}
+	last, ok := c.LastInput(sessionID)
+	if !ok {
+		return nil
+	}
+	return &last
 }
 
 // queueEventLocked appends a pending event under c.mu, bounded so a persistent
@@ -378,7 +397,7 @@ func (c *Coordinator) process(msg ingestMsg) {
 		// Drain the paths this session touched since its last Stop into the
 		// turn_completed payload, then reset the accumulator atomically.
 		files := c.drainTurnTouchesLocked(si.id)
-		c.queueEventLocked(turnCompletedEvent(si.id, si.projectID, files, reportRef, msg.excerpt, msg.ts))
+		c.queueEventLocked(turnCompletedEvent(si.id, si.projectID, files, reportRef, msg.excerpt, msg.lastInput, msg.ts))
 		return
 	}
 	for _, t := range msg.touches {

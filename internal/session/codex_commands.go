@@ -75,6 +75,7 @@ func (r *CodexRunner) codexCommandInputSend(ctx context.Context, raw json.RawMes
 		return nil, errors.New("empty Codex input")
 	}
 	r.addCodexTranscriptBlock("user", in.Text, "", "", "")
+	r.noteTurnPrompt(in.Text)
 	echo := append([]byte("\r\n\x1b[36mYou:\x1b[0m "), codexTerminalTextBytes(in.Text)...)
 	echo = append(echo, []byte("\r\n")...)
 	r.write(echo)

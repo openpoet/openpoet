@@ -19,6 +19,7 @@ import (
 	"openpoet/internal/application"
 	"openpoet/internal/notifications"
 	"openpoet/internal/session"
+	"openpoet/internal/sessioninput"
 	"openpoet/internal/sessiontoken"
 	"openpoet/internal/websocket"
 )
@@ -162,6 +163,7 @@ type HookHandler struct {
 	submittedPrompts  map[string]string                       // sessionID -> prompt text of the last UserPromptSubmit (delivery check)
 	turns             map[string]application.SessionTurnState // sessionID -> open/closed turn (UserPromptSubmit .. Stop)
 	turnObserver      func(sessionID string, turn application.SessionTurnState)
+	inputs            *sessioninput.Tracker // who wrote each session's last accepted prompt
 }
 
 // ACPUsageInfo holds Copilot ACP usage tracking data for a session.
@@ -201,6 +203,7 @@ func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, ses
 		promptWaiters:     make(map[string][]chan struct{}),
 		submittedPrompts:  make(map[string]string),
 		turns:             make(map[string]application.SessionTurnState),
+		inputs:            sessioninput.NewTracker(),
 	}
 }
 
@@ -1386,6 +1389,7 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 
 	h.recordPermissionMode(sessionID, hookEvent)
 	h.trackTurnFromEvent(sessionID, eventName, hookEvent)
+	h.observeSessionInput(sessionID, eventName, hookEvent)
 
 	// Track execution mode changes
 	switch eventName {
@@ -1496,6 +1500,41 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// observeSessionInput attributes each prompt the agent accepts: Claude Code's
+// UserPromptSubmit carries the prompt, Codex app-server sessions report theirs
+// on the turn's mode_changed=executing. ACP's userPromptSubmitted carries no
+// text (attributed by timing); its mode_changed without a prompt is skipped
+// so one prompt is not observed twice.
+func (h *HookHandler) observeSessionInput(sessionID, eventName string, hookEvent map[string]interface{}) {
+	prompt, hasText := hookEvent["prompt"].(string)
+	switch eventName {
+	case "UserPromptSubmit":
+	case "mode_changed":
+		if mode, _ := hookEvent["mode"].(string); mode != "executing" || !hasText {
+			return
+		}
+	default:
+		return
+	}
+	h.inputs.Observe(sessionID, prompt, hasText)
+}
+
+// ExpectSessionInput announces input about to be typed into a session, so the
+// prompt it becomes is attributed to its sender rather than to a human.
+func (h *HookHandler) ExpectSessionInput(sessionID string, input sessioninput.Expected) {
+	if h != nil {
+		h.inputs.Expect(sessionID, input)
+	}
+}
+
+// LastSessionInput says who wrote the last prompt the session's agent accepted.
+func (h *HookHandler) LastSessionInput(sessionID string) (sessioninput.LastInput, bool) {
+	if h == nil {
+		return sessioninput.LastInput{}, false
+	}
+	return h.inputs.Last(sessionID)
 }
 
 // RegisterPromptWaiter returns a channel that fires when the session's next

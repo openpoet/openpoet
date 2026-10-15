@@ -14,6 +14,7 @@ import (
 	"openpoet/internal/notifications"
 	"openpoet/internal/security"
 	runtime "openpoet/internal/session"
+	"openpoet/internal/sessioninput"
 	"openpoet/internal/updater"
 	"openpoet/internal/websocket"
 	"openpoet/internal/workspace"
@@ -129,9 +130,11 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 			RuntimeSettings: runtimeSettings,
 		},
 	)
+	sessionQuestions := application.NewSessionQuestionService(services.DB, questions, effects)
+	sessionQuestions.SetInputRecorder(services.HookHandler)
 	execution := automation.ExecutionPlatformServices{
 		Sessions:           sessionService,
-		SessionQuestions:   application.NewSessionQuestionService(services.DB, questions, effects),
+		SessionQuestions:   sessionQuestions,
 		SessionWatchers:    application.NewSessionEventWatcherService(services.DB, NewSessionEventWatcherAdapter(services.StructuredView), effects),
 		SessionSuggestions: application.NewSessionTaskSuggestionService(services.DB, services.SessionManager, platformSessionSuggestionProvider{handler: services.AIHandler}, effects),
 		FileMutations:      application.NewFileMutationService(services.DB, services.FileHandler, effects),
@@ -218,7 +221,12 @@ func (a *API) configureRestartRecovery(services PlatformServices, questions plat
 	recovery := newRestartRecovery(services.DB, deployrecord.DefaultPath())
 	recovery.restore = a.AutoRestoreSession
 	submitter := platformSessionInitialPromptSubmitter{api: a, questions: questions}
-	recovery.submit = submitter.SubmitInitialSessionPrompt
+	recovery.submit = func(ctx context.Context, sessionID, text string) error {
+		services.HookHandler.ExpectSessionInput(sessionID, sessioninput.Expected{
+			Text: text, Actor: "system:restart-recovery", ActorType: "system", Via: sessioninput.ViaRestartRecovery,
+		})
+		return submitter.SubmitInitialSessionPrompt(ctx, sessionID, text)
+	}
 	recovery.isRunning = services.SessionManager.IsSessionRunning
 	recovery.turnState = services.HookHandler.SessionTurnState
 	recovery.pendingQuestion = func(ctx context.Context, sessionID string) bool {

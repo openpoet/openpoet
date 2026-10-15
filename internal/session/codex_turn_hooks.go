@@ -14,17 +14,39 @@ const codexTurnHookQueueSize = 32
 // last assistant message) when it ends. Stop closes the session's turn, idles
 // its mode and becomes session.turn_completed on the event outbox.
 
+// The turn start carries the user input that started it as "prompt", so the
+// hook handler can tell who wrote it (Claude Code's UserPromptSubmit does the
+// same). Input that steered a running turn is dropped when the turn ends.
 func (r *CodexRunner) postTurnStarted(turnID string) {
-	r.queueTurnHook(map[string]interface{}{
+	event := map[string]interface{}{
 		"hook_event_name": "mode_changed",
 		"mode":            "executing",
 		"turn_id":         turnID,
-	})
+	}
+	if prompt := r.takeTurnPrompt(); prompt != "" {
+		event["prompt"] = prompt
+	}
+	r.queueTurnHook(event)
+}
+
+func (r *CodexRunner) noteTurnPrompt(text string) {
+	r.mu.Lock()
+	r.turnPrompt = text
+	r.mu.Unlock()
+}
+
+func (r *CodexRunner) takeTurnPrompt() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prompt := r.turnPrompt
+	r.turnPrompt = ""
+	return prompt
 }
 
 // postTurnStopped reports the end of a turn; status is completed, failed or
 // interrupted.
 func (r *CodexRunner) postTurnStopped(turnID, status string) {
+	r.takeTurnPrompt()
 	event := map[string]interface{}{
 		"hook_event_name": "Stop",
 		"turn_id":         turnID,

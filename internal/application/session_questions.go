@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	"openpoet/internal/database"
+	"openpoet/internal/sessioninput"
 	"openpoet/internal/sessionprompt"
 )
 
@@ -34,6 +35,13 @@ type SessionQuestionService struct {
 	store   SessionQuestionStore
 	port    SessionQuestionPort
 	effects SessionEffects
+	inputs  SessionInputRecorder
+}
+
+// SetInputRecorder lets text answers be attributed to their sender when the
+// agent takes them as a prompt.
+func (s *SessionQuestionService) SetInputRecorder(inputs SessionInputRecorder) {
+	s.inputs = inputs
 }
 
 func NewSessionQuestionService(store SessionQuestionStore, port SessionQuestionPort, effects SessionEffects) *SessionQuestionService {
@@ -117,6 +125,9 @@ func (s *SessionQuestionService) Answer(ctx context.Context, command AnswerSessi
 			return nil, validationError("unsafe_permissions_forbidden",
 				"Bypass permissions can only be accepted for a session created with dangerously_skip_permissions")
 		}
+	}
+	if text := strings.TrimSpace(answer.Text); text != "" && s.inputs != nil {
+		s.inputs.ExpectSessionInput(sessionID, expectedSessionInput(ctx, text, command.Authorization.Actor, sessioninput.ViaAnswerPrompt))
 	}
 	if err := s.port.AnswerQuestion(ctx, sessionID, question, answer); err != nil {
 		return nil, err

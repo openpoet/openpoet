@@ -23,6 +23,7 @@ import (
 	"openpoet/internal/files"
 	"openpoet/internal/llm"
 	"openpoet/internal/mcp"
+	"openpoet/internal/sessioninput"
 	"openpoet/internal/sessionmeta"
 
 	"github.com/go-chi/chi/v5"
@@ -3212,6 +3213,9 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			defer cancel()
 			ackCh = ch
 		}
+		hooks.ExpectSessionInput(sessionID, sessioninput.Expected{
+			Text: text, Actor: "agent:openpoet-ai", ActorType: "agent", Via: sessioninput.ViaAssistant,
+		})
 		if err := h.api.submitSessionLine(sessionID, text); err != nil {
 			return "", err
 		}

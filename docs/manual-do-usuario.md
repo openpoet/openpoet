@@ -284,6 +284,46 @@ temporais e "mãos" determinísticas:
   uma permissão parqueada. (Esses dois tipos de evento já começam a existir na
   base atual; a projeção os enriquece — p.ex. `files_touched` no
   `turn_completed`.)
+- **Autor do último prompt (`last_input`)** — já implementado. Os eventos
+  `session.turn_completed`, `session.awaiting_input` e todos os
+  `platform.session.*` (`stopped`, `input_sent`, `awaiting_input`,
+  `input_resolved`, …), e também `sessions.get`/`sessions.list`, trazem o
+  campo opcional `last_input`, que diz quem escreveu o último prompt que o
+  agente **aceitou**:
+
+  ```jsonc
+  "last_input": {
+    "source": "automation",          // human | automation | unknown
+    "actor": "automation_client:<id>",
+    "command_id": "orq-…",          // comando de automação que enviou, se houve
+    "via": "send_input",             // terminal | ui | send_input | answer_prompt | initial_prompt | isolation_briefing | restart_recovery | assistant
+    "basis": "prompt_text",          // prompt_text | timing | none
+    "at": "2026-10-14T12:00:03Z",    // quando o agente aceitou o prompt
+    "sent_at": "2026-10-14T12:00:00Z" // quando o remetente digitou (ausente para o terminal)
+  }
+  ```
+
+  Como é decidido: todo envio programático (`sessions.send_input`,
+  `sessions.answer_prompt` com `text`, o prompt inicial de `sessions.create` —
+  `custom_prompt`, tarefa ou planejamento —, o briefing de `sessions.isolate`,
+  a retomada pós-restart e o assistente do OpenPoet) é registrado com seu
+  remetente antes de ser digitado. Quando o agente aceita um prompt (hook
+  `UserPromptSubmit` do Claude Code; no codex app-server, o `mode_changed` do
+  início do turno), o texto é comparado com esses envios: se casa, o prompt é
+  do remetente (`source` vem do tipo do actor: `user` — UI local ou
+  dispositivo — é `human`, qualquer outro é `automation`); se não casa, foi
+  digitado no terminal (`human`, `via: terminal`). Um envio que nunca vira
+  mensagem (comando de barra, resposta de diálogo, envio recusado) não casa
+  com nada e expira em 30 min, então não "rouba" o próximo prompt humano.
+  Textos curtos (menos de 16 caracteres) só casam se forem o prompt inteiro.
+  Backends que não informam o texto do prompt (ACP) usam `basis: timing`: um
+  envio feito até 30 s antes; sem isso, `source: unknown`.
+
+  O campo é omitido quando o OpenPoet ainda não viu nenhum prompt da sessão
+  desde que o servidor subiu (o estado fica em memória; depois de um restart,
+  volta a aparecer no próximo prompt aceito). `last_input` descreve o último
+  prompt aceito **no momento do evento**: em `platform.session.input_sent` ele
+  ainda é o prompt anterior ao que acabou de ser enviado.
 - **`await_events`** — long-poll HTTP sobre o outbox durável: um orquestrador
   parqueia em uma chamada com filtros (tipo de evento, projeto, sessão) e
   cursor; é **acordado pelo commit** do evento, não por polling; retoma de onde

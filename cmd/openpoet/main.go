@@ -423,6 +423,7 @@ func main() {
 	)
 	coord.OnBrainConsult = brainConsultant.Consult
 
+	coord.LastInput = hookHandler.LastSessionInput
 	coord.Start()
 	hookHandler.OnToolEvent = coord.OnHookEvent
 	hookHandler.OnAttention = coord.RecordAttention

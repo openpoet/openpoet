@@ -62,8 +62,9 @@ Current Codex support includes:
   (list, search, expand), the same as a Claude Code JSONL transcript. Sessions on
   the `tui` runtime record no transcript and still answer
   `session_transcript_unavailable`.
-- Turn signals: the runner posts `mode_changed` (executing) to
-  `/api/hooks/event` when a turn starts and `Stop` when it ends (`turn_status`
+- Turn signals: the runner posts `mode_changed` (executing, with the user
+  input that started the turn as `prompt`, so `last_input` can tell who wrote
+  it) to `/api/hooks/event` when a turn starts and `Stop` when it ends (`turn_status`
   completed, failed or interrupted, with `last_assistant_message`). That closes
   the session's turn, idles its mode and emits `session.turn_completed` with a
   `last_message` excerpt. An approval or question parked on the permission hook
