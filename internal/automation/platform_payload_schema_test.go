@@ -274,3 +274,61 @@ func TestDiscoveryPublishesPayloadSchemas(t *testing.T) {
 		}
 	}
 }
+
+func TestFilesReadReturnsTextFilesAsTextOnRequest(t *testing.T) {
+	ports := &executionPlatformFakePorts{}
+	registry, err := NewPlatformCapabilityRegistry(application.NewCapabilityRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterExecutionPlatformCapabilities(registry, executionPlatformTestServices(ports)); err != nil {
+		t.Fatal(err)
+	}
+	actor := executionPlatformActor(executionPlatformDefinitionsForTest())
+	actor.Scopes[ScopeFilesRead] = struct{}{}
+	read := func(t *testing.T, data []byte, payload string) (content, encoding string, truncated bool) {
+		t.Helper()
+		ports.fileRead = OperationalFileReadResult{Metadata: FileMetadataAutomationView{Path: "status.md"}, Data: data}
+		result, err := DispatchPlatformCapability(context.Background(), registry, PlatformDispatchRequest{
+			Capability: "files.read", Actor: actor, Target: json.RawMessage(`{"type":"project","id":1}`), Payload: json.RawMessage(payload),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(result.Result)
+		var view struct {
+			Content   string `json:"content"`
+			Encoding  string `json:"encoding"`
+			Truncated bool   `json:"truncated"`
+		}
+		if err := json.Unmarshal(raw, &view); err != nil {
+			t.Fatal(err)
+		}
+		return view.Content, view.Encoding, view.Truncated
+	}
+
+	report := []byte("# Status\n\nRelatório concluído.\n")
+	if content, encoding, _ := read(t, report, `{"path":"status.md"}`); encoding != "base64" || content != base64.StdEncoding.EncodeToString(report) {
+		t.Fatalf("default read = %q (%s), want base64", content, encoding)
+	}
+	if content, encoding, _ := read(t, report, `{"path":"status.md","encoding":"text"}`); encoding != "utf-8" || content != string(report) {
+		t.Fatalf("text read = %q (%s), want the file as text", content, encoding)
+	}
+	// A file within max_bytes comes back whole; a cut inside "ó" (2 bytes) drops the partial character.
+	if content, encoding, truncated := read(t, []byte("Relatório"), `{"path":"status.md","encoding":"text","max_bytes":81}`); encoding != "utf-8" || content != "Relatório" || truncated {
+		t.Fatalf("short text read = %q (%s, %v)", content, encoding, truncated)
+	}
+	long := []byte(strings.Repeat("a", 79) + "ó")
+	if content, encoding, truncated := read(t, long, `{"path":"status.md","encoding":"text","max_bytes":80}`); encoding != "utf-8" || content != strings.Repeat("a", 79) || !truncated {
+		t.Fatalf("cut text read = %q (%s, %v)", content, encoding, truncated)
+	}
+	binary := []byte{0x89, 'P', 'N', 'G', 0x00, 0xff}
+	if content, encoding, _ := read(t, binary, `{"path":"image.png","encoding":"text"}`); encoding != "base64" || content != base64.StdEncoding.EncodeToString(binary) {
+		t.Fatalf("binary read = %q (%s), want base64", content, encoding)
+	}
+	if _, err := DispatchPlatformCapability(context.Background(), registry, PlatformDispatchRequest{
+		Capability: "files.read", Actor: actor, Target: json.RawMessage(`{"type":"project","id":1}`), Payload: json.RawMessage(`{"path":"a","encoding":"hex"}`),
+	}); err == nil || !strings.Contains(err.Error(), "base64 or text") {
+		t.Fatalf("invalid encoding: %v", err)
+	}
+}

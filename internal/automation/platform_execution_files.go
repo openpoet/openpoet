@@ -1,12 +1,14 @@
 package automation
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"net/http"
 	"path"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"openpoet/internal/application"
 )
@@ -54,7 +56,9 @@ func fileExecutionPlatformDefinitions() []PlatformCapabilityDefinition {
 	projectOrSession := projectTargetDescription + " or " + sessionTargetDescription
 	return []PlatformCapabilityDefinition{
 		withPayloadSchema(executionReadCapability("files.list", "file_operations", "files:read"), projectOrSession, fileListPayload{}, "", ""),
-		withPayloadSchema(executionReadCapability("files.read", "file_operations", "files:read"), projectOrSession, fileReadPayload{}, "", "content is returned base64-encoded; max_bytes is at most 1 MiB"),
+		withPayloadSchema(executionReadCapability("files.read", "file_operations", "files:read"), projectOrSession, fileReadPayload{}, `{"path":"notes/status.md","encoding":"text"}`,
+			"content is returned base64-encoded unless encoding is \"text\": then a UTF-8 text file comes back as plain text with encoding \"utf-8\" "+
+				"(a cut at max_bytes never splits a character), and a binary file still comes back base64 with encoding \"base64\"; max_bytes is at most 1 MiB"),
 		withPayloadSchema(executionReadCapability("files.preview_metadata", "file_operations", "files:read"), projectOrSession, filePreviewMetadataPayload{}, "", ""),
 		withPayloadSchema(executionPayloadLimit(executionDestructiveCapability("files.write", "file_mutations", "files:write"), 3<<20), projectTargetDescription, fileWritePayload{}, "", ""),
 		withPayloadSchema(executionPayloadLimit(executionDestructiveCapability("files.upload_project", "file_mutations", "files:write"), 16<<20), projectTargetDescription, fileUploadPayload{}, "", ""),
@@ -80,6 +84,7 @@ type fileListPayload struct {
 type fileReadPayload struct {
 	Path     string `json:"path"`
 	MaxBytes int    `json:"max_bytes,omitempty"`
+	Encoding string `json:"encoding,omitempty" doc:"base64 (default) or text: return a UTF-8 text file as plain text"`
 }
 
 type filePreviewMetadataPayload struct {
@@ -185,6 +190,9 @@ func (e *fileExecutionPlatformExecutor) Validate(_ context.Context, input Platfo
 		if payload.MaxBytes == 0 {
 			payload.MaxBytes = 128 << 10
 		}
+		if payload.Encoding != "" && payload.Encoding != "base64" && payload.Encoding != "text" {
+			return nil, platformFailure("platform_payload_invalid", `file read encoding must be base64 or text`, false)
+		}
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"path": payload.Path, "max_bytes": payload.MaxBytes}), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
 			result, err := e.reader.ReadOperationalFile(ctx, scope, payload.Path, payload.MaxBytes)
 			if err != nil {
@@ -193,6 +201,13 @@ func (e *fileExecutionPlatformExecutor) Validate(_ context.Context, input Platfo
 			truncated := len(result.Data) > payload.MaxBytes
 			if truncated {
 				result.Data = result.Data[:payload.MaxBytes]
+			}
+			if payload.Encoding == "text" {
+				if text, ok := fileReadText(result.Data, truncated); ok {
+					return fileContentAutomationView{
+						Metadata: sanitizeFileMetadata(result.Metadata), Content: text, Encoding: "utf-8", Truncated: truncated,
+					}, nil
+				}
 			}
 			return fileContentAutomationView{
 				Metadata: sanitizeFileMetadata(result.Metadata), Content: base64.StdEncoding.EncodeToString(result.Data),
@@ -427,4 +442,19 @@ func sanitizeFileMetadata(value FileMetadataAutomationView) FileMetadataAutomati
 		value.Size = 0
 	}
 	return value
+}
+
+// fileReadText returns data as text when it is UTF-8 without NUL bytes. A
+// read cut at max_bytes may end inside a character; that partial character is
+// dropped.
+func fileReadText(data []byte, truncated bool) (string, bool) {
+	if truncated {
+		for cut := 0; cut < utf8.UTFMax-1 && len(data) > 0 && !utf8.Valid(data); cut++ {
+			data = data[:len(data)-1]
+		}
+	}
+	if !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
+		return "", false
+	}
+	return string(data), true
 }
