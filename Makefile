@@ -5,6 +5,20 @@ BINARY_NAME=openpoet
 BUILD_DIR=build
 MAIN_PATH=./cmd/openpoet
 
+# The versioned git hooks (pre-commit and pre-push publish guard, see
+# docs/publish-guard.md) are installed by any make run, so a fresh clone is
+# protected without remembering `make setup`. A different hooksPath is left
+# alone, with a warning.
+HOOKS_PATH := $(shell git config --get core.hooksPath 2>/dev/null)
+ifeq ($(HOOKS_PATH),)
+ifneq ($(shell git rev-parse --is-inside-work-tree 2>/dev/null),)
+$(shell git config core.hooksPath .githooks)
+$(info Git hooks configured (core.hooksPath=.githooks).)
+endif
+else ifneq ($(HOOKS_PATH),.githooks)
+$(warning core.hooksPath is $(HOOKS_PATH), not .githooks: the publish guard hooks are not active. Run: make setup)
+endif
+
 # Default target
 all: deps vendor-js build
 

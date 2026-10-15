@@ -36,7 +36,10 @@ reescrever o histórico.
 ## O guard automático
 
 `ops/publish-guard/guard.sh` roda nos hooks versionados em `.githooks/`
-(ativados por `make setup`, que faz `git config core.hooksPath .githooks`):
+(`core.hooksPath=.githooks`). Qualquer `make` os ativa sozinho num clone que
+ainda não tem hooks configurados; `make setup` faz o mesmo explicitamente. Se
+o clone já usa outro `core.hooksPath`, o `make` não mexe e avisa que o guard
+está inativo:
 
 | Hook / comando | O que verifica |
 |---|---|
@@ -52,10 +55,17 @@ Verificações:
   fechado**. Falsos positivos já revisados ficam em `.gitleaksignore`, por
   fingerprint. Só acrescente um item depois de revisar o achado.
 - **Conteúdo das linhas adicionadas** (e das mensagens de commit, nos modos
-  de range e push): IPv4 privado (10/8, 172.16/12, 192.168/16); o home e o
-  usuário da máquina atual (`$HOME`, `/home/<usuário>`, `/Users/<usuário>`,
-  `\Users\<usuário>`); e o **denylist local**.
-- **Arquivos:** `.env*` (exceto `.env.example`/`.sample`/`.template`), chaves e
+  de range e push): IPv4 privado (10/8, 172.16/12, 192.168/16); nomes de
+  host internos (`*.internal`, `*.intranet`, `*.corp`, `*.lan`,
+  `*.home.arpa` e URLs para `*.local`; `host.docker.internal` passa); o home
+  e o usuário da máquina atual (`$HOME`, `/home/<usuário>`, `/Users/<usuário>`,
+  `\Users\<usuário>`); o home de **qualquer** usuário nesses formatos, exceto
+  usuários neutros de fixture (`dev`, `user`, `developer`, `test`, `runner`,
+  `foo`, `example`…); links OAuth/OIDC com `code`, `state`, PKCE
+  (`code_challenge`/`code_verifier`) ou token na URL; e o **denylist local**.
+- **Arquivos:** os que o configsync gera a partir do setup local de agentes
+  (`CLAUDE.md`, `AGENTS.md`, `.claude/`, `.agents/`, `.codex/`, `.mcp.json`),
+  que ficam no `.gitignore`; `.env*` (exceto `.env.example`/`.sample`/`.template`), chaves e
   certificados, bancos, logs, dumps/HAR/pcap, arquivos de token, backups e
   SQL. Imagens, vídeos e PDFs só em `docs/images/` e `web/static/`. Binário
   acima de 512 KiB ou qualquer arquivo acima de 5 MiB é recusado.
@@ -86,11 +96,15 @@ minúsculas. Linhas vazias ou começando com `#` são ignoradas.
 `ops/publish-guard/guard_test.go`, exercita o guard e os hooks com
 repositórios descartáveis e um remoto bare local. Cobre:
 
-- conteúdo: IP privado (loopback passa), home da máquina, denylist sem
-  diferenciar maiúsculas, marcador de exceção;
-- arquivos: `.env` (com `.env.example` permitido), log, banco, imagem fora e
+- conteúdo: IP privado (loopback passa), home da máquina, home de outro
+  usuário em Linux/macOS/Windows (usuários de fixture passam), host interno
+  (`host.docker.internal` passa), link OAuth (query string comum passa),
+  denylist sem diferenciar maiúsculas, marcador de exceção;
+- arquivos: gerados pelo configsync (`AGENTS.md`, `.codex/`, `.agents/`), `.env` (com `.env.example` permitido), log, banco, imagem fora e
   dentro de `docs/images/`, binário grande, token detectado pelo gitleaks;
 - falha fechada sem gitleaks;
-- hooks: pre-commit bloqueando, mensagem de commit verificada, pre-push
+- hooks: pre-commit bloqueando (IP privado e link OAuth, sem criar o commit),
+  pre-commit deixando passar um commit limpo e um untrack, instalação pelo
+  `make` (e `core.hooksPath` próprio preservado, com aviso), mensagem de commit verificada, pre-push
   bloqueando sem que nada chegue ao remoto, push liberado depois de reescrever
   o commit local, e branch nova verificada.
