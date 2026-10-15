@@ -106,3 +106,26 @@ func TestScanCaughtUpWhenNoMatch(t *testing.T) {
 		t.Fatalf("no-match scan: matched=%d caughtUp=%v next=%d, want 0/true/700", len(matched), caughtUp, next)
 	}
 }
+
+// TestSessionWaitSettledCarriesTheTurnExcerpt pins that a wait answered by a
+// turn or attention event returns its excerpt, so a client can read the
+// agent's reply without a second call.
+func TestSessionWaitSettledCarriesTheTurnExcerpt(t *testing.T) {
+	event := func(eventType, sessionID string, payload map[string]any) automationEvent {
+		return automationEvent{EventType: eventType, Aggregate: eventEntityRef{Type: "session", ID: sessionID}, Payload: payload}
+	}
+	got, settled := sessionWaitSettled("s1", event("session.turn_completed", "s1", map[string]any{"last_message": "Relatório pronto.", "files_touched": []any{}}))
+	if !settled || got.State != "turn_complete" || got.LastMessage != "Relatório pronto." || got.SignalQuality != "exact" {
+		t.Fatalf("turn_completed = %+v, %v", got, settled)
+	}
+	got, settled = sessionWaitSettled("s1", event("session.awaiting_input", "s1", map[string]any{"excerpt": "Posso aplicar?"}))
+	if !settled || got.State != "awaiting_input" || got.Excerpt != "Posso aplicar?" || got.LastMessage != "" {
+		t.Fatalf("awaiting_input = %+v, %v", got, settled)
+	}
+	if _, settled := sessionWaitSettled("s1", event("session.turn_completed", "s2", nil)); settled {
+		t.Fatal("another session's turn must not settle the wait")
+	}
+	if _, settled := sessionWaitSettled("s1", event("session.status_changed", "s1", nil)); settled {
+		t.Fatal("a non-settling event must not settle the wait")
+	}
+}
