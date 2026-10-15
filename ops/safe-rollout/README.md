@@ -10,8 +10,8 @@ executado sem `--execute`; `apply` também exige o token exato gerado pelo
 (HEAD no `prepare`, `git_sha` do manifest no `apply`) na `main` e em
 `origin/main`. Aqui não há bypass.
 
-Este utilitário não substitui aprovação humana. As regras do `AGENTS.md`
-continuam valendo: deploy em `8081` só pode acontecer depois de autorização
+Este utilitário não substitui aprovação humana. As regras de deploy do
+projeto continuam valendo: deploy em `8081` só pode acontecer depois de autorização
 direta e explícita do usuário.
 
 ## Fluxo
