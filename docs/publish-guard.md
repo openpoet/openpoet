@@ -75,7 +75,11 @@ Customer names and private domains cannot live in a versioned file of a public
 repository, so the guard reads them from:
 
 - `.git/info/publish-denylist` (per clone), and
-- `~/.config/openpoet/publish-denylist` (per machine).
+- `~/.config/openpoet/publish-denylist` (per machine), and
+- the file named by `OPENPOET_PUBLISH_DENYLIST_FILE`, if set. CI uses this:
+  the `ci.yml` workflow writes the optional `PUBLISH_DENYLIST` repository
+  secret to a temporary file and points the variable at it (the secret is not
+  available to pull requests from forks).
 
 Each line is an extended regular expression, matched case-insensitively.
 Empty lines and lines starting with `#` are ignored.

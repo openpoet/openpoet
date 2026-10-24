@@ -1835,9 +1835,8 @@ func migrateV67(tx *sqlx.Tx) error {
 // migrateV68 — the resource registry + DB-backed port allocator. Live port/service
 // rows make allocation restart-safe (a partial-unique index forbids two live rows
 // on the same port), and RESERVED rows encode prose conventions as data: the port
-// allocator refuses to hand out 8080/8081 (user app / PRODUCTION) or 8090. A
-// manifest that explicitly demands a reserved port is refused. Turning "8081 is
-// production, never touch it" from prose into a row is the point.
+// allocator refuses to hand out the reserved ports (8080/8081/8090). A
+// manifest that explicitly demands a reserved port is refused.
 func migrateV68(tx *sqlx.Tx) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS environment_resources (
@@ -1860,8 +1859,8 @@ func migrateV68(tx *sqlx.Tx) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_env_resources_live_port
 			ON environment_resources(value) WHERE kind='port' AND status != 'released'`,
 		`CREATE INDEX IF NOT EXISTS idx_env_resources_ws ON environment_resources(workspace_id)`,
-		// Reserved-port rows: 8080 (user's bun app), 8081 (PRODUCTION), 8090 (other
-		// bun app). The allocator must never return these; a manifest demanding one
+		// Reserved-port rows (8080, 8081, 8090). The allocator must never return
+		// these; a manifest demanding one
 		// is refused with port_reserved.
 		`INSERT OR IGNORE INTO environment_resources (project_id, workspace_id, kind, name, value, driver, status)
 			VALUES (0, NULL, 'port', 'reserved:8080', '8080', 'none', 'reserved'),

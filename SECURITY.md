@@ -56,10 +56,18 @@ whether something is a vulnerability.
 - **Credentials are encrypted at rest.** SSH passwords and keys, API keys, MCP
   server environments and other secrets stored in the SQLite database are
   encrypted with AES-256-GCM using a key derived from `OPENPOET_ENCRYPT_KEY`.
-  If the variable is not set, the key is derived from the hostname and user
-  name, which is convenient but weak: set your own random
-  `OPENPOET_ENCRYPT_KEY` and keep it safe. Changing it later makes existing
-  stored credentials unreadable.
+  When the variable is not set, OpenPoet reads `openpoet.key` next to the
+  database, creating it with a random key (mode 0600) on a fresh install.
+  Installs that predate the key file keep their legacy hostname/user-derived
+  key in that file and log a warning; rotate it with
+  `openpoet-secret-migrate rotate-key` (see its `-h`). Back up the key file
+  with the database: without it the stored credentials are unreadable.
+- **Only this machine's names are accepted.** Requests whose `Host` header is
+  not an IP address, `localhost` or the machine's hostname are refused, which
+  blocks DNS-rebinding attacks from web pages. If you reach OpenPoet through a
+  reverse proxy or a custom domain, list the names in `OPENPOET_ALLOWED_HOSTS`
+  (comma-separated). Cross-origin browser requests to the API, `/mcp` and the
+  WebSocket streams are refused, and no CORS headers are sent.
 - **Agents act with your permissions.** Claude Code, Codex and other agent
   CLIs started by OpenPoet run as your user. OpenPoet's approval flows reduce
   surprises, but they are not a sandbox.

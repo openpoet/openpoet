@@ -2,7 +2,7 @@
 # E2E validation of automatic worktree isolation, against a REAL server, REAL git
 # repositories and a FRESH database.
 #
-# Guardrails: never port 8080/8081/8090 (dev + production + the user's apps), never
+# Guardrails: never the reserved ports 8080/8081/8090, never
 # the production DB, never a real registered project — a fresh DB is born with zero
 # projects, which is the structural isolation.
 #

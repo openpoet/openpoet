@@ -93,7 +93,7 @@ openpoet benchmark     Run benchmarks
 | Flag | Default | Description |
 |---|---|---|
 | `-port` | `8080` | Port to listen on |
-| `-bind` | `0.0.0.0` | Address to bind to |
+| `-bind` | `localhost` | Address to bind to (`0.0.0.0` exposes OpenPoet to your whole network, see [SECURITY.md](SECURITY.md)) |
 | `-db` | `openpoet.db` | SQLite database path |
 | `-openai-key` | | OpenAI API key for voice transcription |
 | `-mcp-http` | `false` | Enable MCP HTTP endpoint at /mcp |

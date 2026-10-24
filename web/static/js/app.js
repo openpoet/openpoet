@@ -6581,7 +6581,7 @@ class OpenPoet {
                     <textarea class="form-input" name="compose_yaml" rows="12" spellcheck="false"
                         style="font-family: monospace; font-size: 12px;">${this.escapeHtml(this._defaultComposeYAML())}</textarea>
                     <small style="display:block;margin-top:6px;font-size:12px;color:var(--color-text-secondary,#999);">
-                        Host ports 8080, 8081 and 8090 are reserved and will be refused. Ask the AI assistant to generate this for a specific stack.
+                        Ports reserved by this installation (8080 and 8081 by default) will be refused. Ask the AI assistant to generate this for a specific stack.
                     </small>
                 </div>
                 <div class="form-group">
