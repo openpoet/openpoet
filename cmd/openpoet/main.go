@@ -1057,6 +1057,7 @@ func main() {
 		r.Post("/ai/initiate-skill-customization", aiHandler.HandleInitiateSkillCustomization)
 		r.Post("/ai/generate-skill", aiHandler.HandleGenerateSkill)
 		r.Post("/ai/validate-skill", aiHandler.HandleValidateSkill)
+		r.Get("/ai/tool-definitions", aiHandler.HandleToolDefinitions)
 
 		// AI Suggestions
 		r.Get("/ai/suggestions", aiHandler.ListSuggestions)

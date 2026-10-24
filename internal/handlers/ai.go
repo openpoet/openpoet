@@ -3924,6 +3924,37 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+// HandleToolDefinitions returns the chat tool definitions as JSON.
+// Used by the chat panel (web/static/js/ai-chat.js) to list the available tools.
+// Applies the chat tool policy to filter available tools.
+func (h *AIHandler) HandleToolDefinitions(w http.ResponseWriter, r *http.Request) {
+	tools := llm.ChatTools()
+
+	// Apply chat tool policy
+	policyStr, _ := h.api.db.GetSetting(r.Context(), "mcp_tool_policy_chat")
+	if policyStr != "" {
+		policy := mcp.ParsePolicy(policyStr)
+		var names []string
+		for _, t := range tools {
+			names = append(names, t.Name)
+		}
+		allowed := mcp.FilterByPolicy(policy, names)
+		allowedSet := make(map[string]bool, len(allowed))
+		for _, n := range allowed {
+			allowedSet[n] = true
+		}
+		var filtered []llm.ToolDefinition
+		for _, t := range tools {
+			if allowedSet[t.Name] {
+				filtered = append(filtered, t)
+			}
+		}
+		tools = filtered
+	}
+
+	respondJSON(w, http.StatusOK, tools)
+}
+
 // buildDocCard checks if a tool execution produced a document link and returns
 // metadata for a native doc_card SSE event. Returns nil if not applicable.
 func (h *AIHandler) buildDocCard(toolName, result string, input map[string]interface{}) map[string]interface{} {
