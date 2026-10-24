@@ -2,8 +2,7 @@
   "schema_version": 1,
   "source": {
     "frontend": "web/static/js/*.js",
-    "routes": "cmd/openpoet/main.go",
-    "generated_for": "#700"
+    "routes": "cmd/openpoet/main.go"
   },
   "routes": [
     {"route":"/api/projects","method":"POST","capability":"projects.create","domain":"projects","risk":"R4","scopes":["projects:write","credentials:write"],"application_service":"ProjectService","ui_binding":"shared_application_service","status":"implemented"},
