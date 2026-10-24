@@ -65,10 +65,10 @@ vendor-js:
 	@mkdir -p web/static/vendor
 	@if [ ! -f web/static/vendor/xterm.js ]; then \
 		echo "Downloading xterm.js..."; \
-		curl -sL https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js -o web/static/vendor/xterm.js; \
-		curl -sL https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css -o web/static/vendor/xterm.css; \
-		curl -sL https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js -o web/static/vendor/xterm-addon-fit.js; \
-		curl -sL https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js -o web/static/vendor/xterm-addon-web-links.js; \
+		curl -sL https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js -o web/static/vendor/xterm.js; \
+		curl -sL https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css -o web/static/vendor/xterm.css; \
+		curl -sL https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.js -o web/static/vendor/xterm-addon-fit.js; \
+		curl -sL https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.12.0/lib/addon-web-links.js -o web/static/vendor/xterm-addon-web-links.js; \
 		echo "Vendor libraries downloaded."; \
 	else \
 		echo "Vendor libraries already exist."; \
