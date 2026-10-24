@@ -210,11 +210,19 @@ func main() {
 	}
 	runCodexTranscriptCleanup(ctx, db)
 
-	// Initialize encryptor
-	encryptor, err := security.NewEncryptor(cfg.EncryptKey)
+	// Initialize encryptor: OPENPOET_ENCRYPT_KEY, else the key file next to the
+	// database, else a key created there (legacy key for existing encrypted
+	// data, random for a fresh install). See internal/security/keyfile.go.
+	encryptor, keySource, err := security.LoadEncryptor(security.KeyOptions{
+		EnvKey:        cfg.EncryptKey,
+		KeyFile:       security.KeyFilePath(cfg.DBPath),
+		FindEncrypted: func() (string, string, bool, error) { return db.FindEncryptedValue(ctx) },
+		Logf:          log.Printf,
+	})
 	if err != nil {
 		log.Fatalf("Failed to initialize encryptor: %v", err)
 	}
+	log.Printf("[Security] Encryption key source: %s", keySource)
 
 	// Initialize WebSocket hub
 	hub := websocket.NewHub()

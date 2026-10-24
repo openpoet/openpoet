@@ -351,7 +351,16 @@ func migrateRuntimeSecrets(ctx context.Context, dbPath, encryptKey string) (data
 		return database.LegacyRuntimeSecretMigrationReport{}, err
 	}
 	defer db.Close()
-	encryptor, err := security.NewEncryptor(encryptKey)
+	// Same key resolution as the runtime (env, key file next to the DB, legacy
+	// or fresh key), so the migrated envelopes decrypt after the restart.
+	encryptor, _, err := security.LoadEncryptor(security.KeyOptions{
+		EnvKey:        encryptKey,
+		KeyFile:       security.KeyFilePath(dbPath),
+		FindEncrypted: func() (string, string, bool, error) { return db.FindEncryptedValue(ctx) },
+		Logf: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, format+"\n", args...)
+		},
+	})
 	if err != nil {
 		return database.LegacyRuntimeSecretMigrationReport{}, errors.New("initialize rollout secret encryption")
 	}

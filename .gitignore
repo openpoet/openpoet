@@ -6,6 +6,12 @@
 *.db
 *.db-shm
 *.db-wal
+# Encryption key file the server creates next to the database when
+# OPENPOET_ENCRYPT_KEY is unset (internal/security/keyfile.go). It decrypts
+# every stored credential — never commit it.
+openpoet.key
+openpoet.key.*
+.openpoet.key.tmp-*
 
 # Logs
 *.log
