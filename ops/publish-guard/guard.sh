@@ -28,7 +28,9 @@
 #      state, PKCE challenge or token, or any pattern in the LOCAL denylist
 #      (client names, internal domains), one extended regex per line, read
 #      from $(git rev-parse --git-common-dir)/info/publish-denylist and
-#      ~/.config/openpoet/publish-denylist. The denylist is never versioned.
+#      ~/.config/openpoet/publish-denylist, plus the file named by
+#      $OPENPOET_PUBLISH_DENYLIST_FILE when it is set (CI writes a secret
+#      there). The denylist is never versioned.
 #      A line containing the marker `publish-guard:allow` is skipped (visible
 #      in review; use only for deliberate fixtures).
 #   3. added/modified files must not be files configsync generates from the
@@ -67,8 +69,8 @@ if [ -n "${HOME:-}" ] && [ "$HOME" != "/" ] && [ "${#HOME}" -ge 6 ]; then LITERA
 ME="$(id -un 2>/dev/null || true)"
 if [ "${#ME}" -ge 3 ]; then LITERALS+=("/home/$ME" "/Users/$ME" "\\Users\\$ME"); fi
 DENYLIST=()
-for f in "$(git rev-parse --git-common-dir)/info/publish-denylist" "${HOME:-/nonexistent}/.config/openpoet/publish-denylist"; do
-    [ -f "$f" ] || continue
+for f in "$(git rev-parse --git-common-dir)/info/publish-denylist" "${HOME:-/nonexistent}/.config/openpoet/publish-denylist" "${OPENPOET_PUBLISH_DENYLIST_FILE:-}"; do
+    [ -n "$f" ] && [ -f "$f" ] || continue
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%%$'\r'}"
         case "$line" in ''|'#'*) continue ;; esac
