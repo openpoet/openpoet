@@ -630,7 +630,6 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Compress(5))
 	r.Use(automation.CapturePeerAddress)
-	r.Use(middleware.RealIP)
 
 	// DEBUG: Log static file requests with Content-Type and User-Agent
 	if *debugFlag {
@@ -654,23 +653,10 @@ func main() {
 		})
 	}
 
-	// CORS for development
-	r.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasPrefix(r.URL.Path, "/api/automation/") {
-				next.ServeHTTP(w, r)
-				return
-			}
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type")
-			if r.Method == "OPTIONS" {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	})
+	// Same-origin only: no CORS headers are sent, the Host header must name this
+	// machine (DNS-rebinding defence) and requests carrying a foreign Origin are
+	// refused. Must run before tunnel.AuthMiddleware, which strips the tunnel header.
+	r.Use(handlers.HostOriginGuard(allowedHosts(cfg.Bind)))
 
 	// Tunnel auth middleware (only activates for tunnel-originated requests)
 	r.Use(tunnel.AuthMiddleware(db, []byte(jwtSecret)))
@@ -1063,8 +1049,6 @@ func main() {
 		r.Post("/ai/initiate-skill-customization", aiHandler.HandleInitiateSkillCustomization)
 		r.Post("/ai/generate-skill", aiHandler.HandleGenerateSkill)
 		r.Post("/ai/validate-skill", aiHandler.HandleValidateSkill)
-		r.Post("/ai/execute-tool", aiHandler.HandleExecuteTool)
-		r.Get("/ai/tool-definitions", aiHandler.HandleToolDefinitions)
 
 		// AI Suggestions
 		r.Get("/ai/suggestions", aiHandler.ListSuggestions)
@@ -1427,7 +1411,15 @@ func loadOrGenerateJWTSecret(db *database.DB) string {
 // or generates a new one. Presenting this secret as the openpoet_ui cookie is
 // what authorizes a browser (same-origin) to perform REST mutations.
 func loadOrGenerateUICookieSecret(db *database.DB) string {
-	secret, _ := db.GetSetting(context.Background(), "ui_cookie_secret")
+	ctx := context.Background()
+	secret, _ := db.GetSetting(ctx, "ui_cookie_secret")
+	// Secrets minted before the settings endpoint stopped returning them were
+	// readable by any local caller; replace them once. Browsers pick up the
+	// new cookie on their next page load.
+	if rotated, _ := db.GetSetting(ctx, "ui_cookie_secret_rotated"); rotated != "1" {
+		secret = ""
+		db.SetSetting(ctx, "ui_cookie_secret_rotated", "1")
+	}
 	if secret == "" {
 		generatedKey, err := security.GenerateKey()
 		if err != nil {
@@ -1435,9 +1427,20 @@ func loadOrGenerateUICookieSecret(db *database.DB) string {
 			return ""
 		}
 		secret = generatedKey
-		db.SetSetting(context.Background(), "ui_cookie_secret", secret)
+		db.SetSetting(ctx, "ui_cookie_secret", secret)
 	}
 	return secret
+}
+
+// allowedHosts returns the extra Host names HostOriginGuard accepts besides IP
+// literals, localhost and the OS hostname: the bind address when it is a name,
+// plus the comma-separated OPENPOET_ALLOWED_HOSTS ("*" disables the check).
+func allowedHosts(bind string) []string {
+	hosts := strings.Split(os.Getenv("OPENPOET_ALLOWED_HOSTS"), ",")
+	if bind != "" {
+		hosts = append(hosts, bind)
+	}
+	return hosts
 }
 
 // decryptSetting reads an encrypted setting, auto-migrating plaintext values.

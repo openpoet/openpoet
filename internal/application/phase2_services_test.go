@@ -319,3 +319,35 @@ func TestPhase2ServicesValidateR4PoliciesSharesAndCRUD(t *testing.T) {
 		t.Fatalf("sync orchestration failed: %+v", syncer)
 	}
 }
+
+func TestSettingsViewHidesUnlistedSecrets(t *testing.T) {
+	ctx := context.Background()
+	db := applicationTestDB(t)
+	for key, value := range map[string]string{
+		"ui_cookie_secret":        "cookie-secret",
+		"tunnel_enc_key":          "tunnel-cipher",
+		"tunnel_enc_key_iv":       "tunnel-iv",
+		"future_service_token":    "future-token",
+		"vapid_public_key":        "public-vapid",
+		"deploy.last_restart_key": "restart-1",
+		"ai_model":                "model",
+	} {
+		if err := db.SetSetting(ctx, key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	settings, err := NewConfigurationService(db, applicationEncryptor(t), nil, nil, nil).Settings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"ui_cookie_secret", "tunnel_enc_key", "tunnel_enc_key_iv", "future_service_token"} {
+		if _, ok := settings[key]; ok {
+			t.Fatalf("settings view exposed %s", key)
+		}
+	}
+	for _, key := range []string{"vapid_public_key", "deploy.last_restart_key", "ai_model"} {
+		if _, ok := settings[key]; !ok {
+			t.Fatalf("settings view dropped public key %s", key)
+		}
+	}
+}

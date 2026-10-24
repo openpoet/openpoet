@@ -89,7 +89,33 @@ func (s *ConfigurationService) Settings(ctx context.Context) (map[string]string,
 	}
 	delete(values, "mcp_api_key")
 	delete(values, "mcp_api_key_iv")
+	for key := range values {
+		if secretSettingKey(key) {
+			delete(values, key)
+		}
+	}
 	return values, nil
+}
+
+// secretSettingKey catches credentials stored as settings that the explicit
+// lists above do not name (the UI cookie secret, tunnel keys and any future
+// *_secret/*_token/*_key value), so a new secret is never served by default.
+// Public material that the UI needs is listed in publicSettingKeys.
+func secretSettingKey(key string) bool {
+	if _, ok := publicSettingKeys[key]; ok {
+		return false
+	}
+	for _, suffix := range []string{"_secret", "_token", "_password", "_key", "_iv"} {
+		if strings.HasSuffix(key, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+var publicSettingKeys = map[string]struct{}{
+	"vapid_public_key":        {},
+	"deploy.last_restart_key": {}, // restart idempotency marker, not a credential
 }
 
 func (s *ConfigurationService) UpdateSettings(ctx context.Context, boundary R4Boundary, input map[string]string) error {

@@ -2686,7 +2686,7 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 				"IMPORTANT: Task '%s' has NOT been created yet — it will be created after user approval. "+
 					"Do NOT say the task was created.", title), nil
 		}
-		// Fallback: no collector available (e.g. called from HandleExecuteTool HTTP endpoint)
+		// Fallback: no collector available (non-streaming caller)
 		return "", fmt.Errorf("task creation requires a streaming context")
 
 	case "update_task":
@@ -3922,69 +3922,6 @@ func (h *AIHandler) executeCustomToolSSH(ctx context.Context, project *database.
 // shellQuote wraps a string in single quotes for safe shell usage.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
-}
-
-// HandleExecuteTool is an HTTP endpoint that Node.js SDK sidecar calls to execute
-// OpenPoet tools. It proxies tool calls to the existing executeTool implementation.
-func (h *AIHandler) HandleExecuteTool(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Name           string         `json:"name"`
-		Args           map[string]any `json:"args"`
-		ConversationID int64          `json:"conversation_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
-		return
-	}
-	if input.Args == nil {
-		input.Args = make(map[string]any)
-	}
-	service, ok := h.sharedAIAssistantService(w)
-	if !ok {
-		return
-	}
-	ctx, cancel := context.WithTimeout(platformUIContext(r), 30*time.Second)
-	defer cancel()
-	result, err := service.ExecuteTool(ctx, application.AIToolExecutionRequest{
-		Name: input.Name, Arguments: input.Args, ConversationID: input.ConversationID,
-		Authorization: platformUIAuthorization(r),
-	})
-	if err != nil {
-		respondJSON(w, http.StatusOK, map[string]any{"result": "", "error": err.Error()})
-		return
-	}
-	respondJSON(w, http.StatusOK, map[string]any{"result": result.Output, "error": ""})
-}
-
-// HandleToolDefinitions returns the chat tool definitions as JSON.
-// Used by the Node.js SDK sidecar to register tools at startup.
-// Applies the chat tool policy to filter available tools.
-func (h *AIHandler) HandleToolDefinitions(w http.ResponseWriter, r *http.Request) {
-	tools := llm.ChatTools()
-
-	// Apply chat tool policy
-	policyStr, _ := h.api.db.GetSetting(r.Context(), "mcp_tool_policy_chat")
-	if policyStr != "" {
-		policy := mcp.ParsePolicy(policyStr)
-		var names []string
-		for _, t := range tools {
-			names = append(names, t.Name)
-		}
-		allowed := mcp.FilterByPolicy(policy, names)
-		allowedSet := make(map[string]bool, len(allowed))
-		for _, n := range allowed {
-			allowedSet[n] = true
-		}
-		var filtered []llm.ToolDefinition
-		for _, t := range tools {
-			if allowedSet[t.Name] {
-				filtered = append(filtered, t)
-			}
-		}
-		tools = filtered
-	}
-
-	respondJSON(w, http.StatusOK, tools)
 }
 
 // buildDocCard checks if a tool execution produced a document link and returns

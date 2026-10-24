@@ -222,9 +222,9 @@ func TestCollaborationPlatformMutationMetadataMatchesManifest(t *testing.T) {
 		counts[route.ApplicationService]++
 		checked++
 	}
-	wantCounts := map[string]int{"DocumentService": 2, "ProposalService": 9, "AIAssistantService": 17, "NotificationService": 2, "NotificationDeliveryService": 4, "TokenUsageService": 1}
-	if checked != 35 || !reflect.DeepEqual(counts, wantCounts) {
-		t.Fatalf("checked mutations=%d counts=%v, want 35/%v", checked, counts, wantCounts)
+	wantCounts := map[string]int{"DocumentService": 2, "ProposalService": 9, "AIAssistantService": 16, "NotificationService": 2, "NotificationDeliveryService": 4, "TokenUsageService": 1}
+	if checked != 34 || !reflect.DeepEqual(counts, wantCounts) {
+		t.Fatalf("checked mutations=%d counts=%v, want 34/%v", checked, counts, wantCounts)
 	}
 }
 

@@ -389,6 +389,9 @@ func (c *Client) Send(msg *Message) {
 
 // UpgradeAndServe upgrades an HTTP connection to WebSocket and starts the client
 func UpgradeAndServe(hub *Hub, w http.ResponseWriter, r *http.Request) (*Client, error) {
+	// Origin is enforced by handlers.HostOriginGuard before the upgrade: local
+	// pages must match the Host, and tunnel pages legitimately carry the relay's
+	// origin, which the library's same-host check would reject.
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: []string{"*"},
 	})

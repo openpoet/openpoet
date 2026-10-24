@@ -81,8 +81,9 @@ func resolveActorExemptPath(path string) bool {
 // four credentials — a per-session opst1_ bearer, an opav1_ automation bearer,
 // the per-install UI cookie, or a paired-device session cookie (the tunnel
 // principal) — and threads the verified actor into the request context so the
-// audit trail records who really acted. Reads stay open on loopback; mutations
-// without any credential are rejected 401.
+// audit trail records who really acted. Reads (REST and /ws streams) stay open
+// to loopback peers only; a LAN peer must present a credential for them too,
+// and mutations without any credential are rejected 401.
 func ResolveActorMiddleware(db *database.DB, jwtSecret []byte, uiCookieSecret string) func(http.Handler) http.Handler {
 	uiSecretDigest := sha256.Sum256([]byte(uiCookieSecret))
 	return func(next http.Handler) http.Handler {
@@ -91,8 +92,12 @@ func ResolveActorMiddleware(db *database.DB, jwtSecret []byte, uiCookieSecret st
 				next.ServeHTTP(w, r.WithContext(withResolvedActor(r.Context(), info)))
 				return
 			}
-			if !resolveActorMutatingMethod(r.Method) || resolveActorExemptPath(r.URL.Path) {
-				next.ServeHTTP(w, r) // reads and exempt paths pass through unresolved
+			if resolveActorExemptPath(r.URL.Path) && !strings.HasPrefix(r.URL.Path, "/ws/") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if !resolveActorMutatingMethod(r.Method) && requestFromLoopback(r) {
+				next.ServeHTTP(w, r) // reads stay open to processes on this machine
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
