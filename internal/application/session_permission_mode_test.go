@@ -42,7 +42,7 @@ func TestSetPermissionModeRecordsWhoChangedWhatAndWhy(t *testing.T) {
 	service := permissionModeService(settings, effects)
 
 	result, err := service.SetPermissionMode(context.Background(), SetSessionPermissionModeCommand{
-		SessionID: "s1", Mode: "accept_edits", AuthorizationRef: "ain:example-292", Authorization: phase3Approval(),
+		SessionID: "s1", Mode: "accept_edits", AuthorizationRef: "ain:example-1", Authorization: phase3Approval(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func TestSetPermissionModeRecordsWhoChangedWhatAndWhy(t *testing.T) {
 	}
 	record := effects.records[0]
 	if record.Outcome != "changed" || record.From != "auto" || record.To != "acceptEdits" || record.Requested != "acceptEdits" ||
-		record.AuthorizationRef != "ain:example-292" || record.Reason != "requested operation" || record.ApprovedBy != "owner" ||
+		record.AuthorizationRef != "ain:example-1" || record.Reason != "requested operation" || record.ApprovedBy != "owner" ||
 		record.Actor.ID != "assistant" || record.TaskID != 866 || record.ProjectID != 7 {
 		t.Fatalf("record = %+v", record)
 	}
@@ -78,11 +78,11 @@ func TestSetPermissionModeRequiresReasonReferenceAndAnOwnerTierCaller(t *testing
 		command SetSessionPermissionModeCommand
 		code    string
 	}{
-		{"no reason", SetSessionPermissionModeCommand{SessionID: "s1", Mode: "plan", AuthorizationRef: "ain:example-292", Authorization: noReason}, "reason_required"},
+		{"no reason", SetSessionPermissionModeCommand{SessionID: "s1", Mode: "plan", AuthorizationRef: "ain:example-1", Authorization: noReason}, "reason_required"},
 		{"no reference", SetSessionPermissionModeCommand{SessionID: "s1", Mode: "plan", Authorization: phase3Approval()}, "authorization_ref_required"},
-		{"reference with spaces", SetSessionPermissionModeCommand{SessionID: "s1", Mode: "plan", AuthorizationRef: "ain: 292", Authorization: phase3Approval()}, "authorization_ref_required"},
-		{"session agent", SetSessionPermissionModeCommand{SessionID: "s1", Mode: "plan", AuthorizationRef: "ain:example-292", Authorization: sessionTier}, "action_approval_required"},
-		{"bypass", SetSessionPermissionModeCommand{SessionID: "s1", Mode: "bypassPermissions", AuthorizationRef: "ain:example-292", Authorization: phase3Approval()}, "session_setting_invalid"},
+		{"reference with spaces", SetSessionPermissionModeCommand{SessionID: "s1", Mode: "plan", AuthorizationRef: "ain: example-1", Authorization: phase3Approval()}, "authorization_ref_required"},
+		{"session agent", SetSessionPermissionModeCommand{SessionID: "s1", Mode: "plan", AuthorizationRef: "ain:example-1", Authorization: sessionTier}, "action_approval_required"},
+		{"bypass", SetSessionPermissionModeCommand{SessionID: "s1", Mode: "bypassPermissions", AuthorizationRef: "ain:example-1", Authorization: phase3Approval()}, "session_setting_invalid"},
 	}
 	for _, tc := range cases {
 		_, err := service.SetPermissionMode(context.Background(), tc.command)
@@ -105,7 +105,7 @@ func TestSetPermissionModeRecordsAFailedAttemptThatPressedKeys(t *testing.T) {
 	service := permissionModeService(settings, effects)
 
 	_, err := service.SetPermissionMode(context.Background(), SetSessionPermissionModeCommand{
-		SessionID: "s1", Mode: "plan", AuthorizationRef: "ain:example-292", Authorization: phase3Approval(),
+		SessionID: "s1", Mode: "plan", AuthorizationRef: "ain:example-1", Authorization: phase3Approval(),
 	})
 	if appErr, ok := err.(*Error); !ok || appErr.Code != "permission_mode_unconfirmed" || appErr.Kind != ErrorConflict {
 		t.Fatalf("err = %v", err)
@@ -121,7 +121,7 @@ func TestSetPermissionModeRecordsAFailedAttemptThatPressedKeys(t *testing.T) {
 	settings.change = runtime.PermissionModeChange{From: "auto", To: "auto"}
 	settings.err = fmt.Errorf("%w: answer it first", runtime.ErrSessionAwaitingInput)
 	_, err = service.SetPermissionMode(context.Background(), SetSessionPermissionModeCommand{
-		SessionID: "s1", Mode: "plan", AuthorizationRef: "ain:example-292", Authorization: phase3Approval(),
+		SessionID: "s1", Mode: "plan", AuthorizationRef: "ain:example-1", Authorization: phase3Approval(),
 	})
 	if appErr, ok := err.(*Error); !ok || appErr.Code != "session_awaiting_input" {
 		t.Fatalf("err = %v", err)
@@ -136,7 +136,7 @@ func TestSetPermissionModeAlreadyInModeIsUnchanged(t *testing.T) {
 	effects := &permissionModeEffects{}
 	service := permissionModeService(settings, effects)
 	result, err := service.SetPermissionMode(context.Background(), SetSessionPermissionModeCommand{
-		SessionID: "s1", Mode: "acceptEdits", AuthorizationRef: "task:867", Authorization: phase3Approval(),
+		SessionID: "s1", Mode: "acceptEdits", AuthorizationRef: "task:123", Authorization: phase3Approval(),
 	})
 	if err != nil || result.Changed || result.To != "acceptEdits" {
 		t.Fatalf("result=%+v err=%v", result, err)

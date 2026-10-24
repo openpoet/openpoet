@@ -440,27 +440,27 @@ func deployEventFields(record *deployrecord.Record, action string) map[string]an
 // continuationPrompt is typed into a session whose turn the restart cut.
 // It is one line: the terminal submits on newline.
 func continuationPrompt(cause string, record *deployrecord.Record, bootAt time.Time, requester bool) string {
-	reason := "reinício do serviço (crash, reboot ou restart manual)"
+	reason := "service restart (crash, reboot or manual restart)"
 	if cause == "deploy" && record != nil {
-		reason = "deploy; resultado: " + record.Outcome()
+		reason = "deploy; result: " + record.Outcome()
 		if requester {
-			reason += " — foi o deploy que você mesmo disparou"
+			reason += " — it was the deploy you triggered yourself"
 		}
 	}
-	return fmt.Sprintf("[OpenPoet] O servidor do OpenPoet reiniciou durante o seu turno (%s; motivo: %s). "+
-		"Esta sessão foi retomada com --resume e qualquer comando que estava rodando foi interrompido. "+
-		"Confira o estado atual (git, arquivos, processos, deploy) antes de repetir qualquer efeito e continue de onde parou.",
-		bootAt.Format("02/01 15:04"), reason)
+	return fmt.Sprintf("[OpenPoet] The OpenPoet server restarted during your turn (%s; reason: %s). "+
+		"This session was resumed with --resume and any command that was running was interrupted. "+
+		"Check the current state (git, files, processes, deploy) before repeating any side effect, then continue where you left off.",
+		bootAt.Format("2006-01-02 15:04"), reason)
 }
 
 // deployNoticePrompt tells an idle session the result of the deploy it ran.
 func deployNoticePrompt(record *deployrecord.Record, restarted bool) string {
 	prefix := ""
 	if restarted {
-		prefix = "O servidor reiniciou por causa desse deploy e esta sessão foi retomada com --resume. "
+		prefix = "The server restarted because of this deploy and this session was resumed with --resume. "
 	}
-	return fmt.Sprintf("[OpenPoet] O deploy que você disparou (%s) terminou: %s. %s"+
-		"Faça a verificação pós-deploy (./.scripts/deploy.sh --status e o que mais a task pedir) e registre o resultado na task/relatório.",
+	return fmt.Sprintf("[OpenPoet] The deploy you triggered (%s) finished: %s. %s"+
+		"Run the post-deploy verification (your deploy tool's status check and whatever else the task asks for) and record the result in the task or report.",
 		record.ID, record.Outcome(), prefix)
 }
 

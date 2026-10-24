@@ -21,8 +21,8 @@ func TestClaudeConfigDir(t *testing.T) {
 }
 
 func TestResolveRemoteJSONLPathUsesConfigDir(t *testing.T) {
-	got := ResolveRemoteJSONLPath("/workspace/external-client", "abc", "/home/developer/.claude-dev")
-	want := "/home/developer/.claude-dev/projects/-workspace-external-client/abc.jsonl"
+	got := ResolveRemoteJSONLPath("/workspace/example-app", "abc", "/home/developer/.claude-dev")
+	want := "/home/developer/.claude-dev/projects/-workspace-example-app/abc.jsonl"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

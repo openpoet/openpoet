@@ -385,11 +385,11 @@ func main() {
 		if len(inc.Sessions) > 0 {
 			sessionID = inc.Sessions[0]
 		}
-		body := fmt.Sprintf("Incidente %s: %s (%s) — %s", inc.ID, inc.Rule, inc.Severity, inc.ScopeKey)
-		if err := notifService.Send(ctx, sessionID, "warning", "Conflito entre sessões detectado", body, ""); err != nil {
+		body := fmt.Sprintf("Incident %s: %s (%s) — %s", inc.ID, inc.Rule, inc.Severity, inc.ScopeKey)
+		if err := notifService.Send(ctx, sessionID, "warning", "Conflict between sessions detected", body, ""); err != nil {
 			log.Printf("[Coordinator] escalation notification failed: %v", err)
 		}
-		if _, err := aiHandler.CreateProactiveNotification(ctx, "warning", "conflict", "Conflito entre sessões detectado", body, nil, map[string]interface{}{
+		if _, err := aiHandler.CreateProactiveNotification(ctx, "warning", "conflict", "Conflict between sessions detected", body, nil, map[string]interface{}{
 			"incident_id": inc.ID,
 			"rule":        inc.Rule,
 			"severity":    inc.Severity,

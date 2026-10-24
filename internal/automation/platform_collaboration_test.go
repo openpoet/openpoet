@@ -456,7 +456,7 @@ func TestCollaborationApprovedToolExecutionUsesApplicationServiceAndRedactsOutpu
 	result, err := DispatchPlatformCapability(context.Background(), registry, PlatformDispatchRequest{
 		Capability: "ai.execute_tool", Target: json.RawMessage(`{}`),
 		Payload: json.RawMessage(`{"name":"safe.fake","arguments":{"value":"input"},"conversation_id":41}`),
-		Actor:   collaborationActor(collaborationDefinitionsForTest()), Reason: "president approved fake tool",
+		Actor:   collaborationActor(collaborationDefinitionsForTest()), Reason: "owner approved fake tool",
 		Approval: collaborationApproval(t),
 	})
 	if err != nil {

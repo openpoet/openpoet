@@ -413,7 +413,7 @@ const sessionSendInputNotes = "Types text into the session's agent and, by defau
 
 const sessionSetPermissionModeNotes = "Switches a running Claude Code session's permission mode (auto, acceptEdits, default, plan) with the session's own Shift+Tab cycle, reading the mode indicator on its screen after every press; " +
 	"the result's to is that read-back, never assumed. bypassPermissions and dontAsk are never set this way. " +
-	"Policy approval, no approval_token, but the command needs a reason and correlation_id set to the owner's authorization reference (e.g. ain:example-292); both are kept with who changed it, from and to, " +
+	"Policy approval, no approval_token, but the command needs a reason and correlation_id set to the owner's authorization reference (e.g. ain:example-1); both are kept with who changed it, from and to, " +
 	"in the event outbox (platform.session.permission_mode_recorded, also written for no-ops and for failed attempts that pressed keys; platform.session.permission_mode_changed signals an actual change) and in the linked task's history (session_permission_mode_changed). " +
 	"Refused with session_awaiting_input while a question is open (answer it first); session_setting_unsupported when the target is not offered by the session's cycle (e.g. auto mode unavailable; the error names the mode it ended in) or the backend is not claude_code; " +
 	"permission_mode_unconfirmed when no indicator repainted (re-read sessions.get permission_mode). Already in the mode returns changed false with no key pressed. The current mode is permission_mode in sessions.get."

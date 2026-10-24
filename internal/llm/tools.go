@@ -923,7 +923,7 @@ func AllToolDefs() []ToolDef {
 						Description: "Target permission mode (default is shown as manual mode)",
 						Enum:        []string{"auto", "acceptEdits", "default", "plan"},
 					},
-					"authorization_ref": {Type: "string", Description: "Reference to the owner's authorization, e.g. ain:example-292"},
+					"authorization_ref": {Type: "string", Description: "Reference to the owner's authorization, e.g. ain:example-1"},
 					"reason":            {Type: "string", Description: "Why the mode is being changed"},
 				},
 				Required: []string{"session_id", "mode", "authorization_ref", "reason"},

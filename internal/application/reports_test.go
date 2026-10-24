@@ -208,10 +208,10 @@ func TestStructuredDailyReportContract(t *testing.T) {
 	}
 	if contract.SchemaVersion != 1 || contract.ReportID != "report-2026-07-09" ||
 		contract.Date != "2026-07-09" || contract.ThroughCursor == "" {
-		t.Fatalf("Assistant daily report identity contract changed: %+v", contract)
+		t.Fatalf("daily report identity contract changed: %+v", contract)
 	}
 	if len(contract.Sessions) != 4 || contract.Sessions[1].ProjectName == "" || contract.Sessions[1].Title == "" {
-		t.Fatalf("Assistant session contract changed: %+v", contract.Sessions)
+		t.Fatalf("session contract changed: %+v", contract.Sessions)
 	}
 	var rawContract map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(record.ReportJSON), &rawContract); err != nil {

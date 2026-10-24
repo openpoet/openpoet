@@ -69,7 +69,7 @@ func runSetPermissionMode(t *testing.T, executor *sessionPlatformExecutor, scope
 	})
 }
 
-// The owner wants Assistant to switch modes on his authorization without a manual
+// The owner wants the assistant to switch modes on his authorization without a manual
 // approval each time: a policy-approved write whose correlation_id is the
 // authorization reference.
 func TestSetPermissionModeIsDescribedAsPolicyApprovedWrite(t *testing.T) {
@@ -90,7 +90,7 @@ func TestSetPermissionModeIsDescribedAsPolicyApprovedWrite(t *testing.T) {
 
 func TestSetPermissionModeUsesCorrelationIDAsAuthorizationRef(t *testing.T) {
 	executor, rt, recorder := permissionModeExecutor()
-	result, err := runSetPermissionMode(t, executor, nil, "ain:example-292", "owner asked to approve the restart rule by hand")
+	result, err := runSetPermissionMode(t, executor, nil, "ain:example-1", "owner asked to approve the restart rule by hand")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestSetPermissionModeUsesCorrelationIDAsAuthorizationRef(t *testing.T) {
 	if view.PermissionMode == nil || view.PermissionMode.Mode != "acceptEdits" {
 		t.Fatalf("view.permission_mode = %+v", view.PermissionMode)
 	}
-	if len(rt.calls) != 1 || len(recorder.records) != 1 || recorder.records[0].AuthorizationRef != "ain:example-292" ||
+	if len(rt.calls) != 1 || len(recorder.records) != 1 || recorder.records[0].AuthorizationRef != "ain:example-1" ||
 		recorder.records[0].Reason != "owner asked to approve the restart rule by hand" {
 		t.Fatalf("calls=%v records=%+v", rt.calls, recorder.records)
 	}
@@ -110,10 +110,10 @@ func TestSetPermissionModeUsesCorrelationIDAsAuthorizationRef(t *testing.T) {
 
 func TestSetPermissionModeRefusesMissingReasonAndOutOfScopeSessions(t *testing.T) {
 	executor, rt, _ := permissionModeExecutor()
-	if _, err := runSetPermissionMode(t, executor, nil, "ain:example-292", ""); err == nil {
+	if _, err := runSetPermissionMode(t, executor, nil, "ain:example-1", ""); err == nil {
 		t.Fatal("a change without a reason was accepted")
 	}
-	if _, err := runSetPermissionMode(t, executor, &ProjectScopeSet{Allowed: map[int64]bool{47: true}}, "ain:example-292", "reason"); err == nil {
+	if _, err := runSetPermissionMode(t, executor, &ProjectScopeSet{Allowed: map[int64]bool{47: true}}, "ain:example-1", "reason"); err == nil {
 		t.Fatal("a change outside the client's project_filter was accepted")
 	}
 	if len(rt.calls) != 0 {

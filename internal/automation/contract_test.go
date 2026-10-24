@@ -211,7 +211,7 @@ func TestWorkRunAndPlanAutomationContracts(t *testing.T) {
 		"command_id": "plan-upsert-1", "capability": application.CapabilityPlansUpsert,
 		"target": map[string]any{},
 		"payload": map[string]any{
-			"external_ref": "assistant:daily:" + time.Now().Format("2006-01-02"), "kind": "daily", "title": "Plano Assistant",
+			"external_ref": "assistant:daily:" + time.Now().Format("2006-01-02"), "kind": "daily", "title": "Daily plan",
 			"period_start": time.Now().Format("2006-01-02"), "period_end": time.Now().Format("2006-01-02"), "timezone": "America/Sao_Paulo",
 			"items": []map[string]any{{"external_ref": "assistant:item:1", "title": "Integrar WorkRun", "sort_order": 10}},
 		},

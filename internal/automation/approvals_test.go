@@ -93,7 +93,7 @@ func TestApprovalBrokerRequiresDedicatedScopeAndStoresOnlyDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	if targetScopes.Has(ScopeApprovalsGrant) {
-		t.Fatal("normal Assistant/operator client unexpectedly has approvals:grant")
+		t.Fatal("normal operator client unexpectedly has approvals:grant")
 	}
 	invalidReferenceBody := map[string]any{
 		"target_client_id": target.Client.ID, "capability": application.CapabilityTasksDelete,

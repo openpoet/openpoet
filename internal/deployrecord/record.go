@@ -60,7 +60,7 @@ func (r *Record) RestartKey() string {
 	return fmt.Sprintf("%s#%d", r.ID, r.Restarts)
 }
 
-// Outcome is a one-line, human description of the result (Portuguese, like
+// Outcome is a one-line, human description of the result (English, like
 // the prompts it goes into).
 func (r *Record) Outcome() string {
 	if r == nil {
@@ -72,29 +72,29 @@ func (r *Record) Outcome() string {
 	}
 	switch r.State {
 	case StateSucceeded:
-		return fmt.Sprintf("deploy de %s concluído com sucesso (health check OK, versão %s)", commit, orUnknown(r.Version))
+		return fmt.Sprintf("deploy of %s succeeded (health check OK, version %s)", commit, orUnknown(r.Version))
 	case StateRolledBack:
-		return fmt.Sprintf("deploy de %s FALHOU no health check e foi revertido para o binário anterior (versão %s)", commit, orUnknown(r.Version))
+		return fmt.Sprintf("deploy of %s FAILED the health check and was rolled back to the previous binary (version %s)", commit, orUnknown(r.Version))
 	case StateRollbackFailed:
-		return fmt.Sprintf("deploy de %s FALHOU e o rollback também falhou: produção pode estar fora", commit)
+		return fmt.Sprintf("deploy of %s FAILED and the rollback also failed: production may be down", commit)
 	case StateFailed:
 		detail := r.Detail
 		if detail == "" {
 			detail = r.Step
 		}
 		if r.Restarts == 0 {
-			return fmt.Sprintf("deploy de %s FALHOU antes de parar a produção (%s); a produção seguiu no binário anterior", commit, detail)
+			return fmt.Sprintf("deploy of %s FAILED before stopping production (%s); production kept running the previous binary", commit, detail)
 		}
-		return fmt.Sprintf("deploy de %s FALHOU (%s)", commit, detail)
+		return fmt.Sprintf("deploy of %s FAILED (%s)", commit, detail)
 	case StateRunning:
-		return fmt.Sprintf("deploy de %s ainda em andamento (etapa: %s)", commit, orUnknown(r.Step))
+		return fmt.Sprintf("deploy of %s still in progress (step: %s)", commit, orUnknown(r.Step))
 	}
-	return fmt.Sprintf("deploy de %s em estado %q", commit, r.State)
+	return fmt.Sprintf("deploy of %s in state %q", commit, r.State)
 }
 
 func orUnknown(value string) string {
 	if strings.TrimSpace(value) == "" {
-		return "desconhecida"
+		return "unknown"
 	}
 	return value
 }
