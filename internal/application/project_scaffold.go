@@ -161,7 +161,7 @@ func (s *ProjectScaffoldService) Create(ctx context.Context, input ScaffoldProje
 		return nil, validationError("compose_required",
 			"A docker-compose.yml body is required. Describe the stack so the assistant can generate one.")
 	}
-	if err := LintCompose(compose); err != nil {
+	if err := LintComposeReserved(ctx, compose, s.settings); err != nil {
 		return nil, err
 	}
 

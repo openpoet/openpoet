@@ -189,7 +189,7 @@ func AllToolDefs() []ToolDef {
 			Name: "create_project",
 			Description: "Create a new local project: creates its own folder inside the configured projects root directory on the server, writes a docker-compose.yml, and registers the project in OpenPoet. " +
 				"Write the compose file for the stack the user described (choose sensible images and a host port). " +
-				"NEVER use host ports 8080, 8081 or 8090 — they are reserved and will be refused. " +
+				"NEVER use host ports 8080 or 8081, or any port reserved on this installation — they will be refused. " +
 				"NEVER use privileged, network_mode/pid: host, cap_add, or bind-mount absolute host paths or the Docker socket — all are refused. " +
 				"Use relative paths (./data) or named volumes instead. " +
 				"The containers are NOT started: the user must review and approve the compose file before it can run.",
