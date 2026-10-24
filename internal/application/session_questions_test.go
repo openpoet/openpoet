@@ -87,7 +87,7 @@ func TestAnswerThatGrantsPermissionOrEndsSessionRequiresReason(t *testing.T) {
 			if _, err := service.Answer(context.Background(), command); ErrorCode(err) != "session_question_reason_required" {
 				t.Fatalf("without reason err = %v", err)
 			}
-			command.Authorization.Reason = "task #848 needs the build to run"
+			command.Authorization.Reason = "task #41 needs the build to run"
 			if _, err := service.Answer(context.Background(), command); err != nil {
 				t.Fatalf("with reason err = %v", err)
 			}

@@ -25,7 +25,7 @@ var closeCompletedNow = time.Date(2026, 9, 29, 20, 0, 0, 0, time.UTC)
 func closeCompletedAuthorization() ActionAuthorization {
 	return ActionAuthorization{
 		Actor: Actor{Type: "automation_client", ID: "assistant"}, Approved: true,
-		ApprovedBy: "assistant", Reason: "task #849 validated",
+		ApprovedBy: "assistant", Reason: "task #42 validated",
 	}
 }
 
@@ -62,7 +62,7 @@ func TestCloseCompletedStopsIdleSessionOfDoneTaskAndRecordsWhy(t *testing.T) {
 		t.Fatalf("closures = %d, want 1", len(effects.closures))
 	}
 	got := effects.closures[0]
-	if got.TaskID != 849 || got.Reason != "task #849 validated" || got.Actor.ID != "assistant" || got.Mode != "idle" || got.SessionID != "s1" {
+	if got.TaskID != 849 || got.Reason != "task #42 validated" || got.Actor.ID != "assistant" || got.Mode != "idle" || got.SessionID != "s1" {
 		t.Fatalf("closure record = %+v", got)
 	}
 }

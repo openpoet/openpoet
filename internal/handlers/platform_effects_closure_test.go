@@ -31,7 +31,7 @@ func TestRecordSessionClosureWritesTaskHistoryAndOutbox(t *testing.T) {
 	effects := &platformEffects{db: db}
 	effects.RecordSessionClosure(ctx, application.SessionClosure{
 		SessionID: "48ec507d", ProjectID: project.ID, TaskID: task.ID, TaskStatus: "done", Mode: "idle",
-		Reason: "task validated by Assistant", Actor: application.Actor{Type: "automation_client", ID: "assistant"}, ApprovedBy: "assistant",
+		Reason: "task validated by the assistant", Actor: application.Actor{Type: "automation_client", ID: "assistant"}, ApprovedBy: "assistant",
 	})
 
 	history, err := db.ListTaskHistory(ctx, task.ID, 10)
@@ -41,7 +41,7 @@ func TestRecordSessionClosureWritesTaskHistoryAndOutbox(t *testing.T) {
 	found := false
 	for _, entry := range history {
 		if entry.EventType == "session_closed_completed" {
-			found = entry.Actor == "assistant" && entry.SessionID.String == "48ec507d" && strings.Contains(entry.Details, "task validated by Assistant")
+			found = entry.Actor == "assistant" && entry.SessionID.String == "48ec507d" && strings.Contains(entry.Details, "task validated by the assistant")
 		}
 	}
 	if !found {
@@ -51,7 +51,7 @@ func TestRecordSessionClosureWritesTaskHistoryAndOutbox(t *testing.T) {
 	if err := db.GetContext(ctx, &payload, `SELECT payload_json FROM event_outbox WHERE event_type = 'platform.session.closure_recorded' AND aggregate_id = '48ec507d'`); err != nil {
 		t.Fatalf("outbox closure event: %v", err)
 	}
-	if !strings.Contains(payload, "task validated by Assistant") || !strings.Contains(payload, `"task_id"`) {
+	if !strings.Contains(payload, "task validated by the assistant") || !strings.Contains(payload, `"task_id"`) {
 		t.Fatalf("outbox payload = %s", payload)
 	}
 }
@@ -59,7 +59,7 @@ func TestRecordSessionClosureWritesTaskHistoryAndOutbox(t *testing.T) {
 // A permission mode change keeps who changed it, from and to, under which
 // authorization and why, in the linked task's history and the event outbox.
 func TestRecordSessionPermissionModeChangeWritesTaskHistoryAndOutbox(t *testing.T) {
-	ctx := application.WithEventMetadata(context.Background(), application.EventMetadata{CorrelationID: "ain:example-292"})
+	ctx := application.WithEventMetadata(context.Background(), application.EventMetadata{CorrelationID: "ain:example-1"})
 	db, err := database.New(filepath.Join(t.TempDir(), "mode.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +77,7 @@ func TestRecordSessionPermissionModeChangeWritesTaskHistoryAndOutbox(t *testing.
 	effects := &platformEffects{db: db}
 	effects.RecordSessionPermissionModeChange(ctx, application.SessionPermissionModeChange{
 		SessionID: "50bc056f", ProjectID: project.ID, TaskID: task.ID, Requested: "acceptEdits", From: "auto", To: "acceptEdits",
-		Presses: 2, Outcome: "changed", Reason: "owner approves the restart rule by hand", AuthorizationRef: "ain:example-292",
+		Presses: 2, Outcome: "changed", Reason: "owner approves the restart rule by hand", AuthorizationRef: "ain:example-1",
 		Actor: application.Actor{Type: "automation_client", ID: "assistant"}, ApprovedBy: "assistant",
 	})
 
@@ -89,7 +89,7 @@ func TestRecordSessionPermissionModeChangeWritesTaskHistoryAndOutbox(t *testing.
 	for _, entry := range history {
 		if entry.EventType == "session_permission_mode_changed" {
 			found = entry.Actor == "assistant" && entry.SessionID.String == "50bc056f" &&
-				strings.Contains(entry.Details, `"authorization_ref":"ain:example-292"`) && strings.Contains(entry.Details, `"from":"auto"`)
+				strings.Contains(entry.Details, `"authorization_ref":"ain:example-1"`) && strings.Contains(entry.Details, `"from":"auto"`)
 		}
 	}
 	if !found {
@@ -102,7 +102,7 @@ func TestRecordSessionPermissionModeChangeWritesTaskHistoryAndOutbox(t *testing.
 	if err := db.GetContext(ctx, &row, `SELECT payload_json, correlation_id FROM event_outbox WHERE event_type = 'platform.session.permission_mode_recorded' AND aggregate_id = '50bc056f'`); err != nil {
 		t.Fatalf("outbox permission mode event: %v", err)
 	}
-	if row.CorrelationID != "ain:example-292" || !strings.Contains(row.Payload, `"to":"acceptEdits"`) || !strings.Contains(row.Payload, "restart rule by hand") {
+	if row.CorrelationID != "ain:example-1" || !strings.Contains(row.Payload, `"to":"acceptEdits"`) || !strings.Contains(row.Payload, "restart rule by hand") {
 		t.Fatalf("outbox row = %+v", row)
 	}
 }

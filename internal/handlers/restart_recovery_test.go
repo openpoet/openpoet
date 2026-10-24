@@ -330,8 +330,8 @@ func TestHookTurnChangesReachTheObserver(t *testing.T) {
 	}
 }
 
-// The events land in the outbox with the platform.* names the external-client
-// signal router maps.
+// The events land in the outbox with the platform.* names an external automation
+// client's signal router maps.
 func TestRestartRecoveryEventsReachTheOutbox(t *testing.T) {
 	h := newRecoveryHarness(t)
 	effects := &platformEffects{db: h.db}

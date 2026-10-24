@@ -29,7 +29,7 @@ const automationCommandsGetNotes = "Reads the outcome of one of YOUR OWN earlier
 func automationCommandPlatformDefinitions() []PlatformCapabilityDefinition {
 	return []PlatformCapabilityDefinition{
 		withPayloadSchema(executionPayloadLimit(executionReadCapability("automation.commands.get", "automation_commands", "events:read"), 4<<10),
-			"{}", automationCommandGetPayload{}, `{"idempotency_key":"external-client:assistant:example-238-doc-d1f920bb"}`, automationCommandsGetNotes),
+			"{}", automationCommandGetPayload{}, `{"idempotency_key":"client:assistant:example-doc-d1f920bb"}`, automationCommandsGetNotes),
 	}
 }
 

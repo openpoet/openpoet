@@ -241,7 +241,7 @@ func (s semanticSyncer) SyncToProject(context.Context, *database.Project) error 
 
 func TestSessionServiceCreateOwnsProviderEnvironmentNamingAndTaskNotification(t *testing.T) {
 	project := &database.Project{ID: 7, Name: "OpenPoet", Type: "local", Backend: "claude_code"}
-	task := &database.ProjectTask{ID: 9, ProjectID: 7, Title: "Integrate Assistant", Description: "full integration"}
+	task := &database.ProjectTask{ID: 9, ProjectID: 7, Title: "Integrate the client", Description: "full integration"}
 	store := &semanticSessionStore{project: project, task: task}
 	manager := &semanticSessionManager{}
 	names := &semanticSessionNames{}

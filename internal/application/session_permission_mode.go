@@ -21,7 +21,7 @@ type SessionPermissionModeSetter interface {
 type SetSessionPermissionModeCommand struct {
 	SessionID string
 	Mode      string
-	// AuthorizationRef names the owner's authorization (e.g. "ain:example-292"); it is
+	// AuthorizationRef names the owner's authorization (e.g. "ain:example-1"); it is
 	// required and kept in the audit record with the reason.
 	AuthorizationRef string
 	Authorization    ActionAuthorization
@@ -81,7 +81,7 @@ func (s *SessionService) SetPermissionMode(ctx context.Context, command SetSessi
 	}
 	ref := strings.TrimSpace(command.AuthorizationRef)
 	if !validPermissionModeAuthorizationRef(ref) {
-		return nil, validationError("authorization_ref_required", "An authorization_ref (e.g. ain:example-292) naming the owner's authorization is required to change a session's permission mode")
+		return nil, validationError("authorization_ref_required", "An authorization_ref (e.g. ain:example-1) naming the owner's authorization is required to change a session's permission mode")
 	}
 	mode, err := runtime.ValidateSettablePermissionMode(command.Mode)
 	if err != nil {

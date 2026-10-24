@@ -36,14 +36,14 @@ func TestPlatformPayloadErrorsNameTheFailingField(t *testing.T) {
 		name, capability, payload string
 		want                      []string
 	}{
-		{"host path on paste", "files.paste_session_image", `{"path":"/workspace/external-client/channels/_attachments/a.jpeg"}`,
+		{"host path on paste", "files.paste_session_image", `{"path":"/workspace/example-app/channels/_attachments/a.jpeg"}`,
 			[]string{`"path" is not accepted`, `source {"project_id"`, "accepted fields:", "data_url (string)", "source (object)"}},
 		{"file_path on paste", "files.paste_session_image", `{"file_path":"channels/_attachments/a.jpeg"}`,
 			[]string{`"file_path" is not accepted`, "data_url"}},
 		{"paste without image", "files.paste_session_image", `{}`, []string{`"data_url" is required`, "source"}},
 		{"paste with both sources", "files.paste_session_image", `{"data_url":"data:image/png;base64,aQ==","source":{"project_id":1,"path":"a.png"}}`,
 			[]string{"exactly one of data_url or source"}},
-		{"paste source host path", "files.paste_session_image", `{"source":{"project_id":47,"path":"/workspace/external-client/a.jpeg"}}`,
+		{"paste source host path", "files.paste_session_image", `{"source":{"project_id":47,"path":"/workspace/example-app/a.jpeg"}}`,
 			[]string{`"source.path" must be a path relative to the project root`}},
 		{"session_id in hint payload", "sessions.image_prompt_hint", `{"session_id":"5ee5b896"}`,
 			[]string{`"session_id" is not accepted`, `identify the session in the target`, "image_count (integer, required)"}},

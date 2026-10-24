@@ -12,7 +12,7 @@ import (
 	"openpoet/internal/database"
 )
 
-func TestDailyReportEndpointMatchesAssistantContract(t *testing.T) {
+func TestDailyReportEndpointMatchesClientContract(t *testing.T) {
 	db := automationTestDB(t)
 	ctx := context.Background()
 	project := automationContractProject(t, db, "automation-daily-report")
@@ -37,7 +37,7 @@ func TestDailyReportEndpointMatchesAssistantContract(t *testing.T) {
 	}
 	if _, err := reports.FinalizeTurn(ctx, application.UpsertTurnReportCommand{
 		SessionID: session.ID, TurnID: "turn-api", Objective: "Expose daily report",
-		Outcome: "Endpoint available", WorkSummary: "Returned the Assistant contract",
+		Outcome: "Endpoint available", WorkSummary: "Returned the client contract",
 		Evidence: []application.ReportEvidence{{Kind: "session", Ref: "openpoet:session:" + session.ID}},
 	}); err != nil {
 		t.Fatal(err)
@@ -59,7 +59,7 @@ func TestDailyReportEndpointMatchesAssistantContract(t *testing.T) {
 	}
 	if report.Sessions[0].Title != session.Name || report.Sessions[0].ProjectName != project.Name ||
 		len(report.Sessions[0].WorkSummary) != 1 || len(report.Sessions[0].Evidence) != 1 {
-		t.Fatalf("session does not match Assistant contract: %+v", report.Sessions[0])
+		t.Fatalf("session does not match the client contract: %+v", report.Sessions[0])
 	}
 
 	events, err := db.ListEventOutboxAfter(ctx, 0, 100)

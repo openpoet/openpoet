@@ -88,7 +88,7 @@ func sendInputLedgerHandler(t *testing.T, db *database.DB, ackDelay time.Duratio
 func sendInputEnvelope(key string) map[string]any {
 	return map[string]any{
 		"command_id": "cmd-" + key, "idempotency_key": key, "capability": "sessions.send_input",
-		"correlation_id": "ain:example-238", "target": map[string]any{"type": "session", "id": "s1"},
+		"correlation_id": "ain:example-3", "target": map[string]any{"type": "session", "id": "s1"},
 		"payload": map[string]any{"text": "leia o doc"},
 	}
 }
@@ -132,14 +132,14 @@ func TestSendInputAbortedByClientRecordsRealAckAndRetryDoesNotRetype(t *testing.
 	db := automationTestDB(t)
 	handler, manager := sendInputLedgerHandler(t, db, 400*time.Millisecond)
 	client := provisionApprovalTestClient(t, db, "assistant-send", ScopeSessionsWrite, ScopeEventsRead)
-	envelope := sendInputEnvelope("example-238-doc-d1f920bb")
+	envelope := sendInputEnvelope("example-doc-d1f920bb")
 
 	// First attempt: the client aborts at 100 ms, before the ack at 400 ms.
 	// A retry of the same envelope arrives while it is still running.
 	first := make(chan *httptest.ResponseRecorder, 1)
 	go func() { first <- postWithDeadline(t, handler, client.Token, envelope, 100*time.Millisecond) }()
 	time.Sleep(150 * time.Millisecond)
-	if view := getCommand(t, handler, client.Token, "status-while-running", map[string]any{"idempotency_key": "example-238-doc-d1f920bb"}); view.State != "pending" {
+	if view := getCommand(t, handler, client.Token, "status-while-running", map[string]any{"idempotency_key": "example-doc-d1f920bb"}); view.State != "pending" {
 		t.Fatalf("status while running = %+v, want pending", view)
 	}
 	retry := automationRequest(t, handler, client.Token, http.MethodPost, "/commands", "", envelope)
@@ -155,20 +155,20 @@ func TestSendInputAbortedByClientRecordsRealAckAndRetryDoesNotRetype(t *testing.
 		t.Fatalf("text submitted %d times, want exactly once", got)
 	}
 
-	view := getCommand(t, handler, client.Token, "status-after", map[string]any{"idempotency_key": "example-238-doc-d1f920bb"})
+	view := getCommand(t, handler, client.Token, "status-after", map[string]any{"idempotency_key": "example-doc-d1f920bb"})
 	if !view.Found || view.State != "applied" || view.Capability != "sessions.send_input" ||
-		view.CommandID != "cmd-example-238-doc-d1f920bb" || view.Acknowledged == nil || !*view.Acknowledged {
+		view.CommandID != "cmd-example-doc-d1f920bb" || view.Acknowledged == nil || !*view.Acknowledged {
 		t.Fatalf("commands.get = %+v", view)
 	}
-	byCommandID := getCommand(t, handler, client.Token, "status-by-command", map[string]any{"command_id": "cmd-example-238-doc-d1f920bb"})
-	if byCommandID.IdempotencyKey != "example-238-doc-d1f920bb" || byCommandID.State != "applied" {
+	byCommandID := getCommand(t, handler, client.Token, "status-by-command", map[string]any{"command_id": "cmd-example-doc-d1f920bb"})
+	if byCommandID.IdempotencyKey != "example-doc-d1f920bb" || byCommandID.State != "applied" {
 		t.Fatalf("commands.get by command_id = %+v", byCommandID)
 	}
 	if missing := getCommand(t, handler, client.Token, "status-missing", map[string]any{"idempotency_key": "never-sent"}); missing.Found {
 		t.Fatalf("unknown key = %+v, want found=false", missing)
 	}
 	other := provisionApprovalTestClient(t, db, "other-client", ScopeEventsRead)
-	if foreign := getCommand(t, handler, other.Token, "foreign-status", map[string]any{"idempotency_key": "example-238-doc-d1f920bb"}); foreign.Found {
+	if foreign := getCommand(t, handler, other.Token, "foreign-status", map[string]any{"idempotency_key": "example-doc-d1f920bb"}); foreign.Found {
 		t.Fatalf("another client read the command: %+v", foreign)
 	}
 }
@@ -179,7 +179,7 @@ func TestInterruptedCommandIsIndeterminateAfterRestart(t *testing.T) {
 	db := automationTestDB(t)
 	handler, manager := sendInputLedgerHandler(t, db, time.Millisecond)
 	client := provisionApprovalTestClient(t, db, "assistant-restart", ScopeSessionsWrite, ScopeEventsRead)
-	envelope := sendInputEnvelope("example-300-restart")
+	envelope := sendInputEnvelope("example-restart")
 	encoded, _ := json.Marshal(envelope)
 	req := httptest.NewRequest(http.MethodPost, "http://openpoet/commands", bytes.NewReader(encoded))
 	fingerprint, err := requestFingerprint(req)
@@ -187,8 +187,8 @@ func TestInterruptedCommandIsIndeterminateAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, created, err := db.ClaimAutomationCommand(context.Background(), &database.AutomationCommand{
-		ID: "interrupted", ClientID: client.Client.ID, IdempotencyKey: "example-300-restart", RequestFingerprint: fingerprint,
-		Operation: "POST /commands", CommandID: "cmd-example-300-restart", Capability: "sessions.send_input",
+		ID: "interrupted", ClientID: client.Client.ID, IdempotencyKey: "example-restart", RequestFingerprint: fingerprint,
+		Operation: "POST /commands", CommandID: "cmd-example-restart", Capability: "sessions.send_input",
 	}); err != nil || !created {
 		t.Fatalf("claim created=%v err=%v", created, err)
 	}
@@ -199,7 +199,7 @@ func TestInterruptedCommandIsIndeterminateAfterRestart(t *testing.T) {
 	if retry.Code != http.StatusConflict || decodeAutomationErrorCode(t, retry) != "idempotency_indeterminate" || manager.lines.Load() != 0 {
 		t.Fatalf("retry status=%d lines=%d body=%s", retry.Code, manager.lines.Load(), retry.Body.String())
 	}
-	view := getCommand(t, handler, client.Token, "status-restart", map[string]any{"idempotency_key": "example-300-restart"})
+	view := getCommand(t, handler, client.Token, "status-restart", map[string]any{"idempotency_key": "example-restart"})
 	if view.State != "indeterminate" || view.Error == nil || view.Error.Code != "server_restarted" {
 		t.Fatalf("commands.get = %+v", view)
 	}

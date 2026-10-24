@@ -40,12 +40,12 @@ func waivedStopHandler(t *testing.T, db *database.DB) (http.Handler, *closeCompl
 func stopEnvelope(key string) map[string]any {
 	return map[string]any{
 		"command_id": "cmd-" + key, "capability": "sessions.stop",
-		"correlation_id": "ain:example-314", "reason": "owner pediu para fechar a sessão",
+		"correlation_id": "ain:example-2", "reason": "owner asked to close the session",
 		"target": map[string]any{"type": "session", "id": "s1"}, "payload": map[string]any{},
 	}
 }
 
-// Task 870: a client holding approvals:waived stops a session without an
+// A client holding approvals:waived stops a session without an
 // approval_token, but still under an authorization_ref, a reason and the
 // command ledger.
 func TestApprovalsWaivedClientStopsSessionWithoutGrant(t *testing.T) {
@@ -69,7 +69,7 @@ func TestApprovalsWaivedClientStopsSessionWithoutGrant(t *testing.T) {
 		t.Fatal("session stopped by a rejected command")
 	}
 
-	response = automationRequest(t, handler, assistant.Token, http.MethodPost, "/commands", "example-314-stop", stopEnvelope("example-314-stop"))
+	response = automationRequest(t, handler, assistant.Token, http.MethodPost, "/commands", "waived-stop", stopEnvelope("waived-stop"))
 	if response.Code != http.StatusOK {
 		t.Fatalf("waived stop status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -82,7 +82,7 @@ func TestApprovalsWaivedClientStopsSessionWithoutGrant(t *testing.T) {
 	}
 	if err := db.GetContext(context.Background(), &ledger, `
 		SELECT status, capability FROM automation_commands
-		WHERE client_id = ? AND idempotency_key = ?`, assistant.Client.ID, "example-314-stop"); err != nil {
+		WHERE client_id = ? AND idempotency_key = ?`, assistant.Client.ID, "waived-stop"); err != nil {
 		t.Fatal(err)
 	}
 	if ledger.Status != "succeeded" || ledger.Capability != "sessions.stop" {

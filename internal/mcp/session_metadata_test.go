@@ -173,11 +173,11 @@ func TestSetSessionPermissionModeToolPostsModeReferenceAndReason(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	got, err := executeTool(NewAPIClient(server.URL), "openpoet_set_session_permission_mode",
-		json.RawMessage(`{"session_id":"session-12345678","mode":"acceptEdits","authorization_ref":"ain:example-292","reason":"approve by hand"}`), "", "")
+		json.RawMessage(`{"session_id":"session-12345678","mode":"acceptEdits","authorization_ref":"ain:example-1","reason":"approve by hand"}`), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if input["mode"] != "acceptEdits" || input["authorization_ref"] != "ain:example-292" || input["reason"] != "approve by hand" {
+	if input["mode"] != "acceptEdits" || input["authorization_ref"] != "ain:example-1" || input["reason"] != "approve by hand" {
 		t.Fatalf("payload = %#v", input)
 	}
 	if !strings.Contains(got, "changed from auto to acceptEdits") {
