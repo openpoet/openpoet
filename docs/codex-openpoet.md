@@ -36,8 +36,8 @@ Every session passes model and effort explicitly: `--model` and
 `config.model_reasoning_effort` on `thread/start`/`thread/resume` for the
 app-server runtime (`thread/start` ignores an `effort` param). The model and
 effort Codex reports back for the thread are recorded as the session's effective
-values; native TUI sessions on this host read them from the rollout's last
-`turn_context`. See the user manual, "Modelo e effort sempre explícitos".
+values; native TUI sessions running on the same machine as OpenPoet read them
+from the rollout's last `turn_context`.
 Use `backend_config.runtime = "tui"` only when native Codex TUI menus and
 pickers are more important than OpenPoet modal handling.
 
