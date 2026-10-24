@@ -1,31 +1,32 @@
-# Matriz de paridade UI → Automation
+# UI to Automation parity matrix
 
-Fonte canônica: [`ui-action-manifest.v1.json`](./ui-action-manifest.v1.json).
-Esta matriz cobre mutations HTTP declaradas no router, chamadas mutáveis do
-frontend e ações inline puramente locais. Cada rota de negócio possui binding
-verificado para o mesmo Application Service usado pela UI e pela Automation API.
+Canonical source: [`ui-action-manifest.v1.json`](../../api/automation/ui-action-manifest.v1.json).
+This matrix covers the HTTP mutations declared in the router, the mutating
+frontend calls, and purely local inline actions. Every business route has a
+verified binding to the same Application Service used by both the UI and the
+Automation API.
 
-## Cobertura
+## Coverage
 
-| Item | Quantidade |
+| Item | Count |
 | --- | ---: |
-| Rotas mutáveis `/api` | 121 |
-| Ações inline de negócio | 57 |
-| Ações `presentation_only` | 49 |
-| Listeners estáticos de negócio | 19 |
-| Listeners estáticos de apresentação | 27 |
-| Exceções explícitas de telemetria/teste | 7 |
+| Mutating `/api` routes | 121 |
+| Inline business actions | 57 |
+| `presentation_only` actions | 49 |
+| Static business listeners | 19 |
+| Static presentation listeners | 27 |
+| Explicit telemetry/test exceptions | 7 |
 
-| Estado | Quantidade | Significado |
+| Status | Count | Meaning |
 | --- | ---: | --- |
-| `implemented` | 119 | UI e Automation compartilham Application Service/invariantes |
-| `application_service_ready` | 0 | Nenhuma rota permanece em caminho intermediário |
-| `gap` | 0 | Nenhum gap de Application Service |
-| `internal_only` | 2 | Ingestão de hooks, não ação autônoma de usuário |
+| `implemented` | 119 | UI and Automation share the Application Service and its invariants |
+| `application_service_ready` | 0 | No route remains on an intermediate path |
+| `gap` | 0 | No Application Service gaps |
+| `internal_only` | 2 | Hook ingestion, not a standalone user action |
 
-## Matriz por domínio
+## Matrix by domain
 
-| Domínio | Total | Implementado | Service pronto | Gap | Interno | Riscos |
+| Domain | Total | Implemented | Service ready | Gap | Internal | Risks |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | agents | 3 | 3 | 0 | 0 | 0 | R2, R3 |
 | ai | 16 | 16 | 0 | 0 | 0 | R1, R2, R3 |
@@ -51,89 +52,84 @@ verificado para o mesmo Application Service usado pela UI e pela Automation API.
 | update | 1 | 1 | 0 | 0 | 0 | R4 |
 | voice | 1 | 1 | 0 | 0 | 0 | R1 |
 
-## Segurança
+## Security
 
-- Todo `DELETE` é R3 ou R4.
-- Credenciais, MCP com env/commands, AI configs, custom tools, tunnel e update
-  são R4.
-- Escrita de arquivo e commit são R3; execução arbitrária de tool é R4.
-- `presentation_only` não recebe capability. A lista existe apenas para provar
-  que botões/toggles locais foram inventariados.
-- Telemetria, OTLP e endpoint test-only ficam numa allowlist machine-readable
-  com justificativa; não viram capabilities.
+- Every `DELETE` is R3 or R4.
+- Credentials, MCP servers with env/commands, AI configs, custom tools, the
+  tunnel and updates are R4.
+- File writes and commits are R3; arbitrary tool execution is R4.
+- `presentation_only` actions get no capability. The list exists only to prove
+  that local buttons and toggles were inventoried.
+- Telemetry, OTLP and the test-only endpoint live in a machine-readable
+  allowlist with a justification; they do not become capabilities.
 
-## Application Services compartilhados
+## Shared Application Services
 
-- `ProjectService`: list/get/create/update/delete/duplicate, boundary de
-  credencial criptografada, validação e effects desacoplados.
-- `TagService`: CRUD e atribuição de tags a projeto com deduplicação.
-- `NotificationService`: listagem bounded, ativos, unread count e mark read/all
-  por backend já existente.
-- `SkillService`: CRUD global e por projeto, duplicate/import/restore,
-  versionamento transacional e configuração de skills por projeto.
-- `AIAgentService`: CRUD com validação de políticas/filtros e proteção do agente
-  default.
-- `AIConfigService`: CRUD/assignments, segredo criptografado, update parcial sem
-  apagar API key e reinit somente pós-commit.
-- `MCPService`: MCP global/projeto com ownership, comandos/args/env em envelopes
-  criptografados e DTOs estritamente redigidos.
-- `CustomToolService`: CRUD por projeto com comando criptografado e retorno sem
-  plaintext.
-- `ConfigurationService`: settings, MCP API key, sync global/projeto, shares e
-  políticas globais/de projeto com lotes atômicos.
-- `SessionService`: create/stop/reopen/input/evaluate e hint de imagem, com
-  transições de estado, env/unsafe explícitos e efeitos pós-sucesso.
-- `SessionEventWatcherService`: start/stop de watcher via adapter direto, sem
-  requisição HTTP sintética.
-- `HookResponseService`: respostas de permissão e task notification; ingestão
-  de hooks permanece `internal_only`.
-- `FileMutationService`: escrita/upload em projeto e sessão, paste de imagem,
-  limites de payload e confinamento estrito de caminho relativo.
-- `GitMutationService`: stage/unstage/commit por argumentos tipados e aprovação
-  explícita para commit.
-- `VoiceTranscriptionService`: transcrição com áudio, filename e language tag
-  bounded antes do provider atual.
-- `TunnelMutationService`: enable/disable, confirmação one-time de pairing,
-  revoke e delete permanente; resultados e eventos não carregam credenciais,
-  tokens ou chaves de dispositivo.
-- `UpdateMutationService`: apply com bloqueio de instalação gerenciada/sessões
-  ativas e autorização separada para `force`.
-- `DocumentService`: memory docs e documentos temporários bounded, com secrets
-  redigidos antes da persistência e respostas sem conteúdo bruto na criação.
-- `ProposalService`: memory/task/skill/tool proposals via backend durável;
-  accept/reject atômicos e risco R3/R4 com aprovação explícita.
+- `ProjectService`: list/get/create/update/delete/duplicate, encrypted
+  credential boundary, validation and decoupled effects.
+- `TagService`: tag CRUD and assignment of tags to projects with deduplication.
+- `NotificationService`: bounded listing, active notifications, unread count
+  and mark read/all on the existing backend.
+- `SkillService`: global and per-project CRUD, duplicate/import/restore,
+  transactional versioning and per-project skill configuration.
+- `AIAgentService`: CRUD with policy/filter validation and protection of the
+  default agent.
+- `AIConfigService`: CRUD/assignments, encrypted secret, partial update that
+  does not erase the API key, and reinit only after commit.
+- `MCPService`: global/project MCP servers with ownership, commands/args/env in
+  encrypted envelopes and strictly redacted DTOs.
+- `CustomToolService`: per-project CRUD with encrypted command and no plaintext
+  in responses.
+- `ConfigurationService`: settings, MCP API key, global/project sync, shares and
+  global/project policies in atomic batches.
+- `SessionService`: create/stop/reopen/input/evaluate and image hint, with state
+  transitions, explicit env/unsafe flags and post-success effects.
+- `SessionEventWatcherService`: watcher start/stop through a direct adapter,
+  without a synthetic HTTP request.
+- `HookResponseService`: permission responses and task notifications; hook
+  ingestion stays `internal_only`.
+- `FileMutationService`: writes/uploads in projects and sessions, image paste,
+  payload limits and strict confinement to relative paths.
+- `GitMutationService`: stage/unstage/commit through typed arguments and
+  explicit approval for commits.
+- `VoiceTranscriptionService`: transcription with bounded audio, filename and
+  language tag before reaching the current provider.
+- `TunnelMutationService`: enable/disable, one-time pairing confirmation,
+  revoke and permanent delete; results and events never carry credentials,
+  tokens or device keys.
+- `UpdateMutationService`: apply, blocked for managed installs and while
+  sessions are active, with separate authorization for `force`.
+- `DocumentService`: memory docs and bounded temporary documents, with secrets
+  redacted before persistence and no raw content in creation responses.
+- `ProposalService`: memory/task/skill/tool proposals on a durable backend;
+  atomic accept/reject, and R3/R4 risk with explicit approval.
 - `AIAssistantService`: chat, conversations, initiate, suggestions,
-  generate/validate/test e execução de tool via ports, sem transcript/prompt
-  bruto e com outputs bounded/redigidos.
-- `NotificationDeliveryService`: subscribe/unsubscribe, preferência e teste de
-  push via port; chaves de subscription nunca aparecem na resposta.
-- `TokenUsageService`: clear total com aprovação R3 e effect pós-commit.
+  generate/validate/test and tool execution through ports, with no raw
+  transcript/prompt and with bounded/redacted outputs.
+- `NotificationDeliveryService`: push subscribe/unsubscribe, preference and test
+  through a port; subscription keys never appear in responses.
+- `TokenUsageService`: full clear with R3 approval and a post-commit effect.
 
-Operações que manipulam segredo, comando, policy de tools, assignment de
-provider ou sincronização externa exigem `R4Boundary` explícito com aprovação,
-aprovador e justificativa. Credenciais, env e comandos não fazem parte dos DTOs
-de saída; updates parciais preservam segredo omitido. Effects e reinit são
-executados somente após persistência/sincronização bem-sucedida.
+Operations that handle secrets, commands, tool policies, provider assignments
+or external synchronization require an explicit `R4Boundary` with approval,
+approver and justification. Credentials, env and commands are never part of the
+output DTOs; partial updates preserve an omitted secret. Effects and reinit run
+only after persistence/synchronization succeeds.
 
-Conteúdo, prompts, argumentos JSON e outputs de AI/proposals possuem limites
-explícitos. Secrets são removidos antes de provider/tool/persistência; respostas
-de chat não incluem prompt, transcript, proactive context ou mensagens brutas.
-Deletes, clear de usage e execução/aprovação de tool usam
-`ActionAuthorization` com aprovação explícita.
+Content, prompts, JSON arguments and AI/proposal outputs have explicit limits.
+Secrets are stripped before they reach a provider, a tool or storage; chat
+responses never include the prompt, transcript, proactive context or raw
+messages. Deletes, usage clears and tool execution/approval use
+`ActionAuthorization` with explicit approval.
 
-Os services estão registrados em um registry tipado de 155 capabilities
-(106 mutations e 49 reads) e compostos sobre as dependências reais do processo.
-Os handlers humanos falham fechados se o bundle não estiver pronto; não existe
-fallback mutável para o caminho legado. SSE, multipart e WebSocket permanecem
-somente como bordas de transporte.
+The services are registered in a typed registry of 155 capabilities
+(106 mutations and 49 reads) and composed on top of the process's real
+dependencies. Human-facing handlers fail closed if the bundle is not ready;
+there is no mutating fallback to the legacy path. SSE, multipart and WebSocket
+remain transport edges only.
 
-## Gates operacionais restantes
+## Keeping the matrix honest
 
-1. Ensaio integrado em banco e porta descartáveis.
-2. Shadow mode com identities/scopes reais.
-3. Backup, migração idempotente de secrets e rollback ensaiados.
-4. Autorização explícita do owner antes do cutover.
-
-O teste `TestUIActionManifestCoversBackendAndFrontendMutations` falha quando uma
-nova mutation de router/frontend ou um novo `onclick="app.*"` não recebe
-classificação explícita.
+The `TestUIActionManifestCoversBackendAndFrontendMutations` test fails when a
+new router/frontend mutation or a new `onclick="app.*"` handler is added
+without an explicit classification in the manifest.

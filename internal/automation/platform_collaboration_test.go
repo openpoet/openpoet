@@ -170,7 +170,7 @@ type collaborationManifest struct {
 }
 
 func TestCollaborationPlatformMutationMetadataMatchesManifest(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "automation", "ui-action-manifest.v1.json"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "api", "automation", "ui-action-manifest.v1.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

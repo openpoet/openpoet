@@ -472,7 +472,7 @@ func TestCommandRejectsHeaderAndBodyIdempotencyMismatch(t *testing.T) {
 }
 
 func TestVersionedAutomationSchemasMatchRegistry(t *testing.T) {
-	root := filepath.Join("..", "..", "docs", "automation", "v1")
+	root := filepath.Join("..", "..", "api", "automation", "v1")
 	openAPIBytes, err := os.ReadFile(filepath.Join(root, "openapi.json"))
 	if err != nil {
 		t.Fatal(err)

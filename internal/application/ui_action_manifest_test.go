@@ -306,7 +306,7 @@ func repositoryRoot(t *testing.T) string {
 
 func loadUIActionManifest(t *testing.T, root string) uiActionManifest {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(root, "docs/automation/ui-action-manifest.v1.json"))
+	data, err := os.ReadFile(filepath.Join(root, "api/automation/ui-action-manifest.v1.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

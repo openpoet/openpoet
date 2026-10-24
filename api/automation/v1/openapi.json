@@ -157,7 +157,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Ordered event page compatible with the external-client EventPage contract",
+            "description": "Ordered event page compatible with the external connector EventPage contract",
             "content": {
               "application/json": {
                 "schema": {"$ref": "#/components/schemas/EventPage"}
@@ -233,7 +233,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Daily report compatible with the external-client OpenPoetDailyReport contract",
+            "description": "Daily report compatible with the external connector daily report contract",
             "content": {
               "application/json": {
                 "schema": {"$ref": "#/components/schemas/DailyReport"}
