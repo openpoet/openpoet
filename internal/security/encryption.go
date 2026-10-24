@@ -12,26 +12,23 @@ import (
 	"os"
 )
 
-var ErrInvalidKey = errors.New("encryption key must be set via OPENPOET_ENCRYPT_KEY environment variable")
+var ErrInvalidKey = errors.New("encryption key is empty: set OPENPOET_ENCRYPT_KEY or use LoadEncryptor to resolve the key file")
 
 type Encryptor struct {
 	key []byte
 }
 
+// NewEncryptor builds an Encryptor from key material (OPENPOET_ENCRYPT_KEY or
+// the key file content). An empty key falls back to OPENPOET_ENCRYPT_KEY and
+// is otherwise rejected: there is no implicit default key any more. Runtime
+// callers resolve the key with LoadEncryptor (keyfile.go), which handles the
+// key file, fresh installs and the legacy hostname/user key.
 func NewEncryptor(key string) (*Encryptor, error) {
 	if key == "" {
-		// Generate a random key and store it if not provided
 		key = os.Getenv("OPENPOET_ENCRYPT_KEY")
-		if key == "" {
-			// For convenience, derive a key from hostname+username
-			// In production, users should set OPENPOET_ENCRYPT_KEY
-			hostname, _ := os.Hostname()
-			username := os.Getenv("USER")
-			if username == "" {
-				username = "openpoet"
-			}
-			key = fmt.Sprintf("openpoet-%s-%s-default-key", hostname, username)
-		}
+	}
+	if key == "" {
+		return nil, ErrInvalidKey
 	}
 
 	// Use SHA-256 to derive a 32-byte key

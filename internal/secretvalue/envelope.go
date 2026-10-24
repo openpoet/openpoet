@@ -95,6 +95,23 @@ func IsEncrypted(value string) bool {
 	return state == envelopeValid
 }
 
+// Parts returns the ciphertext and IV of a valid envelope; ok is false for
+// legacy plaintext and malformed envelopes.
+func Parts(value string) (ciphertext string, iv string, ok bool) {
+	parsed, state := inspect(value)
+	if state != envelopeValid {
+		return "", "", false
+	}
+	return parsed.Ciphertext, parsed.IV, true
+}
+
+// LooksLikeEnvelope reports whether value is an envelope, valid or malformed
+// (a JSON object carrying the reserved "ciphertext" or "iv" field).
+func LooksLikeEnvelope(value string) bool {
+	_, state := inspect(value)
+	return state != envelopeLegacy
+}
+
 type envelopeState uint8
 
 const (
