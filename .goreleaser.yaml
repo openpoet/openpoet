@@ -30,8 +30,11 @@ archives:
       - tar.gz
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    # THIRD-PARTY-LICENSES.md carries the notices of everything linked or
+    # embedded (MIT/BSD attribution, the Apache-2.0 license and NOTICE texts).
     files:
       - LICENSE
+      - THIRD-PARTY-LICENSES.md
       - README.md
 
 checksum:
@@ -95,6 +98,7 @@ brews:
     license: "MIT"
     install: |
       bin.install "openpoet"
+      prefix.install "THIRD-PARTY-LICENSES.md"
     custom_block: |
       def post_uninstall
         rm_rf "#{Dir.home}/.openpoet"
