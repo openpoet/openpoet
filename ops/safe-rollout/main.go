@@ -86,23 +86,18 @@ func parseConfig(operation Operation, args []string) (Config, error) {
 	)
 	flags.StringVar(&config.ReleaseID, "release-id", "", "ID seguro da release; gerado no prepare se omitido")
 	flags.StringVar(&config.ManifestPath, "manifest", "", "manifest.json gerado por prepare")
-	flags.StringVar(&config.LiveBinary, "live-binary", filepath.Join(cwd, ".run", "openpoet"), "binário live")
-	flags.StringVar(&config.DBPath, "db", filepath.Join(cwd, ".run", "openpoet.db"), "SQLite de produção")
+	flags.StringVar(&config.LiveBinary, "live-binary", "", "binário live do serviço (obrigatório em preflight/apply)")
+	flags.StringVar(&config.DBPath, "db", "", "SQLite do serviço (obrigatório em preflight/apply)")
 	flags.StringVar(
 		&config.BackupDir,
 		"backup-dir",
 		filepath.Join(home, ".openpoet-rollout", "backups"),
 		"diretório de snapshots SQLite",
 	)
-	flags.StringVar(
-		&config.PlistPath,
-		"plist",
-		filepath.Join(cwd, ".run", "openpoet.production.plist"),
-		"plist do LaunchAgent",
-	)
-	flags.StringVar(&config.ServiceLabel, "service-label", "local.openpoet.production", "label launchd")
+	flags.StringVar(&config.PlistPath, "plist", "", "plist do LaunchAgent (obrigatório em preflight/apply)")
+	flags.StringVar(&config.ServiceLabel, "service-label", "", "label launchd do serviço (obrigatório em apply)")
 	flags.StringVar(&config.LaunchDomain, "launch-domain", fmt.Sprintf("gui/%d", os.Getuid()), "domínio launchd")
-	flags.StringVar(&config.HealthURL, "health-url", "http://127.0.0.1:8081/api/version", "health/version endpoint")
+	flags.StringVar(&config.HealthURL, "health-url", "", "endpoint /api/version do serviço, ex. http://127.0.0.1:8080/api/version (obrigatório em preflight/apply)")
 	flags.StringVar(&config.RelayURL, "relay-url", "", "DefaultRelayURL embutida no build")
 	flags.DurationVar(&config.StopTimeout, "stop-timeout", 30*time.Second, "limite para graceful stop")
 	flags.DurationVar(&config.HealthTimeout, "health-timeout", 45*time.Second, "limite para health gates")

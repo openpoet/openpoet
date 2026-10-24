@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 #
-# deploy_sh_test.sh - checks that .scripts/deploy.sh (host-specific, not
-# versioned) wires the deploy gate in. It runs a COPY of deploy.sh inside a
-# throwaway git repository with systemctl, systemd-run, make, lsof, curl and
-# journalctl stubbed on PATH: it never touches the real production unit.
+# deploy_sh_test.sh - checks that an optional, installation-specific deploy
+# script at .scripts/deploy.sh (gitignored, never versioned) wires the deploy
+# gate in. It runs a COPY of that script inside a throwaway git repository with
+# systemctl, systemd-run, make, lsof, curl and journalctl stubbed on PATH, so
+# it never touches a real service.
+#
+# The contract checked here: the script refuses (exit 1, nothing stopped or
+# launched) when the gate fails, supports --pull, --rollback and a logged
+# --emergency-bypass, and launches when the tree is clean and pushed.
 #
 # Skips (exit 0) when .scripts/deploy.sh is absent (e.g. a fresh clone or CI).
 # Run: make test-deploy-gate
@@ -40,13 +45,14 @@ cp "$DEPLOY" "$P/.scripts/deploy.sh"
 cp "$HERE/gate.sh" "$P/ops/deploy-gate/gate.sh"
 printf '.run/\n.scripts/\n' > "$P/.gitignore"
 printf 'x\n' > "$P/app.txt"
+# runtime dir the script works in (gitignored), with an empty env file
 : > "$P/.run/openpoet.env"
 git -C "$P" add . && git -C "$P" commit -qm init
 git -C "$P" remote add origin "$SANDBOX/origin.git" && git -C "$P" push -q origin main
 
 run() { (cd "$P" && env -u _DEPLOY_DAEMONIZED -u OPENPOET_SESSION_ID PATH="$STUBS:$PATH" bash .scripts/deploy.sh "$@" 2>&1); }
 launched() { grep -q '^systemd-run' "$CALLS"; }
-stopped()  { grep -qE '^systemctl --user (stop|start) openpoet-prod' "$CALLS"; }
+stopped()  { grep -qE '^systemctl --user (stop|start) ' "$CALLS"; }
 
 echo "== deploy.sh wiring"
 
