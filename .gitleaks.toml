@@ -1,0 +1,26 @@
+# gitleaks configuration for OpenPoet.
+#
+# Picked up automatically by `gitleaks git .` / `gitleaks dir .` from the
+# repository root (and therefore by ops/publish-guard/guard.sh and CI). It
+# extends the default ruleset; the allowlists below only cover reviewed false
+# positives. Keep them narrow: never allowlist a whole directory of our own
+# code, and prefer a path + regex pair over a bare path.
+
+title = "OpenPoet gitleaks config"
+
+[extend]
+useDefault = true
+
+# Third-party minified bundles: short minified identifiers trip the
+# generic-api-key rule. These files are vendored verbatim, never edited.
+[[allowlists]]
+description = "Vendored minified JavaScript"
+paths = ['''^web/static/vendor/''']
+
+# Obviously fake key used as a fixture in the automation redaction tests.
+[[allowlists]]
+description = "Fake API key fixture in automation tests"
+condition = "AND"
+paths = ['''^internal/automation/platform_collaboration_test\.go$''']
+regexTarget = "line"
+regexes = ['''sk-0123456789abcdefghijklmnop''']
