@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
-  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.24-00ADD8.svg" alt="Go Version" /></a>
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.25-00ADD8.svg" alt="Go Version" /></a>
   <a href="https://github.com/openpoet/openpoet/releases"><img src="https://img.shields.io/github/v/release/openpoet/openpoet" alt="Release" /></a>
   <a href="https://goreportcard.com/report/github.com/openpoet/openpoet"><img src="https://goreportcard.com/badge/github.com/openpoet/openpoet" alt="Go Report Card" /></a>
 </p>
@@ -116,10 +116,11 @@ OpenPoet does not support Windows natively. Windows users should install and run
 ## Development
 
 ```bash
-# Build
+# Build (release settings, debug off)
 make build
 
-# Run in development mode
+# Development server: debug build on http://127.0.0.1:8080 (loopback only),
+# database ./openpoet.db. Override with DEV_PORT=... / DEV_BIND=...
 make dev
 
 # Run Go tests
@@ -133,8 +134,9 @@ make test-web
 tests under `tests/` in three groups: `unit` (node only), `browser` (Playwright
 against in-process pages) and `server` (Playwright against a running instance).
 The `server` group is skipped unless something answers at `http://localhost:8080`
-— start one with `./.scripts/dev-server.sh start`, or point the suite elsewhere
-with `OPENPOET_E2E_URL`. Port 8081 is production and the runner refuses it.
+— start one with `make dev` in another terminal, or point the suite elsewhere
+with `OPENPOET_E2E_URL`. As a safety net the runner refuses port 8081, the
+conventional port of a production instance.
 
 ## Contributing
 

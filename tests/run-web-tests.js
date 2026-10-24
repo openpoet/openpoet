@@ -86,7 +86,7 @@ async function main() {
 
     if (group === 'server' && !(await serverIsUp(baseURL))) {
       console.log(`\n## ${group}: SKIPPED — nothing answering at ${baseURL}`);
-      console.log('   start a dev instance first: ./.scripts/dev-server.sh start');
+      console.log('   start a dev instance first (in another terminal): make dev');
       console.log('   or point the suite elsewhere: OPENPOET_E2E_URL=http://127.0.0.1:8082');
       skipped += files.length;
       continue;
