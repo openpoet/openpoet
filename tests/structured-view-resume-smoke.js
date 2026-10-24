@@ -49,7 +49,7 @@ async function main() {
         type: 'user',
         uuid: 'resumed-user',
         timestamp: new Date().toISOString(),
-        message: { role: 'user', content_blocks: [{ type: 'text', text: 'mensagem do histórico retomado' }] },
+        message: { role: 'user', content_blocks: [{ type: 'text', text: 'message from the resumed history' }] },
       });
       sv.appendEvent(sessionId, {
         type: 'assistant',
@@ -59,7 +59,7 @@ async function main() {
           role: 'assistant',
           message_id: 'resumed-message',
           stop_reason: 'end_turn',
-          content_blocks: [{ type: 'text', text: 'resposta após o resume' }],
+          content_blocks: [{ type: 'text', text: 'reply after the resume' }],
           usage: { input_tokens: 7, output_tokens: 5 },
         },
       });
@@ -124,8 +124,8 @@ async function main() {
       loaded: true,
     });
     assert.equal(result.eventCount, 2);
-    assert.match(result.rendered, /mensagem do histórico retomado/);
-    assert.match(result.rendered, /resposta após o resume/);
+    assert.match(result.rendered, /message from the resumed history/);
+    assert.match(result.rendered, /reply after the resume/);
     assert.equal(result.inputTokens, 7);
     assert.equal(result.outputTokens, 5);
     assert.match(result.staleRendered, /fresh resumed history/);

@@ -46,7 +46,7 @@ func (workflow Workflow) deployGate(ctx context.Context, repoDir, commit, label 
 		args = append(args, "--commit", commit)
 	}
 	if _, err := workflow.Runner.Run(ctx, repoDir, "bash", args...); err != nil {
-		return fmt.Errorf("%s recusado pelo deploy gate: %w", label, err)
+		return fmt.Errorf("%s refused by the deploy gate: %w", label, err)
 	}
 	return nil
 }
@@ -66,7 +66,7 @@ func (workflow Workflow) Prepare(ctx context.Context, config Config) (Manifest, 
 	}
 	gitSHA := strings.TrimSpace(string(shaOutput))
 	if gitSHA == "" {
-		return empty, "", errors.New("git SHA vazio")
+		return empty, "", errors.New("empty git SHA")
 	}
 
 	releaseID := config.ReleaseID
@@ -77,7 +77,7 @@ func (workflow Workflow) Prepare(ctx context.Context, config Config) (Manifest, 
 		return empty, "", err
 	}
 	if strings.ContainsAny(config.RelayURL, " \t\r\n") {
-		return empty, "", errors.New("relay-url não pode conter espaços")
+		return empty, "", errors.New("relay-url must not contain spaces")
 	}
 
 	testCommand := []string{"go", "test", "./..."}
@@ -91,7 +91,7 @@ func (workflow Workflow) Prepare(ctx context.Context, config Config) (Manifest, 
 	finalDir := filepath.Join(config.ReleasesDir, releaseID)
 	if _, err := os.Stat(finalDir); !os.IsNotExist(err) {
 		if err == nil {
-			return empty, "", fmt.Errorf("release já existe: %s", finalDir)
+			return empty, "", fmt.Errorf("release already exists: %s", finalDir)
 		}
 		return empty, "", err
 	}
@@ -164,11 +164,11 @@ func (workflow Workflow) Preflight(ctx context.Context, config Config) (Manifest
 		return manifest, err
 	}
 	if config.ReleaseID != "" && config.ReleaseID != manifest.ReleaseID {
-		return manifest, fmt.Errorf("release-id %q difere do manifest %q", config.ReleaseID, manifest.ReleaseID)
+		return manifest, fmt.Errorf("release-id %q differs from manifest %q", config.ReleaseID, manifest.ReleaseID)
 	}
 	expectedArtifact := filepath.Join(filepath.Dir(config.ManifestPath), "openpoet")
 	if filepath.Clean(manifest.ArtifactPath) != filepath.Clean(expectedArtifact) {
-		return manifest, errors.New("artifact_path precisa apontar para openpoet ao lado do manifest")
+		return manifest, errors.New("artifact_path must point to openpoet next to the manifest")
 	}
 	if err := VerifyArtifact(manifest); err != nil {
 		return manifest, err
@@ -179,21 +179,21 @@ func (workflow Workflow) Preflight(ctx context.Context, config Config) (Manifest
 		"plist":       config.PlistPath,
 	} {
 		if path == "" {
-			return manifest, fmt.Errorf("%s é obrigatório", name)
+			return manifest, fmt.Errorf("%s is required", name)
 		}
 		info, err := os.Stat(path)
 		if err != nil {
 			return manifest, fmt.Errorf("%s: %w", name, err)
 		}
 		if !info.Mode().IsRegular() {
-			return manifest, fmt.Errorf("%s não é arquivo regular: %s", name, path)
+			return manifest, fmt.Errorf("%s is not a regular file: %s", name, path)
 		}
 	}
 	if err := QuickCheckSQLite(config.DBPath); err != nil {
 		return manifest, fmt.Errorf("live database: %w", err)
 	}
 	if config.HealthURL == "" {
-		return manifest, errors.New("health-url é obrigatória")
+		return manifest, errors.New("health-url is required")
 	}
 	healthCtx, cancel := context.WithTimeout(ctx, minDuration(config.HealthTimeout, 5*time.Second))
 	defer cancel()
@@ -213,16 +213,16 @@ func (workflow Workflow) Apply(ctx context.Context, config Config) (ApplyResult,
 		return result, err
 	}
 	if !config.Execute {
-		return result, errors.New("apply mutante exige --execute")
+		return result, errors.New("a mutating apply requires --execute")
 	}
 	if config.ServiceLabel == "" || config.LaunchDomain == "" {
-		return result, errors.New("service-label e launch-domain são obrigatórios")
+		return result, errors.New("service-label and launch-domain are required")
 	}
 	if config.BackupDir == "" {
-		return result, errors.New("backup-dir é obrigatório")
+		return result, errors.New("backup-dir is required")
 	}
 	if config.RepoDir == "" {
-		return result, errors.New("repo é obrigatório (deploy gate)")
+		return result, errors.New("repo is required (deploy gate)")
 	}
 	if err := workflow.deployGate(ctx, config.RepoDir, manifest.GitSHA, "safe-rollout apply"); err != nil {
 		return result, err
@@ -360,14 +360,14 @@ func migrateRuntimeSecrets(ctx context.Context, dbPath, encryptKey string) (data
 
 func validatePrepareConfig(config Config) error {
 	if config.RepoDir == "" || config.ReleasesDir == "" {
-		return errors.New("repo e releases-dir são obrigatórios")
+		return errors.New("repo and releases-dir are required")
 	}
 	info, err := os.Stat(filepath.Join(config.RepoDir, "go.mod"))
 	if err != nil {
-		return fmt.Errorf("repo inválido: %w", err)
+		return fmt.Errorf("invalid repo: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return errors.New("go.mod não é arquivo regular")
+		return errors.New("go.mod is not a regular file")
 	}
 	return nil
 }

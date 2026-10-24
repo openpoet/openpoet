@@ -197,7 +197,7 @@ func TestRestartRecoveryResumesInterruptedTurnWithDeployResult(t *testing.T) {
 		t.Fatalf("prompts = %v, want exactly one for mid", h.prompts)
 	}
 	text := h.prompts["mid"][0]
-	for _, want := range []string{"reiniciou durante o seu turno", "abc1234 concluído com sucesso", "você mesmo disparou", "continue de onde parou"} {
+	for _, want := range []string{"restarted during your turn", "abc1234 succeeded", "you triggered yourself", "continue where you left off"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("continuation %q lacks %q", text, want)
 		}
@@ -224,7 +224,7 @@ func TestRestartRecoveryResumesInterruptedTurnWithDeployResult(t *testing.T) {
 	again.RunBoot(context.Background(), sessions("mid", "idle", "asking"))
 	h.waitPrompts(1)
 	time.Sleep(50 * time.Millisecond)
-	if len(h.prompts) != 1 || !strings.Contains(h.prompts["mid"][0], "reinício do serviço") {
+	if len(h.prompts) != 1 || !strings.Contains(h.prompts["mid"][0], "service restart") {
 		t.Fatalf("second restart prompts = %v", h.prompts)
 	}
 	if got := h.eventCount("platform.deploy."); got != 0 {
@@ -264,7 +264,7 @@ func TestRestartRecoveryTellsIdleRequesterTheDeployResult(t *testing.T) {
 	after.RunBoot(context.Background(), sessions("req"))
 	h.waitPrompts(1)
 	text := h.prompts["req"][0]
-	if !strings.Contains(text, "O deploy que você disparou (d-rollback)") || !strings.Contains(text, "revertido") || !strings.Contains(text, "retomada com --resume") {
+	if !strings.Contains(text, "The deploy you triggered (d-rollback)") || !strings.Contains(text, "rolled back") || !strings.Contains(text, "resumed with --resume") {
 		t.Fatalf("notice = %q", text)
 	}
 	if got := h.eventCount("platform.deploy.failed:d-rollback"); got != 1 {
@@ -296,7 +296,7 @@ func TestRestartRecoveryReportsDeployWithoutRestart(t *testing.T) {
 	}
 	h.turn(r, "req", false, "Stop")
 	<-done
-	if len(h.prompts["req"]) != 1 || !strings.Contains(h.prompts["req"][0], "antes de parar a produção (build error)") {
+	if len(h.prompts["req"]) != 1 || !strings.Contains(h.prompts["req"][0], "before stopping production (build error)") {
 		t.Fatalf("prompts = %v", h.prompts)
 	}
 	r.reportDeploy(context.Background(), record, false)

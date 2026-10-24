@@ -107,7 +107,7 @@ func ReadManifest(path string) (Manifest, error) {
 		return manifest, err
 	}
 	if manifest.ArtifactPath == "" || manifest.ArtifactSHA256 == "" || manifest.GitSHA == "" {
-		return manifest, errors.New("manifest incompleto")
+		return manifest, errors.New("incomplete manifest")
 	}
 	return manifest, nil
 }
@@ -118,14 +118,14 @@ func VerifyArtifact(manifest Manifest) error {
 		return fmt.Errorf("hash artifact: %w", err)
 	}
 	if hash != manifest.ArtifactSHA256 {
-		return fmt.Errorf("artifact SHA-256 divergente: esperado %s, obtido %s", manifest.ArtifactSHA256, hash)
+		return fmt.Errorf("artifact SHA-256 mismatch: expected %s, got %s", manifest.ArtifactSHA256, hash)
 	}
 	return nil
 }
 
 func QuickCheckSQLite(path string) error {
 	if path == "" {
-		return errors.New("db path vazio")
+		return errors.New("empty db path")
 	}
 	if _, err := os.Stat(path); err != nil {
 		return err
@@ -148,14 +148,14 @@ func QuickCheckSQLite(path string) error {
 
 func BackupSQLite(sourcePath, destinationPath string) error {
 	if sourcePath == "" || destinationPath == "" {
-		return errors.New("source e destination são obrigatórios")
+		return errors.New("source and destination are required")
 	}
 	if _, err := os.Stat(sourcePath); err != nil {
 		return err
 	}
 	if _, err := os.Stat(destinationPath); !os.IsNotExist(err) {
 		if err == nil {
-			return fmt.Errorf("backup já existe: %s", destinationPath)
+			return fmt.Errorf("backup already exists: %s", destinationPath)
 		}
 		return err
 	}
@@ -184,7 +184,7 @@ func BackupSQLite(sourcePath, destinationPath string) error {
 // verified snapshot. WAL sidecars are removed only while the service is down.
 func RestoreSQLiteBackup(backupPath, livePath string) error {
 	if backupPath == "" || livePath == "" {
-		return errors.New("backup e live database são obrigatórios")
+		return errors.New("backup and live database are required")
 	}
 	if err := QuickCheckSQLite(backupPath); err != nil {
 		return fmt.Errorf("verify SQLite restore source: %w", err)
@@ -263,7 +263,7 @@ func AtomicInstall(candidatePath, livePath, releaseID string) (string, error) {
 	previousPath := livePath + ".previous." + releaseID
 	if _, err := os.Stat(previousPath); !os.IsNotExist(err) {
 		if err == nil {
-			return "", fmt.Errorf("previous binary já existe: %s", previousPath)
+			return "", fmt.Errorf("previous binary already exists: %s", previousPath)
 		}
 		return "", err
 	}
@@ -373,17 +373,17 @@ func (health HealthClient) CheckVersion(ctx context.Context, endpoint, expectedV
 		return err
 	}
 	if payload.Version == "" {
-		return errors.New("health sem version")
+		return errors.New("health response has no version")
 	}
 	if expectedVersion != "" && payload.Version != expectedVersion {
-		return fmt.Errorf("versão inesperada: esperado %q, obtido %q", expectedVersion, payload.Version)
+		return fmt.Errorf("unexpected version: expected %q, got %q", expectedVersion, payload.Version)
 	}
 	return nil
 }
 
 func (health HealthClient) WaitForHealth(ctx context.Context, endpoint, expectedVersion string, interval time.Duration, consecutive int) error {
 	if consecutive < 1 {
-		return errors.New("consecutive deve ser positivo")
+		return errors.New("consecutive must be positive")
 	}
 	passed := 0
 	for {

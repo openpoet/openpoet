@@ -5420,7 +5420,7 @@ class OpenPoet {
             <div class="skills-toolbar">
                 <div class="skills-toolbar-left">
                     <button class="btn btn-primary" onclick="app.showSkillModal()">Add Skill</button>
-                    <button class="btn btn-secondary" onclick="app.showAISkillCreator()" title="Generate a skill using AI">Criar com IA</button>
+                    <button class="btn btn-secondary" onclick="app.showAISkillCreator()" title="Generate a skill using AI">Create with AI</button>
                     <button class="btn btn-secondary" onclick="app.syncAllConfig()" title="Sync skills to all projects">Sync Now</button>
                 </div>
                 <div class="skills-toolbar-right">
@@ -7174,7 +7174,7 @@ class OpenPoet {
             list.innerHTML = tags.map(t => `
                 <div class="manage-tag-row" data-tag-id="${t.id}">
                     <span class="tag-chip" style="background:${t.color}22;color:${t.color}">${this.escapeHtml(t.name)}</span>
-                    ${t.coordination === 1 ? '<span class="tag-coord-badge" title="Grupo de coordenação: as sessões coordenadoras atuam sobre os projetos com esta tag" style="font-size:11px;padding:1px 6px;border-radius:8px;border:1px solid var(--color-border);color:var(--color-text-muted);margin-left:6px;white-space:nowrap;">grupo</span>' : ''}
+                    ${t.coordination === 1 ? '<span class="tag-coord-badge" title="Coordination group: coordinator sessions act on the projects with this tag" style="font-size:11px;padding:1px 6px;border-radius:8px;border:1px solid var(--color-border);color:var(--color-text-muted);margin-left:6px;white-space:nowrap;">group</span>' : ''}
                     <div style="display:flex;gap:4px;margin-left:auto;">
                         <button class="btn btn-secondary btn-sm" onclick="app._editTag(${t.id})" title="Edit">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
@@ -7202,9 +7202,9 @@ class OpenPoet {
                 </div>
                 <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;cursor:pointer;">
                     <input type="checkbox" id="new-tag-coordination">
-                    <span>Grupo de coordenação</span>
+                    <span>Coordination group</span>
                 </label>
-                <div style="font-size:12px;color:var(--color-text-muted);margin-top:4px;">Grupos de coordenação definem o escopo das sessões coordenadoras: os projetos com esta tag viram membros do grupo.</div>
+                <div style="font-size:12px;color:var(--color-text-muted);margin-top:4px;">Coordination groups define the scope of coordinator sessions: projects with this tag become members of the group.</div>
             </div>
         `;
 
@@ -7259,9 +7259,9 @@ class OpenPoet {
             <div class="form-group">
                 <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
                     <input type="checkbox" id="edit-tag-coordination" ${tag.coordination === 1 ? 'checked' : ''}>
-                    <span>Grupo de coordenação</span>
+                    <span>Coordination group</span>
                 </label>
-                <div style="font-size:12px;color:var(--color-text-muted);margin-top:4px;">Grupos de coordenação definem o escopo das sessões coordenadoras: os projetos com esta tag viram membros do grupo.</div>
+                <div style="font-size:12px;color:var(--color-text-muted);margin-top:4px;">Coordination groups define the scope of coordinator sessions: projects with this tag become members of the group.</div>
             </div>
             <div style="margin-top:12px;">
                 <span>Preview: </span><span class="tag-chip" id="edit-tag-preview" style="background:${tag.color}22;color:${tag.color}">${this.escapeHtml(tag.name)}</span>
@@ -7673,15 +7673,15 @@ class OpenPoet {
         banner.id = 'update-banner';
         banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:10000;background:linear-gradient(135deg,var(--color-gradient-start,#667eea),var(--color-gradient-end,#764ba2));color:#fff;padding:12px 20px;display:flex;align-items:center;justify-content:center;gap:12px;font-size:14px;font-weight:500;box-shadow:0 2px 12px rgba(0,0,0,0.3);';
         banner.innerHTML = `
-            <span>Nova vers\u00e3o dispon\u00edvel</span>
-            <button id="update-btn" style="background:#fff;color:var(--color-gradient-end,#764ba2);border:none;padding:6px 16px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px;">Atualizar</button>
-            <button onclick="this.parentElement.remove()" style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.4);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:13px;">Depois</button>
+            <span>New version available</span>
+            <button id="update-btn" style="background:#fff;color:var(--color-gradient-end,#764ba2);border:none;padding:6px 16px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px;">Update</button>
+            <button onclick="this.parentElement.remove()" style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.4);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:13px;">Later</button>
         `;
         document.body.prepend(banner);
 
         document.getElementById('update-btn').addEventListener('click', async () => {
             const btn = document.getElementById('update-btn');
-            btn.textContent = 'Atualizando...';
+            btn.textContent = 'Updating...';
             btn.disabled = true;
             btn.style.opacity = '0.7';
 
@@ -10054,14 +10054,14 @@ class OpenPoet {
         const idPrefix = scope === 'project' ? 'project' : 'all';
         return `
             <div class="task-bulk-actions" data-bulk-scope="${scope}">
-                <span class="task-bulk-selection-count"><strong id="${idPrefix}-bulk-selected-count">${selectedCount}</strong> selecionada(s)</span>
+                <span class="task-bulk-selection-count"><strong id="${idPrefix}-bulk-selected-count">${selectedCount}</strong> selected</span>
                 <button id="${idPrefix}-bulk-approve-selected" class="btn btn-success btn-sm" type="button"
                     onclick="app.approveSelectedTaskVerifications('${scope}', ${projectArg})" ${selectedCount === 0 ? 'disabled' : ''}>
-                    Aprovar selecionadas
+                    Approve selected
                 </button>
                 <button class="btn btn-secondary btn-sm" type="button"
                     onclick="app.approveAllPendingTaskVerifications(${projectArg})">
-                    Aprovar todas as pendentes
+                    Approve all pending
                 </button>
             </div>`;
     }
@@ -10093,23 +10093,23 @@ class OpenPoet {
             .filter((id, index, values) => id > 0 && values.indexOf(id) === index);
         if (ids.length === 0) return;
         showConfirmModal(
-            'Aprovar tarefas selecionadas?',
-            `A verificação de <strong>${ids.length}</strong> tarefa(s) será aprovada e elas serão marcadas como concluídas.`,
+            'Approve selected tasks?',
+            `Verification of <strong>${ids.length}</strong> task(s) will be approved and they will be marked as done.`,
             () => this._executeBulkTaskApproval({ task_ids: ids, ...(projectId ? { project_id: projectId } : {}) }, projectId),
-            'Aprovar selecionadas'
+            'Approve selected'
         );
     }
 
     approveAllPendingTaskVerifications(projectId = null) {
         const project = projectId ? this.projects?.find(item => item.id === projectId) : null;
         const scopeLabel = project
-            ? `no projeto <strong>${this.escapeHtml(project.name)}</strong>`
-            : 'em todos os projetos';
+            ? `in project <strong>${this.escapeHtml(project.name)}</strong>`
+            : 'across all projects';
         showConfirmModal(
-            'Aprovar todas as pendentes?',
-            `Todas as tarefas em Awaiting Approval ${scopeLabel} serão marcadas como concluídas.`,
+            'Approve all pending?',
+            `All tasks in Awaiting Approval ${scopeLabel} will be marked as done.`,
             () => this._executeBulkTaskApproval({ all_pending: true, ...(projectId ? { project_id: projectId } : {}) }, projectId),
-            'Aprovar todas'
+            'Approve all'
         );
     }
 
@@ -10118,19 +10118,19 @@ class OpenPoet {
             const result = await this.api('POST', '/tasks/approve-bulk', payload);
             this._getTaskApprovalSelection().clear();
             const parts = [
-                `${result.approved || 0} aprovada(s)`,
-                `${result.already_done || 0} já concluída(s)`,
-                `${result.failed || 0} falha(s)`
+                `${result.approved || 0} approved`,
+                `${result.already_done || 0} already done`,
+                `${result.failed || 0} failed`
             ];
             const failures = (result.results || []).filter(item => item.outcome === 'failed');
             if (failures.length > 0) {
                 const failurePreview = failures.slice(0, 3)
-                    .map(item => `#${item.task_id}: ${item.error || item.error_code || 'falha'}`)
+                    .map(item => `#${item.task_id}: ${item.error || item.error_code || 'failed'}`)
                     .join('; ');
                 parts.push(failurePreview + (failures.length > 3 ? `; +${failures.length - 3}` : ''));
             }
             this.showToast(
-                result.failed ? 'Aprovação em massa concluída parcialmente' : 'Aprovação em massa concluída',
+                result.failed ? 'Bulk approval partially completed' : 'Bulk approval completed',
                 parts.join(' · '),
                 result.failed ? 'warning' : 'success'
             );
@@ -10140,7 +10140,7 @@ class OpenPoet {
                 await this.loadAllTasks();
             }
         } catch (error) {
-            this.showToast('Erro', error.message, 'error');
+            this.showToast('Error', error.message, 'error');
         }
     }
 
@@ -10607,7 +10607,7 @@ class OpenPoet {
                 </form>
             `;
 
-            const aiBtn = !isEdit ? `<button class="btn btn-primary" style="background:var(--color-ai,#8b5cf6)" onclick="app.createTaskWithAI(${projectId}, ${parentId})">&#10022; Criar com IA</button>` : '';
+            const aiBtn = !isEdit ? `<button class="btn btn-primary" style="background:var(--color-ai,#8b5cf6)" onclick="app.createTaskWithAI(${projectId}, ${parentId})">&#10022; Create with AI</button>` : '';
 
             const actions = `
                 <button class="btn btn-secondary" onclick="app.hideModal()">Cancel</button>
@@ -10882,7 +10882,7 @@ class OpenPoet {
     }
     _buildViewDocAction(task) {
         return {
-            label: 'Ver Documento',
+            label: 'View Document',
             role: 'secondary',
             icon: this._taskDetailIcons.fileText,
             class: 'btn btn-secondary',
@@ -11055,10 +11055,10 @@ class OpenPoet {
         const diffHour = Math.floor(diffMin / 60);
         const diffDay = Math.floor(diffHour / 24);
 
-        if (diffSec < 60) return 'agora';
-        if (diffMin < 60) return `${diffMin}m atras`;
-        if (diffHour < 24) return `${diffHour}h atras`;
-        if (diffDay < 7) return `${diffDay}d atras`;
+        if (diffSec < 60) return 'just now';
+        if (diffMin < 60) return `${diffMin}m ago`;
+        if (diffHour < 24) return `${diffHour}h ago`;
+        if (diffDay < 7) return `${diffDay}d ago`;
         return date.toLocaleDateString('en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
     }
 
@@ -12056,7 +12056,7 @@ class OpenPoet {
         toast.innerHTML = `
             <div class="ai-proactive-toast-content">
                 <span class="ai-proactive-toast-title">${this.escapeHtml(data.title)}</span>
-                ${data.conversation_id ? `<a href="#" class="ai-proactive-toast-link" data-conv-id="${data.conversation_id}">Ver</a>` : ''}
+                ${data.conversation_id ? `<a href="#" class="ai-proactive-toast-link" data-conv-id="${data.conversation_id}">View</a>` : ''}
                 <button class="ai-proactive-toast-close">&times;</button>
             </div>
         `;

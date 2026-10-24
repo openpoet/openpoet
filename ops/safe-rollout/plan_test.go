@@ -238,7 +238,7 @@ func TestApplyRejectsInvalidTokenBeforeExternalCommands(t *testing.T) {
 		ConfirmToken: "wrong",
 		ManifestPath: manifestPath,
 	})
-	if err == nil || !strings.Contains(err.Error(), "token inválido") {
+	if err == nil || !strings.Contains(err.Error(), "invalid confirmation token") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(runner.calls) != 0 {
