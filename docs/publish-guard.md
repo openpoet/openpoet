@@ -1,112 +1,113 @@
-# Política de publicação — o OpenPoet é open source
+# Publish guard: keeping a public repository clean
 
-O repositório `openpoet/openpoet` é público. Tudo que entra num commit pode
-chegar ao GitHub, e o que chega ao GitHub deve ser tratado como publicado para
-sempre: forks, clones, caches e indexadores guardam cópias mesmo depois de
-reescrever o histórico.
+OpenPoet is open source and the `openpoet/openpoet` repository is public.
+Anything that lands in a commit can reach GitHub, and anything that reaches
+GitHub should be treated as published forever: forks, clones, caches and
+indexers keep copies even after history is rewritten.
 
-## As regras
+## The rules
 
-1. **Nada comprometedor entra em commit nem chega ao remoto:** segredos,
-   tokens, chaves e senhas; IPs e hosts internos; dados pessoais (caminhos com
-   o usuário da máquina, nomes de clientes e de projetos de clientes, e-mails
-   que não sejam do projeto); imagens e capturas de debug; documentação
-   interna (relatórios de incidente, avaliações, IDs de sessões e tasks
-   internas); dumps, logs, bancos `.db`, arquivos `.env`, binários.
-   Fixtures de teste usam valores neutros: `example.com`, `192.0.2.x`
-   (TEST-NET), `/home/dev`, `C:\Users\dev`.
-2. **Antes de cada commit, revise o diff** (`git diff --staged`) com esse
-   critério. O hook de pre-commit roda o guard (abaixo), mas ele não substitui
-   a leitura.
-3. **Antes de cada push, revise todos os commits que ainda não estão no
-   remoto** (`git log -p origin/main..main`) e rode o scanner
-   (`make publish-guard`). Se aparecer algo, **reescreva o histórico local**
-   antes de empurrar (`git commit --amend`, `git rebase -i` ou
-   `git filter-repo`, sempre com um backup antes, por exemplo
-   `git bundle create <fora-do-repo>/backup.bundle --all`). Nunca empurre para
-   "corrigir depois".
-4. **O que está no `.gitignore` continua no `.gitignore`.** `.scripts/`,
-   `CLAUDE.md`, `.claude/`, `.run/` e os bancos locais não viram arquivos
-   versionados, nem com `git add -f`.
-5. **Segredo que chegou ao remoto exige rotação.** Reescrever o histórico não
-   basta, porque ele já pode ter sido copiado. Revogue e troque a credencial e
-   só depois limpe o histórico (com `--force-with-lease`, avisando antes sobre
-   o impacto em forks e clones).
+1. **Nothing compromising goes into a commit or reaches the remote:** secrets,
+   tokens, keys and passwords; private IPs and internal hostnames; personal
+   data (paths containing your machine's user name, customer or private project
+   names, private e-mail addresses); debug screenshots; internal documents;
+   dumps, logs, `.db` databases, `.env` files, binaries.
+   Test fixtures use neutral values: `example.com`, `192.0.2.x` (TEST-NET),
+   `/home/dev`, `C:\Users\dev`.
+2. **Review the diff before every commit** (`git diff --staged`) with those
+   rules in mind. The pre-commit hook runs the guard (below), but it does not
+   replace reading the diff.
+3. **Before every push, review every commit that is not on the remote yet**
+   (`git log -p origin/main..HEAD`) and run `make publish-guard`. If something
+   shows up, **rewrite your local history** before pushing
+   (`git commit --amend`, `git rebase -i` or `git filter-repo`, after taking a
+   backup such as `git bundle create ../backup.bundle --all`). Never push with
+   the plan of "fixing it later".
+4. **What is in `.gitignore` stays in `.gitignore`.** Never `git add -f` an
+   ignored file.
+5. **A secret that reached the remote must be rotated.** Rewriting history is
+   not enough, because it may already have been copied. Revoke and replace the
+   credential first, then clean the history.
 
-## O guard automático
+## The automatic guard
 
-`ops/publish-guard/guard.sh` roda nos hooks versionados em `.githooks/`
-(`core.hooksPath=.githooks`). Qualquer `make` os ativa sozinho num clone que
-ainda não tem hooks configurados; `make setup` faz o mesmo explicitamente. Se
-o clone já usa outro `core.hooksPath`, o `make` não mexe e avisa que o guard
-está inativo:
+`ops/publish-guard/guard.sh` runs from the versioned hooks in `.githooks/`
+(`core.hooksPath=.githooks`). Any `make` invocation enables them on a clone
+that has no hooks path configured yet; `make setup` does the same explicitly.
+If the clone already uses a different `core.hooksPath`, `make` leaves it alone
+and warns that the guard is inactive.
 
-| Hook / comando | O que verifica |
+| Hook / command | What it checks |
 |---|---|
-| `pre-commit` | as mudanças staged |
-| `pre-push` | cada commit que ainda não está no remoto, inclusive de branch nova |
-| `make publish-guard` | os commits de `HEAD` que não estão em `origin` (com fetch) |
-| `make secret-scan` | o histórico inteiro, todas as refs |
+| `pre-commit` | the staged changes |
+| `pre-push` | every commit that is not on the remote yet, including on new branches |
+| `make publish-guard` | the commits in `HEAD` that are not on `origin` (after a fetch) |
+| `make secret-scan` | the whole history, all refs |
 
-Verificações:
+Checks:
 
-- **Segredos:** o [gitleaks](https://github.com/gitleaks/gitleaks) v8.30.1
-  (licença MIT), instalado com `make tools`. Sem gitleaks o guard **falha
-  fechado**. Falsos positivos já revisados ficam em `.gitleaksignore`, por
-  fingerprint. Só acrescente um item depois de revisar o achado.
-- **Conteúdo das linhas adicionadas** (e das mensagens de commit, nos modos
-  de range e push): IPv4 privado (10/8, 172.16/12, 192.168/16); nomes de
-  host internos (`*.internal`, `*.intranet`, `*.corp`, `*.lan`,
-  `*.home.arpa` e URLs para `*.local`; `host.docker.internal` passa); o home
-  e o usuário da máquina atual (`$HOME`, `/home/<usuário>`, `/Users/<usuário>`,
-  `\Users\<usuário>`); o home de **qualquer** usuário nesses formatos, exceto
-  usuários neutros de fixture (`dev`, `user`, `developer`, `test`, `runner`,
-  `foo`, `example`…); links OAuth/OIDC com `code`, `state`, PKCE
-  (`code_challenge`/`code_verifier`) ou token na URL; e o **denylist local**.
-- **Arquivos:** os que o configsync gera a partir do setup local de agentes
+- **Secrets:** [gitleaks](https://github.com/gitleaks/gitleaks) (MIT
+  license), installed with `make tools`. Without gitleaks the guard **fails
+  closed**. Reviewed false positives are listed by fingerprint in
+  `.gitleaksignore`; only add an entry after reviewing the finding.
+- **Content of added lines** (and of commit messages, in range and push
+  modes): private IPv4 addresses (10/8, 172.16/12, 192.168/16); internal
+  hostnames (`*.internal`, `*.intranet`, `*.corp`, `*.lan`, `*.home.arpa` and
+  URLs pointing at `*.local`; `host.docker.internal` is allowed); the current
+  machine's home directory and user name (`$HOME`, `/home/<user>`,
+  `/Users/<user>`, `\Users\<user>`); the home directory of **any** user in
+  those formats, except neutral fixture users (`dev`, `user`, `developer`,
+  `test`, `runner`, `foo`, `example`, ...); OAuth/OIDC links carrying `code`,
+  `state`, PKCE parameters (`code_challenge`/`code_verifier`) or a token in the
+  URL; and the **local denylist**.
+- **Files:** files generated by configsync from a local agent setup
   (`CLAUDE.md`, `AGENTS.md`, `.claude/`, `.agents/`, `.codex/`, `.mcp.json`,
   `.acp/instructions.md`, `.github/copilot-instructions.md`, `.github/hooks/`),
-  que ficam no `.gitignore`; `.env*` (exceto `.env.example`/`.sample`/`.template`), chaves e
-  certificados, bancos, logs, dumps/HAR/pcap, arquivos de token, backups e
-  SQL. Imagens, vídeos e PDFs só em `docs/images/` e `web/static/`. Binário
-  acima de 512 KiB ou qualquer arquivo acima de 5 MiB é recusado.
+  which are git-ignored; `.env*` (except `.env.example`, `.sample`,
+  `.template`), keys and certificates, databases, logs, dumps/HAR/pcap, token
+  files, backups and SQL. Images, videos and PDFs are only accepted under
+  `docs/images/` and `web/static/`. Binaries over 512 KiB and any file over
+  5 MiB are refused.
 
-### Denylist local (nunca versionado)
+### Local denylist (never versioned)
 
-Nomes de clientes e domínios internos não podem estar num arquivo versionado
-de um repositório público. O guard os lê de:
+Customer names and private domains cannot live in a versioned file of a public
+repository, so the guard reads them from:
 
-- `.git/info/publish-denylist` (por clone), e
-- `~/.config/openpoet/publish-denylist` (por máquina).
+- `.git/info/publish-denylist` (per clone), and
+- `~/.config/openpoet/publish-denylist` (per machine).
 
-Cada linha é uma regex estendida, comparada sem diferenciar maiúsculas de
-minúsculas. Linhas vazias ou começando com `#` são ignoradas.
+Each line is an extended regular expression, matched case-insensitively.
+Empty lines and lines starting with `#` are ignored.
 
-### Exceções
+### Exceptions
 
-- Uma linha com o marcador `publish-guard:allow` é ignorada pelas regras de
-  conteúdo. Ele fica visível no diff, então use só em fixtures deliberadas e
-  justifique na revisão.
-- `git commit --no-verify` / `git push --no-verify` pulam os hooks. **Agentes
-  nunca usam isso sem ordem expressa do usuário** para aquele commit ou push.
-  Mesmo com a ordem, rode `make publish-guard` e relate o resultado.
+- A line containing the marker `publish-guard:allow` is skipped by the content
+  rules. The marker is visible in the diff, so use it only for deliberate
+  fixtures and justify it in review.
+- `git commit --no-verify` and `git push --no-verify` skip the hooks. Do not
+  use them. Automated agents must never use them unless the maintainer
+  explicitly asks for that specific commit or push, and even then they must run
+  `make publish-guard` and report the result.
 
-## Testes
+## Tests
 
-`make test-publish-guard`, que também roda dentro de `go test ./...` via
-`ops/publish-guard/guard_test.go`, exercita o guard e os hooks com
-repositórios descartáveis e um remoto bare local. Cobre:
+`make test-publish-guard`, which also runs as part of `go test ./...` through
+`ops/publish-guard/guard_test.go`, exercises the guard and the hooks against
+throwaway repositories and a local bare remote. It covers:
 
-- conteúdo: IP privado (loopback passa), home da máquina, home de outro
-  usuário em Linux/macOS/Windows (usuários de fixture passam), host interno
-  (`host.docker.internal` passa), link OAuth (query string comum passa),
-  denylist sem diferenciar maiúsculas, marcador de exceção;
-- arquivos: gerados pelo configsync (`AGENTS.md`, `.codex/`, `.agents/`,
-  `.github/hooks/`, instruções do Copilot e do ACP; o resto de `.github/` passa), `.env` (com `.env.example` permitido), log, banco, imagem fora e
-  dentro de `docs/images/`, binário grande, token detectado pelo gitleaks;
-- falha fechada sem gitleaks;
-- hooks: pre-commit bloqueando (IP privado e link OAuth, sem criar o commit),
-  pre-commit deixando passar um commit limpo e um untrack, instalação pelo
-  `make` (e `core.hooksPath` próprio preservado, com aviso), mensagem de commit verificada, pre-push
-  bloqueando sem que nada chegue ao remoto, push liberado depois de reescrever
-  o commit local, e branch nova verificada.
+- content: private IPs (loopback passes), the machine's home directory, other
+  users' home directories on Linux, macOS and Windows (fixture users pass),
+  internal hostnames (`host.docker.internal` passes), OAuth links (ordinary
+  query strings pass), the case-insensitive denylist and the exception marker;
+- files: configsync output (`AGENTS.md`, `.codex/`, `.agents/`,
+  `.github/hooks/`, Copilot and ACP instructions; the rest of `.github/`
+  passes), `.env` (with `.env.example` allowed), logs, databases, images
+  outside and inside `docs/images/`, large binaries and a token detected by
+  gitleaks;
+- failing closed when gitleaks is missing;
+- hooks: pre-commit blocking (private IP and OAuth link, without creating the
+  commit), pre-commit allowing a clean commit and an untrack, installation by
+  `make` (preserving a custom `core.hooksPath`, with a warning), commit message
+  checks, pre-push blocking with nothing reaching the remote, push allowed
+  after rewriting the local commit, and new branches being checked.
