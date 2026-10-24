@@ -131,7 +131,7 @@ func (s *ComposeApplicationService) Status(ctx context.Context, projectID int64)
 	} else {
 		status.Manifest = body
 	}
-	if lintErr := LintCompose(body); lintErr != nil {
+	if lintErr := LintComposeReserved(ctx, body, s.approvals); lintErr != nil {
 		status.LintError = lintErr.Error()
 	}
 	if approved, err := s.approvals.IsManifestApproved(ctx, projectID, status.ManifestSHA); err == nil {
@@ -171,7 +171,7 @@ func (s *ComposeApplicationService) Approve(ctx context.Context, projectID int64
 		return nil, conflictError("compose_changed",
 			"The compose file changed since it was displayed. Review it again before approving.")
 	}
-	if err := LintCompose(body); err != nil {
+	if err := LintComposeReserved(ctx, body, s.approvals); err != nil {
 		return nil, err
 	}
 	if err := s.approvals.ApproveManifest(ctx, projectID, ComposeManifestSource, body, sha, approvedBy); err != nil {
@@ -201,7 +201,7 @@ func (s *ComposeApplicationService) Up(ctx context.Context, projectID int64) (*C
 	if err != nil {
 		return nil, err
 	}
-	if err := LintCompose(body); err != nil {
+	if err := LintComposeReserved(ctx, body, s.approvals); err != nil {
 		return nil, err
 	}
 	sha := ComposeSHA(body)

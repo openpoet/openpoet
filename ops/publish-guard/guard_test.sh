@@ -12,6 +12,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 GUARD="$HERE/guard.sh"
+# The suite controls every denylist itself (CI may export a real one).
+unset OPENPOET_PUBLISH_DENYLIST_FILE
 if ! command -v gitleaks >/dev/null 2>&1; then
     echo "publish guard: SKIP (gitleaks not installed; make tools)"
     exit 0
@@ -25,7 +27,9 @@ bad() { FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; }
 
 FAKEHOME="$SANDBOX/home-guardtester"
 mkdir -p "$FAKEHOME"
-IP="10.0.0.""42"
+IP="10.255.255.""1"
+IP_C="192.168.255.""1"
+IP_B="172.31.255.""1"
 CLIENT="acme""corp"
 OTHER_HOME="/home/""jdoe"
 MAC_HOME="/Users/""jdoe"
@@ -76,6 +80,12 @@ expect "clean staged change passes" 0 "OK" -- staged; reset_index
 stage net.go "var host = \"$IP\""
 expect "private IP is refused" 1 "private IP" -- staged; reset_index
 
+stage net_b.go "var hosts = []string{\"$IP_B\", \"$IP_C\"}"
+expect "private IPs in 172.16/12 and 192.168/16 are refused" 1 "private IP" -- staged; reset_index
+
+stage doc_ip.go 'var host = "192.0.2.10" // RFC 5737 documentation address'
+expect "documentation IP is fine" 0 "OK" -- staged; reset_index
+
 stage loop.go 'var host = "127.0.0.1"'
 expect "loopback is fine" 0 "OK" -- staged; reset_index
 
@@ -84,6 +94,16 @@ expect "this machine's home path is refused" 1 "user/home path" -- staged; reset
 
 stage cli.md "deployed for ${CLIENT^^} last week"
 expect "local denylist match (case-insensitive) is refused" 1 "local denylist" -- staged; reset_index
+
+EXTRA_DENY="$SANDBOX/ci-denylist"
+printf '# comment\n%s\n' "wid""getco" > "$EXTRA_DENY"
+stage ci.md "built for wid""getco"
+expect "a pattern outside every denylist passes" 0 "OK" -- staged
+out="$(cd "$R" && HOME="$FAKEHOME" OPENPOET_PUBLISH_DENYLIST_FILE="$EXTRA_DENY" bash ops/publish-guard/guard.sh staged 2>&1)"; rc=$?
+[ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "local denylist" && ok "OPENPOET_PUBLISH_DENYLIST_FILE adds denylist patterns" || bad "OPENPOET_PUBLISH_DENYLIST_FILE adds denylist patterns (rc=$rc)"
+out="$(cd "$R" && HOME="$FAKEHOME" OPENPOET_PUBLISH_DENYLIST_FILE="$SANDBOX/missing" bash ops/publish-guard/guard.sh staged 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && ok "a missing OPENPOET_PUBLISH_DENYLIST_FILE is ignored" || bad "a missing OPENPOET_PUBLISH_DENYLIST_FILE is ignored (rc=$rc)"
+reset_index
 
 stage home.go "var p = \"$OTHER_HOME/.claude/projects\""
 expect "another user's home path is refused" 1 "user home path" -- staged; reset_index

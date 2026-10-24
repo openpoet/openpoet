@@ -61,7 +61,7 @@ func (d *DB) IsManifestApproved(ctx context.Context, projectID int64, sha string
 	return n > 0, err
 }
 
-// IsPortReserved reports whether a port is recorded as reserved (8080/8081/8090
+// IsPortReserved reports whether a port is recorded as reserved (the seeded rows
 // and any operator-declared rows) — turning a prose convention into data.
 func (d *DB) IsPortReserved(ctx context.Context, port int) (bool, error) {
 	var n int

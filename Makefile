@@ -1,4 +1,4 @@
-.PHONY: all build run clean test test-web test-deploy-gate deploy-gate test-publish-guard publish-guard secret-scan deps vendor-js provider-helper setup format
+.PHONY: all build build-dev dev run clean test test-web test-deploy-gate deploy-gate test-publish-guard publish-guard secret-scan deps vendor-js provider-helper setup format
 
 # Variables
 BINARY_NAME=openpoet
@@ -22,12 +22,26 @@ endif
 # Default target
 all: deps vendor-js build
 
-# Build the binary
+LDFLAGS = -X main.BuildVersion=$$(git rev-parse --short HEAD)-$$(date +%s) -X main.DefaultRelayURL=$(RELAY_URL)
+
+# Development server: debug build, loopback only, port 8080.
+DEV_BIND ?= 127.0.0.1
+DEV_PORT ?= 8080
+
+# Build the binary (release settings: debug routes and logging off; enable
+# them at runtime with -debug, or use build-dev)
 build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
-	go build -ldflags "-X main.BuildVersion=$$(git rev-parse --short HEAD)-$$(date +%s) -X main.DefaultRelayURL=$(RELAY_URL) -X main.DebugDefault=true" -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
+	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
 	@echo "Built: $(BUILD_DIR)/$(BINARY_NAME)"
+
+# Build the binary with debug logging and the /api/debug routes on by default
+build-dev:
+	@echo "Building $(BINARY_NAME) (debug)..."
+	@mkdir -p $(BUILD_DIR)
+	go build -ldflags "$(LDFLAGS) -X main.DebugDefault=true" -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
+	@echo "Built: $(BUILD_DIR)/$(BINARY_NAME) (debug)"
 
 # Install the audited, version-pinned OpenAI-to-Claude Code bridge.
 # This is intentionally explicit: normal builds never download third-party binaries.
@@ -49,9 +63,11 @@ run: build
 	@echo "Running $(BINARY_NAME)..."
 	./$(BUILD_DIR)/$(BINARY_NAME)
 
-# Run in development mode
-dev:
-	go run $(MAIN_PATH)
+# Run a development server: debug build on http://127.0.0.1:8080 (loopback
+# only), database ./openpoet.db (gitignored). Override with DEV_BIND/DEV_PORT.
+dev: build-dev
+	@echo "Development server on http://$(DEV_BIND):$(DEV_PORT) (Ctrl+C to stop)"
+	./$(BUILD_DIR)/$(BINARY_NAME) -debug -bind $(DEV_BIND) -port $(DEV_PORT)
 
 # Download dependencies
 deps:
@@ -80,7 +96,7 @@ test:
 
 # Run the browser/DOM tests under tests/ (Playwright). Installs the dev-only
 # Node deps on first use; the server group is skipped unless a dev instance is
-# up (./.scripts/dev-server.sh start).
+# up on http://localhost:8080 (`make dev` in another terminal).
 test-web: node_modules
 	node tests/run-web-tests.js
 
@@ -183,10 +199,11 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  all          Build with dependencies and vendor JS (default)"
-	@echo "  build        Build the binary"
+	@echo "  build        Build the binary (debug off)"
+	@echo "  build-dev    Build the binary with debug logging/routes on"
 	@echo "  build-all    Build for multiple platforms"
 	@echo "  run          Build and run the application"
-	@echo "  dev          Run in development mode"
+	@echo "  dev          Debug build, served on http://127.0.0.1:8080"
 	@echo "  deps         Download Go dependencies"
 	@echo "  vendor-js    Download vendor JavaScript libraries"
 	@echo "  provider-helper Install the pinned OpenAI OAuth provider bridge"

@@ -35,7 +35,7 @@ type UpdateStatus struct {
 	DownloadURL    string `json:"download_url,omitempty"`
 	ChecksumURL    string `json:"checksum_url,omitempty"`
 	Error          string `json:"error,omitempty"`
-	Managed        string `json:"managed,omitempty"` // "homebrew", "winget", or ""
+	Managed        string `json:"managed,omitempty"` // "homebrew" or ""
 	CheckedAt      string `json:"checked_at,omitempty"`
 }
 
@@ -256,14 +256,6 @@ func (u *Updater) DetectPackageManager() string {
 	// Homebrew: binary resolves to /opt/homebrew/Cellar/ or /usr/local/Cellar/
 	if strings.Contains(resolved, "/Cellar/") {
 		return "homebrew"
-	}
-
-	// Winget: binary in typical Windows package manager paths (experimental, not officially supported)
-	if runtime.GOOS == "windows" {
-		lower := strings.ToLower(resolved)
-		if strings.Contains(lower, "\\windowsapps\\") || strings.Contains(lower, "\\winget\\") {
-			return "winget"
-		}
 	}
 
 	return ""

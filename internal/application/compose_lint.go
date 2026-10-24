@@ -1,8 +1,10 @@
 package application
 
 import (
+	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -50,12 +52,62 @@ var composeRules = []composeRule{
 	},
 }
 
-// reservedComposePorts are the host ports the compose file must never publish:
-// 8080 is the dev server, 8081 is PRODUCTION, 8090 is another running app.
+// reservedComposePorts are the host ports the compose file must never publish
+// on any installation: 8080 is OpenPoet's default port and 8081 the
+// conventional port of a production instance next to a development one.
+// Installation-specific reservations live in the database (environment_resources
+// rows with status 'reserved') and are enforced by LintComposeReserved.
 var reservedComposePorts = map[string]string{
 	"8080": "the OpenPoet development server",
 	"8081": "the OpenPoet PRODUCTION server",
-	"8090": "a reserved application port",
+}
+
+// ReservedPortChecker is implemented by stores that record reserved host ports
+// (database.DB does, through environment_resources).
+type ReservedPortChecker interface {
+	IsPortReserved(ctx context.Context, port int) (bool, error)
+}
+
+// publishedHostPorts returns the host-side ports (both ends of a range) the
+// compose body publishes.
+func publishedHostPorts(body string) []string {
+	var ports []string
+	for _, match := range publishedPortPattern.FindAllStringSubmatch(body, -1) {
+		for _, port := range match[1:] {
+			if port != "" {
+				ports = append(ports, port)
+			}
+		}
+	}
+	return ports
+}
+
+// LintComposeReserved runs LintCompose and, when store records reserved ports
+// (see ReservedPortChecker), also refuses host ports reserved on this
+// installation. A store without that capability adds no extra check.
+func LintComposeReserved(ctx context.Context, body string, store any) error {
+	if err := LintCompose(body); err != nil {
+		return err
+	}
+	checker, ok := store.(ReservedPortChecker)
+	if !ok || checker == nil {
+		return nil
+	}
+	for _, port := range publishedHostPorts(body) {
+		number, err := strconv.Atoi(port)
+		if err != nil {
+			continue
+		}
+		reserved, err := checker.IsPortReserved(ctx, number)
+		if err != nil {
+			return fmt.Errorf("check reserved port %d: %w", number, err)
+		}
+		if reserved {
+			return validationError("compose_reserved_port", fmt.Sprintf(
+				"Refused: host port %s is reserved on this installation. Publish a different port.", port))
+		}
+	}
+	return nil
 }
 
 // publishedPortPattern captures the HOST side of a `ports:` entry, i.e. the
@@ -76,15 +128,10 @@ func LintCompose(body string) error {
 				rule.reason, strings.TrimSpace(loc)))
 		}
 	}
-	for _, match := range publishedPortPattern.FindAllStringSubmatch(body, -1) {
-		for _, port := range match[1:] {
-			if port == "" {
-				continue
-			}
-			if why, reserved := reservedComposePorts[port]; reserved {
-				return validationError("compose_reserved_port", fmt.Sprintf(
-					"Refused: host port %s is reserved for %s. Publish a different port.", port, why))
-			}
+	for _, port := range publishedHostPorts(body) {
+		if why, reserved := reservedComposePorts[port]; reserved {
+			return validationError("compose_reserved_port", fmt.Sprintf(
+				"Refused: host port %s is reserved for %s. Publish a different port.", port, why))
 		}
 	}
 	return nil

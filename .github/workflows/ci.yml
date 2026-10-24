@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned gitleaks release (MIT). The checksum comes from the release's
+  # gitleaks_<version>_checksums.txt; bump both together.
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+
+jobs:
+  go:
+    name: Go vet, build and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted (run: make format):"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      # The publish guard suite skips here (no gitleaks in this job); the
+      # secret-scan job runs it with gitleaks installed.
+      - name: go test
+        run: go test ./...
+
+  secret-scan:
+    name: Secret scan and publish guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Scan the PR's own commits, not GitHub's synthetic merge commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install gitleaks
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # Uses .gitleaks.toml (default rules + reviewed allowlists) and
+      # .gitleaksignore from the repository root.
+      - name: gitleaks (git history)
+        run: gitleaks git . --redact --no-banner --exit-code 1
+
+      - name: gitleaks (working tree)
+        run: gitleaks dir . --redact --no-banner --exit-code 1
+
+      # Optional extra denylist (client names, internal domains: one extended
+      # regex per line) from the PUBLISH_DENYLIST repository secret. Secrets
+      # are not exposed to pull requests from forks; the step is then a no-op.
+      # Each pattern is masked so a finding never prints it in the log.
+      - name: Load the publish denylist
+        env:
+          PUBLISH_DENYLIST: ${{ secrets.PUBLISH_DENYLIST }}
+        run: |
+          [ -n "${PUBLISH_DENYLIST}" ] || { echo "No PUBLISH_DENYLIST secret; skipping."; exit 0; }
+          file="$RUNNER_TEMP/publish-denylist"
+          printf '%s\n' "$PUBLISH_DENYLIST" > "$file"
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done < "$file"
+          echo "OPENPOET_PUBLISH_DENYLIST_FILE=$file" >> "$GITHUB_ENV"
+
+      - name: Publish guard (new commits)
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            ./ops/publish-guard/guard.sh range "${PR_BASE}..HEAD"
+          elif [ -n "$PUSH_BEFORE" ] && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+            ./ops/publish-guard/guard.sh range "${PUSH_BEFORE}..HEAD"
+          else
+            ./ops/publish-guard/guard.sh history
+          fi
+
+      - name: Publish guard tests
+        run: bash ops/publish-guard/guard_test.sh
