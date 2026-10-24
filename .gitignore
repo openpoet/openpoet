@@ -6,9 +6,31 @@
 *.db
 *.db-shm
 *.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
 
 # Logs
 *.log
+nohup*.out
+
+# Secrets: env files, keys and certificates (.env.example stays versionable)
+.env
+.env.*
+!.env.example
+*.env
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+
+# Local MCP client config (may carry tokens)
+.mcp.json
+
+# Network captures
+*.har
 
 # Node
 #
@@ -17,14 +39,17 @@
 # in the Go binary.
 node_modules/
 
-# Screenshots / test files
+# Screenshots / captures
 #
-# Screenshots are ignored by DEFAULT and the few real assets are opted back in
-# below. Never comment this rule out to let a file
-# through: add an exception below instead.
+# Images, animations and PDFs are ignored by DEFAULT (debug captures must never
+# be committed) and the few real assets are opted back in below. To version a
+# new asset, add an explicit exception here; never disable these rules.
 *.png
 *.jpg
 *.jpeg
+*.gif
+*.webp
+*.pdf
 !docs/images/*.png
 !web/static/icon-*.png
 !web/static/badge-*.png
