@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-25
+
 ### Added
 
 - **Automation API v1** (`/api/automation/v1`): a versioned command API with
@@ -98,5 +100,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 See the [GitHub releases](https://github.com/openpoet/openpoet/releases).
 
-[Unreleased]: https://github.com/openpoet/openpoet/compare/v0.1.15...HEAD
+[Unreleased]: https://github.com/openpoet/openpoet/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/openpoet/openpoet/compare/v0.1.15...v0.2.0
 [0.1.15]: https://github.com/openpoet/openpoet/releases/tag/v0.1.15
