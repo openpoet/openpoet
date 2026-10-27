@@ -13,6 +13,7 @@ import (
 
 	"openpoet/internal/application"
 	"openpoet/internal/database"
+	"openpoet/internal/mcp"
 	"openpoet/internal/websocket"
 )
 
@@ -97,6 +98,24 @@ func (e *platformEffects) publish(ctx context.Context, domain, action, aggregate
 	aggregateID = nonEmptyAggregateID(aggregateID)
 	e.broadcastStateUpdate(domain, action, aggregateID)
 	e.audit(ctx, domain, action, aggregateID, actor)
+	if affectsMCPToolList(domain, action) {
+		mcp.NotifyToolsChanged()
+	}
+}
+
+// affectsMCPToolList reports whether a change can alter the tool list an open
+// MCP session sees: shares, global and per-project tool policies, and the
+// settings and project writes those live in.
+func affectsMCPToolList(domain, action string) bool {
+	switch domain {
+	case "tools", "settings":
+		return true
+	case "projects":
+		return action == "shares_replaced"
+	case "project":
+		return action == "updated" || action == "deleted"
+	}
+	return false
 }
 
 func (e *platformEffects) broadcastStateUpdate(domain, action, aggregateID string) {

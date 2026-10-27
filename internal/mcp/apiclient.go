@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -84,4 +85,26 @@ func (c *APIClient) PostRaw(path string, data []byte) ([]byte, error) {
 // Delete performs a DELETE request and returns the response body.
 func (c *APIClient) Delete(path string) ([]byte, error) {
 	return c.do("DELETE", path, "", nil)
+}
+
+// Stream opens a long-lived GET (e.g. an SSE stream) without the client's
+// request timeout; the caller reads the body until ctx is done and closes it.
+func (c *APIClient) Stream(ctx context.Context, path string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", path, err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", path, err)
+	}
+	if resp.StatusCode >= 400 {
+		resp.Body.Close()
+		return nil, fmt.Errorf("GET %s: status %d", path, resp.StatusCode)
+	}
+	return resp, nil
 }

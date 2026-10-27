@@ -966,6 +966,10 @@ func main() {
 		r.Get("/config/mcp-api-key/status", api.GetMCPAPIKeyStatus)
 		r.Delete("/config/mcp-api-key", api.RevokeMCPAPIKey)
 
+		// MCP stdio servers (mcp-serve) subscribe here to learn when a share or
+		// tool policy changes, so open sessions get tools/list_changed.
+		r.Get("/mcp/tool-changes", mcp.ToolChangesStream)
+
 		// Config - Tool Policies
 		r.Get("/config/tool-policies", api.GetToolPolicies)
 		r.Put("/config/tool-policies", api.UpdateToolPolicies)

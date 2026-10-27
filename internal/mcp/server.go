@@ -2,11 +2,15 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"sort"
+	"strings"
+	"sync"
 )
 
 // jsonRPCRequest is a JSON-RPC 2.0 request.
@@ -38,6 +42,11 @@ type RequestHandler struct {
 	context        string // "session", "chat", "http"
 	conversationID string
 	policy         ToolPolicy
+
+	// listedMu guards listed: the tool names last returned by tools/list,
+	// sorted and joined ("" until the client first lists).
+	listedMu sync.Mutex
+	listed   string
 }
 
 // NewRequestHandler creates a RequestHandler with the given parameters.
@@ -117,7 +126,7 @@ func (h *RequestHandler) Handle(req *jsonRPCRequest) *jsonRPCResponse {
 			Result: map[string]interface{}{
 				"protocolVersion": "2024-11-05",
 				"capabilities": map[string]interface{}{
-					"tools": map[string]interface{}{},
+					"tools": map[string]interface{}{"listChanged": true},
 				},
 				"serverInfo": map[string]interface{}{
 					"name":    "openpoet",
@@ -130,6 +139,9 @@ func (h *RequestHandler) Handle(req *jsonRPCRequest) *jsonRPCResponse {
 		h.policy = h.fetchPolicy()
 		tools := toolsDef(h.context)
 		tools = h.policy.FilterTools(tools)
+		h.listedMu.Lock()
+		h.listed = toolNamesKey(tools)
+		h.listedMu.Unlock()
 		return &jsonRPCResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
@@ -152,6 +164,28 @@ func (h *RequestHandler) Handle(req *jsonRPCRequest) *jsonRPCResponse {
 			},
 		}
 	}
+}
+
+// toolListChanged reports whether the effective tool list now differs from the
+// one last returned by tools/list, i.e. whether the client must be sent
+// notifications/tools/list_changed. False before the client's first tools/list.
+func (h *RequestHandler) toolListChanged() bool {
+	h.listedMu.Lock()
+	listed := h.listed
+	h.listedMu.Unlock()
+	if listed == "" {
+		return false
+	}
+	return toolNamesKey(h.fetchPolicy().FilterTools(toolsDef(h.context))) != listed
+}
+
+func toolNamesKey(tools []MCPTool) string {
+	names := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Name
+	}
+	sort.Strings(names)
+	return "[" + strings.Join(names, ",") + "]"
 }
 
 func (h *RequestHandler) handleToolCall(req *jsonRPCRequest) *jsonRPCResponse {
@@ -221,7 +255,7 @@ func Serve(apiURL string) {
 	log.SetPrefix("[mcp] ")
 
 	sessionID := os.Getenv("OPENPOET_SESSION_ID")
-	context := os.Getenv("OPENPOET_CONTEXT")
+	mcpContext := os.Getenv("OPENPOET_CONTEXT")
 	conversationID := os.Getenv("OPENPOET_CONVERSATION_ID")
 	sessionToken := os.Getenv("OPENPOET_SESSION_TOKEN")
 	client := NewAPIClientWithToken(apiURL, sessionToken)
@@ -229,12 +263,31 @@ func Serve(apiURL string) {
 	// Start with deny_all as safe default. The handler dynamically fetches the
 	// current policy from the API on every tools/list and tools/call request,
 	// ensuring policy changes are reflected immediately in active sessions.
-	handler := NewRequestHandler(client, sessionID, context, conversationID, ToolPolicy{Mode: "deny_all"})
+	handler := NewRequestHandler(client, sessionID, mcpContext, conversationID, ToolPolicy{Mode: "deny_all"})
 
 	reader := bufio.NewReader(os.Stdin)
-	writer := os.Stdout
+	var writeMu sync.Mutex
+	write := func(msg []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_, err := os.Stdout.Write(append(msg, '\n'))
+		return err
+	}
 
-	log.Printf("MCP server started, API URL: %s, Session ID: %s, Context: %s, ConversationID: %s", apiURL, sessionID, context, conversationID)
+	// Tell the client when its tool list changes (a share or tool policy was
+	// written in the server), so it re-lists without a restart.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watchToolChanges(ctx, client, func() {
+		if handler.toolListChanged() {
+			log.Printf("tool list changed, notifying client")
+			if err := write(toolListChangedNotification); err != nil {
+				log.Printf("write error: %v", err)
+			}
+		}
+	})
+
+	log.Printf("MCP server started, API URL: %s, Session ID: %s, Context: %s, ConversationID: %s", apiURL, sessionID, mcpContext, conversationID)
 
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -271,8 +324,7 @@ func Serve(apiURL string) {
 			continue
 		}
 
-		respBytes = append(respBytes, '\n')
-		if _, err := writer.Write(respBytes); err != nil {
+		if err := write(respBytes); err != nil {
 			log.Printf("write error: %v", err)
 			return
 		}

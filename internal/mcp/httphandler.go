@@ -131,9 +131,10 @@ func (h *HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // handleGetStream answers a GET on /mcp with an SSE stream per the MCP Streamable
 // HTTP transport (Phase 5). Previously GET returned 405 — external MCP clients
 // that open a server->client channel need a 200 text/event-stream. This opens
-// the stream and keeps it alive with heartbeats; server-initiated MCP messages
-// (notifications) would be pushed here. Non-SSE GETs (no event-stream Accept)
-// still get 405 so nothing else changes.
+// the stream and keeps it alive with heartbeats; when the stream names a known
+// MCP session (Mcp-Session-Id), notifications/tools/list_changed is pushed here
+// whenever that session's effective tool list changes. Non-SSE GETs (no
+// event-stream Accept) still get 405 so nothing else changes.
 func (h *HTTPHandler) handleGetStream(w http.ResponseWriter, r *http.Request) {
 	if !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
@@ -168,15 +169,40 @@ func (h *HTTPHandler) handleGetStream(w http.ResponseWriter, r *http.Request) {
 		return rc.Flush()
 	}
 
+	handler := h.streamHandler(r)
+	var toolsSignal <-chan struct{}
+	if handler != nil {
+		signal, unsubscribe := subscribeToolsChanged()
+		defer unsubscribe()
+		toolsSignal = signal
+	}
+	notifyIfToolsChanged := func() error {
+		if !handler.toolListChanged() {
+			return nil
+		}
+		log.Printf("[MCP-HTTP] stream %s: tool list changed, notifying client", shortSessionID(r.Header.Get("Mcp-Session-Id")))
+		return write("event: message\ndata: " + string(toolListChangedNotification) + "\n\n")
+	}
+
 	w.WriteHeader(http.StatusOK)
 	if err := write(": mcp stream open\n\n"); err != nil { // first frame so the client sees the stream is live
 		return
+	}
+	if handler != nil {
+		if err := notifyIfToolsChanged(); err != nil { // a change may predate this stream
+			return
+		}
 	}
 
 	ticker := time.NewTicker(mcpStreamPingInterval)
 	defer ticker.Stop()
 	for {
 		select {
+		case <-toolsSignal:
+			if err := notifyIfToolsChanged(); err != nil {
+				log.Printf("[MCP-HTTP] stream %s: notification failed, closing: %v", shortSessionID(r.Header.Get("Mcp-Session-Id")), err)
+				return
+			}
 		case <-ticker.C:
 			if err := write(": ping\n\n"); err != nil {
 				log.Printf("[MCP-HTTP] stream %s: heartbeat failed, closing: %v", r.URL.Query().Get("session_id"), err)
@@ -186,6 +212,34 @@ func (h *HTTPHandler) handleGetStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// streamHandler returns the RequestHandler of the MCP session a GET stream
+// belongs to (Mcp-Session-Id), restoring a persisted session after a server
+// restart. Nil when the stream names no known session.
+func (h *HTTPHandler) streamHandler(r *http.Request) *RequestHandler {
+	sessID := r.Header.Get("Mcp-Session-Id")
+	if sessID == "" {
+		return nil
+	}
+	h.mu.RLock()
+	sess := h.sessions[sessID]
+	h.mu.RUnlock()
+	if sess != nil {
+		return sess.handler
+	}
+	client, openpoetSessionID := h.clientForRequest(r)
+	if openpoetSessionID == "" {
+		openpoetSessionID = r.URL.Query().Get("session_id")
+	}
+	mcpContext := "http"
+	if openpoetSessionID != "" {
+		mcpContext = "session"
+	}
+	if restored := h.restoreSession(r.Context(), sessID, openpoetSessionID, mcpContext, client); restored != nil {
+		return restored.handler
+	}
+	return nil
 }
 
 // Heartbeat cadence of the GET /mcp stream and how long one heartbeat may take
