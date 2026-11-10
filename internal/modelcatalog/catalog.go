@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -214,9 +215,87 @@ func probeEnv() []string {
 	return env
 }
 
-// runJSONLines starts bin with args, writes requests (one JSON per line) and
-// scans stdout lines until match returns true. The process is killed after.
-func runJSONLines(ctx context.Context, bin string, args []string, requests []string, match func(line []byte) (bool, error)) error {
+const claudeOAuthTokenVar = "CLAUDE_CODE_OAUTH_TOKEN"
+
+// claudeProbeEnv is probeEnv plus the "env" block of the user's Claude
+// settings. The probe runs with --setting-sources "" (so user hooks stay off),
+// which also skips that block, and the credential the user's sessions get
+// from it. Without it the CLI reports the unauthenticated catalog, missing
+// the models the account can use.
+func claudeProbeEnv() []string {
+	env := probeEnv()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return env
+	}
+	return withClaudeSettingsEnv(env, filepath.Join(home, ".claude", "settings.json"))
+}
+
+// withClaudeSettingsEnv adds the settings file's "env" block to env when env
+// carries no OAuth token. Variables already set (non-empty) win. Failures are
+// silent: the values may be secrets and must never reach a log or error.
+func withClaudeSettingsEnv(env []string, settingsPath string) []string {
+	if envValue(env, claudeOAuthTokenVar) != "" {
+		return env
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return env
+	}
+	var settings struct {
+		Env map[string]any `json:"env"`
+	}
+	if json.Unmarshal(data, &settings) != nil || len(settings.Env) == 0 {
+		return env
+	}
+	keys := make([]string, 0, len(settings.Env))
+	for k := range settings.Env {
+		if k != "" && !strings.Contains(k, "=") && k != "CLAUDECODE" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if envValue(env, k) != "" {
+			continue
+		}
+		var value string
+		switch v := settings.Env[k].(type) {
+		case string:
+			value = v
+		case float64, bool:
+			value = fmt.Sprint(v)
+		default:
+			continue
+		}
+		env = append(withoutEnv(env, k), k+"="+value)
+	}
+	return env
+}
+
+func envValue(env []string, key string) string {
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, key+"="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+func withoutEnv(env []string, key string) []string {
+	out := env[:0:0]
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, key+"=") {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// runJSONLines starts bin with env and args, writes requests (one JSON per
+// line) and scans stdout lines until match returns true. The process is
+// killed after.
+func runJSONLines(ctx context.Context, bin string, env []string, args []string, requests []string, match func(line []byte) (bool, error)) error {
 	dir, err := os.MkdirTemp("", "openpoet-models-")
 	if err != nil {
 		return err
@@ -227,7 +306,7 @@ func runJSONLines(ctx context.Context, bin string, args []string, requests []str
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = dir
-	cmd.Env = probeEnv()
+	cmd.Env = env
 	cmd.Stderr = io.Discard
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -283,7 +362,7 @@ func probeClaude(ctx context.Context) ([]Model, error) {
 	req := `{"type":"control_request","request_id":"openpoet-models","request":{"subtype":"initialize"}}`
 
 	var models []Model
-	err = runJSONLines(ctx, bin, args, []string{req}, func(line []byte) (bool, error) {
+	err = runJSONLines(ctx, bin, claudeProbeEnv(), args, []string{req}, func(line []byte) (bool, error) {
 		var msg struct {
 			Type     string `json:"type"`
 			Response struct {
@@ -382,7 +461,7 @@ func probeCodex(ctx context.Context) ([]Model, error) {
 		`{"jsonrpc":"2.0","id":2,"method":"model/list","params":{"limit":100,"includeHidden":false}}`,
 	}
 	var models []Model
-	err = runJSONLines(ctx, bin, []string{"app-server"}, requests, func(line []byte) (bool, error) {
+	err = runJSONLines(ctx, bin, probeEnv(), []string{"app-server"}, requests, func(line []byte) (bool, error) {
 		var done bool
 		var parseErr error
 		models, done, parseErr = parseCodexModelList(line)

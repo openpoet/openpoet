@@ -3,6 +3,9 @@ package modelcatalog
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -114,5 +117,58 @@ func TestCatalogFindAndKnownEfforts(t *testing.T) {
 	}
 	if got := KnownEfforts("codex", Catalog{}); len(got) == 0 || got[len(got)-1] != "ultra" {
 		t.Fatalf("fallback = %v", got)
+	}
+}
+
+func writeSettings(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestWithClaudeSettingsEnvAddsSettingsBlockWithoutToken(t *testing.T) {
+	path := writeSettings(t, `{"model":"fable","env":{"CLAUDE_CODE_OAUTH_TOKEN":"tok-from-settings","EXTRA":"x","NUM":3,"SKIP":{"a":1}},"hooks":{"Stop":[]}}`)
+	got := withClaudeSettingsEnv([]string{"HOME=/home/dev", "EXTRA=keep", "CLAUDE_CODE_OAUTH_TOKEN="}, path)
+	if v := envValue(got, "CLAUDE_CODE_OAUTH_TOKEN"); v != "tok-from-settings" {
+		t.Fatalf("token = %q, want the settings value", v)
+	}
+	if v := envValue(got, "EXTRA"); v != "keep" {
+		t.Fatalf("EXTRA = %q, want the environment's value to win", v)
+	}
+	if v := envValue(got, "NUM"); v != "3" {
+		t.Fatalf("NUM = %q, want 3", v)
+	}
+	if envValue(got, "SKIP") != "" || envValue(got, "HOME") != "/home/dev" {
+		t.Fatalf("unexpected env %v", got)
+	}
+	n := 0
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "CLAUDE_CODE_OAUTH_TOKEN=") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("token appears %d times in %v", n, got)
+	}
+}
+
+func TestWithClaudeSettingsEnvKeepsExistingToken(t *testing.T) {
+	path := writeSettings(t, `{"env":{"CLAUDE_CODE_OAUTH_TOKEN":"tok-from-settings","EXTRA":"x"}}`)
+	in := []string{"CLAUDE_CODE_OAUTH_TOKEN=tok-from-env"}
+	got := withClaudeSettingsEnv(in, path)
+	if len(got) != 1 || got[0] != in[0] {
+		t.Fatalf("env = %v, want it unchanged", got)
+	}
+}
+
+func TestWithClaudeSettingsEnvToleratesMissingOrBadFile(t *testing.T) {
+	in := []string{"HOME=/home/dev"}
+	for _, path := range []string{filepath.Join(t.TempDir(), "absent.json"), writeSettings(t, `not json`), writeSettings(t, `{"env":null}`)} {
+		if got := withClaudeSettingsEnv(in, path); len(got) != 1 || got[0] != in[0] {
+			t.Fatalf("%s: env = %v, want it unchanged", path, got)
+		}
 	}
 }
