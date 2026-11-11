@@ -38,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `read_document` are extended with the matching artifact tools on upgrade.
   Policies that allow everything are not changed.
 
+### Security
+
+- Rendered artifacts neuter WebRTC. The `webrtc 'block'` CSP directive is
+  ignored by Chromium (a peer connection could still gather candidates against
+  an external STUN host), so a guard script runs as the first script of every
+  rendered document and removes the `RTCPeerConnection` constructors before any
+  agent script, closing an outbound channel the CSP fetch directives do not
+  govern. The directive stays as defence in depth.
+
 ## [0.2.0] - 2026-10-25
 
 ### Added

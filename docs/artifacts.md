@@ -62,15 +62,24 @@ inserted into the OpenPoet page.
    `Cross-Origin-Resource-Policy: same-origin` and a `Permissions-Policy` that
    denies camera, microphone, geolocation and clipboard.
 
+4. **WebRTC is neutered in the document.** Peer connections are outside the CSP
+   fetch directives, and `webrtc 'block'` is ignored by Chromium (it was
+   confirmed to gather server-reflexive candidates against an external STUN
+   host), so a guard script injected as the **first** script of every rendered
+   document removes `RTCPeerConnection`, `webkitRTCPeerConnection`,
+   `mozRTCPeerConnection` and `RTCDataChannel` before any agent script runs. The
+   sandbox already blocks nested frames and workers (`frame-src`, `child-src`,
+   `worker-src` are `'none'`), so there is no other context to re-obtain them.
+   `webrtc 'block'` stays in the CSP as defence in depth. The guard is injected
+   right after a leading `<!doctype>`, so a standards-mode document keeps
+   standards mode.
+
 What remains possible, because CSP does not govern it:
 
 - An artifact can navigate its own frame to another URL, which can disclose the
   artifact's own content to that URL.
-- WebRTC peer connections are outside the CSP fetch directives. The response
-  sends `webrtc 'block'`, which only browsers that implement that directive
-  enforce; this has not been verified to stop a connection.
 
-In both cases the only data available to the artifact is its own content, which
+In this case the only data available to the artifact is its own content, which
 the agent wrote. Nothing from OpenPoet is ever placed in the frame: annotation
 text, in particular, stays in the page.
 

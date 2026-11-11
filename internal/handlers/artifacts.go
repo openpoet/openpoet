@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -444,8 +445,10 @@ func (n platformArtifactNotifier) ArtifactAnnotationsChanged(_ context.Context, 
 //     and cannot pull scripts, styles, images or fonts from any host;
 //   - only inline scripts/styles and data:/blob: media are allowed, which is
 //     what a self-contained artifact needs;
-//   - webrtc 'block' closes peer connections in browsers that implement the
-//     directive (others ignore it).
+//   - webrtc 'block' is kept as defence in depth for browsers that implement
+//     the directive, but Chromium ignores it, so peer connections are actually
+//     closed by the guard script injected first in every rendered document (see
+//     artifactRenderDocument); the CSP is not the only line of defence here.
 //
 // CSP does not govern navigation: the artifact can still navigate its own
 // frame to another URL, carrying only what the artifact itself contains.
@@ -510,9 +513,34 @@ func (a *API) RenderArtifact(w http.ResponseWriter, r *http.Request) {
 //go:embed artifact_bridge.js
 var artifactBridgeScript string
 
+// artifactGuardScript neuters the WebRTC peer-connection constructors. It must
+// run before any agent-written script, so artifactRenderDocument injects it as
+// the first script of the rendered document. It is never stored with the
+// artifact.
+//
+//go:embed artifact_guard.js
+var artifactGuardScript string
+
+// artifactScriptBlock wraps embedded JavaScript in an inline <script> the
+// agent's markup cannot break out of: the only way an inline script ends is a
+// literal "</script" (any case), which is escaped so the browser keeps the
+// whole source inside this element.
+func artifactScriptBlock(attr, source string) string {
+	return "<script " + attr + ">" + reCloseScript.ReplaceAllString(source, "<\\/script") + "</script>"
+}
+
+var reCloseScript = regexp.MustCompile(`(?i)</script`)
+
 // artifactRenderDocument returns the HTML sent to the sandboxed iframe for a
-// stored version: the artifact, byte for byte, followed by the annotation
-// bridge.
+// stored version: the WebRTC guard first, then the artifact, then the
+// annotation bridge.
+//
+// The guard goes first because it has to run before any script the artifact
+// carries (a reference grabbed before the guard runs would survive). It is
+// injected right after a leading <!doctype>, when there is one, so a
+// standards-mode document stays in standards mode — a script placed before the
+// doctype would force quirks mode. A document with no doctype is already in
+// quirks mode, so the guard is simply prepended and the mode does not change.
 //
 // The bridge goes after the whole document rather than before </body>: finding
 // "the" closing tag in agent-written markup is guesswork (the text "</body>"
@@ -520,11 +548,33 @@ var artifactBridgeScript string
 // artifact's own scripts in half. Browsers run a script that follows </html>
 // as part of the body.
 //
-// The bridge runs inside the same sandbox as the artifact and gets no extra
-// capability: it only reports selections to the embedding page and draws
-// highlights. If an artifact's markup swallows it (a document that ends inside
-// an unclosed <script> or comment) the artifact still renders and annotations
-// are simply unavailable for that version; the viewer says so.
+// Both run inside the same sandbox as the artifact and get no extra capability.
+// If an artifact's markup swallows the bridge (a document that ends inside an
+// unclosed <script> or comment) the artifact still renders and annotations are
+// simply unavailable for that version; the viewer says so. The guard cannot be
+// swallowed the same way: it precedes the artifact's markup.
 func artifactRenderDocument(html string) string {
-	return html + "\n<script data-openpoet-bridge>" + strings.ReplaceAll(artifactBridgeScript, "</script", "<\\/script") + "</script>"
+	guard := artifactScriptBlock("data-openpoet-guard", artifactGuardScript)
+	bridge := artifactScriptBlock("data-openpoet-bridge", artifactBridgeScript)
+	return injectAfterDoctype(html, guard) + "\n" + bridge
+}
+
+// injectAfterDoctype inserts snippet right after a leading <!doctype ...>
+// declaration, past any leading whitespace or BOM, so a standards-mode document
+// keeps its doctype as the first thing and stays in standards mode. A document
+// with no leading doctype is already in quirks mode; the snippet is prepended,
+// which keeps it in quirks mode. A doctype has no '>' inside it, so the first
+// '>' after "<!doctype" always closes it.
+func injectAfterDoctype(html, snippet string) string {
+	rest := strings.TrimLeft(html, " \t\r\n\f\v")
+	rest = strings.TrimPrefix(rest, "\ufeff")
+	rest = strings.TrimLeft(rest, " \t\r\n\f\v")
+	lead := len(html) - len(rest)
+	if len(rest) >= len("<!doctype") && strings.EqualFold(rest[:len("<!doctype")], "<!doctype") {
+		if gt := strings.IndexByte(rest, '>'); gt >= 0 {
+			end := lead + gt + 1
+			return html[:end] + "\n" + snippet + html[end:]
+		}
+	}
+	return snippet + "\n" + html
 }

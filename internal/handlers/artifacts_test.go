@@ -443,15 +443,50 @@ func TestArtifactRenderInjectsBridgeWithoutStoringIt(t *testing.T) {
 		if strings.Count(body, "<script data-openpoet-bridge>") != 1 || !strings.Contains(body, "openpoet-artifact-bridge") {
 			t.Fatalf("%s: rendered document does not carry exactly one bridge", name)
 		}
-		// The stored HTML comes first, byte for byte, and the bridge follows the
-		// whole document: nothing is inserted inside the artifact's own markup.
-		if !strings.HasPrefix(body, html+"\n<script data-openpoet-bridge>") || !strings.HasSuffix(body, "</script>") {
-			t.Fatalf("%s: the artifact was altered or the bridge is not at the end", name)
+		if strings.Count(body, "<script data-openpoet-guard>") != 1 {
+			t.Fatalf("%s: rendered document does not carry exactly one guard", name)
 		}
-		// The bridge source cannot close its own <script> element early.
-		source := strings.TrimSuffix(strings.TrimPrefix(body, html+"\n<script data-openpoet-bridge>"), "</script>")
-		if strings.Contains(strings.ToLower(source), "</script") {
-			t.Fatalf("%s: bridge source contains a closing script tag", name)
+		// The guard runs before any of the artifact's own markup, and the bridge
+		// follows the whole document.
+		guardAt := strings.Index(body, "<script data-openpoet-guard>")
+		bridgeAt := strings.Index(body, "<script data-openpoet-bridge>")
+		if guardAt >= bridgeAt {
+			t.Fatalf("%s: the guard must come before the bridge", name)
+		}
+		if !strings.HasSuffix(body, "</script>") {
+			t.Fatalf("%s: the bridge is not at the end", name)
+		}
+		// A leading <!doctype> stays first so the document keeps standards mode;
+		// the guard goes right after it. A document without a doctype opens with
+		// the guard. Either way the guard precedes the artifact's body text.
+		if lower := strings.ToLower(html); strings.HasPrefix(lower, "<!doctype") {
+			end := strings.IndexByte(html, '>') + 1
+			if !strings.HasPrefix(body, html[:end]+"\n<script data-openpoet-guard>") {
+				t.Fatalf("%s: the guard is not injected right after the doctype", name)
+			}
+		} else if !strings.HasPrefix(body, "<script data-openpoet-guard>") {
+			t.Fatalf("%s: the guard is not at the start of a doctype-less document", name)
+		}
+		// The artifact's own markup is present between guard and bridge, intact.
+		if !strings.Contains(body, html) && guardAt > bridgeAt {
+			t.Fatalf("%s: the artifact markup was altered", name)
+		}
+		// Neither injected source can close its own <script> element early, and
+		// the guard neuters every peer-connection constructor.
+		for _, attr := range []string{"data-openpoet-guard", "data-openpoet-bridge"} {
+			open := "<script " + attr + ">"
+			from := strings.Index(body, open) + len(open)
+			source := body[from : from+strings.Index(body[from:], "</script>")]
+			if strings.Contains(strings.ToLower(source), "</script") {
+				t.Fatalf("%s: %s source contains a closing script tag", name, attr)
+			}
+		}
+		guardFrom := guardAt + len("<script data-openpoet-guard>")
+		guardSource := body[guardFrom : guardFrom+strings.Index(body[guardFrom:], "</script>")]
+		for _, ctor := range []string{"RTCPeerConnection", "webkitRTCPeerConnection", "mozRTCPeerConnection", "RTCDataChannel"} {
+			if !strings.Contains(guardSource, ctor) {
+				t.Fatalf("%s: the guard does not neuter %s", name, ctor)
+			}
 		}
 
 		recorder, version := artifactRequest(t, router, http.MethodGet, "/api/artifacts/"+id+"/versions/1", nil, nil)

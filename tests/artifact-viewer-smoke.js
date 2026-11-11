@@ -25,6 +25,13 @@ function probeHTML(label) {
   // Opened directly in a tab there is no parent page to reach (parent === self).
   try { r.parent = parent === self ? 'self' : 'read:' + parent.document.title; } catch (e) { r.parent = 'ERR ' + e.name; }
   try { r.popup = window.open('about:blank') ? 'opened' : 'blocked'; } catch (e) { r.popup = 'ERR ' + e.name; }
+  // WebRTC must be neutered: the constructors are gone and building one throws,
+  // so the artifact cannot reach an external STUN/TURN host.
+  r.rtc = typeof window.RTCPeerConnection;
+  r.rtcWebkit = typeof window.webkitRTCPeerConnection;
+  r.rtcMoz = typeof window.mozRTCPeerConnection;
+  r.rtcDataChannel = typeof window.RTCDataChannel;
+  try { new window.RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }); r.rtcConstruct = 'constructed'; } catch (e) { r.rtcConstruct = 'ERR ' + e.name; }
   r.image = await new Promise(resolve => {
     const img = new Image();
     img.onload = () => resolve('loaded');
@@ -69,6 +76,11 @@ function assertContained(result, where, { framed = true } = {}) {
   assert.notEqual(result.popup, 'opened', `${where}: popups must be blocked`);
   assert.equal(result.image, 'blocked', `${where}: remote images must be blocked`);
   assert.equal(result.script, 'blocked', `${where}: remote scripts must be blocked`);
+  assert.equal(result.rtc, 'undefined', `${where}: RTCPeerConnection must be neutered (${result.rtc})`);
+  assert.equal(result.rtcWebkit, 'undefined', `${where}: webkitRTCPeerConnection must be neutered (${result.rtcWebkit})`);
+  assert.equal(result.rtcMoz, 'undefined', `${where}: mozRTCPeerConnection must be neutered (${result.rtcMoz})`);
+  assert.equal(result.rtcDataChannel, 'undefined', `${where}: RTCDataChannel must be neutered (${result.rtcDataChannel})`);
+  assert.match(result.rtcConstruct, /^ERR /, `${where}: constructing a peer connection must throw (${result.rtcConstruct})`);
 }
 
 async function api(page, method, path, body) {
