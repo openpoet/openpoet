@@ -101,6 +101,7 @@ var migrations = []Migration{
 	{Version: 81, Description: "artifacts: versioned interactive HTML artifacts stored in the database (artifacts, artifact_versions) and user annotations on them (artifact_annotations)", Up: migrateV81},
 	{Version: 82, Description: "tool policies: allowlists that grant the Docs tools also grant the HTML artifact tools, so artifacts are available wherever Docs already are", Up: migrateV82},
 	{Version: 83, Description: "tool policies: allowlists that grant read_document or read_artifact also grant get_link, the tool that returns the link of an artifact, Doc, session or task", Up: migrateV83},
+	{Version: 84, Description: "artifacts: questions a version declares for the reader (artifact_questions) and answers stored as annotations (kind, question_id, answer_json, updated_at; one open answer per question)", Up: migrateV84},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2417,6 +2418,43 @@ func migrateV83(tx *sqlx.Tx) error {
 			if _, err := tx.Exec(t.updateSQL, updated, row.ID); err != nil {
 				return fmt.Errorf("migrateV83 failed: %w\nSQL: %s", err, t.updateSQL)
 			}
+		}
+	}
+	return nil
+}
+
+// migrateV84 lets an artifact ask the reader questions. A version declares its
+// questions (artifact_questions), and each answer is an annotation of kind
+// "answer" naming the question it answers. The partial unique index is what
+// makes an answer replaceable instead of piling up: a question of an artifact
+// has at most one open answer.
+//
+// The columns are added with defaults, and every reader of artifact_annotations
+// names its columns, so a binary from before this migration keeps working on
+// the migrated table (it sees an answer as a note without an anchor).
+func migrateV84(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS artifact_questions (
+			artifact_id TEXT NOT NULL,
+			version INTEGER NOT NULL,
+			position INTEGER NOT NULL DEFAULT 0,
+			question_id TEXT NOT NULL,
+			type TEXT NOT NULL DEFAULT 'single',
+			prompt TEXT NOT NULL DEFAULT '',
+			options_json TEXT NOT NULL DEFAULT '[]',
+			allow_comment INTEGER NOT NULL DEFAULT 1,
+			PRIMARY KEY (artifact_id, version, question_id)
+		)`,
+		`ALTER TABLE artifact_annotations ADD COLUMN kind TEXT NOT NULL DEFAULT 'note'`,
+		`ALTER TABLE artifact_annotations ADD COLUMN question_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE artifact_annotations ADD COLUMN answer_json TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE artifact_annotations ADD COLUMN updated_at TIMESTAMP`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_annotations_open_answer
+			ON artifact_annotations(artifact_id, question_id) WHERE kind = 'answer' AND status = 'open'`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV84 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

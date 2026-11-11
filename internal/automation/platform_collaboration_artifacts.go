@@ -57,6 +57,15 @@ type artifactAnnotationListPayload struct {
 	Status string `json:"status,omitempty"`
 }
 
+type artifactAnswersSavePayload struct {
+	Version int                               `json:"version,omitempty"`
+	Answers []application.ArtifactAnswerInput `json:"answers"`
+}
+
+type artifactAnswerWithdrawPayload struct {
+	Question string `json:"question"`
+}
+
 type artifactAnnotationCreatePayload struct {
 	Version int                        `json:"version,omitempty"`
 	Anchor  application.ArtifactAnchor `json:"anchor"`
@@ -87,6 +96,9 @@ func artifactCollaborationDefinitions() []PlatformCapabilityDefinition {
 		collaborationWriteCapability("artifacts.annotations.create", "artifacts", "documents:write"),
 		collaborationWriteCapability("artifacts.annotations.resolve", "artifacts", "documents:write"),
 		collaborationWriteCapability("artifacts.annotations.reopen", "artifacts", "documents:write"),
+		collaborationReadCapability("artifacts.questions.list", "artifacts", "documents:read"),
+		collaborationWriteCapability("artifacts.answers.save", "artifacts", "documents:write"),
+		collaborationDestructiveCapability("artifacts.answers.withdraw", "artifacts", "documents:write"),
 	}
 }
 
@@ -310,6 +322,78 @@ func (e *artifactCollaborationExecutor) Validate(_ context.Context, input Platfo
 				return e.service.ResolveAnnotation(ctx, command)
 			}
 			return e.service.ReopenAnnotation(ctx, command)
+		}}, nil
+	case "artifacts.questions.list":
+		var payload artifactGetVersionPayload
+		if err := decodeCollaborationPayload(input.Payload, &payload); err != nil {
+			return nil, err
+		}
+		id, err := collaborationStringID(target, "", "artifact id")
+		if err != nil {
+			return nil, err
+		}
+		if payload.Version < 0 {
+			return nil, platformFailure("platform_payload_invalid", "artifact version cannot be negative", false)
+		}
+		return &collaborationValidatedCommand{preview: collaborationPreview(input.Handler, map[string]any{"artifact_id": id, "version": payload.Version}), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
+			return e.service.Questions(ctx, id, payload.Version)
+		}}, nil
+	case "artifacts.answers.save":
+		var payload artifactAnswersSavePayload
+		if err := decodeCollaborationPayload(input.Payload, &payload); err != nil {
+			return nil, err
+		}
+		id, err := collaborationStringID(target, "", "artifact id")
+		if err != nil {
+			return nil, err
+		}
+		if payload.Version < 0 {
+			return nil, platformFailure("platform_payload_invalid", "artifact version cannot be negative", false)
+		}
+		if len(payload.Answers) == 0 {
+			return nil, platformFailure("platform_payload_invalid", "answers must name at least one question", false)
+		}
+		for i := range payload.Answers {
+			answer := &payload.Answers[i]
+			if answer.Question, err = boundedCollaborationInput(answer.Question, "question id", 64, true); err != nil {
+				return nil, err
+			}
+			if answer.Text, err = boundedCollaborationInput(answer.Text, "answer text", 16<<10, false); err != nil {
+				return nil, err
+			}
+			if answer.Comment, err = boundedCollaborationInput(answer.Comment, "answer comment", 16<<10, false); err != nil {
+				return nil, err
+			}
+		}
+		// The preview names the questions, never what was answered.
+		return &collaborationValidatedCommand{preview: collaborationPreview(input.Handler, map[string]any{
+			"artifact_id": id, "version": payload.Version, "answers": len(payload.Answers),
+		}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+			return e.service.AnswerQuestions(ctx, application.AnswerArtifactQuestionsCommand{
+				ArtifactID: id, Version: payload.Version, Answers: payload.Answers, Authorization: authorization,
+			})
+		}}, nil
+	case "artifacts.answers.withdraw":
+		var payload artifactAnswerWithdrawPayload
+		if err := decodeCollaborationPayload(input.Payload, &payload); err != nil {
+			return nil, err
+		}
+		id, err := collaborationStringID(target, "", "artifact id")
+		if err != nil {
+			return nil, err
+		}
+		if payload.Question, err = boundedCollaborationInput(payload.Question, "question id", 64, true); err != nil {
+			return nil, err
+		}
+		return &collaborationValidatedCommand{preview: collaborationPreview(input.Handler, map[string]any{
+			"artifact_id": id, "question": payload.Question,
+		}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+			if err := e.service.WithdrawAnswer(ctx, application.WithdrawArtifactAnswerCommand{
+				ArtifactID: id, QuestionID: payload.Question, Authorization: authorization,
+			}); err != nil {
+				return nil, err
+			}
+			return map[string]any{"artifact_id": id, "question": payload.Question, "withdrawn": true}, nil
 		}}, nil
 	default:
 		return nil, platformFailure("platform_handler_unsupported", "the artifact capability handler is unsupported", false)

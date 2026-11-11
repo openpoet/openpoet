@@ -66,13 +66,14 @@ func artifactSessionID(r *http.Request, claimed string) string {
 func (a *API) artifactPublishResponse(ctx context.Context, result application.ArtifactPublishResult) map[string]any {
 	link := application.ArtifactLinkPath(result.Artifact.ID, 0)
 	return map[string]any{
-		"id":       result.Artifact.ID,
-		"version":  result.Version,
-		"created":  result.Created,
-		"redacted": result.Redacted,
-		"link":     link,
-		"url":      a.Links().Absolute(ctx, link),
-		"artifact": result.Artifact,
+		"id":        result.Artifact.ID,
+		"version":   result.Version,
+		"created":   result.Created,
+		"redacted":  result.Redacted,
+		"questions": result.Questions,
+		"link":      link,
+		"url":       a.Links().Absolute(ctx, link),
+		"artifact":  result.Artifact,
 	}
 }
 
@@ -343,6 +344,71 @@ func (a *API) changeArtifactAnnotation(w http.ResponseWriter, r *http.Request, r
 		return
 	}
 	respondJSON(w, http.StatusOK, view)
+}
+
+// ListArtifactQuestions returns the questions one version declares
+// (?v=<n>, default the current version).
+func (a *API) ListArtifactQuestions(w http.ResponseWriter, r *http.Request) {
+	service, ok := a.artifactService(w)
+	if !ok {
+		return
+	}
+	version, valid := parseArtifactVersion(r.URL.Query().Get("v"))
+	if !valid {
+		respondError(w, http.StatusBadRequest, "v must be a positive integer")
+		return
+	}
+	view, err := service.Questions(platformUIContext(r), chi.URLParam(r, "id"), version)
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, view)
+}
+
+// SaveArtifactAnswers stores the reader's answers to questions of one version:
+// PUT /api/artifacts/{id}/answers {version, answers:[{question, options, text,
+// comment}]}. The request is built by the OpenPoet page from what the user
+// confirmed there; the service checks every answer against the questions the
+// version declared, so nothing the artifact's own script says can add to them.
+func (a *API) SaveArtifactAnswers(w http.ResponseWriter, r *http.Request) {
+	service, ok := a.artifactService(w)
+	if !ok {
+		return
+	}
+	var input struct {
+		Version flexibleID                        `json:"version"`
+		Answers []application.ArtifactAnswerInput `json:"answers"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	views, err := service.AnswerQuestions(platformUIContext(r), application.AnswerArtifactQuestionsCommand{
+		ArtifactID: chi.URLParam(r, "id"), Version: int(input.Version), Answers: input.Answers,
+		Authorization: platformUIAuthorization(r),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, views)
+}
+
+// WithdrawArtifactAnswer removes the open answer to one question.
+func (a *API) WithdrawArtifactAnswer(w http.ResponseWriter, r *http.Request) {
+	service, ok := a.artifactService(w)
+	if !ok {
+		return
+	}
+	if err := service.WithdrawAnswer(platformUIContext(r), application.WithdrawArtifactAnswerCommand{
+		ArtifactID: chi.URLParam(r, "id"), QuestionID: chi.URLParam(r, "questionId"),
+		Authorization: platformUIAuthorization(r),
+	}); err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // artifactDocumentIDPrefix marks an artifact in the document listings and doc

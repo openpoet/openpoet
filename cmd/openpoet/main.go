@@ -1063,6 +1063,9 @@ func main() {
 		r.Post("/artifacts/{id}/annotations", api.CreateArtifactAnnotation)
 		r.Post("/artifacts/{id}/annotations/{annotationId}/resolve", api.ResolveArtifactAnnotation)
 		r.Post("/artifacts/{id}/annotations/{annotationId}/reopen", api.ReopenArtifactAnnotation)
+		r.Get("/artifacts/{id}/questions", api.ListArtifactQuestions)
+		r.Put("/artifacts/{id}/answers", api.SaveArtifactAnswers)
+		r.Delete("/artifacts/{id}/answers/{questionId}", api.WithdrawArtifactAnswer)
 
 		// AI
 		r.Get("/ai/status", aiHandler.HandleStatus)

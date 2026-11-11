@@ -39,6 +39,7 @@ type ArtifactStore interface {
 	AppendArtifactVersion(context.Context, string, int, *database.ArtifactVersion) (*database.Artifact, bool, error)
 	UpdateArtifactMeta(context.Context, string, *string, *string, *string) error
 	ArtifactAnnotationStore
+	ArtifactQuestionStore
 }
 
 type ArtifactView struct {
@@ -80,6 +81,9 @@ type ArtifactPublishResult struct {
 	Version  int          `json:"version"`
 	Created  bool         `json:"created"`
 	Redacted bool         `json:"redacted,omitempty"`
+	// Questions is how many questions the published version declares for the
+	// reader to answer.
+	Questions int `json:"questions"`
 }
 
 type CreateArtifactCommand struct {
@@ -189,6 +193,10 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 	if err != nil {
 		return ArtifactPublishResult{}, err
 	}
+	questions, err := artifactQuestionsOf(content)
+	if err != nil {
+		return ArtifactPublishResult{}, err
+	}
 	sessionID := strings.TrimSpace(command.SessionID)
 	if len(sessionID) > 200 {
 		return ArtifactPublishResult{}, validationError("invalid_session_id", "Session ID exceeds its bounded limit")
@@ -245,7 +253,7 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 	}
 	version := &database.ArtifactVersion{
 		Content: content, SizeBytes: int64(len(content)), SHA256: artifactContentHash(content),
-		CreatedBy: actor, SessionID: sessionID,
+		CreatedBy: actor, SessionID: sessionID, Questions: questions,
 	}
 	if err := s.store.CreateArtifact(ctx, artifact, version); err != nil {
 		return ArtifactPublishResult{}, err
@@ -258,7 +266,7 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 	view := artifactView(stored)
 	view.SizeBytes = version.SizeBytes
 	s.notifyPublished(ctx, view, true)
-	return ArtifactPublishResult{Artifact: view, Version: 1, Created: true, Redacted: redacted}, nil
+	return ArtifactPublishResult{Artifact: view, Version: 1, Created: true, Redacted: redacted, Questions: len(questions)}, nil
 }
 
 func (s *ArtifactService) Update(ctx context.Context, command UpdateArtifactCommand) (ArtifactPublishResult, error) {
@@ -276,6 +284,10 @@ func (s *ArtifactService) Update(ctx context.Context, command UpdateArtifactComm
 	if err != nil {
 		return ArtifactPublishResult{}, err
 	}
+	questions, err := artifactQuestionsOf(content)
+	if err != nil {
+		return ArtifactPublishResult{}, err
+	}
 	note, err := boundedRedactedInput(singleLine(command.ChangeNote), maxArtifactChangeNoteRunes, "Artifact change note", false)
 	if err != nil {
 		return ArtifactPublishResult{}, err
@@ -287,6 +299,7 @@ func (s *ArtifactService) Update(ctx context.Context, command UpdateArtifactComm
 	version := &database.ArtifactVersion{
 		Content: content, SizeBytes: int64(len(content)), SHA256: artifactContentHash(content),
 		ChangeNote: note, CreatedBy: command.Authorization.Actor.eventValue(), SessionID: sessionID,
+		Questions: questions,
 	}
 	stored, created, err := s.store.AppendArtifactVersion(ctx, id, command.BaseVersion, version)
 	if err != nil {
@@ -305,7 +318,7 @@ func (s *ArtifactService) Update(ctx context.Context, command UpdateArtifactComm
 		publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "artifacts", Action: "version_published", Meta: artifactChangeMeta(stored)})
 		s.notifyPublished(ctx, view, false)
 	}
-	return ArtifactPublishResult{Artifact: view, Version: stored.CurrentVersion, Created: created, Redacted: redacted}, nil
+	return ArtifactPublishResult{Artifact: view, Version: stored.CurrentVersion, Created: created, Redacted: redacted, Questions: len(questions)}, nil
 }
 
 func (s *ArtifactService) UpdateMeta(ctx context.Context, command UpdateArtifactMetaCommand) (ArtifactView, error) {
@@ -467,8 +480,22 @@ func normalizeArtifactHTML(content string) (string, bool, error) {
 // CheckArtifactHTML reports whether content would be accepted as an artifact
 // version, and whether storing it would mask credential-looking text in it.
 func CheckArtifactHTML(content string) (redacted bool, err error) {
-	_, redacted, err = normalizeArtifactHTML(content)
+	normalized, redacted, err := normalizeArtifactHTML(content)
+	if err != nil {
+		return redacted, err
+	}
+	_, err = artifactQuestionsOf(normalized)
 	return redacted, err
+}
+
+// artifactQuestionsOf returns the rows for the questions a document declares.
+// It reads the HTML as it will be stored, after masking.
+func artifactQuestionsOf(content string) ([]database.ArtifactQuestion, error) {
+	questions, err := ParseArtifactQuestions(content)
+	if err != nil {
+		return nil, err
+	}
+	return artifactQuestionRows(questions)
 }
 
 func artifactContentHash(content string) string {
@@ -549,6 +576,10 @@ type ArtifactAnchor struct {
 	End      int    `json:"end,omitempty"`
 	Tag      string `json:"tag,omitempty"`
 	Label    string `json:"label,omitempty"`
+	// Question is set on the anchor of an answer (Type "question"): the id of
+	// the question it answers. Such an anchor is only ever written by
+	// AnswerQuestions; CreateAnnotation refuses the type.
+	Question string `json:"question,omitempty"`
 }
 
 type ArtifactAnnotationView struct {
@@ -564,6 +595,13 @@ type ArtifactAnnotationView struct {
 	ResolvedAt     *time.Time     `json:"resolved_at,omitempty"`
 	CreatedBy      string         `json:"created_by,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`
+	// Kind is "note" or "answer". For an answer, QuestionID names the
+	// question, Quote is its prompt, Answer the options chosen, and Body the
+	// comment (or the text of a free-text answer).
+	Kind       string              `json:"kind"`
+	QuestionID string              `json:"question_id,omitempty"`
+	Answer     *ArtifactAnswerView `json:"answer,omitempty"`
+	UpdatedAt  *time.Time          `json:"updated_at,omitempty"`
 }
 
 type CreateArtifactAnnotationCommand struct {
@@ -717,6 +755,9 @@ func (s *ArtifactService) changeAnnotation(ctx context.Context, command ResolveA
 		if errors.Is(err, sql.ErrNoRows) {
 			return ArtifactAnnotationView{}, notFoundError("annotation_not_found", "Annotation not found", err)
 		}
+		if errors.Is(err, database.ErrArtifactAnswerSuperseded) {
+			return ArtifactAnnotationView{}, conflictError("answer_superseded", "This question already has a newer open answer; change that one instead")
+		}
 		return ArtifactAnnotationView{}, err
 	}
 	stored, err := store.GetArtifactAnnotation(ctx, command.AnnotationID)
@@ -796,6 +837,21 @@ func artifactAnnotationView(annotation *database.ArtifactAnnotation) ArtifactAnn
 	// A stored anchor that no longer decodes is shown without an anchor rather
 	// than failing the whole listing.
 	_ = json.Unmarshal([]byte(annotation.AnchorJSON), &view.Anchor)
+	view.Kind = annotation.Kind
+	if view.Kind == "" {
+		view.Kind = database.ArtifactAnnotationKindNote
+	}
+	if view.Kind == database.ArtifactAnnotationKindAnswer {
+		view.QuestionID = annotation.QuestionID
+		var answer ArtifactAnswerView
+		if json.Unmarshal([]byte(annotation.AnswerJSON), &answer) == nil {
+			view.Answer = &answer
+		}
+	}
+	if annotation.UpdatedAt.Valid {
+		updatedAt := annotation.UpdatedAt.Time
+		view.UpdatedAt = &updatedAt
+	}
 	if annotation.ResolvedAt.Valid {
 		resolvedAt := annotation.ResolvedAt.Time
 		view.ResolvedAt = &resolvedAt

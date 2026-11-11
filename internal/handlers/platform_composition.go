@@ -37,9 +37,12 @@ const (
 	// with workspace merge: -2 capabilities, -1 mutation, -1 read.
 	// models.list (read) publishes each backend's models and the efforts
 	// they accept: +1 capability, +1 read.
-	expectedPlatformCapabilities = 192
-	expectedPlatformMutations    = 126
-	expectedPlatformReads        = 66
+	// artifacts.questions.list (read) and artifacts.answers.save/withdraw
+	// (mutations) let an artifact ask its reader questions: +3 capabilities,
+	// +2 mutations, +1 read.
+	expectedPlatformCapabilities = 195
+	expectedPlatformMutations    = 128
+	expectedPlatformReads        = 67
 )
 
 // PlatformServices is the explicit runtime composition root for Automation.

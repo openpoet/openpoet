@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/jmoiron/sqlx"
 )
 
 // Artifact is a self-contained interactive HTML document published by an agent
@@ -38,6 +40,24 @@ type ArtifactVersion struct {
 	CreatedBy  string    `db:"created_by" json:"created_by"`
 	SessionID  string    `db:"session_id" json:"session_id,omitempty"`
 	CreatedAt  time.Time `db:"created_at" json:"created_at"`
+	// Questions are the questions this version declares for the reader to
+	// answer. They are stored in artifact_questions with the version, and are
+	// only set here on the way in (publishing).
+	Questions []ArtifactQuestion `db:"-" json:"-"`
+}
+
+// ArtifactQuestion is one question a version of an artifact declares: a
+// single or multiple choice among options, or a free-text question. Answers
+// are validated against it, so an answer can only name what was declared.
+type ArtifactQuestion struct {
+	ArtifactID   string `db:"artifact_id" json:"-"`
+	Version      int    `db:"version" json:"-"`
+	Position     int    `db:"position" json:"-"`
+	QuestionID   string `db:"question_id" json:"id"`
+	Type         string `db:"type" json:"type"` // "single", "multi" or "text"
+	Prompt       string `db:"prompt" json:"prompt"`
+	OptionsJSON  string `db:"options_json" json:"-"`
+	AllowComment bool   `db:"allow_comment" json:"comment"`
 }
 
 // ArtifactListItem is an artifact row plus the figures a listing shows.
@@ -59,6 +79,10 @@ type ArtifactFilter struct {
 // ErrArtifactVersionConflict is returned by AppendArtifactVersion when the
 // caller's base version is no longer the current one.
 var ErrArtifactVersionConflict = errors.New("artifact version conflict")
+
+// ErrArtifactAnswerSuperseded is returned when an answer cannot be reopened
+// because its question already has a newer open answer.
+var ErrArtifactAnswerSuperseded = errors.New("the question already has a newer open answer")
 
 const artifactColumns = `id, project_id, session_id, task_id, conversation_id, title, summary, current_version, status, created_by, created_at, updated_at`
 
@@ -92,7 +116,38 @@ func (d *DB) CreateArtifact(ctx context.Context, artifact *Artifact, version *Ar
 		version.CreatedBy, version.SessionID); err != nil {
 		return err
 	}
+	if err := insertArtifactQuestions(ctx, tx, artifact.ID, 1, version.Questions); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+// insertArtifactQuestions stores the questions a version declares, in the
+// transaction that stores the version.
+func insertArtifactQuestions(ctx context.Context, tx *sqlx.Tx, artifactID string, version int, questions []ArtifactQuestion) error {
+	for position, question := range questions {
+		options := question.OptionsJSON
+		if options == "" {
+			options = "[]"
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO artifact_questions (artifact_id, version, position, question_id, type, prompt, options_json, allow_comment)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			artifactID, version, position, question.QuestionID, question.Type, question.Prompt, options, question.AllowComment); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ListArtifactQuestions returns the questions one version declares, in the
+// order they were declared.
+func (d *DB) ListArtifactQuestions(ctx context.Context, artifactID string, version int) ([]ArtifactQuestion, error) {
+	questions := []ArtifactQuestion{}
+	err := d.SelectContext(ctx, &questions,
+		`SELECT artifact_id, version, position, question_id, type, prompt, options_json, allow_comment
+		 FROM artifact_questions WHERE artifact_id = ? AND version = ? ORDER BY position`, artifactID, version)
+	return questions, err
 }
 
 // GetArtifact returns the artifact row (no HTML).
@@ -201,6 +256,9 @@ func (d *DB) AppendArtifactVersion(ctx context.Context, artifactID string, baseV
 		version.CreatedBy, version.SessionID); err != nil {
 		return nil, false, err
 	}
+	if err := insertArtifactQuestions(ctx, tx, artifactID, next, version.Questions); err != nil {
+		return nil, false, err
+	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE artifacts SET current_version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, next, artifactID); err != nil {
 		return nil, false, err
@@ -261,9 +319,22 @@ type ArtifactAnnotation struct {
 	ResolvedAt     sql.NullTime `db:"resolved_at" json:"-"`
 	CreatedBy      string       `db:"created_by" json:"created_by"`
 	CreatedAt      time.Time    `db:"created_at" json:"created_at"`
+	// Kind is "note" (a free note on a text range or element) or "answer" (the
+	// reader's answer to a question the artifact declares). For an answer,
+	// QuestionID names the question and AnswerJSON holds what was chosen.
+	Kind       string       `db:"kind" json:"kind"`
+	QuestionID string       `db:"question_id" json:"question_id,omitempty"`
+	AnswerJSON string       `db:"answer_json" json:"-"`
+	UpdatedAt  sql.NullTime `db:"updated_at" json:"-"`
 }
 
-const artifactAnnotationColumns = `id, artifact_id, version, anchor_json, quote, body, status, resolution_note, resolved_by, resolved_at, created_by, created_at`
+// Annotation kinds.
+const (
+	ArtifactAnnotationKindNote   = "note"
+	ArtifactAnnotationKindAnswer = "answer"
+)
+
+const artifactAnnotationColumns = `id, artifact_id, version, anchor_json, quote, body, status, resolution_note, resolved_by, resolved_at, created_by, created_at, kind, question_id, answer_json, updated_at`
 
 // CreateArtifactAnnotation stores an open annotation and sets its ID.
 func (d *DB) CreateArtifactAnnotation(ctx context.Context, annotation *ArtifactAnnotation) error {
@@ -337,6 +408,78 @@ func (d *DB) ResolveArtifactAnnotation(ctx context.Context, id int64, note, reso
 func (d *DB) ReopenArtifactAnnotation(ctx context.Context, id int64) error {
 	result, err := d.ExecContext(ctx,
 		`UPDATE artifact_annotations SET status = 'open', resolution_note = '', resolved_by = '', resolved_at = NULL WHERE id = ?`, id)
+	if err != nil {
+		// A question has one open answer: an older answer cannot be reopened
+		// while a newer one is open.
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrArtifactAnswerSuperseded
+		}
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// UpsertArtifactAnswers stores the reader's answers to questions: all of them
+// or none. There is at most one open answer per question of an artifact:
+// answering again replaces it (keeping its id), and an answer the agent
+// already resolved is left as the record it is while a new open one is
+// created. It sets each annotation's ID.
+func (d *DB) UpsertArtifactAnswers(ctx context.Context, answers []*ArtifactAnnotation) error {
+	tx, err := d.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, answer := range answers {
+		if err := upsertArtifactAnswer(ctx, tx, answer); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func upsertArtifactAnswer(ctx context.Context, tx *sqlx.Tx, answer *ArtifactAnnotation) error {
+	if answer.AnchorJSON == "" {
+		answer.AnchorJSON = "{}"
+	}
+	answer.Kind = ArtifactAnnotationKindAnswer
+	answer.Status = "open"
+	var existing int64
+	err := tx.GetContext(ctx, &existing,
+		`SELECT id FROM artifact_annotations WHERE artifact_id = ? AND question_id = ? AND kind = 'answer' AND status = 'open'`,
+		answer.ArtifactID, answer.QuestionID)
+	switch {
+	case err == nil:
+		answer.ID = existing
+		_, err = tx.ExecContext(ctx,
+			`UPDATE artifact_annotations SET version = ?, anchor_json = ?, quote = ?, body = ?, answer_json = ?, created_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			answer.Version, answer.AnchorJSON, answer.Quote, answer.Body, answer.AnswerJSON, answer.CreatedBy, existing)
+		return err
+	case errors.Is(err, sql.ErrNoRows):
+		result, err := tx.ExecContext(ctx,
+			`INSERT INTO artifact_annotations (artifact_id, version, anchor_json, quote, body, status, created_by, kind, question_id, answer_json)
+			 VALUES (?, ?, ?, ?, ?, 'open', ?, 'answer', ?, ?)`,
+			answer.ArtifactID, answer.Version, answer.AnchorJSON, answer.Quote, answer.Body, answer.CreatedBy, answer.QuestionID, answer.AnswerJSON)
+		if err != nil {
+			return err
+		}
+		answer.ID, err = result.LastInsertId()
+		return err
+	default:
+		return err
+	}
+}
+
+// DeleteOpenArtifactAnswer withdraws the open answer to one question. Only an
+// open answer can be withdrawn: one the agent resolved is part of the record.
+// It returns sql.ErrNoRows when there is no open answer.
+func (d *DB) DeleteOpenArtifactAnswer(ctx context.Context, artifactID, questionID string) error {
+	result, err := d.ExecContext(ctx,
+		`DELETE FROM artifact_annotations WHERE artifact_id = ? AND question_id = ? AND kind = 'answer' AND status = 'open'`,
+		artifactID, questionID)
 	if err != nil {
 		return err
 	}

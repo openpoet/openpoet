@@ -147,9 +147,10 @@ func validateUIActionManifest(t *testing.T, manifest uiActionManifest) (map[stri
 	// sessions.set_permission_mode; 128 after the Node sidecar's /api/ai/execute-tool
 	// route was removed; 131 with the three HTML artifact mutations
 	// (artifacts.create/update/update_meta); 134 with the three artifact
-	// annotation mutations (create/resolve/reopen).
-	if implemented != 134 || internal != 3 {
-		t.Errorf("manifest convergence = %d implemented/%d internal, want 134/3", implemented, internal)
+	// annotation mutations (create/resolve/reopen); 136 with the two artifact
+	// answer mutations (answers.save/withdraw).
+	if implemented != 136 || internal != 3 {
+		t.Errorf("manifest convergence = %d implemented/%d internal, want 136/3", implemented, internal)
 	}
 	allowlist := make(map[string]struct{}, len(manifest.Allowlist))
 	for _, item := range manifest.Allowlist {
