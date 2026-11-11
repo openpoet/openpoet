@@ -89,6 +89,12 @@ func (b *ClaudeCodeBackend) BuildEnvVars(cfg *SessionConfig) map[string]string {
 		"OTEL_RESOURCE_ATTRIBUTES":     "openpoet.session_id=" + cfg.SessionID,
 		"OTEL_METRIC_EXPORT_INTERVAL":  "10000",
 	}
+	// The openpoet binary, for `$OPENPOET_BIN cli call <tool>`: the docs
+	// steering and the html-artifact skill name it as the way to reach the
+	// OpenPoet tools from a shell.
+	if cfg.ExecPath != "" {
+		env["OPENPOET_BIN"] = cfg.ExecPath
+	}
 	applySessionTokenEnv(env, cfg)
 	return env
 }

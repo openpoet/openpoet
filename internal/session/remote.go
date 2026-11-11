@@ -104,6 +104,11 @@ func (r *RemoteRunner) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to set up remote provider tunnel: %w", err)
 	}
 
+	// OPENPOET_BIN is the path of the openpoet binary on this machine. It does
+	// not exist on the remote host, where the OpenPoet tools are reached over
+	// the tunnel instead, so the remote session is not told about it.
+	delete(r.envVars, "OPENPOET_BIN")
+
 	// Rewrite OpenPoet MCP from subprocess to URL-based transport via tunnel
 	r.rewriteMCPConfigForRemote()
 

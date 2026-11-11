@@ -53,3 +53,16 @@ func TestClaudeCodeBackendPassesOpenAIModelToClaudeHarness(t *testing.T) {
 		t.Fatalf("BuildCLIArgs() = %#v, want %#v", got, want)
 	}
 }
+
+// A Claude session is told where the openpoet binary is, so the CLI the docs
+// steering and the html-artifact skill name ($OPENPOET_BIN cli call ...) works.
+func TestClaudeCodeBackendExportsTheOpenPoetBinary(t *testing.T) {
+	backend := &ClaudeCodeBackend{}
+	env := backend.BuildEnvVars(&SessionConfig{SessionID: "s1", ServerAddr: "localhost:8080", ExecPath: "/opt/openpoet/openpoet"})
+	if env["OPENPOET_BIN"] != "/opt/openpoet/openpoet" || env["OPENPOET_HOOK_URL"] != "http://localhost:8080" || env["OPENPOET_SESSION_ID"] != "s1" {
+		t.Fatalf("env = %v", env)
+	}
+	if _, set := backend.BuildEnvVars(&SessionConfig{SessionID: "s1", ServerAddr: "localhost:8080"})["OPENPOET_BIN"]; set {
+		t.Fatal("OPENPOET_BIN set without a resolved binary path")
+	}
+}
