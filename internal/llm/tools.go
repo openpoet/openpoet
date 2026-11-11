@@ -524,16 +524,18 @@ func AllToolDefs() []ToolDef {
 				"Prefer this over create_document for plans, reports, documentation and any deliverable the user will read or review: build a small site with navigation, visual components, inline charts and restrained motion. " +
 				"Rules: a complete HTML document with ALL CSS and JavaScript inline; no external scripts, stylesheets, fonts or images (the viewer blocks every network request, so use inline SVG/canvas and data: URIs); must work in light and dark themes and on a phone; at most 2 MiB. " +
 				"The user gets a card to open it — do not paste the HTML or a link in your reply. The user can annotate the artifact; read their notes with list_artifact_annotations. " +
-				"When the user has to decide or answer something, declare questions in the page (a JSON block with id openpoet-questions; the html-artifact skill shows how): the answers come back with the annotations.",
+				"When the user has to decide or answer something, declare questions in the page (a JSON block with id openpoet-questions; the html-artifact skill shows how): the answers come back with the annotations. " +
+				"In a session, write the page to an .html file and pass html_path instead of html: the document is then read from the file instead of being typed again as a tool argument. The result reports the exact size and SHA-256 of what was stored.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
-					"title":   {Type: "string", Description: "Short title shown in the viewer and in listings"},
-					"html":    {Type: "string", Description: "The complete, self-contained HTML document (inline CSS and JS only)"},
-					"summary": {Type: "string", Description: "One or two sentences on what the artifact contains"},
-					"task_id": {Type: "string", Description: "Optional task ID to link the artifact to (defaults to the task of the current session)"},
+					"title":     {Type: "string", Description: "Short title shown in the viewer and in listings"},
+					"html_path": {Type: "string", Description: "Preferred in a session: path of an .html file with the complete document, inside your workspace (relative paths resolve against it) or the temporary directory. OpenPoet reads the file; pass this or html, not both"},
+					"html":      {Type: "string", Description: "The complete, self-contained HTML document (inline CSS and JS only). Use it when you cannot write a file"},
+					"summary":   {Type: "string", Description: "One or two sentences on what the artifact contains"},
+					"task_id":   {Type: "string", Description: "Optional task ID to link the artifact to (defaults to the task of the current session)"},
 				},
-				Required: []string{"title", "html"},
+				Required: []string{"title"},
 			},
 			Context: ToolContextBoth,
 		},
@@ -541,28 +543,59 @@ func AllToolDefs() []ToolDef {
 			Name: "update_artifact",
 			Description: "Publish a new version of an existing HTML artifact (the full new HTML document, same rules as create_artifact). Earlier versions stay available to the user. " +
 				"Before updating, read the open annotations with list_artifact_annotations and address them; afterwards resolve each one with resolve_artifact_annotation. " +
-				"Pass base_version (the version you read) so a concurrent change is reported as a conflict instead of being overwritten.",
+				"Pass base_version (the version you read) so a concurrent change is reported as a conflict instead of being overwritten. " +
+				"For a change to part of the page, prefer patch_artifact, which sends only the replacements. For a rewrite in a session, edit the .html file and pass html_path instead of typing the document again in html.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
 					"artifact_id":  {Type: "string", Description: "The artifact ID (8 characters)"},
-					"html":         {Type: "string", Description: "The complete new HTML document"},
+					"html_path":    {Type: "string", Description: "Preferred in a session: path of an .html file with the complete new document, inside your workspace (relative paths resolve against it) or the temporary directory. OpenPoet reads the file; pass this or html, not both"},
+					"html":         {Type: "string", Description: "The complete new HTML document. Use it when you cannot write a file"},
 					"change_note":  {Type: "string", Description: "One line on what changed in this version"},
 					"base_version": {Type: "string", Description: "The version number this change is based on; the update is refused if the artifact has moved on"},
 				},
-				Required: []string{"artifact_id", "html"},
+				Required: []string{"artifact_id"},
 			},
 			Context: ToolContextBoth,
 		},
 		{
-			Name:        "read_artifact",
-			Description: "Read an HTML artifact: title, links, version history and its open annotations. Set include_html to also get the HTML of a version (the current one by default) — needed before update_artifact when you do not have the HTML at hand.",
+			Name: "patch_artifact",
+			Description: "Publish a new version of an HTML artifact by replacing pieces of its current HTML, without sending the whole document: the cheapest way to make a change. " +
+				"Each edit replaces old with new. old has to match the stored HTML exactly (whitespace, line breaks and entities included) and occur exactly once, unless replace_all is set; edits apply in order, each to the result of the previous one. " +
+				"If any edit does not match, nothing is published and the error says which one. base_version is required: the version whose HTML the edits were written against (the update is refused if the artifact has moved on). " +
+				"The result reports the exact size and SHA-256 of the new version. Before patching, read the open annotations with list_artifact_annotations; afterwards resolve each one you addressed with resolve_artifact_annotation.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"artifact_id":  {Type: "string", Description: "The artifact ID (8 characters)"},
+					"base_version": {Type: "string", Description: "The version number the edits are based on (the current version)"},
+					"edits": {Type: "array", Description: "The replacements, applied in order", Items: &ToolPropertySchema{
+						Type: "object",
+						Properties: map[string]ToolPropertySchema{
+							"old":         {Type: "string", Description: "Exact text of the stored HTML to replace. Include enough surrounding text to be unique"},
+							"new":         {Type: "string", Description: "The text that replaces it (empty to delete)"},
+							"replace_all": {Type: "boolean", Description: "Replace every occurrence of old instead of requiring exactly one (default: false)"},
+						},
+						Required: []string{"old", "new"},
+					}},
+					"change_note": {Type: "string", Description: "One line on what changed in this version"},
+				},
+				Required: []string{"artifact_id", "base_version", "edits"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name: "read_artifact",
+			Description: "Read an HTML artifact: title, its link, the version history (exact size and SHA-256 of each version) and its open annotations. " +
+				"To get the HTML of a version (the current one by default), in a session pass output_path: the stored HTML is written byte for byte to a file in your workspace, ready to edit and publish again with update_artifact html_path, and is not returned in the result. " +
+				"Set include_html to have it returned in the result instead.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
 					"artifact_id":  {Type: "string", Description: "The artifact ID (8 characters; an 'artifact:' prefix is accepted)"},
 					"version":      {Type: "string", Description: "Version number to read (default: the current version)"},
-					"include_html": {Type: "boolean", Description: "Also return the HTML of that version (default: false)"},
+					"output_path":  {Type: "string", Description: "Write the HTML of that version to this .html file, inside your workspace (relative paths resolve against it) or the temporary directory. The directory must exist; an existing file is replaced. Only in a session"},
+					"include_html": {Type: "boolean", Description: "Also return the HTML of that version in the result (default: false)"},
 				},
 				Required: []string{"artifact_id"},
 			},

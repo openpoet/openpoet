@@ -22,9 +22,12 @@ Rules the server enforces on every publish:
 
 - The content must be an HTML document, valid UTF-8, at most **2 MiB** per
   version.
+- The HTML is stored exactly as it was sent, and the publish result carries its
+  size in bytes and its SHA-256.
 - Credential-looking text (`password=…`, `api_key: …`, private keys) is masked
-  as `[REDACTED]`, as in Docs. The publish result says when that happened,
-  because masking inside a script can break it.
+  as `[REDACTED]`, as in Docs. That is the one case in which the stored HTML
+  differs from the input; the publish result says when it happened, because
+  masking inside a script can break it.
 - An update names the version it was based on (`base_version`). If the artifact
   has moved on, the update is refused with a conflict that names the current
   version; nothing is overwritten.
@@ -198,12 +201,14 @@ message from the frame proves nothing about what the user did.
 
 | Method and route | Purpose |
 | --- | --- |
-| `POST /api/artifacts` | Publish a new artifact (`title`, `html`, `summary`, optional `project_id`, `task_id`, `conversation_id`, `session_id`) |
+| `POST /api/artifacts` | Publish a new artifact (`title`, `html` or `html_path`, `summary`, optional `project_id`, `task_id`, `conversation_id`, `session_id`) |
 | `GET /api/artifacts?project_id=&session_id=&task_id=&include_archived=` | List artifacts, without HTML |
-| `GET /api/artifacts/{id}` | Metadata, version history and open-annotation count |
-| `PUT /api/artifacts/{id}` | Publish a new version (`html`, `base_version`, `change_note`) |
+| `GET /api/artifacts/{id}` | Metadata, version history (size and SHA-256 of each version), open-annotation count, `link` and `url` |
+| `PUT /api/artifacts/{id}` | Publish a new version (`html` or `html_path`, `base_version`, `change_note`) |
+| `POST /api/artifacts/{id}/patch` | Publish a new version from replacements (`base_version`, `edits: [{old, new, replace_all}]`, `change_note`) |
 | `PATCH /api/artifacts/{id}` | Change `title`, `summary` or `status` |
 | `GET /api/artifacts/{id}/versions/{n\|current}` | One version with its HTML, as JSON |
+| `POST /api/artifacts/{id}/versions/{n\|current}/export` | Write the HTML of a version to a file in the calling session's workspace (`path`) |
 | `GET /api/artifacts/{id}/render?v=n` | The sandboxed document for the viewer |
 | `GET /api/artifacts/{id}/annotations?status=open\|resolved\|all` | List annotations |
 | `POST /api/artifacts/{id}/annotations` | Create an annotation (`version`, `anchor`, `body`) |
@@ -217,6 +222,35 @@ A caller authenticated as a session is always attributed to its own session.
 Artifacts also appear in the session and task document listings with ids of
 the form `artifact:<id>` and type `artifact`.
 
+A create, update or patch answers with `version`, `created`, `size_bytes` and
+`sha256` (the exact size and hash of the stored HTML), `redacted`, `link` and
+`url`. The HTML is stored as it was sent: `sha256` is the hash of the input
+unless `redacted` is true.
+
+### Publishing without resending the document
+
+A large page passed inline costs its whole size on every revision. Three
+things avoid that:
+
+- **`html_path`**, on create and update: the path of an `.html` file that
+  OpenPoet reads. It is resolved for the calling session, on the machine that
+  session runs on (the local disk, or over SFTP for a remote project): a
+  relative path is resolved against the session's working directory, and the
+  file has to be inside that directory or the machine's temporary directory
+  once symbolic links are followed. Only a regular `.html` or `.htm` file of at
+  most 2 MiB is read. A request that is not attributed to a session is
+  refused, and so is a remote Windows project. OpenPoet reaches that machine
+  with the OS account the session runs as, so this reads nothing the session
+  could not read itself.
+- **Patch**: the server applies `edits` in order to the HTML of
+  `base_version`, which must be the current version. Each `old` has to match
+  exactly and once (or every occurrence with `replace_all`); if one does not,
+  nothing is published and the error names the edit. An edit written with LF
+  line breaks matches a document stored with CRLF.
+- **Export**: the HTML of a version is written to a file under the same rules
+  as `html_path` (the directory must exist; only a regular file is replaced),
+  and the answer has the path, size and hash, never the HTML.
+
 ## Agent tools
 
 Registered next to the Docs tools, so they are available to sessions over MCP,
@@ -224,36 +258,48 @@ to the chat assistant, and through `openpoet cli call`.
 
 | Tool | Arguments |
 | --- | --- |
-| `openpoet_create_artifact` | `title`, `html`, `summary`, `task_id` |
-| `openpoet_update_artifact` | `artifact_id`, `html`, `change_note`, `base_version` |
-| `openpoet_read_artifact` | `artifact_id`, `version`, `include_html` |
+| `openpoet_create_artifact` | `title`, `html_path` or `html`, `summary`, `task_id` |
+| `openpoet_update_artifact` | `artifact_id`, `html_path` or `html`, `change_note`, `base_version` |
+| `openpoet_patch_artifact` | `artifact_id`, `base_version`, `edits` (`[{old, new, replace_all}]`), `change_note` |
+| `openpoet_read_artifact` | `artifact_id`, `version`, `output_path` (write the HTML to a file) or `include_html` (return it) |
 | `openpoet_list_artifacts` | `project_id`, `task_id`, `session_id`, `include_archived` |
 | `openpoet_list_artifact_annotations` | `artifact_id`, `status` (default `open`). Lists notes and answers, and names the questions of the current version that have no open answer |
 | `openpoet_resolve_artifact_annotation` | `artifact_id`, `annotation_id`, `resolution_note` |
 
 The link that opens an artifact for someone else comes from `openpoet_get_link`
-(see [`links.md`](links.md)); the publish results carry it when a public base
-URL is configured.
+(see [`links.md`](links.md)); the results of create, update, patch and read
+carry it when a public base URL is configured.
 
-Through the CLI, `html_file` publishes a document from a local file instead of
-passing it inline:
+Every publish result states the exact size and SHA-256 of the stored HTML and
+whether it is byte for byte what was sent, and `openpoet_read_artifact` lists
+them for each version.
+
+`html_path` and `output_path` are for sessions (see above). The chat assistant
+has no workspace and refuses them. `openpoet_patch_artifact` works everywhere.
+
+Through the CLI, `html_file` publishes a document from a local file and
+`output_file` saves the HTML of a version to one. The CLI runs as the user and
+reads and writes the file itself, anywhere on the machine:
 
 ```bash
 openpoet cli call openpoet_create_artifact '{"title":"Plan","html_file":"/tmp/plan.html"}'
+openpoet cli call openpoet_read_artifact '{"artifact_id":"1a2b3c4d","output_file":"/tmp/plan.html"}'
 ```
 
-Only the CLI honors `html_file`; the MCP server never reads a path named by a
-client.
+Only the CLI honors `html_file` and `output_file`; the MCP server never opens
+a path named by a client. Sessions started by OpenPoet have the binary in
+`$OPENPOET_BIN` (not on a remote host, where it does not exist).
 
 Tool policies written as an allowlist name every tool they grant. On upgrade,
-allowlists that already grant `create_document` get the publishing tools, and
-those that grant `read_document` get the reading tools. Policies that allow
+allowlists that already grant `create_document` get the publishing tools,
+those that grant `read_document` get the reading tools, and those that grant
+`update_artifact` get `patch_artifact`. Policies that allow
 everything are not touched. Remove the tools in the tool policy settings to opt
 a project out.
 
 Automation API capabilities (`artifacts.list`, `artifacts.get`,
 `artifacts.get_version`, `artifacts.create`, `artifacts.update`,
-`artifacts.update_meta`, `artifacts.annotations.list`, `.create`, `.resolve`,
+`artifacts.patch`, `artifacts.update_meta`, `artifacts.annotations.list`, `.create`, `.resolve`,
 `.reopen`, `artifacts.questions.list`, `artifacts.answers.save`, `.withdraw`)
 use the `documents:read` and `documents:write` scopes. One automation
 command is limited to the Automation API's 1 MiB request body, so larger

@@ -134,8 +134,8 @@ func collaborationApproval(t *testing.T) PlatformApprovalDecision {
 
 func TestCollaborationPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := collaborationDefinitionsForTest()
-	if len(definitions) != 61 {
-		t.Fatalf("collaboration surface has %d capabilities, want 61", len(definitions))
+	if len(definitions) != 62 {
+		t.Fatalf("collaboration surface has %d capabilities, want 62", len(definitions))
 	}
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -223,9 +223,9 @@ func TestCollaborationPlatformMutationMetadataMatchesManifest(t *testing.T) {
 		counts[route.ApplicationService]++
 		checked++
 	}
-	wantCounts := map[string]int{"DocumentService": 2, "ArtifactService": 8, "ProposalService": 9, "AIAssistantService": 16, "NotificationService": 2, "NotificationDeliveryService": 4, "TokenUsageService": 1}
-	if checked != 42 || !reflect.DeepEqual(counts, wantCounts) {
-		t.Fatalf("checked mutations=%d counts=%v, want 42/%v", checked, counts, wantCounts)
+	wantCounts := map[string]int{"DocumentService": 2, "ArtifactService": 9, "ProposalService": 9, "AIAssistantService": 16, "NotificationService": 2, "NotificationDeliveryService": 4, "TokenUsageService": 1}
+	if checked != 43 || !reflect.DeepEqual(counts, wantCounts) {
+		t.Fatalf("checked mutations=%d counts=%v, want 43/%v", checked, counts, wantCounts)
 	}
 }
 
@@ -272,6 +272,7 @@ func collaborationMutationDryRunCases() []collaborationDryRunCase {
 		{"documents.create_temp", `{}`, `{"title":"Doc","content":"temporary-secret-content"}`},
 		{"artifacts.create", `{}`, `{"title":"Plan","html":"<html><body>artifact-secret-content</body></html>"}`},
 		{"artifacts.update", `{"id":"art00001"}`, `{"html":"<html><body>artifact-secret-content</body></html>","base_version":1}`},
+		{"artifacts.patch", `{"id":"art00001"}`, `{"edits":[{"old":"artifact-secret-content","new":"artifact-secret-content-2"}],"base_version":1}`},
 		{"artifacts.update_meta", `{"id":"art00001"}`, `{"title":"artifact-secret-content"}`},
 		{"artifacts.annotations.create", `{"id":"art00001"}`, `{"anchor":{"type":"text","exact":"artifact-secret-content"},"body":"artifact-secret-content"}`},
 		{"artifacts.annotations.resolve", `{"id":"art00001"}`, `{"annotation_id":3,"resolution_note":"artifact-secret-content"}`},
@@ -308,8 +309,8 @@ func TestCollaborationEveryManifestMutationDryRunsWithoutEffectOrSecretEcho(t *t
 	_, registry := collaborationTestRegistry(t, collaborationTestServices())
 	actor := collaborationActor(definitions)
 	cases := collaborationMutationDryRunCases()
-	if len(cases) != 43 {
-		t.Fatalf("dry-run cases=%d want=43", len(cases))
+	if len(cases) != 44 {
+		t.Fatalf("dry-run cases=%d want=44", len(cases))
 	}
 	seen := map[string]struct{}{}
 	for _, testCase := range cases {
@@ -332,7 +333,7 @@ func TestCollaborationEveryManifestMutationDryRunsWithoutEffectOrSecretEcho(t *t
 		}
 		seen[testCase.capability] = struct{}{}
 	}
-	if len(seen) != 43 {
+	if len(seen) != 44 {
 		t.Fatalf("dry-run covered %d unique mutations", len(seen))
 	}
 }

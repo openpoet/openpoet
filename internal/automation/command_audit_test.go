@@ -260,8 +260,8 @@ func TestPlatformMutationMetadataTotalsAreExplicit(t *testing.T) {
 			reads++
 		}
 	}
-	if mutations != 128 || reads != 67 || len(definitions) != 195 {
-		t.Fatalf("platform metadata totals mutations=%d reads=%d total=%d, want 128/67/195", mutations, reads, len(definitions))
+	if mutations != 129 || reads != 67 || len(definitions) != 196 {
+		t.Fatalf("platform metadata totals mutations=%d reads=%d total=%d, want 129/67/196", mutations, reads, len(definitions))
 	}
 }
 

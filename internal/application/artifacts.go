@@ -84,6 +84,13 @@ type ArtifactPublishResult struct {
 	// Questions is how many questions the published version declares for the
 	// reader to answer.
 	Questions int `json:"questions"`
+	// SizeBytes and SHA256 describe the HTML of that version exactly as it is
+	// stored, so the publisher can compare them with what it sent. The stored
+	// HTML is the input byte for byte unless Redacted is set.
+	SizeBytes int64  `json:"size_bytes"`
+	SHA256    string `json:"sha256"`
+	// Replacements is how many places a patch changed (0 for a full publish).
+	Replacements int `json:"replacements,omitempty"`
 }
 
 type CreateArtifactCommand struct {
@@ -105,6 +112,29 @@ type UpdateArtifactCommand struct {
 	SessionID     string
 	Authorization ActionAuthorization
 }
+
+// ArtifactEdit replaces one piece of the HTML of a version. Old must occur
+// exactly once in the document, unless ReplaceAll is set, in which case every
+// occurrence is replaced.
+type ArtifactEdit struct {
+	Old        string `json:"old"`
+	New        string `json:"new"`
+	ReplaceAll bool   `json:"replace_all,omitempty"`
+}
+
+// PatchArtifactCommand publishes a new version made of the HTML of
+// BaseVersion with Edits applied in order.
+type PatchArtifactCommand struct {
+	ArtifactID    string
+	BaseVersion   int
+	Edits         []ArtifactEdit
+	ChangeNote    string
+	SessionID     string
+	Authorization ActionAuthorization
+}
+
+// maxArtifactEdits bounds the edits of one patch.
+const maxArtifactEdits = 200
 
 type UpdateArtifactMetaCommand struct {
 	ArtifactID    string
@@ -266,7 +296,8 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 	view := artifactView(stored)
 	view.SizeBytes = version.SizeBytes
 	s.notifyPublished(ctx, view, true)
-	return ArtifactPublishResult{Artifact: view, Version: 1, Created: true, Redacted: redacted, Questions: len(questions)}, nil
+	return ArtifactPublishResult{Artifact: view, Version: 1, Created: true, Redacted: redacted, Questions: len(questions),
+		SizeBytes: version.SizeBytes, SHA256: version.SHA256}, nil
 }
 
 func (s *ArtifactService) Update(ctx context.Context, command UpdateArtifactCommand) (ArtifactPublishResult, error) {
@@ -318,7 +349,112 @@ func (s *ArtifactService) Update(ctx context.Context, command UpdateArtifactComm
 		publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "artifacts", Action: "version_published", Meta: artifactChangeMeta(stored)})
 		s.notifyPublished(ctx, view, false)
 	}
-	return ArtifactPublishResult{Artifact: view, Version: stored.CurrentVersion, Created: created, Redacted: redacted, Questions: len(questions)}, nil
+	return ArtifactPublishResult{Artifact: view, Version: stored.CurrentVersion, Created: created, Redacted: redacted, Questions: len(questions),
+		SizeBytes: version.SizeBytes, SHA256: version.SHA256}, nil
+}
+
+// Patch publishes a new version by applying text replacements to the HTML of
+// the version the caller read, so a small change does not resend the whole
+// document. base_version is required and must be the current version: the
+// edits are located in that exact text. Each edit's old text has to match the
+// stored HTML exactly and (unless replace_all) exactly once; when one does not,
+// nothing is published and the error says which edit and how many matches.
+func (s *ArtifactService) Patch(ctx context.Context, command PatchArtifactCommand) (ArtifactPublishResult, error) {
+	if err := requireActionActor(command.Authorization); err != nil {
+		return ArtifactPublishResult{}, err
+	}
+	id, err := normalizeArtifactID(command.ArtifactID)
+	if err != nil {
+		return ArtifactPublishResult{}, err
+	}
+	if command.BaseVersion <= 0 {
+		return ArtifactPublishResult{}, validationError("base_version_required", "base_version is required for a patch: pass the version whose HTML your edits were written against")
+	}
+	if len(command.Edits) == 0 {
+		return ArtifactPublishResult{}, validationError("edits_required", "A patch needs at least one edit ({old, new})")
+	}
+	if len(command.Edits) > maxArtifactEdits {
+		return ArtifactPublishResult{}, validationError("too_many_edits", fmt.Sprintf("A patch takes at most %d edits", maxArtifactEdits))
+	}
+	artifact, err := s.artifact(ctx, id)
+	if err != nil {
+		return ArtifactPublishResult{}, err
+	}
+	if artifact.CurrentVersion != command.BaseVersion {
+		return ArtifactPublishResult{}, conflictError("artifact_version_conflict",
+			fmt.Sprintf("Artifact %s is at version %d, not base_version %d. Read the current version, reapply your change and patch again.", id, artifact.CurrentVersion, command.BaseVersion))
+	}
+	base, err := s.store.GetArtifactVersion(ctx, id, command.BaseVersion)
+	if err != nil || base == nil {
+		return ArtifactPublishResult{}, notFoundError("artifact_version_not_found", "Artifact version not found", err)
+	}
+	content, replacements, err := applyArtifactEdits(base.Content, command.Edits)
+	if err != nil {
+		return ArtifactPublishResult{}, err
+	}
+	// Update checks base_version again inside the write transaction, so a
+	// version published between the read above and the write is a conflict.
+	result, err := s.Update(ctx, UpdateArtifactCommand{
+		ArtifactID: id, Content: content, ChangeNote: command.ChangeNote, BaseVersion: command.BaseVersion,
+		SessionID: command.SessionID, Authorization: command.Authorization,
+	})
+	if err != nil {
+		return ArtifactPublishResult{}, err
+	}
+	result.Replacements = replacements
+	return result, nil
+}
+
+// applyArtifactEdits applies the edits in order, each one to the result of the
+// ones before it, and returns the new text and how many places changed.
+func applyArtifactEdits(content string, edits []ArtifactEdit) (string, int, error) {
+	replacements := 0
+	for i, edit := range edits {
+		number := i + 1
+		if edit.Old == "" {
+			return "", 0, validationError("invalid_edit", fmt.Sprintf("Edit %d: old is empty. Give the exact text to replace", number))
+		}
+		if edit.Old == edit.New {
+			return "", 0, validationError("invalid_edit", fmt.Sprintf("Edit %d: old and new are the same text", number))
+		}
+		old, replacement := edit.Old, edit.New
+		count := strings.Count(content, old)
+		// A document stored with CRLF line breaks is still matched by an edit
+		// written with LF, which is what a tool argument usually carries.
+		if count == 0 && strings.Contains(content, "\r\n") && !strings.Contains(old, "\r") {
+			if crlf := strings.ReplaceAll(old, "\n", "\r\n"); crlf != old && strings.Contains(content, crlf) {
+				old, replacement = crlf, strings.ReplaceAll(strings.ReplaceAll(replacement, "\r\n", "\n"), "\n", "\r\n")
+				count = strings.Count(content, old)
+			}
+		}
+		switch {
+		case count == 0:
+			return "", 0, validationError("edit_not_found", fmt.Sprintf(
+				"Edit %d: old text not found (%s). It has to match the stored HTML exactly, including whitespace, line breaks and entities, and edits apply in order to the result of the previous ones. Nothing was published.",
+				number, describeEditText(edit.Old)))
+		case count > 1 && !edit.ReplaceAll:
+			return "", 0, validationError("edit_ambiguous", fmt.Sprintf(
+				"Edit %d: old text occurs %d times (%s). Add surrounding text so it is unique, or set replace_all. Nothing was published.",
+				number, count, describeEditText(edit.Old)))
+		}
+		if edit.ReplaceAll {
+			content = strings.ReplaceAll(content, old, replacement)
+			replacements += count
+		} else {
+			content = strings.Replace(content, old, replacement, 1)
+			replacements++
+		}
+	}
+	return content, replacements, nil
+}
+
+// describeEditText identifies an edit's text in an error without echoing all of it.
+func describeEditText(text string) string {
+	oneLine := strings.Join(strings.Fields(text), " ")
+	if runes := []rune(oneLine); len(runes) > 60 {
+		oneLine = string(runes[:60]) + "…"
+	}
+	return fmt.Sprintf("%d bytes, starting %q", len(text), oneLine)
 }
 
 func (s *ArtifactService) UpdateMeta(ctx context.Context, command UpdateArtifactMetaCommand) (ArtifactView, error) {
@@ -472,9 +608,11 @@ func normalizeArtifactHTML(content string) (string, bool, error) {
 	if !artifactHTMLPattern.MatchString(content) {
 		return "", false, validationError("invalid_artifact_html", "Artifact content must be an HTML document (use a Doc for markdown or plain text)")
 	}
-	trimmed := strings.TrimSpace(content)
-	masked := redactReportSecrets(trimmed)
-	return masked, masked != trimmed, nil
+	// The document is stored as it was sent: its size and SHA-256 are reported
+	// back so the publisher can compare them with its own copy. Masking is the
+	// only thing that changes it.
+	masked := redactReportSecrets(content)
+	return masked, masked != content, nil
 }
 
 // CheckArtifactHTML reports whether content would be accepted as an artifact

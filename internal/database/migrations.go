@@ -102,6 +102,7 @@ var migrations = []Migration{
 	{Version: 82, Description: "tool policies: allowlists that grant the Docs tools also grant the HTML artifact tools, so artifacts are available wherever Docs already are", Up: migrateV82},
 	{Version: 83, Description: "tool policies: allowlists that grant read_document or read_artifact also grant get_link, the tool that returns the link of an artifact, Doc, session or task", Up: migrateV83},
 	{Version: 84, Description: "artifacts: questions a version declares for the reader (artifact_questions) and answers stored as annotations (kind, question_id, answer_json, updated_at; one open answer per question)", Up: migrateV84},
+	{Version: 85, Description: "tool policies: allowlists that grant update_artifact also grant patch_artifact, the tool that changes an artifact by sending only the replacements", Up: migrateV85},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2455,6 +2456,46 @@ func migrateV84(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV84 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// patchToolFollowing maps update_artifact to patch_artifact: an allowlist that
+// lets an agent publish a new version also lets it publish one as a patch.
+var patchToolFollowing = map[string][]string{
+	"update_artifact": {"patch_artifact"},
+}
+
+// migrateV85 makes patch_artifact available wherever update_artifact already
+// is, for the same reason as V82 and V83: an allowlist names every tool it
+// grants, so a tool added later stays unavailable until the user ticks it. It
+// changes stored policies only; the schema is the same as in V84.
+func migrateV85(tx *sqlx.Tx) error {
+	targets := []struct{ selectSQL, updateSQL string }{
+		{`SELECT key AS id, value AS policy FROM settings WHERE key IN ('mcp_tool_policy_session', 'mcp_tool_policy_chat', 'mcp_tool_policy_http')`,
+			`UPDATE settings SET value = ? WHERE key = ?`},
+		{`SELECT CAST(id AS TEXT) AS id, tool_policy AS policy FROM projects WHERE tool_policy != ''`,
+			`UPDATE projects SET tool_policy = ? WHERE id = ?`},
+		{`SELECT CAST(id AS TEXT) AS id, tool_policy AS policy FROM ai_agents WHERE tool_policy != ''`,
+			`UPDATE ai_agents SET tool_policy = ? WHERE id = ?`},
+	}
+	for _, t := range targets {
+		var rows []struct {
+			ID     string `db:"id"`
+			Policy string `db:"policy"`
+		}
+		if err := tx.Select(&rows, t.selectSQL); err != nil {
+			return fmt.Errorf("migrateV85 failed: %w\nSQL: %s", err, t.selectSQL)
+		}
+		for _, row := range rows {
+			updated, changed := extendToolPolicyAllowlist(row.Policy, patchToolFollowing)
+			if !changed {
+				continue
+			}
+			if _, err := tx.Exec(t.updateSQL, updated, row.ID); err != nil {
+				return fmt.Errorf("migrateV85 failed: %w\nSQL: %s", err, t.updateSQL)
+			}
 		}
 	}
 	return nil

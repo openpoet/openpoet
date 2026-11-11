@@ -40,8 +40,10 @@ const (
 	// artifacts.questions.list (read) and artifacts.answers.save/withdraw
 	// (mutations) let an artifact ask its reader questions: +3 capabilities,
 	// +2 mutations, +1 read.
-	expectedPlatformCapabilities = 195
-	expectedPlatformMutations    = 128
+	// artifacts.patch (mutation) publishes a version from replacements
+	// instead of the whole document: +1 capability, +1 mutation.
+	expectedPlatformCapabilities = 196
+	expectedPlatformMutations    = 129
 	expectedPlatformReads        = 67
 )
 

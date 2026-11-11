@@ -35,6 +35,13 @@ type artifactUpdatePayload struct {
 	SessionID   string `json:"session_id,omitempty"`
 }
 
+type artifactPatchPayload struct {
+	Edits       []application.ArtifactEdit `json:"edits"`
+	ChangeNote  string                     `json:"change_note,omitempty"`
+	BaseVersion int                        `json:"base_version"`
+	SessionID   string                     `json:"session_id,omitempty"`
+}
+
 type artifactUpdateMetaPayload struct {
 	Title   *string `json:"title,omitempty"`
 	Summary *string `json:"summary,omitempty"`
@@ -91,6 +98,7 @@ func artifactCollaborationDefinitions() []PlatformCapabilityDefinition {
 		collaborationReadCapability("artifacts.get_version", "artifacts", "documents:read"),
 		collaborationPayloadLimit(collaborationWriteCapability("artifacts.create", "artifacts", "documents:write"), maxArtifactAutomationPayloadBytes),
 		collaborationPayloadLimit(collaborationWriteCapability("artifacts.update", "artifacts", "documents:write"), maxArtifactAutomationPayloadBytes),
+		collaborationPayloadLimit(collaborationWriteCapability("artifacts.patch", "artifacts", "documents:write"), maxArtifactAutomationPayloadBytes),
 		collaborationWriteCapability("artifacts.update_meta", "artifacts", "documents:write"),
 		collaborationReadCapability("artifacts.annotations.list", "artifacts", "documents:read"),
 		collaborationWriteCapability("artifacts.annotations.create", "artifacts", "documents:write"),
@@ -226,6 +234,39 @@ func (e *artifactCollaborationExecutor) Validate(_ context.Context, input Platfo
 		}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
 			return e.service.Update(ctx, application.UpdateArtifactCommand{
 				ArtifactID: id, Content: payload.HTML, ChangeNote: payload.ChangeNote, BaseVersion: payload.BaseVersion,
+				SessionID: payload.SessionID, Authorization: authorization,
+			})
+		}}, nil
+	case "artifacts.patch":
+		var payload artifactPatchPayload
+		if err := decodeCollaborationPayload(input.Payload, &payload); err != nil {
+			return nil, err
+		}
+		id, err := collaborationStringID(target, "", "artifact id")
+		if err != nil {
+			return nil, err
+		}
+		if payload.ChangeNote, err = boundedCollaborationInput(payload.ChangeNote, "artifact change note", 1000, false); err != nil {
+			return nil, err
+		}
+		if payload.SessionID, err = boundedCollaborationInput(payload.SessionID, "session id", 200, false); err != nil {
+			return nil, err
+		}
+		if payload.BaseVersion <= 0 {
+			return nil, platformFailure("platform_payload_invalid", "base_version is required", false)
+		}
+		if len(payload.Edits) == 0 {
+			return nil, platformFailure("platform_payload_invalid", "edits is required", false)
+		}
+		editBytes := 0
+		for _, edit := range payload.Edits {
+			editBytes += len(edit.Old) + len(edit.New)
+		}
+		return &collaborationValidatedCommand{preview: collaborationPreview(input.Handler, map[string]any{
+			"artifact_id": id, "edits": len(payload.Edits), "edit_bytes": editBytes, "base_version": payload.BaseVersion, "has_session": payload.SessionID != "",
+		}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+			return e.service.Patch(ctx, application.PatchArtifactCommand{
+				ArtifactID: id, BaseVersion: payload.BaseVersion, Edits: payload.Edits, ChangeNote: payload.ChangeNote,
 				SessionID: payload.SessionID, Authorization: authorization,
 			})
 		}}, nil

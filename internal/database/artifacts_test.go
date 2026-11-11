@@ -449,3 +449,54 @@ func TestExtendToolPolicyAllowlistGrantsGetLink(t *testing.T) {
 		}
 	}
 }
+
+// TestMigrationV85GrantsPatchWhereUpdateIsGranted checks that an allowlist
+// that lets an agent publish a new version also lets it publish one as a patch.
+func TestMigrationV85GrantsPatchWhereUpdateIsGranted(t *testing.T) {
+	for name, tc := range map[string]struct {
+		policy  string
+		want    string
+		changed bool
+	}{
+		"session allowlist": {`{"mode":"deny_all","allowed":["openpoet_update_artifact","openpoet_read_artifact"]}`,
+			`{"allowed":["openpoet_update_artifact","openpoet_read_artifact","openpoet_patch_artifact"],"mode":"deny_all"}`, true},
+		"chat allowlist": {`{"mode":"custom","allowed":["update_artifact"],"denied":[]}`,
+			`{"allowed":["update_artifact","patch_artifact"],"denied":[],"mode":"custom"}`, true},
+		"already granted": {`{"mode":"deny_all","allowed":["openpoet_update_artifact","openpoet_patch_artifact"]}`, "", false},
+		"read only":       {`{"mode":"deny_all","allowed":["openpoet_read_artifact"]}`, "", false},
+		"allows all":      {`{"mode":"allow_all","denied":["openpoet_delete_task"]}`, "", false},
+	} {
+		updated, changed := extendToolPolicyAllowlist(tc.policy, patchToolFollowing)
+		if changed != tc.changed || (changed && updated != tc.want) {
+			t.Fatalf("%s: updated=%s changed=%v", name, updated, changed)
+		}
+	}
+
+	db := setupTestDB(t)
+	ctx := context.Background()
+	project := &Project{Name: "restricted", Path: "/tmp/restricted", Type: "local"}
+	if err := db.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE projects SET tool_policy = ? WHERE id = ?`,
+		`{"mode":"deny_all","allowed":["openpoet_create_artifact","openpoet_update_artifact"]}`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Beginx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateV85(tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var policy string
+	if err := db.Get(&policy, `SELECT tool_policy FROM projects WHERE id = ?`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(policy, `"openpoet_patch_artifact"`) {
+		t.Fatalf("project policy after V85 = %s", policy)
+	}
+}

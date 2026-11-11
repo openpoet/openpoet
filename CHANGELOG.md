@@ -44,6 +44,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opens an artifact, a Doc, a session or a task, ready to pass on. Agents no
   longer have a reason to build a URL on `localhost`. Also `GET /api/links`.
   The artifact and Doc publish results name the shareable link.
+- **Publishing an artifact without resending it**: `html_path` on
+  `openpoet_create_artifact` and `openpoet_update_artifact` publishes from an
+  `.html` file in the session's workspace or temporary directory (read by
+  OpenPoet, also over SFTP for a remote project), and the new
+  `openpoet_patch_artifact` publishes a version from `{old, new}` replacements
+  on the current one. `openpoet_read_artifact` writes the HTML of a version to
+  a file with `output_path` (`output_file` in the CLI). Also
+  `POST /api/artifacts/{id}/patch`, `POST /api/artifacts/{id}/versions/{n}/export`
+  and the `artifacts.patch` Automation API capability. See
+  [`docs/artifacts.md`](docs/artifacts.md).
+- The artifact tools report the exact size in bytes and the SHA-256 of the
+  stored HTML on create, update, patch and read, and whether it is byte for
+  byte what was sent.
 
 ### Changed
 
@@ -51,6 +64,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agents to keep the content of tabs in the DOM, and states the sandbox policy.
   An installed copy that was never edited is updated on start; an edited one is
   left as it is.
+- An artifact is stored exactly as it was sent: leading and trailing
+  whitespace is no longer trimmed, so the reported SHA-256 is the hash of the
+  publisher's own file unless credential-looking text was masked.
+- The results of `openpoet_update_artifact` and `openpoet_read_artifact` carry
+  the artifact's link (and the shareable one when a public base URL is
+  configured), as create already did.
+- Claude Code sessions get `$OPENPOET_BIN`, the path of the openpoet binary,
+  like the other backends: the `openpoet cli call ...` commands named by the
+  steering block and the `html-artifact` skill now work there. Remote sessions
+  are not given the variable, since the path is on the OpenPoet host.
+- The built-in `html-artifact` skill and the steering block teach publishing
+  from a file and changing a page with a patch instead of typing the page into
+  a tool argument.
 - "Send to agent" says it is OpenPoet reporting a button press, counts answers
   and notes separately, and asks the agent to act on each one or leave it open
   saying why.

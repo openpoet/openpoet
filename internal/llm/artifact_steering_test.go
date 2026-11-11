@@ -24,7 +24,7 @@ func TestPromptsAndToolDescriptionsPreferArtifactsForDocumentation(t *testing.T)
 			t.Fatalf("%s: no rule that sends plans and documentation to create_artifact first: %q", name, rule)
 		}
 	}
-	if prompt := ChatSystemPrompt(nil, nil, nil, nil); !strings.Contains(prompt, "**Artifacts**: create_artifact, update_artifact, read_artifact, list_artifacts, list_artifact_annotations, resolve_artifact_annotation") {
+	if prompt := ChatSystemPrompt(nil, nil, nil, nil); !strings.Contains(prompt, "**Artifacts**: create_artifact, update_artifact, patch_artifact, read_artifact, list_artifacts, list_artifact_annotations, resolve_artifact_annotation") {
 		t.Fatal("the direct API prompt does not list the artifact tools")
 	}
 

@@ -60,21 +60,44 @@ func artifactSessionID(r *http.Request, claimed string) string {
 	return strings.TrimSpace(claimed)
 }
 
-// artifactPublishResponse is what a create or update answers. "link" is the
-// in-app path of the artifact; "url" is that path on the public base URL, and
-// is empty when none is configured.
-func (a *API) artifactPublishResponse(ctx context.Context, result application.ArtifactPublishResult) map[string]any {
+// artifactPublishResponse is what a create, update or patch answers. "link" is
+// the in-app path of the artifact; "url" is that path on the public base URL,
+// and is empty when none is configured. "size_bytes" and "sha256" describe the
+// stored HTML of the version; "source_path" is the file it was read from, when
+// it was published from one.
+func (a *API) artifactPublishResponse(ctx context.Context, result application.ArtifactPublishResult, sourcePath string) map[string]any {
 	link := application.ArtifactLinkPath(result.Artifact.ID, 0)
-	return map[string]any{
-		"id":        result.Artifact.ID,
-		"version":   result.Version,
-		"created":   result.Created,
-		"redacted":  result.Redacted,
-		"questions": result.Questions,
-		"link":      link,
-		"url":       a.Links().Absolute(ctx, link),
-		"artifact":  result.Artifact,
+	response := map[string]any{
+		"id":         result.Artifact.ID,
+		"version":    result.Version,
+		"created":    result.Created,
+		"redacted":   result.Redacted,
+		"questions":  result.Questions,
+		"size_bytes": result.SizeBytes,
+		"sha256":     result.SHA256,
+		"link":       link,
+		"url":        a.Links().Absolute(ctx, link),
+		"artifact":   result.Artifact,
 	}
+	if sourcePath != "" {
+		response["source_path"] = sourcePath
+	}
+	if result.Replacements > 0 {
+		response["replacements"] = result.Replacements
+	}
+	return response
+}
+
+// artifactDetailResponse is an artifact with the links that open it.
+type artifactDetailResponse struct {
+	application.ArtifactView
+	Link string `json:"link"`
+	URL  string `json:"url"`
+}
+
+func (a *API) artifactDetailResponse(ctx context.Context, view application.ArtifactView) artifactDetailResponse {
+	link := application.ArtifactLinkPath(view.ID, 0)
+	return artifactDetailResponse{ArtifactView: view, Link: link, URL: a.Links().Absolute(ctx, link)}
 }
 
 func (a *API) artifactService(w http.ResponseWriter) (*application.ArtifactService, bool) {
@@ -115,6 +138,7 @@ func (a *API) CreateArtifact(w http.ResponseWriter, r *http.Request) {
 		Title          string     `json:"title"`
 		Summary        string     `json:"summary"`
 		HTML           string     `json:"html"`
+		HTMLPath       string     `json:"html_path"`
 		ProjectID      flexibleID `json:"project_id"`
 		TaskID         flexibleID `json:"task_id"`
 		ConversationID flexibleID `json:"conversation_id"`
@@ -123,8 +147,13 @@ func (a *API) CreateArtifact(w http.ResponseWriter, r *http.Request) {
 	if !decodeArtifactRequest(w, r, &input) {
 		return
 	}
+	html, sourcePath, err := a.artifactHTMLInput(r, input.HTML, input.HTMLPath, input.SessionID)
+	if err != nil {
+		respondArtifactFileError(w, err)
+		return
+	}
 	result, err := service.Create(platformUIContext(r), application.CreateArtifactCommand{
-		Title: input.Title, Summary: input.Summary, Content: input.HTML,
+		Title: input.Title, Summary: input.Summary, Content: html,
 		ProjectID: input.ProjectID.pointer(), TaskID: input.TaskID.pointer(), ConversationID: input.ConversationID.pointer(),
 		SessionID: artifactSessionID(r, input.SessionID), Authorization: platformUIAuthorization(r),
 	})
@@ -132,7 +161,7 @@ func (a *API) CreateArtifact(w http.ResponseWriter, r *http.Request) {
 		respondApplicationError(w, err)
 		return
 	}
-	respondJSON(w, http.StatusCreated, a.artifactPublishResponse(r.Context(), result))
+	respondJSON(w, http.StatusCreated, a.artifactPublishResponse(r.Context(), result, sourcePath))
 }
 
 // UpdateArtifact publishes a new version of an existing artifact.
@@ -143,6 +172,7 @@ func (a *API) UpdateArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	var input struct {
 		HTML        string     `json:"html"`
+		HTMLPath    string     `json:"html_path"`
 		ChangeNote  string     `json:"change_note"`
 		BaseVersion flexibleID `json:"base_version"`
 		SessionID   string     `json:"session_id"`
@@ -150,8 +180,13 @@ func (a *API) UpdateArtifact(w http.ResponseWriter, r *http.Request) {
 	if !decodeArtifactRequest(w, r, &input) {
 		return
 	}
+	html, sourcePath, err := a.artifactHTMLInput(r, input.HTML, input.HTMLPath, input.SessionID)
+	if err != nil {
+		respondArtifactFileError(w, err)
+		return
+	}
 	result, err := service.Update(platformUIContext(r), application.UpdateArtifactCommand{
-		ArtifactID: chi.URLParam(r, "id"), Content: input.HTML, ChangeNote: input.ChangeNote,
+		ArtifactID: chi.URLParam(r, "id"), Content: html, ChangeNote: input.ChangeNote,
 		BaseVersion: int(input.BaseVersion), SessionID: artifactSessionID(r, input.SessionID),
 		Authorization: platformUIAuthorization(r),
 	})
@@ -159,7 +194,82 @@ func (a *API) UpdateArtifact(w http.ResponseWriter, r *http.Request) {
 		respondApplicationError(w, err)
 		return
 	}
-	respondJSON(w, http.StatusOK, a.artifactPublishResponse(r.Context(), result))
+	respondJSON(w, http.StatusOK, a.artifactPublishResponse(r.Context(), result, sourcePath))
+}
+
+// PatchArtifactContent publishes a new version made of the HTML of
+// base_version with text replacements applied: POST /api/artifacts/{id}/patch
+// {base_version, edits:[{old, new, replace_all}], change_note}. A small change
+// then costs its own size instead of the whole document.
+func (a *API) PatchArtifactContent(w http.ResponseWriter, r *http.Request) {
+	service, ok := a.artifactService(w)
+	if !ok {
+		return
+	}
+	var input struct {
+		BaseVersion flexibleID                 `json:"base_version"`
+		Edits       []application.ArtifactEdit `json:"edits"`
+		ChangeNote  string                     `json:"change_note"`
+		SessionID   string                     `json:"session_id"`
+	}
+	if !decodeArtifactRequest(w, r, &input) {
+		return
+	}
+	result, err := service.Patch(platformUIContext(r), application.PatchArtifactCommand{
+		ArtifactID: chi.URLParam(r, "id"), BaseVersion: int(input.BaseVersion), Edits: input.Edits,
+		ChangeNote: input.ChangeNote, SessionID: artifactSessionID(r, input.SessionID),
+		Authorization: platformUIAuthorization(r),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, a.artifactPublishResponse(r.Context(), result, ""))
+}
+
+// ExportArtifactVersion writes the stored HTML of one version, byte for byte,
+// to a file in the calling session's workspace:
+// POST /api/artifacts/{id}/versions/{version}/export {path}. It answers with
+// the path written and the size and SHA-256 of the HTML, and never returns the
+// HTML itself.
+func (a *API) ExportArtifactVersion(w http.ResponseWriter, r *http.Request) {
+	service, ok := a.artifactService(w)
+	if !ok {
+		return
+	}
+	version, valid := parseArtifactVersion(chi.URLParam(r, "version"))
+	if !valid {
+		respondError(w, http.StatusBadRequest, "version must be a positive integer or \"current\"")
+		return
+	}
+	var input struct {
+		Path      string `json:"path"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	view, err := service.GetVersion(platformUIContext(r), chi.URLParam(r, "id"), version)
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	workspace, err := a.artifactWorkspaceFor(r, input.SessionID)
+	if err != nil {
+		respondArtifactFileError(w, err)
+		return
+	}
+	defer workspace.close()
+	written, err := workspace.write(input.Path, view.Content)
+	if err != nil {
+		respondArtifactFileError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"artifact_id": view.ArtifactID, "version": view.Version, "path": written,
+		"size_bytes": view.SizeBytes, "sha256": view.SHA256,
+	})
 }
 
 // PatchArtifact changes the title, summary or status (active/archived).
@@ -221,7 +331,7 @@ func (a *API) GetArtifact(w http.ResponseWriter, r *http.Request) {
 		respondApplicationError(w, err)
 		return
 	}
-	respondJSON(w, http.StatusOK, view)
+	respondJSON(w, http.StatusOK, a.artifactDetailResponse(r.Context(), view))
 }
 
 // GetArtifactVersion returns one version with its HTML as JSON data. This is

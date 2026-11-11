@@ -83,7 +83,10 @@ Examples:
   openpoet cli call openpoet_create_artifact '{"title":"Plan","html_file":"/tmp/plan.html"}'
 
 For openpoet_create_artifact and openpoet_update_artifact, html_file names a
-local file to publish instead of passing the document inline in html.
+local file to publish instead of passing the document inline in html. For
+openpoet_read_artifact, output_file names a local file that receives the HTML
+of the version, byte for byte:
+  openpoet cli call openpoet_read_artifact '{"artifact_id":"1a2b3c4d","output_file":"/tmp/plan.html"}'
 `)
 }
 

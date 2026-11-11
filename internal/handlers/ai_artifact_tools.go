@@ -17,6 +17,7 @@ import (
 var artifactChatTools = map[string]bool{
 	"create_artifact":             true,
 	"update_artifact":             true,
+	"patch_artifact":              true,
 	"read_artifact":               true,
 	"list_artifacts":              true,
 	"list_artifact_annotations":   true,
@@ -79,6 +80,14 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		return len(annotations)
 	}
 
+	// The chat assistant has no workspace: a file path only means something to
+	// a session, whose files OpenPoet can reach.
+	for _, key := range []string{"html_path", "output_path"} {
+		if chatToolString(input, key) != "" {
+			return "", fmt.Errorf("%s is only available to a session, which has a workspace; here, pass the document in html (and read it with include_html)", key)
+		}
+	}
+
 	switch name {
 	case "create_artifact":
 		html, _ := input["html"].(string)
@@ -101,7 +110,7 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		if err != nil {
 			return "", err
 		}
-		return mcp.FormatArtifactPublished(encode(h.api.artifactPublishResponse(ctx, result)), ""), nil
+		return mcp.FormatArtifactPublished(encode(h.api.artifactPublishResponse(ctx, result, "")), ""), nil
 
 	case "update_artifact":
 		if artifactID == "" {
@@ -123,7 +132,33 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		if err != nil {
 			return "", err
 		}
-		return mcp.FormatArtifactUpdated(encode(h.api.artifactPublishResponse(ctx, result)), openAnnotations(artifactID), ""), nil
+		return mcp.FormatArtifactUpdated(encode(h.api.artifactPublishResponse(ctx, result, "")), openAnnotations(artifactID), ""), nil
+
+	case "patch_artifact":
+		if artifactID == "" {
+			return "", fmt.Errorf("artifact_id is required")
+		}
+		baseVersion, err := strconv.Atoi(chatToolString(input, "base_version"))
+		if err != nil || baseVersion <= 0 {
+			return "", fmt.Errorf("base_version is required: the version whose HTML your edits were written against")
+		}
+		// The edits are decoded the way the REST route decodes them.
+		var edits []application.ArtifactEdit
+		raw, _ := json.Marshal(input["edits"])
+		if text, ok := input["edits"].(string); ok {
+			raw = []byte(text)
+		}
+		if err := json.Unmarshal(raw, &edits); err != nil || len(edits) == 0 {
+			return "", fmt.Errorf("edits is required: a list of {old, new} objects")
+		}
+		result, err := service.Patch(ctx, application.PatchArtifactCommand{
+			ArtifactID: artifactID, BaseVersion: baseVersion, Edits: edits,
+			ChangeNote: chatToolString(input, "change_note"), Authorization: authorization,
+		})
+		if err != nil {
+			return "", err
+		}
+		return mcp.FormatArtifactUpdated(encode(h.api.artifactPublishResponse(ctx, result, "")), openAnnotations(artifactID), ""), nil
 
 	case "read_artifact":
 		if artifactID == "" {
@@ -154,7 +189,7 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		if questions, err := service.Questions(ctx, artifactID, 0); err == nil {
 			questionsJSON = encode(questions)
 		}
-		return mcp.FormatArtifactDetail(encode(view), annotationsJSON, versionJSON, "", questionsJSON), nil
+		return mcp.FormatArtifactDetail(encode(h.api.artifactDetailResponse(ctx, view)), annotationsJSON, versionJSON, "", questionsJSON), nil
 
 	case "list_artifacts":
 		query := application.ArtifactListQuery{

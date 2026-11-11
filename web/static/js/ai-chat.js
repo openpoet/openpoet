@@ -873,6 +873,7 @@ class AIChatManager {
             'list_artifacts': 'Listing artifacts',
             'list_artifact_annotations': 'Reading annotations',
             'resolve_artifact_annotation': 'Resolving annotation',
+            'patch_artifact': 'Patching artifact',
             'list_tasks': 'Listing tasks',
             'create_task': 'Creating task',
             'update_task': 'Updating task',

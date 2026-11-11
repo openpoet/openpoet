@@ -15,7 +15,7 @@ import (
 )
 
 func TestArtifactToolsAreRegisteredForSessionsAndChat(t *testing.T) {
-	want := []string{"create_artifact", "update_artifact", "read_artifact", "list_artifacts", "list_artifact_annotations", "resolve_artifact_annotation"}
+	want := []string{"create_artifact", "update_artifact", "patch_artifact", "read_artifact", "list_artifacts", "list_artifact_annotations", "resolve_artifact_annotation"}
 	session := map[string]MCPTool{}
 	for _, tool := range toolsDef("session") {
 		session[tool.Name] = tool
@@ -156,7 +156,7 @@ func TestArtifactToolsCallTheAPIAndExplainTheResult(t *testing.T) {
 	// read: metadata + open annotations; the HTML only on request.
 	result, err = call("openpoet_read_artifact", `{"artifact_id":"ab12cd34"}`)
 	if err != nil || !strings.Contains(result, "## Artifact ab12cd34 — Plan") || !strings.Contains(result, "Current version: 3") ||
-		!strings.Contains(result, "- v3 (4.0 KiB, 2026-11-10T10:00:00Z): addressed notes") || !strings.Contains(result, "### Open annotations (2)") ||
+		!strings.Contains(result, "- v3 (4096 bytes (4.0 KiB), 2026-11-10T10:00:00Z): addressed notes") || !strings.Contains(result, "### Open annotations (2)") ||
 		strings.Contains(result, "<html>") || !strings.Contains(result, "include_html=true") {
 		t.Fatalf("read result = %q err=%v", result, err)
 	}
@@ -192,7 +192,7 @@ func TestArtifactToolsCallTheAPIAndExplainTheResult(t *testing.T) {
 	// list: without filters, the calling session's project.
 	requests = nil
 	result, err = call("openpoet_list_artifacts", `{}`)
-	if err != nil || !strings.Contains(result, `- ab12cd34 — "Plan", v3, 4.0 KiB, 2 open annotation(s), task #12`) {
+	if err != nil || !strings.Contains(result, `- ab12cd34 — "Plan", v3, 4096 bytes (4.0 KiB), 2 open annotation(s), task #12`) {
 		t.Fatalf("list result = %q err=%v", result, err)
 	}
 	if len(requests) != 2 || requests[0] != "GET /api/sessions/sess-1" || requests[1] != "GET /api/artifacts?project_id=7" {
@@ -246,11 +246,12 @@ func TestArtifactHTMLFileIsHonoredOnlyByTheCLI(t *testing.T) {
 	if _, err := executeToolWithOptions(client, "openpoet_create_artifact", args, "", "", toolExecutionOptions{LocalFiles: true}); err != nil || received != "<html><body>from file</body></html>" {
 		t.Fatalf("CLI publish from file: err=%v received=%q", err, received)
 	}
-	// An inline document wins over a file, and a missing file is an error.
+	// Two sources for the document are refused rather than one silently
+	// winning, and a missing file is an error.
 	received = ""
 	both, _ := json.Marshal(map[string]string{"title": "Plan", "html": "<p>inline</p>", "html_file": path})
-	if _, err := executeToolWithOptions(client, "openpoet_create_artifact", both, "", "", toolExecutionOptions{LocalFiles: true}); err != nil || received != "<p>inline</p>" {
-		t.Fatalf("inline html did not win: err=%v received=%q", err, received)
+	if _, err := executeToolWithOptions(client, "openpoet_create_artifact", both, "", "", toolExecutionOptions{LocalFiles: true}); err == nil || !strings.Contains(err.Error(), "only one of") || received != "" {
+		t.Fatalf("two sources were accepted: err=%v received=%q", err, received)
 	}
 	missing, _ := json.Marshal(map[string]string{"title": "Plan", "html_file": filepath.Join(t.TempDir(), "absent.html")})
 	if _, err := executeToolWithOptions(client, "openpoet_create_artifact", missing, "", "", toolExecutionOptions{LocalFiles: true}); err == nil {

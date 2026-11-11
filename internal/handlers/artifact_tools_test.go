@@ -159,7 +159,7 @@ func TestArtifactChatToolsShareTheServiceAndTheWording(t *testing.T) {
 		t.Fatal(err)
 	}
 	match := artifactIDInToolResult.FindStringSubmatch(published)
-	if match == nil || !strings.Contains(published, "call update_artifact with artifact_id") || strings.Contains(published, "openpoet_") {
+	if match == nil || !strings.Contains(published, "update_artifact (the whole page) with artifact_id") || strings.Contains(published, "openpoet_") {
 		t.Fatalf("chat create result = %s", published)
 	}
 	id := match[1]

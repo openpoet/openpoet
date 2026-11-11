@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -13,6 +15,7 @@ import (
 var artifactToolNames = map[string]bool{
 	"openpoet_create_artifact":             true,
 	"openpoet_update_artifact":             true,
+	"openpoet_patch_artifact":              true,
 	"openpoet_read_artifact":               true,
 	"openpoet_list_artifacts":              true,
 	"openpoet_list_artifact_annotations":   true,
@@ -31,9 +34,12 @@ type artifactToolView struct {
 	SizeBytes       int64  `json:"size_bytes"`
 	OpenAnnotations int    `json:"open_annotations"`
 	UpdatedAt       string `json:"updated_at"`
+	Link            string `json:"link"`
+	URL             string `json:"url"`
 	Versions        []struct {
 		Version    int    `json:"version"`
 		SizeBytes  int64  `json:"size_bytes"`
+		SHA256     string `json:"sha256"`
 		ChangeNote string `json:"change_note"`
 		CreatedBy  string `json:"created_by"`
 		CreatedAt  string `json:"created_at"`
@@ -50,6 +56,13 @@ type artifactPublishToolResult struct {
 	// Questions is how many questions the published version declares.
 	Questions int              `json:"questions"`
 	Artifact  artifactToolView `json:"artifact"`
+	// SizeBytes and SHA256 are the exact size and hash of the stored HTML.
+	SizeBytes int64  `json:"size_bytes"`
+	SHA256    string `json:"sha256"`
+	// SourcePath is the file the HTML was read from (html_path).
+	SourcePath string `json:"source_path"`
+	// Replacements is how many places a patch changed.
+	Replacements int `json:"replacements"`
 }
 
 type artifactAnnotationToolView struct {
@@ -139,37 +152,79 @@ func artifactAPIError(err error) error {
 	return err
 }
 
-// resolveArtifactHTML returns the HTML to publish. html_file is honored only
-// when allowFiles is set, i.e. in the local CLI, where the caller is a process
-// on the user's machine that can already read that file. The MCP server never
-// reads a path named by a client.
-func resolveArtifactHTML(params map[string]interface{}, allowFiles bool) (string, error) {
-	if html, _ := params["html"].(string); strings.TrimSpace(html) != "" {
-		return html, nil
+// resolveArtifactHTML returns what to publish: the document itself (html), or
+// the path of a file in the session's workspace that the OpenPoet server reads
+// (html_path). html_file is honored only when allowFiles is set, i.e. in the
+// local CLI, which runs as a process on the user's machine and reads the file
+// itself; the MCP server never opens a path named by a client, it forwards
+// html_path to the server, which confines it to the caller's own workspace.
+func resolveArtifactHTML(params map[string]interface{}, allowFiles bool) (html, htmlPath string, err error) {
+	html, _ = params["html"].(string)
+	htmlPath = stringParam(params, "html_path")
+	file := stringParam(params, "html_file")
+	given := 0
+	for _, present := range []bool{strings.TrimSpace(html) != "", htmlPath != "", file != ""} {
+		if present {
+			given++
+		}
 	}
-	path := stringParam(params, "html_file")
-	if path == "" {
-		return "", fmt.Errorf("html is required")
+	switch {
+	case given == 0:
+		return "", "", fmt.Errorf("html_path (a file in your workspace) or html (the document) is required")
+	case given > 1:
+		return "", "", fmt.Errorf("pass only one of html_path, html and html_file")
+	case file == "":
+		return html, htmlPath, nil
+	case !allowFiles:
+		return "", "", fmt.Errorf("html_file is only available through the openpoet CLI; use html_path (a file in your workspace) or pass the document in html")
 	}
-	if !allowFiles {
-		return "", fmt.Errorf("html_file is only available through the openpoet CLI; pass the document in html")
-	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(file)
 	if err != nil {
-		return "", fmt.Errorf("read html_file: %w", err)
+		return "", "", fmt.Errorf("read html_file: %w", err)
 	}
-	return string(data), nil
+	return string(data), "", nil
+}
+
+// artifactEditsParam reads the edits of a patch: a list of {old, new,
+// replace_all}, also accepted as a JSON string of that list.
+func artifactEditsParam(params map[string]interface{}) ([]map[string]interface{}, error) {
+	raw := params["edits"]
+	if text, ok := raw.(string); ok {
+		var decoded []interface{}
+		if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+			return nil, fmt.Errorf("edits must be a list of {old, new} objects")
+		}
+		raw = decoded
+	}
+	list, ok := raw.([]interface{})
+	if !ok || len(list) == 0 {
+		return nil, fmt.Errorf("edits is required: a list of {old, new} objects")
+	}
+	edits := make([]map[string]interface{}, 0, len(list))
+	for i, item := range list {
+		object, ok := item.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("edit %d must be an object with old and new", i+1)
+		}
+		oldText, hasOld := object["old"].(string)
+		newText, hasNew := object["new"].(string)
+		if !hasOld || !hasNew {
+			return nil, fmt.Errorf("edit %d needs old and new as strings (new may be empty to delete)", i+1)
+		}
+		edits = append(edits, map[string]interface{}{"old": oldText, "new": newText, "replace_all": boolParam(object, "replace_all")})
+	}
+	return edits, nil
 }
 
 func executeArtifactTool(client *APIClient, name string, params map[string]interface{}, sessionID, conversationID string, allowFiles bool) (string, error) {
 	switch name {
 	case "openpoet_create_artifact":
-		html, err := resolveArtifactHTML(params, allowFiles)
+		html, htmlPath, err := resolveArtifactHTML(params, allowFiles)
 		if err != nil {
 			return "", err
 		}
 		payload, _ := json.Marshal(map[string]interface{}{
-			"title": stringParam(params, "title"), "html": html, "summary": stringParam(params, "summary"),
+			"title": stringParam(params, "title"), "html": html, "html_path": htmlPath, "summary": stringParam(params, "summary"),
 			"task_id": stringParam(params, "task_id"), "conversation_id": conversationID, "session_id": sessionID,
 		})
 		body, err := client.Post("/api/artifacts", string(payload))
@@ -183,15 +238,38 @@ func executeArtifactTool(client *APIClient, name string, params map[string]inter
 		if err != nil {
 			return "", err
 		}
-		html, err := resolveArtifactHTML(params, allowFiles)
+		html, htmlPath, err := resolveArtifactHTML(params, allowFiles)
 		if err != nil {
 			return "", err
 		}
 		payload, _ := json.Marshal(map[string]interface{}{
-			"html": html, "change_note": stringParam(params, "change_note"),
+			"html": html, "html_path": htmlPath, "change_note": stringParam(params, "change_note"),
 			"base_version": stringParam(params, "base_version"), "session_id": sessionID,
 		})
 		body, err := client.Put("/api/artifacts/"+url.PathEscape(id), string(payload))
+		if err != nil {
+			return "", artifactAPIError(err)
+		}
+		return FormatArtifactUpdated(body, countOpenArtifactAnnotations(client, id), "openpoet_"), nil
+
+	case "openpoet_patch_artifact":
+		id, err := artifactIDParam(params)
+		if err != nil {
+			return "", err
+		}
+		edits, err := artifactEditsParam(params)
+		if err != nil {
+			return "", err
+		}
+		baseVersion := stringParam(params, "base_version")
+		if baseVersion == "" {
+			return "", fmt.Errorf("base_version is required: the version whose HTML your edits were written against")
+		}
+		payload, _ := json.Marshal(map[string]interface{}{
+			"edits": edits, "change_note": stringParam(params, "change_note"),
+			"base_version": baseVersion, "session_id": sessionID,
+		})
+		body, err := client.Post("/api/artifacts/"+url.PathEscape(id)+"/patch", string(payload))
 		if err != nil {
 			return "", artifactAPIError(err)
 		}
@@ -202,7 +280,17 @@ func executeArtifactTool(client *APIClient, name string, params map[string]inter
 		if err != nil {
 			return "", err
 		}
-		return readArtifactForTool(client, id, stringParam(params, "version"), boolParam(params, "include_html"))
+		version := stringParam(params, "version")
+		if outputPath := stringParam(params, "output_path"); outputPath != "" {
+			return exportArtifactForTool(client, id, version, outputPath, sessionID)
+		}
+		if outputFile := stringParam(params, "output_file"); outputFile != "" {
+			if !allowFiles {
+				return "", fmt.Errorf("output_file is only available through the openpoet CLI; use output_path (a file in your workspace)")
+			}
+			return saveArtifactForCLI(client, id, version, outputFile)
+		}
+		return readArtifactForTool(client, id, version, boolParam(params, "include_html"))
 
 	case "openpoet_list_artifacts":
 		query := url.Values{}
@@ -285,10 +373,35 @@ func FormatArtifactPublished(body []byte, toolPrefix string) string {
 	if err := json.Unmarshal(body, &result); err != nil || result.ID == "" {
 		return string(body)
 	}
-	return fmt.Sprintf("Artifact published: artifact_id %s, version %d (%s). The user was shown a card to open it in the artifact viewer — do NOT paste the HTML or generate links. "+
-		"To change it, call %supdate_artifact with artifact_id %s and base_version %d. Internal link: %s%s%s",
-		result.ID, result.Version, formatArtifactSize(result.Artifact.SizeBytes), toolPrefix, result.ID, result.Version, result.Link,
+	return fmt.Sprintf("Artifact published: artifact_id %s, version %d (%s).%s The user was shown a card to open it in the artifact viewer — do NOT paste the HTML or generate links. "+
+		"To change it, call %spatch_artifact (a few replacements) or %supdate_artifact (the whole page) with artifact_id %s and base_version %d. Internal link: %s%s%s",
+		result.ID, result.Version, artifactIntegrity(result), artifactSourceNote(result.SourcePath), toolPrefix, toolPrefix, result.ID, result.Version, result.Link,
 		ShareableLinkNote(result.URL, toolPrefix), artifactQuestionsNote(result.Questions, toolPrefix)+artifactRedactionNote(result.Redacted))
+}
+
+// artifactIntegrity states the exact size and hash of the stored HTML of a
+// publish, and whether that is what the publisher sent.
+func artifactIntegrity(result artifactPublishToolResult) string {
+	size, hash := result.SizeBytes, result.SHA256
+	if hash == "" {
+		// A server that does not report the hash yet.
+		return formatArtifactSize(result.Artifact.SizeBytes)
+	}
+	if result.Replacements > 0 {
+		// A patch sends replacements, not a document to compare with.
+		return fmt.Sprintf("%s, sha256 %s", formatArtifactSize(size), hash)
+	}
+	if result.Redacted {
+		return fmt.Sprintf("%s, sha256 %s — not the hash of what you sent, because text was masked", formatArtifactSize(size), hash)
+	}
+	return fmt.Sprintf("%s, sha256 %s, stored byte for byte as received", formatArtifactSize(size), hash)
+}
+
+func artifactSourceNote(sourcePath string) string {
+	if sourcePath == "" {
+		return ""
+	}
+	return " Read from " + oneLine(sourcePath, 400) + "."
 }
 
 // artifactQuestionsNote tells the publisher what happens to the questions the
@@ -311,17 +424,25 @@ func ShareableLinkNote(publicURL, toolPrefix string) string {
 	return " If the user asks for a link to pass on, call " + toolPrefix + "get_link; never build a URL yourself."
 }
 
-// FormatArtifactUpdated describes the result of publishing a new version.
+// FormatArtifactUpdated describes the result of publishing a new version,
+// with update_artifact or patch_artifact.
 func FormatArtifactUpdated(body []byte, openAnnotations int, toolPrefix string) string {
 	var result artifactPublishToolResult
 	if err := json.Unmarshal(body, &result); err != nil || result.ID == "" {
 		return string(body)
 	}
+	links := fmt.Sprintf(" Internal link: %s%s", result.Link, ShareableLinkNote(result.URL, toolPrefix))
 	if !result.Created {
-		return fmt.Sprintf("No new version: the HTML is identical to version %d of artifact %s.", result.Version, result.ID)
+		return fmt.Sprintf("No new version: the HTML is identical to version %d of artifact %s (%s).%s",
+			result.Version, result.ID, artifactIntegrity(result), links)
 	}
-	message := fmt.Sprintf("Artifact %s is now at version %d (%s). The user's open viewer is offered the new version.%s%s",
-		result.ID, result.Version, formatArtifactSize(result.Artifact.SizeBytes), artifactQuestionsNote(result.Questions, toolPrefix), artifactRedactionNote(result.Redacted))
+	patched := ""
+	if result.Replacements > 0 {
+		patched = fmt.Sprintf(" %d replacement(s) applied to version %d.", result.Replacements, result.Version-1)
+	}
+	message := fmt.Sprintf("Artifact %s is now at version %d (%s).%s%s The user's open viewer is offered the new version.%s%s%s",
+		result.ID, result.Version, artifactIntegrity(result), patched, artifactSourceNote(result.SourcePath),
+		artifactQuestionsNote(result.Questions, toolPrefix), artifactRedactionNote(result.Redacted), links)
 	if openAnnotations > 0 {
 		message += fmt.Sprintf(" %d annotation(s) are still open: resolve the ones this version addresses with %sresolve_artifact_annotation.", openAnnotations, toolPrefix)
 	}
@@ -432,6 +553,11 @@ func FormatArtifactDetail(artifactBody, openAnnotations, version []byte, toolPre
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("## Artifact %s — %s\n\n", artifact.ID, oneLine(artifact.Title, 200)))
 	sb.WriteString(fmt.Sprintf("Current version: %d | Status: %s | Size: %s", artifact.CurrentVersion, artifact.Status, formatArtifactSize(artifact.SizeBytes)))
+	for _, v := range artifact.Versions {
+		if v.Version == artifact.CurrentVersion && v.SHA256 != "" {
+			sb.WriteString(" | sha256: " + v.SHA256)
+		}
+	}
 	if artifact.ProjectID != nil {
 		sb.WriteString(fmt.Sprintf(" | Project: %d", *artifact.ProjectID))
 	}
@@ -444,9 +570,16 @@ func FormatArtifactDetail(artifactBody, openAnnotations, version []byte, toolPre
 		// to imitate the sections that follow.
 		sb.WriteString("\nSummary: " + oneLine(artifact.Summary, 1000) + "\n")
 	}
+	if artifact.Link != "" {
+		sb.WriteString(fmt.Sprintf("\nInternal link: %s%s\n", artifact.Link, ShareableLinkNote(artifact.URL, toolPrefix)))
+	}
 	sb.WriteString("\n### Versions\n")
 	for _, v := range artifact.Versions {
-		sb.WriteString(fmt.Sprintf("- v%d (%s, %s)", v.Version, formatArtifactSize(v.SizeBytes), v.CreatedAt))
+		sb.WriteString(fmt.Sprintf("- v%d (%s, %s", v.Version, formatArtifactSize(v.SizeBytes), v.CreatedAt))
+		if v.SHA256 != "" {
+			sb.WriteString(", sha256 " + v.SHA256)
+		}
+		sb.WriteString(")")
 		if v.ChangeNote != "" {
 			sb.WriteString(": " + oneLine(v.ChangeNote, 1000))
 		}
@@ -464,17 +597,23 @@ func FormatArtifactDetail(artifactBody, openAnnotations, version []byte, toolPre
 		sb.WriteString(FormatArtifactUnanswered(questions, openAnnotations))
 	}
 	if version == nil {
-		sb.WriteString(fmt.Sprintf("\nCall %sread_artifact with include_html=true to get the HTML of a version.\n", toolPrefix))
+		sb.WriteString(fmt.Sprintf("\nTo get the HTML of a version, call %sread_artifact with output_path (writes it to a file in your workspace, byte for byte) or with include_html=true (returns it here).\n", toolPrefix))
 		return sb.String()
 	}
 	var stored struct {
-		Version int    `json:"version"`
-		Content string `json:"content"`
+		Version   int    `json:"version"`
+		Content   string `json:"content"`
+		SizeBytes int64  `json:"size_bytes"`
+		SHA256    string `json:"sha256"`
 	}
 	if err := json.Unmarshal(version, &stored); err != nil {
 		return sb.String()
 	}
-	sb.WriteString(fmt.Sprintf("\n### HTML of version %d\n\n", stored.Version))
+	if stored.SHA256 != "" {
+		sb.WriteString(fmt.Sprintf("\n### HTML of version %d (%s, sha256 %s)\n\n", stored.Version, formatArtifactSize(stored.SizeBytes), stored.SHA256))
+	} else {
+		sb.WriteString(fmt.Sprintf("\n### HTML of version %d\n\n", stored.Version))
+	}
 	sb.WriteString(stored.Content)
 	sb.WriteString("\n")
 	return sb.String()
@@ -519,6 +658,69 @@ func readArtifactForTool(client *APIClient, id, version string, includeHTML bool
 	}
 	questions, _ := client.Get(fmt.Sprintf("/api/artifacts/%s/questions", url.PathEscape(id)))
 	return FormatArtifactDetail(body, annotations, versionBody, "openpoet_", questions), nil
+}
+
+// exportArtifactForTool has the server write the stored HTML of a version to a
+// file in the calling session's workspace.
+func exportArtifactForTool(client *APIClient, id, version, outputPath, sessionID string) (string, error) {
+	if version == "" {
+		version = "current"
+	}
+	payload, _ := json.Marshal(map[string]string{"path": outputPath, "session_id": sessionID})
+	body, err := client.Post(fmt.Sprintf("/api/artifacts/%s/versions/%s/export", url.PathEscape(id), url.PathEscape(version)), string(payload))
+	if err != nil {
+		return "", artifactAPIError(err)
+	}
+	return FormatArtifactExported(body, "openpoet_"), nil
+}
+
+// FormatArtifactExported confirms that the HTML of a version was written to a file.
+func FormatArtifactExported(body []byte, toolPrefix string) string {
+	var result struct {
+		ArtifactID string `json:"artifact_id"`
+		Version    int    `json:"version"`
+		Path       string `json:"path"`
+		SizeBytes  int64  `json:"size_bytes"`
+		SHA256     string `json:"sha256"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil || result.Path == "" {
+		return string(body)
+	}
+	return fmt.Sprintf("HTML of version %d of artifact %s written to %s (%s, sha256 %s), byte for byte as stored. "+
+		"Edit that file and publish it with %supdate_artifact (html_path, base_version %d), or send only the changes with %spatch_artifact.",
+		result.Version, result.ArtifactID, oneLine(result.Path, 400), formatArtifactSize(result.SizeBytes), result.SHA256,
+		toolPrefix, result.Version, toolPrefix)
+}
+
+// saveArtifactForCLI writes the stored HTML of a version to a local file. It
+// is the CLI's counterpart of output_path: the CLI runs on the caller's own
+// machine and writes the file itself.
+func saveArtifactForCLI(client *APIClient, id, version, outputFile string) (string, error) {
+	if version == "" {
+		version = "current"
+	}
+	body, err := client.Get(fmt.Sprintf("/api/artifacts/%s/versions/%s", url.PathEscape(id), url.PathEscape(version)))
+	if err != nil {
+		return "", artifactAPIError(err)
+	}
+	var stored struct {
+		Version int    `json:"version"`
+		Content string `json:"content"`
+		SHA256  string `json:"sha256"`
+	}
+	if err := json.Unmarshal(body, &stored); err != nil || stored.Version == 0 {
+		return "", fmt.Errorf("unexpected artifact version response")
+	}
+	if err := os.WriteFile(outputFile, []byte(stored.Content), 0o644); err != nil {
+		return "", fmt.Errorf("write output_file: %w", err)
+	}
+	sum := sha256.Sum256([]byte(stored.Content))
+	written := hex.EncodeToString(sum[:])
+	if stored.SHA256 != "" && stored.SHA256 != written {
+		return "", fmt.Errorf("the HTML written to %s has sha256 %s, but the stored version has %s", outputFile, written, stored.SHA256)
+	}
+	return fmt.Sprintf("HTML of version %d of artifact %s written to %s (%s, sha256 %s), byte for byte as stored.",
+		stored.Version, id, outputFile, formatArtifactSize(int64(len(stored.Content))), written), nil
 }
 
 func fetchArtifactAnnotations(client *APIClient, id, status string) ([]artifactAnnotationToolView, error) {
@@ -605,11 +807,13 @@ func oneLine(value string, limit int) string {
 	return value
 }
 
+// formatArtifactSize gives the exact size, with a rounded figure next to it
+// once it is large enough to be hard to read.
 func formatArtifactSize(bytes int64) string {
 	if bytes < 1024 {
-		return fmt.Sprintf("%d B", bytes)
+		return fmt.Sprintf("%d bytes", bytes)
 	}
-	return fmt.Sprintf("%.1f KiB", float64(bytes)/1024)
+	return fmt.Sprintf("%d bytes (%.1f KiB)", bytes, float64(bytes)/1024)
 }
 
 func artifactRedactionNote(redacted bool) string {
