@@ -10,19 +10,19 @@ Automation API.
 
 | Item | Count |
 | --- | ---: |
-| Mutating `/api` routes | 121 |
-| Inline business actions | 57 |
-| `presentation_only` actions | 49 |
-| Static business listeners | 19 |
-| Static presentation listeners | 27 |
-| Explicit telemetry/test exceptions | 7 |
+| Mutating `/api` routes | 137 |
+| Inline business actions | 70 |
+| `presentation_only` actions | 61 |
+| Static business listeners | 20 |
+| Static presentation listeners | 28 |
+| Explicit telemetry/test exceptions | 12 |
 
 | Status | Count | Meaning |
 | --- | ---: | --- |
-| `implemented` | 119 | UI and Automation share the Application Service and its invariants |
+| `implemented` | 134 | UI and Automation share the Application Service and its invariants |
 | `application_service_ready` | 0 | No route remains on an intermediate path |
 | `gap` | 0 | No Application Service gaps |
-| `internal_only` | 2 | Hook ingestion, not a standalone user action |
+| `internal_only` | 3 | Hook ingestion, not a standalone user action |
 
 ## Matrix by domain
 
@@ -30,27 +30,29 @@ Automation API.
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | agents | 3 | 3 | 0 | 0 | 0 | R2, R3 |
 | ai | 16 | 16 | 0 | 0 | 0 | R1, R2, R3 |
-| ai_configs | 4 | 4 | 0 | 0 | 0 | R4 |
+| ai_configs | 7 | 7 | 0 | 0 | 0 | R2, R4 |
+| artifacts | 6 | 6 | 0 | 0 | 0 | R2 |
 | config | 1 | 1 | 0 | 0 | 0 | R4 |
 | documents | 2 | 2 | 0 | 0 | 0 | R2 |
+| environments | 4 | 4 | 0 | 0 | 0 | R2, R3, R4 |
 | files | 4 | 4 | 0 | 0 | 0 | R2, R3 |
 | git | 3 | 3 | 0 | 0 | 0 | R2, R3 |
-| hooks | 4 | 2 | 0 | 0 | 2 | R1, R2, R3 |
+| hooks | 5 | 2 | 0 | 0 | 3 | R1, R2, R3 |
 | mcp | 8 | 8 | 0 | 0 | 0 | R4 |
 | notifications | 6 | 6 | 0 | 0 | 0 | R1, R2, R3 |
-| projects | 8 | 8 | 0 | 0 | 0 | R1, R2, R3, R4 |
+| projects | 9 | 9 | 0 | 0 | 0 | R1, R2, R3, R4 |
 | proposals | 9 | 9 | 0 | 0 | 0 | R1, R2, R3, R4 |
-| sessions | 10 | 10 | 0 | 0 | 0 | R1, R2, R3 |
+| sessions | 12 | 12 | 0 | 0 | 0 | R1, R2, R3 |
 | settings | 1 | 1 | 0 | 0 | 0 | R4 |
 | skills | 10 | 10 | 0 | 0 | 0 | R2, R3 |
 | tags | 4 | 4 | 0 | 0 | 0 | R2, R3 |
 | task_links | 2 | 2 | 0 | 0 | 0 | R2 |
-| tasks | 10 | 10 | 0 | 0 | 0 | R2, R3 |
+| tasks | 11 | 11 | 0 | 0 | 0 | R2, R3 |
 | token_usage | 1 | 1 | 0 | 0 | 0 | R3 |
-| tools | 6 | 6 | 0 | 0 | 0 | R4 |
+| tools | 5 | 5 | 0 | 0 | 0 | R4 |
 | tunnel | 5 | 5 | 0 | 0 | 0 | R4 |
 | update | 1 | 1 | 0 | 0 | 0 | R4 |
-| voice | 1 | 1 | 0 | 0 | 0 | R1 |
+| voice | 2 | 2 | 0 | 0 | 0 | R1 |
 
 ## Security
 
@@ -88,6 +90,10 @@ Automation API.
   without a synthetic HTTP request.
 - `HookResponseService`: permission responses and task notifications; hook
   ingestion stays `internal_only`.
+- `ArtifactService`: versioned HTML artifacts (create, publish a version with
+  an optimistic base version, rename/archive) and the user's annotations on
+  them (create, resolve, reopen). The HTML is bounded, must be HTML, and goes
+  through the same credential masking as Docs.
 - `FileMutationService`: writes/uploads in projects and sessions, image paste,
   payload limits and strict confinement to relative paths.
 - `GitMutationService`: stage/unstage/commit through typed arguments and

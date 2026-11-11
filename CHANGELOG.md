@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **HTML artifacts**: agents publish interactive, self-contained HTML documents
+  into the OpenPoet database instead of writing files into the project. Every
+  publish is a version and old versions stay readable. Artifacts are linked to
+  the project, session and task that produced them and show up in the session
+  and task document lists and in a new Artifacts section of the project view.
+  See [`docs/artifacts.md`](docs/artifacts.md).
+- A sandboxed artifact viewer: the page runs in an iframe that allows scripts
+  and nothing else, served with a Content Security Policy that blocks network
+  requests and remote resources, so agent-generated HTML cannot reach cookies,
+  the session or the OpenPoet API.
+- Annotations on artifacts: select text or click an element to leave a note.
+  Agents list the open notes and resolve them, and a note made on one version
+  is placed again on the next.
+- Agent tools for artifacts over MCP, the chat assistant and the CLI
+  (`openpoet_create_artifact`, `openpoet_update_artifact`,
+  `openpoet_read_artifact`, `openpoet_list_artifacts`,
+  `openpoet_list_artifact_annotations`, `openpoet_resolve_artifact_annotation`),
+  and the matching Automation API capabilities under `artifacts.*`.
+- A built-in `html-artifact` skill with the design guide for artifacts.
+
+### Changed
+
+- Agents are now steered to publish plans, reports and documentation as HTML
+  artifacts. Docs remain for short plain-text answers. The managed instruction
+  block in each project is replaced on the next config sync.
+- Tool policies written as an allowlist that already grant `create_document` or
+  `read_document` are extended with the matching artifact tools on upgrade.
+  Policies that allow everything are not changed.
+
 ## [0.2.0] - 2026-10-25
 
 ### Added

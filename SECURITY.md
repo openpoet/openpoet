@@ -71,10 +71,18 @@ whether something is a vulnerability.
 - **Agents act with your permissions.** Claude Code, Codex and other agent
   CLIs started by OpenPoet run as your user. OpenPoet's approval flows reduce
   surprises, but they are not a sandbox.
+- **HTML artifacts are sandboxed in the browser.** A page published by an
+  agent is shown in an iframe that allows scripts and nothing else, served with
+  a Content Security Policy that blocks `fetch`, XHR, WebSockets and the
+  loading of any remote script, style, image or font, so it cannot read cookies
+  or call the OpenPoet API. The policy does not stop the page from navigating
+  its own frame elsewhere. Details and the remaining exposure are in
+  [`docs/artifacts.md`](docs/artifacts.md). The older HTML file preview for
+  project files does not have these restrictions.
 
 Examples of issues we want to hear about: ways to reach the API or the
 terminal without network access to the bound address, tunnel or pairing
 bypasses, credentials leaking in plaintext (logs, API responses, the
-Automation API), path traversal outside a project, and cross-site attacks
+Automation API), path traversal outside a project, cross-site attacks
 against a localhost instance (CSRF, DNS rebinding, malicious WebSocket
-origins).
+origins), and ways for an HTML artifact to escape its sandbox.

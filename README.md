@@ -110,6 +110,7 @@ OpenPoet does not support Windows natively. Windows users should install and run
 - [**Skills System**](https://openpoet.ai/docs/skills.html) — Create and sync instruction templates for Claude Code
 - [**MCP Server Configuration**](https://openpoet.ai/docs/mcp-servers.html) — Configure and inject MCP servers into sessions
 - [**Task Management**](https://openpoet.ai/docs/tasks.html) — Track todos, progress, and priorities per project
+- [**HTML Artifacts**](docs/artifacts.md) — Agents publish interactive HTML documents you view in a sandbox and annotate
 - [**Mobile-Optimized UI**](https://openpoet.ai/docs/mobile.html) — Full-featured mobile terminal with voice input
 - [**PWA Support**](https://openpoet.ai/docs/mobile.html) — Install as a progressive web app with offline capability
 
