@@ -37,9 +37,9 @@ const (
 	// with workspace merge: -2 capabilities, -1 mutation, -1 read.
 	// models.list (read) publishes each backend's models and the efforts
 	// they accept: +1 capability, +1 read.
-	expectedPlatformCapabilities = 182
-	expectedPlatformMutations    = 120
-	expectedPlatformReads        = 62
+	expectedPlatformCapabilities = 188
+	expectedPlatformMutations    = 123
+	expectedPlatformReads        = 65
 )
 
 // PlatformServices is the explicit runtime composition root for Automation.
@@ -161,6 +161,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 
 	collaboration := automation.CollaborationPlatformServices{
 		Documents: application.NewDocumentService(services.DB, platformMemoryMirror{api: a}, effects),
+		Artifacts: application.NewArtifactService(services.DB, effects),
 		Proposals: application.NewProposalService(platformProposalBackend{api: a}, effects),
 		AI: application.NewAIAssistantService(
 			platformAIProvider{handler: services.AIHandler},

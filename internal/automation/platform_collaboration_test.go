@@ -77,6 +77,7 @@ func (f *collaborationTokenReadFake) GetTokenUsageSummary(context.Context, time.
 func collaborationTestServices() CollaborationPlatformServices {
 	return CollaborationPlatformServices{
 		Documents:            application.NewDocumentService(nil, nil, nil),
+		Artifacts:            application.NewArtifactService(nil, nil),
 		Proposals:            application.NewProposalService(nil, nil),
 		AI:                   application.NewAIAssistantService(nil, nil, nil, nil),
 		Notifications:        application.NewNotificationService(nil),
@@ -102,7 +103,7 @@ func collaborationTestRegistry(t *testing.T, services CollaborationPlatformServi
 
 func collaborationDefinitionsForTest() []PlatformCapabilityDefinition {
 	groups := [][]PlatformCapabilityDefinition{
-		documentCollaborationDefinitions(), proposalCollaborationDefinitions(), aiCollaborationDefinitions(),
+		documentCollaborationDefinitions(), artifactCollaborationDefinitions(), proposalCollaborationDefinitions(), aiCollaborationDefinitions(),
 		notificationCollaborationDefinitions(), notificationDeliveryCollaborationDefinitions(), tokenUsageCollaborationDefinitions(),
 	}
 	var definitions []PlatformCapabilityDefinition
@@ -133,8 +134,8 @@ func collaborationApproval(t *testing.T) PlatformApprovalDecision {
 
 func TestCollaborationPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := collaborationDefinitionsForTest()
-	if len(definitions) != 48 {
-		t.Fatalf("collaboration surface has %d capabilities, want 48", len(definitions))
+	if len(definitions) != 54 {
+		t.Fatalf("collaboration surface has %d capabilities, want 54", len(definitions))
 	}
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -183,7 +184,7 @@ func TestCollaborationPlatformMutationMetadataMatchesManifest(t *testing.T) {
 		definitions[definition.Name] = definition
 	}
 	wantedServices := map[string]string{
-		"DocumentService": "documents", "ProposalService": "proposals", "AIAssistantService": "ai_assistant",
+		"DocumentService": "documents", "ArtifactService": "artifacts", "ProposalService": "proposals", "AIAssistantService": "ai_assistant",
 		"NotificationService": "notifications", "NotificationDeliveryService": "notification_delivery", "TokenUsageService": "token_usage",
 	}
 	riskMetadata := map[string]struct {
@@ -222,15 +223,16 @@ func TestCollaborationPlatformMutationMetadataMatchesManifest(t *testing.T) {
 		counts[route.ApplicationService]++
 		checked++
 	}
-	wantCounts := map[string]int{"DocumentService": 2, "ProposalService": 9, "AIAssistantService": 16, "NotificationService": 2, "NotificationDeliveryService": 4, "TokenUsageService": 1}
-	if checked != 34 || !reflect.DeepEqual(counts, wantCounts) {
-		t.Fatalf("checked mutations=%d counts=%v, want 34/%v", checked, counts, wantCounts)
+	wantCounts := map[string]int{"DocumentService": 2, "ArtifactService": 3, "ProposalService": 9, "AIAssistantService": 16, "NotificationService": 2, "NotificationDeliveryService": 4, "TokenUsageService": 1}
+	if checked != 37 || !reflect.DeepEqual(counts, wantCounts) {
+		t.Fatalf("checked mutations=%d counts=%v, want 37/%v", checked, counts, wantCounts)
 	}
 }
 
 func TestCollaborationOperationalReadsUseDedicatedLeastPrivilegeScopes(t *testing.T) {
 	want := map[string]string{
 		"documents.get_memory": "documents:read", "documents.get_temp": "documents:read",
+		"artifacts.list": "documents:read", "artifacts.get": "documents:read", "artifacts.get_version": "documents:read",
 		"ai.conversations.list": "ai:read", "ai.conversations.get": "ai:read", "ai.messages.list": "ai:read",
 		"ai.suggestions.list": "ai:read", "ai.suggestions.get": "ai:read", "ai.status": "ai:read",
 		"notifications.list": "notifications:read", "notifications.active": "notifications:read",
@@ -267,6 +269,9 @@ func collaborationMutationDryRunCases() []collaborationDryRunCase {
 	return []collaborationDryRunCase{
 		{"documents.update_memory", `{"id":1}`, `{"content":"document-secret-content","summary":"summary"}`},
 		{"documents.create_temp", `{}`, `{"title":"Doc","content":"temporary-secret-content"}`},
+		{"artifacts.create", `{}`, `{"title":"Plan","html":"<html><body>artifact-secret-content</body></html>"}`},
+		{"artifacts.update", `{"id":"art00001"}`, `{"html":"<html><body>artifact-secret-content</body></html>","base_version":1}`},
+		{"artifacts.update_meta", `{"id":"art00001"}`, `{"title":"artifact-secret-content"}`},
 		{"proposals.memory.create", `{"id":1}`, `{"content":"proposal-secret-content"}`},
 		{"proposals.memory.approve", proposal, `{}`}, {"proposals.memory.reject", proposal, `{}`},
 		{"proposals.task.approve", proposal, `{}`}, {"proposals.task.reject", proposal, `{}`},
@@ -297,8 +302,8 @@ func TestCollaborationEveryManifestMutationDryRunsWithoutEffectOrSecretEcho(t *t
 	_, registry := collaborationTestRegistry(t, collaborationTestServices())
 	actor := collaborationActor(definitions)
 	cases := collaborationMutationDryRunCases()
-	if len(cases) != 35 {
-		t.Fatalf("dry-run cases=%d want=35", len(cases))
+	if len(cases) != 38 {
+		t.Fatalf("dry-run cases=%d want=38", len(cases))
 	}
 	seen := map[string]struct{}{}
 	for _, testCase := range cases {
@@ -311,7 +316,7 @@ func TestCollaborationEveryManifestMutationDryRunsWithoutEffectOrSecretEcho(t *t
 			continue
 		}
 		encoded, _ := json.Marshal(result)
-		for _, secret := range []string{"document-secret-content", "temporary-secret-content", "proposal-secret-content", "p256-secret", "auth-secret", "endpoint-secret", "sk-0123456789abcdefghijklmnop", "prompt-secret-content", "description-secret", "generate-secret-description", "validate-secret-content", "echo tool-secret"} {
+		for _, secret := range []string{"artifact-secret-content", "document-secret-content", "temporary-secret-content", "proposal-secret-content", "p256-secret", "auth-secret", "endpoint-secret", "sk-0123456789abcdefghijklmnop", "prompt-secret-content", "description-secret", "generate-secret-description", "validate-secret-content", "echo tool-secret"} {
 			if strings.Contains(string(encoded), secret) {
 				t.Errorf("dry-run %s echoed secret %q: %s", testCase.capability, secret, encoded)
 			}
@@ -321,7 +326,7 @@ func TestCollaborationEveryManifestMutationDryRunsWithoutEffectOrSecretEcho(t *t
 		}
 		seen[testCase.capability] = struct{}{}
 	}
-	if len(seen) != 35 {
+	if len(seen) != 38 {
 		t.Fatalf("dry-run covered %d unique mutations", len(seen))
 	}
 }

@@ -48,6 +48,7 @@ type TokenUsageCollaborationReadPort interface {
 
 type CollaborationPlatformServices struct {
 	Documents            *application.DocumentService
+	Artifacts            *application.ArtifactService
 	Proposals            *application.ProposalService
 	AI                   *application.AIAssistantService
 	Notifications        *application.NotificationService
@@ -61,7 +62,7 @@ func RegisterCollaborationPlatformCapabilities(registry *PlatformCapabilityRegis
 	if registry == nil {
 		return errors.New("platform capability registry is required")
 	}
-	if services.Documents == nil || services.Proposals == nil || services.AI == nil ||
+	if services.Documents == nil || services.Artifacts == nil || services.Proposals == nil || services.AI == nil ||
 		services.Notifications == nil || services.NotificationDelivery == nil || services.TokenUsage == nil ||
 		services.AIQueries == nil || services.TokenUsageQueries == nil {
 		return errors.New("all collaboration platform services and read ports are required")
@@ -71,6 +72,7 @@ func RegisterCollaborationPlatformCapabilities(registry *PlatformCapabilityRegis
 		executor    PlatformDomainExecutor
 	}{
 		{documentCollaborationDefinitions(), &documentCollaborationExecutor{service: services.Documents}},
+		{artifactCollaborationDefinitions(), &artifactCollaborationExecutor{service: services.Artifacts}},
 		{proposalCollaborationDefinitions(), &proposalCollaborationExecutor{service: services.Proposals}},
 		{aiCollaborationDefinitions(), &aiCollaborationExecutor{service: services.AI, queries: services.AIQueries}},
 		{notificationCollaborationDefinitions(), &notificationCollaborationExecutor{service: services.Notifications}},

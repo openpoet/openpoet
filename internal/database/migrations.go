@@ -96,6 +96,7 @@ var migrations = []Migration{
 	{Version: 78, Description: "sessions: session_restart_state keeps each live session's turn (open/closed) and pending question across a server restart, so an interrupted turn can be resumed", Up: migrateV78},
 	{Version: 79, Description: "retire the coordinator tier: delete the session-report skill and the coordinator lease/spawn blackboard keys (the conflict radar and lifecycle reports stay)", Up: migrateV79},
 	{Version: 80, Description: "sessions: effective_effort (reported by the runtime) and model_source/effort_source (request, session, project or global) for explicit model/effort", Up: migrateV80},
+	{Version: 81, Description: "artifacts: versioned interactive HTML artifacts stored in the database (artifacts, artifact_versions) and user annotations on them (artifact_annotations)", Up: migrateV81},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2147,6 +2148,66 @@ func migrateV80(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV80 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// migrateV81 adds HTML artifacts: a self-contained interactive HTML document an
+// agent publishes into the database (never into the project directory). An
+// artifact keeps every published version; annotations are the user's notes on
+// a text range or element of one version, which the agent reads and resolves.
+// Only new tables are created, so a binary from before V81 never reads them.
+func migrateV81(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS artifacts (
+			id TEXT PRIMARY KEY,
+			project_id INTEGER,
+			session_id TEXT NOT NULL DEFAULT '',
+			task_id INTEGER,
+			conversation_id INTEGER,
+			title TEXT NOT NULL DEFAULT '',
+			summary TEXT NOT NULL DEFAULT '',
+			current_version INTEGER NOT NULL DEFAULT 1,
+			status TEXT NOT NULL DEFAULT 'active',
+			created_by TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_artifacts_project ON artifacts(project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id)`,
+		`CREATE TABLE IF NOT EXISTS artifact_versions (
+			artifact_id TEXT NOT NULL,
+			version INTEGER NOT NULL,
+			content TEXT NOT NULL,
+			size_bytes INTEGER NOT NULL DEFAULT 0,
+			sha256 TEXT NOT NULL DEFAULT '',
+			change_note TEXT NOT NULL DEFAULT '',
+			created_by TEXT NOT NULL DEFAULT '',
+			session_id TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (artifact_id, version)
+		)`,
+		`CREATE TABLE IF NOT EXISTS artifact_annotations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			artifact_id TEXT NOT NULL,
+			version INTEGER NOT NULL,
+			anchor_json TEXT NOT NULL DEFAULT '{}',
+			quote TEXT NOT NULL DEFAULT '',
+			body TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'open',
+			resolution_note TEXT NOT NULL DEFAULT '',
+			resolved_by TEXT NOT NULL DEFAULT '',
+			resolved_at TIMESTAMP,
+			created_by TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_artifact_annotations_artifact ON artifact_annotations(artifact_id, status)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV81 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

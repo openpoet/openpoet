@@ -1044,6 +1044,14 @@ func main() {
 		r.Post("/documents", api.CreateTempDocument)
 		r.Get("/documents/{id}", api.GetTempDocument)
 
+		// HTML Artifacts (versioned, stored in the database)
+		r.Post("/artifacts", api.CreateArtifact)
+		r.Get("/artifacts", api.ListArtifacts)
+		r.Get("/artifacts/{id}", api.GetArtifact)
+		r.Put("/artifacts/{id}", api.UpdateArtifact)
+		r.Patch("/artifacts/{id}", api.PatchArtifact)
+		r.Get("/artifacts/{id}/versions/{version}", api.GetArtifactVersion)
+
 		// AI
 		r.Get("/ai/status", aiHandler.HandleStatus)
 		r.Post("/ai/test-connection", aiHandler.HandleTestConnection)
