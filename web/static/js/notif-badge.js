@@ -225,6 +225,13 @@ class NotifBadge {
             return;
         }
 
+        // /app/artifact/{id} → open the sandboxed artifact viewer
+        const artifactMatch = link.match(/^\/app\/artifact\/([a-zA-Z0-9-]+)$/);
+        if (artifactMatch) {
+            window.artifactViewer?.open(artifactMatch[1]);
+            return;
+        }
+
         // /app/doc/{id} → open document viewer
         const docMatch = link.match(/^\/app\/doc\/([a-zA-Z0-9-]+)$/);
         if (docMatch) {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,9 @@ func artifactTestRouter(t *testing.T) (*API, http.Handler) {
 		r.Put("/artifacts/{id}", api.UpdateArtifact)
 		r.Patch("/artifacts/{id}", api.PatchArtifact)
 		r.Get("/artifacts/{id}/versions/{version}", api.GetArtifactVersion)
+		r.Get("/artifacts/{id}/render", api.RenderArtifact)
+		r.Get("/sessions/{id}/documents", api.ListSessionDocuments)
+		r.Get("/projects/{id}/tasks/{taskId}/documents", api.ListTaskDocuments)
 	})
 	return api, router
 }
@@ -184,5 +188,139 @@ func TestArtifactRESTRejectsInvalidAndOversizedContent(t *testing.T) {
 	}
 	if recorder, _ := artifactRequest(t, router, http.MethodPost, "/api/artifacts", nil, nil); recorder.Code != http.StatusBadRequest {
 		t.Fatalf("empty body status = %d", recorder.Code)
+	}
+}
+
+// TestArtifactRenderIsAlwaysSandboxed pins the response that carries
+// agent-generated HTML to a browser: the HTML itself, and never without the
+// headers that contain it.
+func TestArtifactRenderIsAlwaysSandboxed(t *testing.T) {
+	_, router := artifactTestRouter(t)
+	recorder, created := artifactRequest(t, router, http.MethodPost, "/api/artifacts", map[string]any{"title": "Render", "html": artifactHandlerHTML}, nil)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("create status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	id, _ := created["id"].(string)
+	v2 := strings.Replace(artifactHandlerHTML, "Roadmap", "Roadmap v2", 1)
+	if recorder, _ := artifactRequest(t, router, http.MethodPut, "/api/artifacts/"+id, map[string]any{"html": v2}, nil); recorder.Code != http.StatusOK {
+		t.Fatalf("update status = %d", recorder.Code)
+	}
+
+	render := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Accept", "text/html")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		return recorder
+	}
+	assertContained := func(name string, recorder *httptest.ResponseRecorder) {
+		t.Helper()
+		csp := recorder.Header().Get("Content-Security-Policy")
+		for _, directive := range []string{
+			"sandbox allow-scripts;", "default-src 'none'", "script-src 'unsafe-inline'", "connect-src 'none'",
+			"form-action 'none'", "base-uri 'none'", "frame-src 'none'", "worker-src 'none'", "object-src 'none'", "frame-ancestors 'self'",
+		} {
+			if !strings.Contains(csp, directive) {
+				t.Errorf("%s: CSP lacks %q: %s", name, directive, csp)
+			}
+		}
+		// The sandbox must grant scripts and nothing else: any of these would
+		// hand the artifact the OpenPoet origin, popups, forms or navigation.
+		sandbox := strings.SplitN(csp, ";", 2)[0]
+		for _, forbidden := range []string{"allow-same-origin", "allow-popups", "allow-forms", "allow-top-navigation", "allow-downloads", "allow-modals"} {
+			if strings.Contains(sandbox, forbidden) {
+				t.Errorf("%s: sandbox grants %s: %s", name, forbidden, sandbox)
+			}
+		}
+		for _, source := range []string{"http:", "https:", "*", "'self'"} {
+			for _, directive := range strings.Split(csp, ";") {
+				directive = strings.TrimSpace(directive)
+				if strings.HasPrefix(directive, "frame-ancestors") {
+					continue
+				}
+				for _, token := range strings.Fields(directive)[1:] {
+					if token == source {
+						t.Errorf("%s: CSP directive %q allows %s", name, directive, source)
+					}
+				}
+			}
+		}
+		for header, want := range map[string]string{
+			"X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Cache-Control": "no-store",
+			"Cross-Origin-Resource-Policy": "same-origin", "X-Frame-Options": "SAMEORIGIN",
+		} {
+			if got := recorder.Header().Get(header); got != want {
+				t.Errorf("%s: %s = %q, want %q", name, header, got, want)
+			}
+		}
+		if cookies := recorder.Header().Values("Set-Cookie"); len(cookies) != 0 {
+			t.Errorf("%s: render response sets cookies: %v", name, cookies)
+		}
+	}
+
+	current := render("/api/artifacts/" + id + "/render")
+	if current.Code != http.StatusOK || !strings.HasPrefix(current.Header().Get("Content-Type"), "text/html") || !strings.Contains(current.Body.String(), "Roadmap v2") {
+		t.Fatalf("current render: status=%d type=%q body=%s", current.Code, current.Header().Get("Content-Type"), current.Body.String())
+	}
+	assertContained("current", current)
+
+	first := render("/api/artifacts/" + id + "/render?v=1")
+	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), "<h1>Roadmap</h1>") {
+		t.Fatalf("v1 render: status=%d body=%s", first.Code, first.Body.String())
+	}
+	assertContained("v1", first)
+
+	// Errors are plain text and carry the same headers.
+	for path, status := range map[string]int{
+		"/api/artifacts/missing/render":         http.StatusNotFound,
+		"/api/artifacts/" + id + "/render?v=99": http.StatusNotFound,
+		"/api/artifacts/" + id + "/render?v=x":  http.StatusBadRequest,
+	} {
+		failed := render(path)
+		if failed.Code != status || !strings.HasPrefix(failed.Header().Get("Content-Type"), "text/plain") {
+			t.Fatalf("%s: status=%d type=%q", path, failed.Code, failed.Header().Get("Content-Type"))
+		}
+		assertContained(path, failed)
+	}
+}
+
+func TestArtifactsAppearInSessionAndTaskDocumentListings(t *testing.T) {
+	api, router := artifactTestRouter(t)
+	ctx := context.Background()
+	project := &database.Project{Name: "artifact-docs", Path: "/tmp/artifact-docs", Type: "local", Backend: "claude_code", BackendConfig: "{}"}
+	if err := api.db.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	task := &database.ProjectTask{ProjectID: project.ID, Title: "Write plan", Status: "todo", Priority: "medium"}
+	if err := api.db.CreateTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.CreateSession(ctx, &database.Session{ID: "sess-docs", ProjectID: project.ID, Status: "running", Name: "s", StartTime: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.LinkSessionToTask(ctx, "sess-docs", task.ID); err != nil {
+		t.Fatal(err)
+	}
+	recorder, created := artifactRequest(t, router, http.MethodPost, "/api/artifacts", map[string]any{"title": "Plan", "html": artifactHandlerHTML, "session_id": "sess-docs"}, nil)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("create status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	id, _ := created["id"].(string)
+
+	for _, path := range []string{
+		"/api/sessions/sess-docs/documents",
+		"/api/projects/" + strconv.FormatInt(project.ID, 10) + "/tasks/" + strconv.FormatInt(task.ID, 10) + "/documents",
+	} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		var entries []map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &entries); err != nil || recorder.Code != http.StatusOK {
+			t.Fatalf("%s: status=%d body=%s", path, recorder.Code, recorder.Body.String())
+		}
+		if len(entries) != 1 || entries[0]["id"] != "artifact:"+id || entries[0]["type"] != "artifact" || entries[0]["title"] != "Plan" || entries[0]["status"] != "v1" {
+			t.Fatalf("%s: entries = %v", path, entries)
+		}
 	}
 }

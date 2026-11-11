@@ -116,13 +116,33 @@ type ArtifactListQuery struct {
 	Limit           int
 }
 
+// ArtifactNotifier is a post-commit effect that tells connected UIs about a
+// publish, so an open viewer can offer the new version and a new artifact gets
+// its card. It carries no HTML.
+type ArtifactNotifier interface {
+	ArtifactPublished(ctx context.Context, artifact ArtifactView, isNew bool)
+}
+
 type ArtifactService struct {
-	store   ArtifactStore
-	effects ApplicationEffects
+	store    ArtifactStore
+	effects  ApplicationEffects
+	notifier ArtifactNotifier
 }
 
 func NewArtifactService(store ArtifactStore, effects ApplicationEffects) *ArtifactService {
 	return &ArtifactService{store: store, effects: effects}
+}
+
+// SetNotifier installs the UI notifier. It is optional: without one, publishes
+// only emit the application change event.
+func (s *ArtifactService) SetNotifier(notifier ArtifactNotifier) {
+	s.notifier = notifier
+}
+
+func (s *ArtifactService) notifyPublished(ctx context.Context, artifact ArtifactView, isNew bool) {
+	if s.notifier != nil {
+		s.notifier.ArtifactPublished(ctx, artifact, isNew)
+	}
 }
 
 func (s *ArtifactService) CapabilityServiceName() CapabilityServiceName {
@@ -216,6 +236,7 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 	publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "artifacts", Action: "created", Meta: artifactChangeMeta(stored)})
 	view := artifactView(stored)
 	view.SizeBytes = version.SizeBytes
+	s.notifyPublished(ctx, view, true)
 	return ArtifactPublishResult{Artifact: view, Version: 1, Created: true, Redacted: redacted}, nil
 }
 
@@ -257,12 +278,12 @@ func (s *ArtifactService) Update(ctx context.Context, command UpdateArtifactComm
 		}
 		return ArtifactPublishResult{}, err
 	}
-	if created {
-		meta := artifactChangeMeta(stored)
-		publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "artifacts", Action: "version_published", Meta: meta})
-	}
 	view := artifactView(stored)
 	view.SizeBytes = version.SizeBytes
+	if created {
+		publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "artifacts", Action: "version_published", Meta: artifactChangeMeta(stored)})
+		s.notifyPublished(ctx, view, false)
+	}
 	return ArtifactPublishResult{Artifact: view, Version: stored.CurrentVersion, Created: created, Redacted: redacted}, nil
 }
 

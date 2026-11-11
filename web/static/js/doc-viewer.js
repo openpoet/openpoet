@@ -60,6 +60,13 @@ class DocViewer {
     }
 
     async open(docId, opts = {}) {
+        // Ids like "artifact:ab12cd34" come from the same listings, cards and
+        // URLs as documents, but are HTML artifacts: they open in the sandboxed
+        // artifact viewer, never in this markdown overlay.
+        if (typeof docId === 'string' && docId.startsWith('artifact:')) {
+            await window.artifactViewer?.open(docId.slice('artifact:'.length), opts);
+            return;
+        }
         try {
             const resp = await fetch(`/api/documents/${docId}`);
             if (!resp.ok) throw new Error('Document not found');

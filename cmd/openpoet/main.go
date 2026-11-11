@@ -1051,6 +1051,7 @@ func main() {
 		r.Put("/artifacts/{id}", api.UpdateArtifact)
 		r.Patch("/artifacts/{id}", api.PatchArtifact)
 		r.Get("/artifacts/{id}/versions/{version}", api.GetArtifactVersion)
+		r.Get("/artifacts/{id}/render", api.RenderArtifact)
 
 		// AI
 		r.Get("/ai/status", aiHandler.HandleStatus)

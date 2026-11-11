@@ -197,3 +197,47 @@ func TestArtifactUpdateVersionsConflictAndRead(t *testing.T) {
 		t.Fatalf("include_archived listing = %+v err=%v", listed, err)
 	}
 }
+
+type recordingArtifactNotifier struct {
+	published []ArtifactView
+	isNew     []bool
+}
+
+func (r *recordingArtifactNotifier) ArtifactPublished(_ context.Context, artifact ArtifactView, isNew bool) {
+	r.published = append(r.published, artifact)
+	r.isNew = append(r.isNew, isNew)
+}
+
+// The UI is told about a new artifact and about each stored version, and about
+// nothing else: a rejected or no-op publish must not announce a version.
+func TestArtifactNotifierFiresOnlyForStoredPublishes(t *testing.T) {
+	ctx := context.Background()
+	service, _, _ := artifactTestService(t)
+	notifier := &recordingArtifactNotifier{}
+	service.SetNotifier(notifier)
+	auth := phase4Authorization()
+
+	created, err := service.Create(ctx, CreateArtifactCommand{Title: "Doc", Content: artifactTestHTML, SessionID: "sess-n", Authorization: auth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := created.Artifact.ID
+	if _, err := service.Create(ctx, CreateArtifactCommand{Content: "not html", Authorization: auth}); err == nil {
+		t.Fatal("expected validation failure")
+	}
+	if _, err := service.Update(ctx, UpdateArtifactCommand{ArtifactID: id, Content: artifactTestHTML, Authorization: auth}); err != nil {
+		t.Fatal(err) // identical HTML: accepted, nothing stored
+	}
+	if _, err := service.Update(ctx, UpdateArtifactCommand{ArtifactID: id, Content: artifactTestHTML + "<!-- v2 -->", BaseVersion: 9, Authorization: auth}); err == nil {
+		t.Fatal("expected version conflict")
+	}
+	if _, err := service.Update(ctx, UpdateArtifactCommand{ArtifactID: id, Content: artifactTestHTML + "<!-- v2 -->", BaseVersion: 1, Authorization: auth}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(notifier.published) != 2 || !notifier.isNew[0] || notifier.isNew[1] ||
+		notifier.published[0].ID != id || notifier.published[0].CurrentVersion != 1 || notifier.published[0].SessionID != "sess-n" ||
+		notifier.published[1].ID != id || notifier.published[1].CurrentVersion != 2 {
+		t.Fatalf("notifications = %+v isNew=%v", notifier.published, notifier.isNew)
+	}
+}

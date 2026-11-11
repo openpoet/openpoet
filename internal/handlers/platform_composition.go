@@ -161,7 +161,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 
 	collaboration := automation.CollaborationPlatformServices{
 		Documents: application.NewDocumentService(services.DB, platformMemoryMirror{api: a}, effects),
-		Artifacts: application.NewArtifactService(services.DB, effects),
+		Artifacts: newPlatformArtifactService(a, services.DB, effects),
 		Proposals: application.NewProposalService(platformProposalBackend{api: a}, effects),
 		AI: application.NewAIAssistantService(
 			platformAIProvider{handler: services.AIHandler},

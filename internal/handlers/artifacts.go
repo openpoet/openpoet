@@ -1,16 +1,19 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"openpoet/internal/application"
+	"openpoet/internal/database"
 )
 
 // maxArtifactRequestBytes bounds a create/update request body. The HTML limit
@@ -248,4 +251,155 @@ func parseArtifactVersion(raw string) (int, bool) {
 		return 0, false
 	}
 	return version, true
+}
+
+// artifactDocumentIDPrefix marks an artifact in the document listings and doc
+// cards that also carry Docs and plans ("plan:<session>" is the precedent). The
+// UI document viewer hands any id with this prefix to the artifact viewer.
+const artifactDocumentIDPrefix = "artifact:"
+
+type artifactDocEntry struct {
+	ID        string
+	Title     string
+	Type      string
+	Status    string
+	CreatedAt time.Time
+}
+
+// artifactDocEntries lists artifacts for the session/task document listings.
+// The status column carries the version ("v3"), which is what a reader of that
+// list needs to tell whether an artifact changed.
+func (a *API) artifactDocEntries(r *http.Request, filter database.ArtifactFilter) []artifactDocEntry {
+	if filter.SessionID == "" && filter.TaskID == 0 && filter.ProjectID == 0 {
+		return nil
+	}
+	items, err := a.db.ListArtifacts(r.Context(), filter)
+	if err != nil {
+		return nil
+	}
+	entries := make([]artifactDocEntry, 0, len(items))
+	for _, item := range items {
+		entries = append(entries, artifactDocEntry{
+			ID: artifactDocumentIDPrefix + item.ID, Title: item.Title, Type: "artifact",
+			Status: fmt.Sprintf("v%d", item.CurrentVersion), CreatedAt: item.UpdatedAt,
+		})
+	}
+	return entries
+}
+
+// platformArtifactNotifier pushes artifact publishes to connected UIs.
+type platformArtifactNotifier struct{ api *API }
+
+func newPlatformArtifactService(api *API, store application.ArtifactStore, effects application.ApplicationEffects) *application.ArtifactService {
+	service := application.NewArtifactService(store, effects)
+	service.SetNotifier(platformArtifactNotifier{api: api})
+	return service
+}
+
+func (n platformArtifactNotifier) ArtifactPublished(_ context.Context, artifact application.ArtifactView, isNew bool) {
+	if n.api == nil || n.api.hub == nil {
+		return
+	}
+	conversationID := ""
+	if artifact.ConversationID != nil {
+		conversationID = strconv.FormatInt(*artifact.ConversationID, 10)
+	}
+	if isNew {
+		// Same card the Docs get, so the artifact shows up where the agent is
+		// working (floating over the terminal, in the structured view, in chat).
+		n.api.hub.BroadcastChatDocCard(map[string]interface{}{
+			"doc_id":          artifactDocumentIDPrefix + artifact.ID,
+			"type":            "artifact",
+			"title":           artifact.Title,
+			"summary":         artifact.Summary,
+			"conversation_id": conversationID,
+			"session_id":      artifact.SessionID,
+		})
+	}
+	update := map[string]interface{}{
+		"artifact_id": artifact.ID,
+		"version":     artifact.CurrentVersion,
+		"title":       artifact.Title,
+		"session_id":  artifact.SessionID,
+		"is_new":      isNew,
+	}
+	if artifact.ProjectID != nil {
+		update["project_id"] = *artifact.ProjectID
+	}
+	if artifact.TaskID != nil {
+		update["task_id"] = *artifact.TaskID
+	}
+	n.api.hub.BroadcastArtifactUpdated(update)
+}
+
+// artifactContentSecurityPolicy is sent with every rendered artifact. The HTML
+// is agent-generated and treated as hostile:
+//   - sandbox allow-scripts: scripts run, but in an opaque origin (no cookies,
+//     no storage, no same-origin access to OpenPoet), with no popups, forms,
+//     top navigation or downloads — even when the URL is opened directly in a
+//     tab instead of the viewer's sandboxed iframe;
+//   - default-src 'none' + connect-src 'none': no network at all, so the page
+//     cannot call the OpenPoet API or send anything out by fetch/XHR/WebSocket,
+//     and cannot pull scripts, styles, images or fonts from any host;
+//   - only inline scripts/styles and data:/blob: media are allowed, which is
+//     what a self-contained artifact needs.
+const artifactContentSecurityPolicy = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; " +
+	"style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; " +
+	"connect-src 'none'; form-action 'none'; base-uri 'none'; frame-src 'none'; child-src 'none'; " +
+	"worker-src 'none'; object-src 'none'; frame-ancestors 'self'"
+
+func setArtifactRenderHeaders(w http.ResponseWriter) {
+	header := w.Header()
+	header.Set("Content-Security-Policy", artifactContentSecurityPolicy)
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Referrer-Policy", "no-referrer")
+	header.Set("Cache-Control", "no-store")
+	header.Set("Cross-Origin-Resource-Policy", "same-origin")
+	header.Set("X-Frame-Options", "SAMEORIGIN")
+	header.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), clipboard-read=(), clipboard-write=()")
+}
+
+// RenderArtifact serves one version of an artifact as an HTML document for the
+// viewer's sandboxed iframe. It is the only artifact route that returns
+// text/html, and it always carries the restrictive headers above — on errors
+// too, so nothing under this path is ever served without them. The route lives
+// under /api/ on purpose: the UI-cookie middleware never plants the UI secret
+// on /api/ responses.
+func (a *API) RenderArtifact(w http.ResponseWriter, r *http.Request) {
+	setArtifactRenderHeaders(w)
+	renderError := func(status int, message string) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(message))
+	}
+	services, ready := a.platformApplicationServices()
+	if !ready || services.Collaboration.Artifacts == nil {
+		renderError(http.StatusServiceUnavailable, "artifact service is unavailable")
+		return
+	}
+	version, valid := parseArtifactVersion(r.URL.Query().Get("v"))
+	if !valid {
+		renderError(http.StatusBadRequest, "v must be a positive integer")
+		return
+	}
+	view, err := services.Collaboration.Artifacts.GetVersion(platformUIContext(r), chi.URLParam(r, "id"), version)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if application.ErrorIsKind(err, application.ErrorNotFound) {
+			status = http.StatusNotFound
+		} else if application.ErrorIsKind(err, application.ErrorValidation) {
+			status = http.StatusBadRequest
+		}
+		renderError(status, "artifact not available")
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(artifactRenderDocument(view.Content)))
+}
+
+// artifactRenderDocument returns the HTML sent to the sandboxed iframe for a
+// stored version.
+func artifactRenderDocument(html string) string {
+	return html
 }

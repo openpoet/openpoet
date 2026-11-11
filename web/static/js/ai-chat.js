@@ -154,6 +154,14 @@ class AIChatManager {
                 return;
             }
 
+            // /app/artifact/{id} → open the sandboxed artifact viewer
+            const artifactMatch = href.match(/^\/app\/artifact\/([a-zA-Z0-9-]+)$/);
+            if (artifactMatch) {
+                e.preventDefault();
+                window.artifactViewer?.open(artifactMatch[1]);
+                return;
+            }
+
             // /app/doc/{id} → open document viewer overlay
             const docMatch = href.match(/^\/app\/doc\/([a-zA-Z0-9-]+)$/);
             if (docMatch) {

@@ -1833,7 +1833,12 @@ func (a *API) ListSessionDocuments(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// 2. Session plan (if any)
+	// 2. HTML artifacts published by this session
+	for _, artifact := range a.artifactDocEntries(r, database.ArtifactFilter{SessionID: sessionID}) {
+		results = append(results, docEntry{ID: artifact.ID, Title: artifact.Title, Type: artifact.Type, Status: artifact.Status, CreatedAt: artifact.CreatedAt})
+	}
+
+	// 3. Session plan (if any)
 	planContent, _, err := a.db.GetSessionPlan(r.Context(), sessionID)
 	if err == nil && planContent != "" {
 		session, _ := a.db.GetSession(r.Context(), sessionID)
@@ -3487,7 +3492,12 @@ func (a *API) ListTaskDocuments(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// 2. Session plans from linked sessions
+	// 2. HTML artifacts linked to this task
+	for _, artifact := range a.artifactDocEntries(r, database.ArtifactFilter{TaskID: taskID}) {
+		results = append(results, docEntry{ID: artifact.ID, Title: artifact.Title, Type: artifact.Type, Status: artifact.Status, CreatedAt: artifact.CreatedAt})
+	}
+
+	// 3. Session plans from linked sessions
 	sessions, _ := a.db.GetSessionsForTask(r.Context(), taskID)
 	for _, s := range sessions {
 		if s.PlanContent != "" {

@@ -43,6 +43,9 @@ const (
 	MsgTypeAIProactive  MessageType = "ai_proactive"
 	MsgTypeChatDocCard  MessageType = "chat_doc_card"
 
+	// HTML artifact published (new artifact or new version)
+	MsgTypeArtifactUpdated MessageType = "artifact_updated"
+
 	// Notification count updates
 	MsgTypeNotificationCount MessageType = "notification_count"
 
@@ -295,6 +298,15 @@ func (h *Hub) BroadcastAIProactive(data interface{}) {
 func (h *Hub) BroadcastChatDocCard(data interface{}) {
 	h.BroadcastToChannel("events", &Message{
 		Type: MsgTypeChatDocCard,
+		Data: data,
+	})
+}
+
+// BroadcastArtifactUpdated tells every UI that an artifact got a new version
+// (or was created), so an open viewer can offer it.
+func (h *Hub) BroadcastArtifactUpdated(data interface{}) {
+	h.BroadcastToChannel("events", &Message{
+		Type: MsgTypeArtifactUpdated,
 		Data: data,
 	})
 }

@@ -307,6 +307,7 @@ class OpenPoet {
     _documentURLToken(route) {
         if (!route) return '';
         if (route.kind === 'document' && route.id) return String(route.id);
+        if (route.kind === 'artifact' && route.id) return `artifact:${route.id}`;
         if (route.kind === 'plan' && route.sessionId) return `plan:${route.sessionId}`;
         if (route.kind === 'task' && route.projectId && route.taskId) {
             return `task:${route.projectId}:${route.taskId}`;
@@ -328,7 +329,8 @@ class OpenPoet {
             if (session?.project_id) state.project = String(session.project_id);
         }
 
-        const docRoute = window.docViewer?.getURLState?.();
+        // An open artifact sits on top of whatever the document viewer shows.
+        const docRoute = window.artifactViewer?.getURLState?.() || window.docViewer?.getURLState?.();
         const doc = this._documentURLToken(docRoute);
         if (doc) state.doc = doc;
         if (!state.project && docRoute?.projectId) state.project = String(docRoute.projectId);
@@ -512,6 +514,7 @@ class OpenPoet {
         const state = this._readURLState();
         this._restoringURLState = true;
         try {
+            window.artifactViewer?.dismiss?.({ updateURL: false });
             window.docViewer?.dismiss?.({ updateURL: false });
             this._viewingTaskDetail = null;
 
@@ -548,6 +551,51 @@ class OpenPoet {
 
     _onDocumentURLStateChanged(options = {}) {
         this._syncURLState(options);
+    }
+
+    // An artifact was created or got a new version (events WebSocket).
+    handleArtifactUpdated(data) {
+        if (!data) return;
+        window.artifactViewer?.handleArtifactUpdated(data);
+        if (data.session_id) window.hookManager?.fetchSessionDocs(data.session_id);
+        if (this.currentView === 'project-detail' && this._detailProject && data.project_id === this._detailProject.id) {
+            this.loadProjectArtifacts(this._detailProject.id);
+        }
+    }
+
+    // Artifacts section of the project detail view.
+    async loadProjectArtifacts(projectId) {
+        const list = document.getElementById('project-artifacts-list');
+        const summary = document.getElementById('project-artifacts-summary');
+        if (!list) return;
+        let artifacts = [];
+        try {
+            artifacts = await this.api('GET', `/artifacts?project_id=${projectId}`) || [];
+        } catch (e) {
+            list.innerHTML = '<div class="meta-empty">Failed to load artifacts</div>';
+            return;
+        }
+        if (this._detailProject?.id !== projectId) return;
+        if (summary) summary.textContent = artifacts.length ? `${artifacts.length} artifact${artifacts.length === 1 ? '' : 's'}` : '';
+        if (artifacts.length === 0) {
+            list.innerHTML = '<div class="meta-empty">No artifacts yet. Agents publish interactive HTML documents here.</div>';
+            return;
+        }
+        list.innerHTML = '';
+        for (const artifact of artifacts) {
+            const row = document.createElement('button');
+            row.type = 'button';
+            row.className = 'project-artifacts-row';
+            const open = artifact.open_annotations > 0
+                ? `<span class="project-artifacts-row-badge" title="Open annotations">${artifact.open_annotations} open</span>` : '';
+            row.innerHTML = `
+                <span class="project-artifacts-row-title">${this.escapeHtml(artifact.title || 'Artifact')}</span>
+                ${open}
+                <span class="project-artifacts-row-meta">v${artifact.current_version} · ${this.escapeHtml(this.relativeTime(artifact.updated_at))}</span>
+            `;
+            row.addEventListener('click', () => window.artifactViewer?.open(artifact.id));
+            list.appendChild(row);
+        }
     }
 
     refreshViewData(viewName) {
@@ -779,6 +827,9 @@ class OpenPoet {
                 if (window.hookManager && msg.data?.session_id) {
                     window.hookManager.fetchPlan(msg.data.session_id);
                 }
+                break;
+            case 'artifact_updated':
+                this.handleArtifactUpdated(msg.data);
                 break;
             default:
                 // Route hook messages to HookManager
@@ -1059,6 +1110,7 @@ class OpenPoet {
                 const sessMatch = link.match(/^\/app\/session\/(.+)$/);
                 const projectMatch = link.match(/^\/app\/project\/(\d+)$/);
                 const docMatch = link.match(/^\/app\/doc\/(.+)$/);
+                const artifactMatch = link.match(/^\/app\/artifact\/([a-zA-Z0-9-]+)$/);
                 if (sessMatch) {
                     if (window.hookManager) {
                         window.hookManager.openSessionWithPendingDialog(sessMatch[1]);
@@ -1067,6 +1119,8 @@ class OpenPoet {
                     }
                 } else if (projectMatch) {
                     this.showProjectDetail(Number(projectMatch[1]));
+                } else if (artifactMatch) {
+                    window.artifactViewer?.open(artifactMatch[1]);
                 } else if (docMatch) {
                     window.docViewer?.open(decodeURIComponent(docMatch[1]));
                 }
@@ -2166,6 +2220,18 @@ class OpenPoet {
             <div class="project-detail-card">
                 <div class="project-detail-section">
                     <div class="project-detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                        <span>Artifacts</span>
+                        <span id="project-artifacts-summary" style="font-size: 11px; color: var(--color-text-muted);"></span>
+                    </div>
+                    <div id="project-artifacts-list" class="project-tools-list">
+                        <div class="meta-empty">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="project-detail-card">
+                <div class="project-detail-section">
+                    <div class="project-detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
                         <span>Session Tools</span>
                         <span id="project-tools-summary" style="font-size: 11px; color: var(--color-text-muted);"></span>
                     </div>
@@ -2274,6 +2340,7 @@ class OpenPoet {
 
         // Load memory doc, tasks, tools, skills, and token usage
         this.loadMemoryDoc(project.id);
+        this.loadProjectArtifacts(project.id);
         this.loadProjectTools(project.id);
         this.loadProjectSkills(project.id);
         this.loadProjectCustomTools(project.id);
@@ -10782,9 +10849,10 @@ class OpenPoet {
         if (documents && documents.length > 0) {
             md += `---\n\n### Documents\n\n`;
             for (const doc of documents) {
-                const docIcon = doc.type === 'plan' ? '[P]' : (doc.title.startsWith('Verification') || doc.title.startsWith('Verification') ? '[V]' : '[D]');
+                const docIcon = doc.type === 'plan' ? '[P]' : doc.type === 'artifact' ? '[A]' : (doc.title.startsWith('Verification') || doc.title.startsWith('Verification') ? '[V]' : '[D]');
                 const time = this.relativeTime(doc.created_at);
-                md += `${docIcon} **${this.escapeHtml(doc.title)}** — *${time}* <a href="#" data-action="open-doc" data-doc-id="${this.escapeHtml(doc.id)}" data-doc-type="${this.escapeHtml(doc.type)}" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Open</a>\n\n`;
+                const docVersion = doc.type === 'artifact' && doc.status ? ` (${this.escapeHtml(doc.status)})` : '';
+                md += `${docIcon} **${this.escapeHtml(doc.title)}**${docVersion} — *${time}* <a href="#" data-action="open-doc" data-doc-id="${this.escapeHtml(doc.id)}" data-doc-type="${this.escapeHtml(doc.type)}" style="color:var(--color-primary);text-decoration:underline;cursor:pointer">Open</a>\n\n`;
             }
         }
 
