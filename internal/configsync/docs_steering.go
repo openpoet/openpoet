@@ -5,9 +5,12 @@ import (
 	"strings"
 )
 
-// Phase 7.1 (Maestro): every harness is steered to publish documentation as
-// OpenPoet Docs (openpoet_create_document) instead of harness-native artifacts,
-// so output lands in one durable, user-visible place.
+// Every harness is steered to publish documentation into OpenPoet instead of
+// harness-native artifacts or loose files, so output lands in one durable,
+// user-visible place. Plans, reports and documentation go out as interactive
+// HTML artifacts (openpoet_create_artifact), which the user can annotate and
+// the agent revises; short plain-text answers stay as OpenPoet Docs
+// (openpoet_create_document).
 
 const docsSteeringBegin = "<!-- OPENPOET:BEGIN docs-steering -->"
 const docsSteeringEnd = "<!-- OPENPOET:END docs-steering -->"
@@ -15,15 +18,32 @@ const docsSteeringEnd = "<!-- OPENPOET:END docs-steering -->"
 // OpenPoetDocsInstructionBlock is the harness-agnostic steering text. It is
 // embedded verbatim in every per-backend instruction surface (copilot
 // instructions, ACP instructions, the managed .claude/CLAUDE.md, and the
-// codex/opencode AGENTS.md managed section).
+// codex/opencode AGENTS.md managed section). The markers stay the same across
+// releases, so a sync replaces the previous wording in place.
 func OpenPoetDocsInstructionBlock() string {
 	return docsSteeringBegin + `
-## Documentation goes to OpenPoet Docs
+## Plans and documentation go to OpenPoet, as interactive HTML artifacts
 
-When you produce documentation, reports, plans, or any long-form deliverable,
-create it as an OpenPoet Doc with the ` + "`openpoet_create_document`" + ` tool
-(or ` + "`$OPENPOET_BIN cli call openpoet_create_document ...`" + ` when MCP is
-unavailable) instead of harness-native artifacts or loose files.
+When you write a plan, a report, documentation or any deliverable the user will
+read or review, and whenever the user asks you to document something, publish it
+as an HTML artifact with the ` + "`openpoet_create_artifact`" + ` tool: one self-contained
+HTML page (inline CSS and JavaScript, no external resources) built like a small
+site, with navigation between sections, visual components, inline SVG or canvas
+charts and restrained motion. Do not write a ` + "`.md`" + ` or ` + "`.html`" + ` file into the
+project for this, and do not use harness-native artifacts. The
+` + "`html-artifact`" + ` skill has the design guide.
+
+- The user annotates artifacts. Before changing one, read the open annotations
+  with ` + "`openpoet_list_artifact_annotations`" + `; publish the new version with
+  ` + "`openpoet_update_artifact`" + `; then resolve each annotation you addressed with
+  ` + "`openpoet_resolve_artifact_annotation`" + `.
+- For a short plain-text answer that only needs to leave the chat (a list, a
+  snippet, a quick explanation), create an OpenPoet Doc with
+  ` + "`openpoet_create_document`" + ` instead. Use it too when the artifact tools are
+  not available in this session.
+- When MCP is unavailable, call the same tools through the CLI, for example
+  ` + "`$OPENPOET_BIN cli call openpoet_create_artifact '{\"title\":\"Plan\",\"html_file\":\"/tmp/plan.html\"}'`" + `
+  or ` + "`$OPENPOET_BIN cli call openpoet_create_document ...`" + `.
 ` + docsSteeringEnd + "\n"
 }
 

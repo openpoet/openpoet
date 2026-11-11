@@ -448,6 +448,13 @@ func normalizeArtifactHTML(content string) (string, bool, error) {
 	return masked, masked != trimmed, nil
 }
 
+// CheckArtifactHTML reports whether content would be accepted as an artifact
+// version, and whether storing it would mask credential-looking text in it.
+func CheckArtifactHTML(content string) (redacted bool, err error) {
+	_, redacted, err = normalizeArtifactHTML(content)
+	return redacted, err
+}
+
 func artifactContentHash(content string) string {
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])

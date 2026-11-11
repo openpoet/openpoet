@@ -474,8 +474,8 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:           "create_document",
-			Description:    "Create a temporary markdown document and return a clickable link. Use this for ANY response that would be longer than 5 lines — lists, explanations, code, reports, etc. This keeps the chat clean.",
-			MCPDescription: "Create a temporary markdown document for the user to view. Use for ANY response longer than ~5 lines (lists, explanations, code, reports). Keeps the chat clean.",
+			Description:    "Create a temporary markdown document and return a clickable link. Use this for a response that would be longer than 5 lines — lists, explanations, code. This keeps the chat clean. For a plan, a report or documentation the user will read or review, prefer create_artifact (an interactive HTML page the user can annotate).",
+			MCPDescription: "Create a temporary markdown document for the user to view. Use for a response longer than ~5 lines (lists, explanations, code). Keeps the chat clean. For a plan, a report or documentation the user will read or review, prefer openpoet_create_artifact (an interactive HTML page the user can annotate).",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{

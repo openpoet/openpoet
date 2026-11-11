@@ -234,6 +234,12 @@ func main() {
 	// Initialize config syncer
 	configSync := configsync.NewConfigSyncer(db, encryptor.Decrypt, cfg.Address())
 
+	// Built-in skill: the design guide agents follow when publishing HTML
+	// artifacts. Registered once; never overwrites or resurrects a skill.
+	if err := configsync.EnsureHTMLArtifactSkill(context.Background(), db); err != nil {
+		log.Printf("Warning: Failed to register the html-artifact skill: %v", err)
+	}
+
 	// Initialize web push service
 	webpush, err := notifications.NewWebPushService(db, cfg.VAPIDEmail)
 	if err != nil {
