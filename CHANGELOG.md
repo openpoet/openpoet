@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `openpoet_list_artifact_annotations`, `openpoet_resolve_artifact_annotation`),
   and the matching Automation API capabilities under `artifacts.*`.
 - A built-in `html-artifact` skill with the design guide for artifacts.
+- **Public base URL**: a setting (Config → Settings → Public Address, or
+  `OPENPOET_PUBLIC_BASE_URL`) with the address the instance is reached at from
+  other devices. Links handed out by OpenPoet are built on it, and its host is
+  accepted by the Host guard. See [`docs/links.md`](docs/links.md).
+- `openpoet_get_link` (MCP, CLI) and `get_link` (chat assistant): the link that
+  opens an artifact, a Doc, a session or a task, ready to pass on. Agents no
+  longer have a reason to build a URL on `localhost`. Also `GET /api/links`.
+  The artifact and Doc publish results name the shareable link.
 
 ### Changed
 

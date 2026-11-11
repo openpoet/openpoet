@@ -34,7 +34,12 @@ var originGuardedPrefixes = []string{"/api/", "/mcp", "/ws/", "/v1/"}
 // paired-device credential on every non-public path. A browser cannot forge
 // the tunnel header cross-origin without a preflight, which OpenPoet no longer
 // answers. extraHosts may contain "*" to disable the Host allowlist.
-func HostOriginGuard(extraHosts []string) func(http.Handler) http.Handler {
+//
+// publicHost, when given, returns one more accepted host name that can change
+// while the server runs: the host of the configured public base URL. It is the
+// address the owner published the instance at, so it does not have to be
+// repeated in OPENPOET_ALLOWED_HOSTS. It returns "" when none is configured.
+func HostOriginGuard(extraHosts []string, publicHost ...func() string) func(http.Handler) http.Handler {
 	allowed := map[string]bool{"localhost": true}
 	if name, err := os.Hostname(); err == nil && name != "" {
 		name = strings.ToLower(name)
@@ -56,7 +61,7 @@ func HostOriginGuard(extraHosts []string) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			if !anyHost && !hostAllowed(r.Host, allowed) {
+			if !anyHost && !hostAllowed(r.Host, allowed) && !hostIsPublic(r.Host, publicHost) {
 				writeGuardError(w, "host not allowed: add it to OPENPOET_ALLOWED_HOSTS to reach OpenPoet by this name")
 				return
 			}
@@ -96,6 +101,27 @@ func hostAllowed(hostport string, allowed map[string]bool) bool {
 		return true
 	}
 	return allowed[host]
+}
+
+// hostIsPublic reports whether hostport names the configured public host.
+func hostIsPublic(hostport string, publicHost []func() string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+	if host == "" {
+		return false
+	}
+	for _, provider := range publicHost {
+		if provider == nil {
+			continue
+		}
+		if name := provider(); name != "" && name == host {
+			return true
+		}
+	}
+	return false
 }
 
 func sameOrigin(origin, host string) bool {

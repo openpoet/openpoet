@@ -670,7 +670,7 @@ func main() {
 	// Same-origin only: no CORS headers are sent, the Host header must name this
 	// machine (DNS-rebinding defence) and requests carrying a foreign Origin are
 	// refused. Must run before tunnel.AuthMiddleware, which strips the tunnel header.
-	r.Use(handlers.HostOriginGuard(allowedHosts(cfg.Bind)))
+	r.Use(handlers.HostOriginGuard(allowedHosts(cfg.Bind), api.PublicHost))
 
 	// Tunnel auth middleware (only activates for tunnel-originated requests)
 	r.Use(tunnel.AuthMiddleware(db, []byte(jwtSecret)))
@@ -1051,6 +1051,7 @@ func main() {
 		r.Get("/documents/{id}", api.GetTempDocument)
 
 		// HTML Artifacts (versioned, stored in the database)
+		r.Get("/links", api.GetLink)
 		r.Post("/artifacts", api.CreateArtifact)
 		r.Get("/artifacts", api.ListArtifacts)
 		r.Get("/artifacts/{id}", api.GetArtifact)

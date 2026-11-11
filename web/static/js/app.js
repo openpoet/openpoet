@@ -5889,6 +5889,22 @@ class OpenPoet {
             </div>
             <div class="card" style="margin-bottom: 16px;">
                 <div class="card-header">
+                    <div class="card-title">Public Address</div>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: 12px; color: var(--color-text-secondary, #999); font-size: 13px;">
+                        The address this OpenPoet instance is reached at from other devices. Links that agents hand out (artifacts, Docs, sessions, tasks) are built on it. Leave empty if the instance is only used on this machine.
+                    </p>
+                    <div class="form-group">
+                        <label class="form-label" for="public-base-url">Public base URL</label>
+                        <input type="url" class="form-input" id="public-base-url" placeholder="https://openpoet.example.com" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false">
+                        <small id="public-base-url-hint" style="display: block; margin-top: 6px; font-size: 12px; color: var(--color-text-secondary, #999);"></small>
+                    </div>
+                    <button class="btn btn-sm btn-primary" onclick="withLoading(this, () => app.savePublicBaseURL())">Save</button>
+                </div>
+            </div>
+            <div class="card" style="margin-bottom: 16px;">
+                <div class="card-header">
                     <div class="card-title">Push Notifications</div>
                 </div>
                 <div class="card-body">
@@ -6048,6 +6064,11 @@ class OpenPoet {
                 const projectsRootInput = document.getElementById('projects-root-path');
                 if (projectsRootInput) {
                     projectsRootInput.value = this.settings.projects_root_path || '';
+                }
+                const publicBaseInput = document.getElementById('public-base-url');
+                if (publicBaseInput) {
+                    publicBaseInput.value = this.settings.public_base_url || '';
+                    this._renderPublicBaseURLHint();
                 }
                 const providerSelect = document.getElementById('whisper-provider');
                 if (providerSelect && this.settings.whisper_provider) {
@@ -7631,6 +7652,32 @@ class OpenPoet {
             if (this.settings) this.settings.projects_root_path = value;
             if (hint) hint.textContent = value ? '' : 'Folder creation is disabled while this is empty.';
             this.showToast('Success', value ? 'Projects root saved' : 'Projects root cleared', 'success');
+        } catch (error) {
+            this._showApiError(error);
+        }
+    }
+
+    _renderPublicBaseURLHint() {
+        const hint = document.getElementById('public-base-url-hint');
+        if (!hint) return;
+        const value = this.settings?.public_base_url || '';
+        hint.textContent = value
+            ? `Links look like ${value}/app/artifact/…`
+            : 'Without it, agents are told there is no link that works outside this machine.';
+    }
+
+    async savePublicBaseURL() {
+        const input = document.getElementById('public-base-url');
+        if (!input) return;
+        const value = input.value.trim();
+        try {
+            await this.api('PUT', '/config/settings', { public_base_url: value });
+            // The server stores it normalized (no trailing slash): show that form.
+            const settings = await this.api('GET', '/config/settings');
+            this.settings = { ...(this.settings || {}), public_base_url: settings?.public_base_url || '' };
+            input.value = this.settings.public_base_url;
+            this._renderPublicBaseURLHint();
+            this.showToast('Success', value ? 'Public base URL saved' : 'Public base URL cleared', 'success');
         } catch (error) {
             this._showApiError(error);
         }

@@ -46,6 +46,7 @@ type artifactPublishToolResult struct {
 	Created  bool             `json:"created"`
 	Redacted bool             `json:"redacted"`
 	Link     string           `json:"link"`
+	URL      string           `json:"url"`
 	Artifact artifactToolView `json:"artifact"`
 }
 
@@ -253,8 +254,20 @@ func FormatArtifactPublished(body []byte, toolPrefix string) string {
 		return string(body)
 	}
 	return fmt.Sprintf("Artifact published: artifact_id %s, version %d (%s). The user was shown a card to open it in the artifact viewer — do NOT paste the HTML or generate links. "+
-		"To change it, call %supdate_artifact with artifact_id %s and base_version %d. Internal link: %s%s",
-		result.ID, result.Version, formatArtifactSize(result.Artifact.SizeBytes), toolPrefix, result.ID, result.Version, result.Link, artifactRedactionNote(result.Redacted))
+		"To change it, call %supdate_artifact with artifact_id %s and base_version %d. Internal link: %s%s%s",
+		result.ID, result.Version, formatArtifactSize(result.Artifact.SizeBytes), toolPrefix, result.ID, result.Version, result.Link,
+		ShareableLinkNote(result.URL, toolPrefix), artifactRedactionNote(result.Redacted))
+}
+
+// ShareableLinkNote tells the agent which link may leave the app. The internal
+// link is a path the OpenPoet UI understands; the shareable one is that path on
+// the instance's public address, which only the server knows. toolPrefix is
+// "openpoet_" for MCP tool names and "" for chat tool names.
+func ShareableLinkNote(publicURL, toolPrefix string) string {
+	if publicURL != "" {
+		return " Shareable link, if the user asks for one to pass on: " + publicURL + " (use it as it is; never build a URL yourself)."
+	}
+	return " If the user asks for a link to pass on, call " + toolPrefix + "get_link; never build a URL yourself."
 }
 
 // FormatArtifactUpdated describes the result of publishing a new version.

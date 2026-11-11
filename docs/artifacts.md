@@ -154,6 +154,10 @@ to the chat assistant, and through `openpoet cli call`.
 | `openpoet_list_artifact_annotations` | `artifact_id`, `status` (default `open`) |
 | `openpoet_resolve_artifact_annotation` | `artifact_id`, `annotation_id`, `resolution_note` |
 
+The link that opens an artifact for someone else comes from `openpoet_get_link`
+(see [`links.md`](links.md)); the publish results carry it when a public base
+URL is configured.
+
 Through the CLI, `html_file` publishes a document from a local file instead of
 passing it inline:
 

@@ -77,7 +77,7 @@ Do NOT call the same tool more than once with the same arguments. If you already
 **Search**: find_files, grep_content
 **Files**: open_file (opens file viewer cards in chat — does NOT read content, use read_file for that)
 **Artifacts**: create_artifact, update_artifact, read_artifact, list_artifacts, list_artifact_annotations, resolve_artifact_annotation (interactive HTML documents the user can annotate)
-**Other**: update_setting, sync_config, create_document
+**Other**: update_setting, sync_config, create_document, get_link (the link that opens an artifact, a Doc, a session or a task; never build a URL yourself)
 `)
 	}
 

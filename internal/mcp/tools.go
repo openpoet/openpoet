@@ -79,6 +79,9 @@ func executeToolWithOptions(client *APIClient, name string, args json.RawMessage
 	if artifactToolNames[name] {
 		return executeArtifactTool(client, name, params, sessionID, conversationID, options.LocalFiles)
 	}
+	if name == "openpoet_get_link" {
+		return executeLinkTool(client, params, sessionID)
+	}
 
 	switch name {
 	case "openpoet_list_skills":
@@ -1209,9 +1212,10 @@ func executeToolWithOptions(client *APIClient, name string, args json.RawMessage
 		var result struct {
 			ID   string `json:"id"`
 			Link string `json:"link"`
+			URL  string `json:"url"`
 		}
 		if json.Unmarshal(body, &result) == nil {
-			return fmt.Sprintf("Document created successfully. A 'View Document' button was automatically displayed to the user. Do NOT generate links — the user will use the native button. Internal link: %s", result.Link), nil
+			return fmt.Sprintf("Document created successfully. A 'View Document' button was automatically displayed to the user. Do NOT generate links — the user will use the native button. Internal link: %s%s", result.Link, ShareableLinkNote(result.URL, "openpoet_")), nil
 		}
 		return string(body), nil
 

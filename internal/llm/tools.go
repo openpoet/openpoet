@@ -501,6 +501,22 @@ func AllToolDefs() []ToolDef {
 			},
 			Context: ToolContextBoth,
 		},
+		{
+			Name: "get_link",
+			Description: "Get the link that opens an artifact, a Doc, a session or a task directly in OpenPoet, ready to pass on to the user (for example in a message they will open on their phone). " +
+				"Use it whenever a link is asked for: only the server knows the address this instance is published at, so never build a URL yourself and never use localhost or a port. " +
+				"The result says whether the link works outside the machine OpenPoet runs on.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"kind":    {Type: "string", Description: "What the link opens", Enum: []string{"artifact", "document", "session", "task"}},
+					"id":      {Type: "string", Description: "The artifact ID, document ID, session ID or task ID. For kind \"session\" it can be omitted to mean the calling session"},
+					"version": {Type: "string", Description: "Artifacts only: open this version instead of the current one"},
+				},
+				Required: []string{"kind"},
+			},
+			Context: ToolContextBoth,
+		},
 		// ──── HTML artifacts (versioned interactive documents stored in OpenPoet) ────
 		{
 			Name: "create_artifact",

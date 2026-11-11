@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -99,6 +100,7 @@ var migrations = []Migration{
 	{Version: 80, Description: "sessions: effective_effort (reported by the runtime) and model_source/effort_source (request, session, project or global) for explicit model/effort", Up: migrateV80},
 	{Version: 81, Description: "artifacts: versioned interactive HTML artifacts stored in the database (artifacts, artifact_versions) and user annotations on them (artifact_annotations)", Up: migrateV81},
 	{Version: 82, Description: "tool policies: allowlists that grant the Docs tools also grant the HTML artifact tools, so artifacts are available wherever Docs already are", Up: migrateV82},
+	{Version: 83, Description: "tool policies: allowlists that grant read_document or read_artifact also grant get_link, the tool that returns the link of an artifact, Doc, session or task", Up: migrateV83},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2313,6 +2315,107 @@ func migrateV82(tx *sqlx.Tx) error {
 			}
 			if _, err := tx.Exec(t.updateSQL, updated, row.ID); err != nil {
 				return fmt.Errorf("migrateV82 failed: %w\nSQL: %s", err, t.updateSQL)
+			}
+		}
+	}
+	return nil
+}
+
+// linkToolFollowing maps the reading tools to get_link: an allowlist that lets
+// an agent read Docs or artifacts also lets it ask for their link.
+var linkToolFollowing = map[string][]string{
+	"read_document": {"get_link"},
+	"read_artifact": {"get_link"},
+}
+
+// extendToolPolicyAllowlist returns the policy JSON with, for every tool of
+// following that its allowlist grants, the tools that follow it added, and
+// whether anything changed. Only policies that work as an allowlist are
+// touched ("deny_all", or "custom" with a non-empty allowed list); a policy
+// that allows everything by default already allows the new tools, and its
+// denied list is left alone. Tool names are matched with or without the
+// "openpoet_" prefix (session policies use it, chat policies do not), and the
+// added names follow the same form. Every other field is preserved.
+func extendToolPolicyAllowlist(policyJSON string, following map[string][]string) (string, bool) {
+	var policy map[string]json.RawMessage
+	if json.Unmarshal([]byte(policyJSON), &policy) != nil {
+		return policyJSON, false
+	}
+	var mode string
+	_ = json.Unmarshal(policy["mode"], &mode)
+	var allowed []string
+	if json.Unmarshal(policy["allowed"], &allowed) != nil {
+		return policyJSON, false
+	}
+	if mode != "deny_all" && !(mode == "custom" && len(allowed) > 0) {
+		return policyJSON, false
+	}
+	present := make(map[string]bool, len(allowed))
+	for _, name := range allowed {
+		present[name] = true
+	}
+	granting := make([]string, 0, len(following))
+	for name := range following {
+		granting = append(granting, name)
+	}
+	sort.Strings(granting) // the order of the added names does not depend on map iteration
+	changed := false
+	for _, prefix := range []string{"openpoet_", ""} {
+		for _, grantingTool := range granting {
+			if !present[prefix+grantingTool] {
+				continue
+			}
+			for _, followingTool := range following[grantingTool] {
+				if name := prefix + followingTool; !present[name] {
+					allowed = append(allowed, name)
+					present[name] = true
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return policyJSON, false
+	}
+	encoded, err := json.Marshal(allowed)
+	if err != nil {
+		return policyJSON, false
+	}
+	policy["allowed"] = encoded
+	updated, err := json.Marshal(policy)
+	if err != nil {
+		return policyJSON, false
+	}
+	return string(updated), true
+}
+
+// migrateV83 makes get_link available wherever reading Docs or artifacts
+// already is, for the same reason as V82: an allowlist names every tool it
+// grants, so a tool added later stays unavailable until the user ticks it.
+func migrateV83(tx *sqlx.Tx) error {
+	targets := []struct{ selectSQL, updateSQL string }{
+		{`SELECT key AS id, value AS policy FROM settings WHERE key IN ('mcp_tool_policy_session', 'mcp_tool_policy_chat', 'mcp_tool_policy_http')`,
+			`UPDATE settings SET value = ? WHERE key = ?`},
+		{`SELECT CAST(id AS TEXT) AS id, tool_policy AS policy FROM projects WHERE tool_policy != ''`,
+			`UPDATE projects SET tool_policy = ? WHERE id = ?`},
+		{`SELECT CAST(id AS TEXT) AS id, tool_policy AS policy FROM ai_agents WHERE tool_policy != ''`,
+			`UPDATE ai_agents SET tool_policy = ? WHERE id = ?`},
+	}
+	for _, t := range targets {
+		var rows []struct {
+			ID     string `db:"id"`
+			Policy string `db:"policy"`
+		}
+		if err := tx.Select(&rows, t.selectSQL); err != nil {
+			return fmt.Errorf("migrateV83 failed: %w\nSQL: %s", err, t.selectSQL)
+		}
+		for _, row := range rows {
+			updated, changed := extendToolPolicyAllowlist(row.Policy, linkToolFollowing)
+			if !changed {
+				continue
+			}
+			if _, err := tx.Exec(t.updateSQL, updated, row.ID); err != nil {
+				return fmt.Errorf("migrateV83 failed: %w\nSQL: %s", err, t.updateSQL)
 			}
 		}
 	}

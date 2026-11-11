@@ -101,7 +101,7 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		if err != nil {
 			return "", err
 		}
-		return mcp.FormatArtifactPublished(encode(artifactPublishResponse(result)), ""), nil
+		return mcp.FormatArtifactPublished(encode(h.api.artifactPublishResponse(ctx, result)), ""), nil
 
 	case "update_artifact":
 		if artifactID == "" {
@@ -123,7 +123,7 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		if err != nil {
 			return "", err
 		}
-		return mcp.FormatArtifactUpdated(encode(artifactPublishResponse(result)), openAnnotations(artifactID), ""), nil
+		return mcp.FormatArtifactUpdated(encode(h.api.artifactPublishResponse(ctx, result)), openAnnotations(artifactID), ""), nil
 
 	case "read_artifact":
 		if artifactID == "" {
@@ -218,4 +218,26 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		return mcp.FormatArtifactAnnotationResolved(artifactID, annotationID, openAnnotations(artifactID)), nil
 	}
 	return "", fmt.Errorf("unknown tool: %s", name)
+}
+
+// executeLinkChatTool runs get_link for the chat assistant: the link that
+// opens an artifact, a Doc, a session or a task. It answers with the same text
+// as the MCP tool.
+func (h *AIHandler) executeLinkChatTool(ctx context.Context, input map[string]interface{}) (string, error) {
+	version := 0
+	if raw := chatToolString(input, "version"); raw != "" && raw != "current" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			return "", fmt.Errorf("version must be a version number")
+		}
+		version = parsed
+	}
+	view, err := h.api.Links().Link(ctx, application.LinkQuery{
+		Kind: chatToolString(input, "kind"), ID: chatToolString(input, "id"), Version: version,
+	})
+	if err != nil {
+		return "", err
+	}
+	data, _ := json.Marshal(view)
+	return mcp.FormatLink(data), nil
 }

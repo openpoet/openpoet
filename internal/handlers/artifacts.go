@@ -60,17 +60,18 @@ func artifactSessionID(r *http.Request, claimed string) string {
 	return strings.TrimSpace(claimed)
 }
 
-func artifactLink(id string) string {
-	return "/app/artifact/" + id
-}
-
-func artifactPublishResponse(result application.ArtifactPublishResult) map[string]any {
+// artifactPublishResponse is what a create or update answers. "link" is the
+// in-app path of the artifact; "url" is that path on the public base URL, and
+// is empty when none is configured.
+func (a *API) artifactPublishResponse(ctx context.Context, result application.ArtifactPublishResult) map[string]any {
+	link := application.ArtifactLinkPath(result.Artifact.ID, 0)
 	return map[string]any{
 		"id":       result.Artifact.ID,
 		"version":  result.Version,
 		"created":  result.Created,
 		"redacted": result.Redacted,
-		"link":     artifactLink(result.Artifact.ID),
+		"link":     link,
+		"url":      a.Links().Absolute(ctx, link),
 		"artifact": result.Artifact,
 	}
 }
@@ -130,7 +131,7 @@ func (a *API) CreateArtifact(w http.ResponseWriter, r *http.Request) {
 		respondApplicationError(w, err)
 		return
 	}
-	respondJSON(w, http.StatusCreated, artifactPublishResponse(result))
+	respondJSON(w, http.StatusCreated, a.artifactPublishResponse(r.Context(), result))
 }
 
 // UpdateArtifact publishes a new version of an existing artifact.
@@ -157,7 +158,7 @@ func (a *API) UpdateArtifact(w http.ResponseWriter, r *http.Request) {
 		respondApplicationError(w, err)
 		return
 	}
-	respondJSON(w, http.StatusOK, artifactPublishResponse(result))
+	respondJSON(w, http.StatusOK, a.artifactPublishResponse(r.Context(), result))
 }
 
 // PatchArtifact changes the title, summary or status (active/archived).

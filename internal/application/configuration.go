@@ -134,6 +134,14 @@ func (s *ConfigurationService) UpdateSettings(ctx context.Context, boundary R4Bo
 		if key == "" || key == "vapid_private_key" || strings.HasSuffix(key, "_iv") || strings.HasSuffix(key, "_preview") || key == "mcp_api_key" {
 			return validationError("reserved_setting_key", "Reserved setting keys cannot be updated directly")
 		}
+		if key == PublicBaseURLSetting {
+			// Stored normalized, so every link is built on the same form.
+			normalized, err := NormalizePublicBaseURL(value)
+			if err != nil {
+				return err
+			}
+			value = normalized
+		}
 		if _, ok := sensitiveApplicationSettings[key]; ok {
 			if value == "" {
 				continue

@@ -1765,6 +1765,9 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 	if artifactChatTools[name] {
 		return h.executeArtifactChatTool(ctx, name, input, conversationID, authorization)
 	}
+	if name == "get_link" {
+		return h.executeLinkChatTool(ctx, input)
+	}
 
 	switch name {
 	case "create_skill":
@@ -3323,7 +3326,9 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			return "", err
 		}
 
-		return fmt.Sprintf("Document created successfully. A 'View Document' button was automatically displayed in chat. Do NOT generate links — the user will use the native button. Internal link: /app/doc/%s", doc.ID), nil
+		link := application.DocumentLinkPath(doc.ID)
+		return fmt.Sprintf("Document created successfully. A 'View Document' button was automatically displayed in chat. Do NOT generate links — the user will use the native button. Internal link: %s%s",
+			link, mcp.ShareableLinkNote(h.api.Links().Absolute(ctx, link), "")), nil
 
 	case "list_directory":
 		projectID, err := parseIDParam(input, "project_id")

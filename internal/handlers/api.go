@@ -135,6 +135,10 @@ type API struct {
 	// restartRecovery resumes sessions a server restart interrupted.
 	restartRecovery *restartRecovery
 
+	// links builds the links handed out for use outside the app (see Links).
+	linksOnce sync.Once
+	links     *application.LinkService
+
 	// ReinitAIProvider is called when legacy AI settings change (kept for backward compat).
 	ReinitAIProvider func()
 	// ReinitAIProviders is called when AI configs/assignments change to reinitialize all providers.
@@ -2695,6 +2699,8 @@ func (a *API) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		respondApplicationError(w, err)
 		return
 	}
+	// The public base URL may have changed: links and the Host guard see it now.
+	a.Links().Invalidate()
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -2883,9 +2889,11 @@ func (a *API) CreateTempDocument(w http.ResponseWriter, r *http.Request) {
 		"session_id":      input.SessionID,
 	})
 
+	link := application.DocumentLinkPath(doc.ID)
 	respondJSON(w, http.StatusCreated, map[string]string{
 		"id":   doc.ID,
-		"link": fmt.Sprintf("/app/doc/%s", doc.ID),
+		"link": link,
+		"url":  a.Links().Absolute(r.Context(), link),
 	})
 }
 

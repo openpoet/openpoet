@@ -377,3 +377,75 @@ func TestMigrationV82ExtendsStoredAllowlists(t *testing.T) {
 		t.Fatalf("a setting that is not a tool policy was rewritten: %s", policy)
 	}
 }
+
+func TestExtendToolPolicyAllowlistGrantsGetLink(t *testing.T) {
+	cases := []struct {
+		name    string
+		policy  string
+		want    []string
+		absent  []string
+		changed bool
+	}{
+		{
+			name:    "session allowlist that reads Docs",
+			policy:  `{"mode":"deny_all","allowed":["openpoet_read_document","openpoet_get_my_task"]}`,
+			want:    []string{"openpoet_read_document", "openpoet_get_my_task", "openpoet_get_link"},
+			absent:  []string{"get_link"},
+			changed: true,
+		},
+		{
+			name:    "reading both Docs and artifacts grants it once",
+			policy:  `{"mode":"deny_all","allowed":["openpoet_read_document","openpoet_read_artifact"]}`,
+			want:    []string{"openpoet_get_link"},
+			changed: true,
+		},
+		{
+			name:    "chat policy uses unprefixed names and keeps its deny list",
+			policy:  `{"mode":"custom","allowed":["read_artifact"],"denied":["delete_task"]}`,
+			want:    []string{"read_artifact", "get_link"},
+			absent:  []string{"openpoet_get_link"},
+			changed: true,
+		},
+		{name: "publish-only allowlist is left alone", policy: `{"mode":"deny_all","allowed":["openpoet_create_document","openpoet_create_artifact"]}`},
+		{name: "allow_all needs nothing", policy: `{"mode":"allow_all","denied":["openpoet_delete_task"]}`},
+		{name: "custom with only a deny list allows it already", policy: `{"mode":"custom","allowed":[],"denied":["openpoet_delete_task"]}`},
+		{name: "already granted", policy: `{"mode":"deny_all","allowed":["openpoet_read_document","openpoet_get_link"]}`},
+		{name: "not JSON", policy: `not json`},
+	}
+	for _, tc := range cases {
+		updated, changed := extendToolPolicyAllowlist(tc.policy, linkToolFollowing)
+		if changed != tc.changed {
+			t.Fatalf("%s: changed = %v, want %v (%s)", tc.name, changed, tc.changed, updated)
+		}
+		if !changed {
+			if updated != tc.policy {
+				t.Fatalf("%s: unchanged policy was rewritten: %s", tc.name, updated)
+			}
+			continue
+		}
+		var parsed struct {
+			Allowed []string `json:"allowed"`
+			Denied  []string `json:"denied"`
+		}
+		if err := json.Unmarshal([]byte(updated), &parsed); err != nil {
+			t.Fatalf("%s: result is not JSON: %s", tc.name, updated)
+		}
+		allowed := map[string]int{}
+		for _, name := range parsed.Allowed {
+			allowed[name]++
+		}
+		for _, name := range tc.want {
+			if allowed[name] != 1 {
+				t.Fatalf("%s: %q appears %d times in %v", tc.name, name, allowed[name], parsed.Allowed)
+			}
+		}
+		for _, name := range tc.absent {
+			if allowed[name] != 0 {
+				t.Fatalf("%s: %q must not be granted: %v", tc.name, name, parsed.Allowed)
+			}
+		}
+		if strings.Contains(tc.policy, `"denied"`) && len(parsed.Denied) == 0 {
+			t.Fatalf("%s: the deny list was dropped: %s", tc.name, updated)
+		}
+	}
+}
