@@ -245,3 +245,103 @@ func (d *DB) UpdateArtifactMeta(ctx context.Context, artifactID string, title, s
 	}
 	return nil
 }
+
+// ArtifactAnnotation is a note the user attached to a text range or an element
+// of one artifact version. The agent reads the open ones and resolves them.
+type ArtifactAnnotation struct {
+	ID             int64        `db:"id" json:"id"`
+	ArtifactID     string       `db:"artifact_id" json:"artifact_id"`
+	Version        int          `db:"version" json:"version"`
+	AnchorJSON     string       `db:"anchor_json" json:"-"`
+	Quote          string       `db:"quote" json:"quote"`
+	Body           string       `db:"body" json:"body"`
+	Status         string       `db:"status" json:"status"`
+	ResolutionNote string       `db:"resolution_note" json:"resolution_note"`
+	ResolvedBy     string       `db:"resolved_by" json:"resolved_by"`
+	ResolvedAt     sql.NullTime `db:"resolved_at" json:"-"`
+	CreatedBy      string       `db:"created_by" json:"created_by"`
+	CreatedAt      time.Time    `db:"created_at" json:"created_at"`
+}
+
+const artifactAnnotationColumns = `id, artifact_id, version, anchor_json, quote, body, status, resolution_note, resolved_by, resolved_at, created_by, created_at`
+
+// CreateArtifactAnnotation stores an open annotation and sets its ID.
+func (d *DB) CreateArtifactAnnotation(ctx context.Context, annotation *ArtifactAnnotation) error {
+	if annotation.AnchorJSON == "" {
+		annotation.AnchorJSON = "{}"
+	}
+	annotation.Status = "open"
+	result, err := d.ExecContext(ctx,
+		`INSERT INTO artifact_annotations (artifact_id, version, anchor_json, quote, body, status, created_by)
+		 VALUES (?, ?, ?, ?, ?, 'open', ?)`,
+		annotation.ArtifactID, annotation.Version, annotation.AnchorJSON, annotation.Quote, annotation.Body, annotation.CreatedBy)
+	if err != nil {
+		return err
+	}
+	annotation.ID, err = result.LastInsertId()
+	return err
+}
+
+// GetArtifactAnnotation returns one annotation by ID.
+func (d *DB) GetArtifactAnnotation(ctx context.Context, id int64) (*ArtifactAnnotation, error) {
+	var annotation ArtifactAnnotation
+	if err := d.GetContext(ctx, &annotation,
+		`SELECT `+artifactAnnotationColumns+` FROM artifact_annotations WHERE id = ?`, id); err != nil {
+		return nil, err
+	}
+	return &annotation, nil
+}
+
+// ListArtifactAnnotations returns an artifact's annotations in creation order.
+// status "" returns all of them; otherwise only "open" or "resolved".
+func (d *DB) ListArtifactAnnotations(ctx context.Context, artifactID, status string) ([]ArtifactAnnotation, error) {
+	annotations := []ArtifactAnnotation{}
+	query := `SELECT ` + artifactAnnotationColumns + ` FROM artifact_annotations WHERE artifact_id = ?`
+	args := []any{artifactID}
+	if status != "" {
+		query += ` AND status = ?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY id`
+	err := d.SelectContext(ctx, &annotations, query, args...)
+	return annotations, err
+}
+
+// CountOpenArtifactAnnotations returns how many annotations of an artifact are
+// still open.
+func (d *DB) CountOpenArtifactAnnotations(ctx context.Context, artifactID string) (int, error) {
+	var count int
+	err := d.GetContext(ctx, &count,
+		`SELECT COUNT(*) FROM artifact_annotations WHERE artifact_id = ? AND status = 'open'`, artifactID)
+	return count, err
+}
+
+// ResolveArtifactAnnotation marks an annotation resolved, recording who
+// resolved it and their note. Resolving an already resolved annotation updates
+// the note and resolver.
+func (d *DB) ResolveArtifactAnnotation(ctx context.Context, id int64, note, resolvedBy string) error {
+	result, err := d.ExecContext(ctx,
+		`UPDATE artifact_annotations SET status = 'resolved', resolution_note = ?, resolved_by = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		note, resolvedBy, id)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// ReopenArtifactAnnotation puts a resolved annotation back to open and clears
+// its resolution.
+func (d *DB) ReopenArtifactAnnotation(ctx context.Context, id int64) error {
+	result, err := d.ExecContext(ctx,
+		`UPDATE artifact_annotations SET status = 'open', resolution_note = '', resolved_by = '', resolved_at = NULL WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}

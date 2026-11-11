@@ -53,6 +53,23 @@ type artifactGetVersionPayload struct {
 	Version int `json:"version,omitempty"`
 }
 
+type artifactAnnotationListPayload struct {
+	Status string `json:"status,omitempty"`
+}
+
+type artifactAnnotationCreatePayload struct {
+	Version int                        `json:"version,omitempty"`
+	Anchor  application.ArtifactAnchor `json:"anchor"`
+	Body    string                     `json:"body"`
+}
+
+// artifactAnnotationChangePayload addresses one annotation of the artifact in
+// the command target.
+type artifactAnnotationChangePayload struct {
+	AnnotationID   int64  `json:"annotation_id"`
+	ResolutionNote string `json:"resolution_note,omitempty"`
+}
+
 type artifactVersionAutomationView struct {
 	application.ArtifactVersionView
 	WasTruncated bool `json:"was_truncated,omitempty"`
@@ -66,6 +83,10 @@ func artifactCollaborationDefinitions() []PlatformCapabilityDefinition {
 		collaborationPayloadLimit(collaborationWriteCapability("artifacts.create", "artifacts", "documents:write"), maxArtifactAutomationPayloadBytes),
 		collaborationPayloadLimit(collaborationWriteCapability("artifacts.update", "artifacts", "documents:write"), maxArtifactAutomationPayloadBytes),
 		collaborationWriteCapability("artifacts.update_meta", "artifacts", "documents:write"),
+		collaborationReadCapability("artifacts.annotations.list", "artifacts", "documents:read"),
+		collaborationWriteCapability("artifacts.annotations.create", "artifacts", "documents:write"),
+		collaborationWriteCapability("artifacts.annotations.resolve", "artifacts", "documents:write"),
+		collaborationWriteCapability("artifacts.annotations.reopen", "artifacts", "documents:write"),
 	}
 }
 
@@ -222,6 +243,73 @@ func (e *artifactCollaborationExecutor) Validate(_ context.Context, input Platfo
 			return e.service.UpdateMeta(ctx, application.UpdateArtifactMetaCommand{
 				ArtifactID: id, Title: payload.Title, Summary: payload.Summary, Status: payload.Status, Authorization: authorization,
 			})
+		}}, nil
+	case "artifacts.annotations.list":
+		var payload artifactAnnotationListPayload
+		if err := decodeCollaborationPayload(input.Payload, &payload); err != nil {
+			return nil, err
+		}
+		id, err := collaborationStringID(target, "", "artifact id")
+		if err != nil {
+			return nil, err
+		}
+		if payload.Status, err = boundedCollaborationInput(payload.Status, "annotation status", 20, false); err != nil {
+			return nil, err
+		}
+		if payload.Status == "" {
+			payload.Status = "open"
+		}
+		return &collaborationValidatedCommand{preview: collaborationPreview(input.Handler, map[string]any{"artifact_id": id, "status": payload.Status}), execute: func(ctx context.Context, _ application.ActionAuthorization) (any, error) {
+			return e.service.ListAnnotations(ctx, id, payload.Status)
+		}}, nil
+	case "artifacts.annotations.create":
+		var payload artifactAnnotationCreatePayload
+		if err := decodeCollaborationPayload(input.Payload, &payload); err != nil {
+			return nil, err
+		}
+		id, err := collaborationStringID(target, "", "artifact id")
+		if err != nil {
+			return nil, err
+		}
+		if payload.Body, err = boundedCollaborationInput(payload.Body, "annotation text", 16<<10, true); err != nil {
+			return nil, err
+		}
+		if payload.Version < 0 {
+			return nil, platformFailure("platform_payload_invalid", "artifact version cannot be negative", false)
+		}
+		return &collaborationValidatedCommand{preview: collaborationPreview(input.Handler, map[string]any{
+			"artifact_id": id, "version": payload.Version, "anchor_type": payload.Anchor.Type, "body_bytes": len(payload.Body),
+		}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+			return e.service.CreateAnnotation(ctx, application.CreateArtifactAnnotationCommand{
+				ArtifactID: id, Version: payload.Version, Anchor: payload.Anchor, Body: payload.Body, Authorization: authorization,
+			})
+		}}, nil
+	case "artifacts.annotations.resolve", "artifacts.annotations.reopen":
+		var payload artifactAnnotationChangePayload
+		if err := decodeCollaborationPayload(input.Payload, &payload); err != nil {
+			return nil, err
+		}
+		id, err := collaborationStringID(target, "", "artifact id")
+		if err != nil {
+			return nil, err
+		}
+		if payload.AnnotationID <= 0 {
+			return nil, platformFailure("platform_payload_invalid", "annotation_id must be a positive integer", false)
+		}
+		if payload.ResolutionNote, err = boundedCollaborationInput(payload.ResolutionNote, "resolution note", 16<<10, false); err != nil {
+			return nil, err
+		}
+		resolve := input.Handler == "artifacts.annotations.resolve"
+		return &collaborationValidatedCommand{preview: collaborationPreview(input.Handler, map[string]any{
+			"artifact_id": id, "annotation_id": payload.AnnotationID, "has_note": payload.ResolutionNote != "",
+		}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+			command := application.ResolveArtifactAnnotationCommand{
+				ArtifactID: id, AnnotationID: payload.AnnotationID, ResolutionNote: payload.ResolutionNote, Authorization: authorization,
+			}
+			if resolve {
+				return e.service.ResolveAnnotation(ctx, command)
+			}
+			return e.service.ReopenAnnotation(ctx, command)
 		}}, nil
 	default:
 		return nil, platformFailure("platform_handler_unsupported", "the artifact capability handler is unsupported", false)

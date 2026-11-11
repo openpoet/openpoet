@@ -45,6 +45,8 @@ const (
 
 	// HTML artifact published (new artifact or new version)
 	MsgTypeArtifactUpdated MessageType = "artifact_updated"
+	// An annotation on an artifact was created, resolved or reopened
+	MsgTypeArtifactAnnotationsChanged MessageType = "artifact_annotations_changed"
 
 	// Notification count updates
 	MsgTypeNotificationCount MessageType = "notification_count"
@@ -307,6 +309,15 @@ func (h *Hub) BroadcastChatDocCard(data interface{}) {
 func (h *Hub) BroadcastArtifactUpdated(data interface{}) {
 	h.BroadcastToChannel("events", &Message{
 		Type: MsgTypeArtifactUpdated,
+		Data: data,
+	})
+}
+
+// BroadcastArtifactAnnotationsChanged tells every UI that an artifact's
+// annotations changed. It carries ids and counts only, never annotation text.
+func (h *Hub) BroadcastArtifactAnnotationsChanged(data interface{}) {
+	h.BroadcastToChannel("events", &Message{
+		Type: MsgTypeArtifactAnnotationsChanged,
 		Data: data,
 	})
 }

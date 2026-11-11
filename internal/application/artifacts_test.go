@@ -199,8 +199,13 @@ func TestArtifactUpdateVersionsConflictAndRead(t *testing.T) {
 }
 
 type recordingArtifactNotifier struct {
-	published []ArtifactView
-	isNew     []bool
+	published         []ArtifactView
+	isNew             []bool
+	annotationChanges []string
+}
+
+func (r *recordingArtifactNotifier) ArtifactAnnotationsChanged(_ context.Context, artifact ArtifactView) {
+	r.annotationChanges = append(r.annotationChanges, artifact.ID)
 }
 
 func (r *recordingArtifactNotifier) ArtifactPublished(_ context.Context, artifact ArtifactView, isNew bool) {
@@ -239,5 +244,149 @@ func TestArtifactNotifierFiresOnlyForStoredPublishes(t *testing.T) {
 		notifier.published[0].ID != id || notifier.published[0].CurrentVersion != 1 || notifier.published[0].SessionID != "sess-n" ||
 		notifier.published[1].ID != id || notifier.published[1].CurrentVersion != 2 {
 		t.Fatalf("notifications = %+v isNew=%v", notifier.published, notifier.isNew)
+	}
+}
+
+func TestArtifactAnnotationsAreBoundedVersionedAndResolvable(t *testing.T) {
+	ctx := context.Background()
+	service, db, effects := artifactTestService(t)
+	notifier := &recordingArtifactNotifier{}
+	service.SetNotifier(notifier)
+	user := ActionAuthorization{Actor: Actor{Type: "user", ID: "ui"}}
+	agent := ActionAuthorization{Actor: Actor{Type: "session", ID: "sess-agent"}}
+
+	created, err := service.Create(ctx, CreateArtifactCommand{Title: "Doc", Content: artifactTestHTML, Authorization: agent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := created.Artifact.ID
+	if _, err := service.Update(ctx, UpdateArtifactCommand{ArtifactID: id, Content: artifactTestHTML + "<!-- v2 -->", Authorization: agent}); err != nil {
+		t.Fatal(err)
+	}
+	effectsBefore := len(effects.changes)
+
+	// A text annotation on the current version (version 0), with control
+	// characters and an oversized context that must be cut down, and a secret
+	// in the note that must not be stored.
+	textNote, err := service.CreateAnnotation(ctx, CreateArtifactAnnotationCommand{
+		ArtifactID: id,
+		Anchor: ArtifactAnchor{
+			Type: "text", Selector: "  #intro > p:nth-of-type(2)  ", Exact: "three \x00stages", Start: 10, End: 22,
+			Prefix: strings.Repeat("p", 500), Suffix: "after", Tag: "ignored-for-text", Label: "x",
+		},
+		Body: "  Explain the stages. password=annotation-secret  ", Authorization: user,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if textNote.Version != 2 || textNote.Status != "open" || textNote.Quote != "three stages" || textNote.CreatedBy != "user:ui" ||
+		textNote.Anchor.Type != "text" || textNote.Anchor.Selector != "#intro > p:nth-of-type(2)" || textNote.Anchor.Exact != "three stages" ||
+		len(textNote.Anchor.Prefix) != maxArtifactAnnotationContextRunes || textNote.Anchor.Start != 10 || textNote.Anchor.End != 22 ||
+		strings.Contains(textNote.Body, "annotation-secret") || !strings.HasPrefix(textNote.Body, "Explain the stages.") {
+		t.Fatalf("text annotation = %+v", textNote)
+	}
+
+	// An element annotation pinned to version 1.
+	elementNote, err := service.CreateAnnotation(ctx, CreateArtifactAnnotationCommand{
+		ArtifactID: id, Version: 1,
+		Anchor: ArtifactAnchor{Type: "element", Selector: "#cta", Tag: "BUTTON", Label: "Launch", Exact: "dropped for elements"},
+		Body:   "Rename", Authorization: user,
+	})
+	if err != nil || elementNote.Version != 1 || elementNote.Quote != "Launch" || elementNote.Anchor.Tag != "button" || elementNote.Anchor.Exact != "" {
+		t.Fatalf("element annotation = %+v err=%v", elementNote, err)
+	}
+	unlabeled, err := service.CreateAnnotation(ctx, CreateArtifactAnnotationCommand{
+		ArtifactID: id, Anchor: ArtifactAnchor{Type: "element", Selector: "svg", Tag: "svg"}, Body: "Bigger chart", Authorization: user,
+	})
+	if err != nil || unlabeled.Quote != "<svg>" {
+		t.Fatalf("unlabeled element annotation = %+v err=%v", unlabeled, err)
+	}
+
+	for name, command := range map[string]CreateArtifactAnnotationCommand{
+		"unknown type":      {ArtifactID: id, Anchor: ArtifactAnchor{Type: "region"}, Body: "x", Authorization: user},
+		"text without text": {ArtifactID: id, Anchor: ArtifactAnchor{Type: "text", Exact: "  "}, Body: "x", Authorization: user},
+		"element no target": {ArtifactID: id, Anchor: ArtifactAnchor{Type: "element"}, Body: "x", Authorization: user},
+		"negative range":    {ArtifactID: id, Anchor: ArtifactAnchor{Type: "text", Exact: "x", Start: 5, End: 2}, Body: "x", Authorization: user},
+		"empty body":        {ArtifactID: id, Anchor: ArtifactAnchor{Type: "text", Exact: "x"}, Body: "   ", Authorization: user},
+		"oversized body":    {ArtifactID: id, Anchor: ArtifactAnchor{Type: "text", Exact: "x"}, Body: strings.Repeat("b", maxArtifactAnnotationBodyRunes+1), Authorization: user},
+		"no actor":          {ArtifactID: id, Anchor: ArtifactAnchor{Type: "text", Exact: "x"}, Body: "x"},
+	} {
+		if _, err := service.CreateAnnotation(ctx, command); !ErrorIsKind(err, ErrorValidation) {
+			t.Fatalf("%s: expected validation error, got %v", name, err)
+		}
+	}
+	if _, err := service.CreateAnnotation(ctx, CreateArtifactAnnotationCommand{ArtifactID: id, Version: 3, Anchor: ArtifactAnchor{Type: "text", Exact: "x"}, Body: "x", Authorization: user}); !ErrorIsKind(err, ErrorNotFound) {
+		t.Fatalf("future version err = %v", err)
+	}
+	if _, err := service.CreateAnnotation(ctx, CreateArtifactAnnotationCommand{ArtifactID: "missing", Anchor: ArtifactAnchor{Type: "text", Exact: "x"}, Body: "x", Authorization: user}); !ErrorIsKind(err, ErrorNotFound) {
+		t.Fatalf("missing artifact err = %v", err)
+	}
+	persisted, err := db.GetArtifactAnnotation(ctx, textNote.ID)
+	if err != nil || strings.Contains(persisted.Body, "annotation-secret") || strings.ContainsRune(persisted.AnchorJSON, 0) {
+		t.Fatalf("persisted annotation = %+v err=%v", persisted, err)
+	}
+
+	// What the agent reads: the open ones, in creation order; the artifact
+	// reports how many are open.
+	open, err := service.ListAnnotations(ctx, id, "open")
+	if err != nil || len(open) != 3 || open[0].ID != textNote.ID || open[2].ID != unlabeled.ID {
+		t.Fatalf("open annotations = %+v err=%v", open, err)
+	}
+	if view, err := service.Get(ctx, id); err != nil || view.OpenAnnotations != 3 {
+		t.Fatalf("artifact open annotations = %+v err=%v", view, err)
+	}
+
+	// The agent resolves one, saying what it did.
+	resolved, err := service.ResolveAnnotation(ctx, ResolveArtifactAnnotationCommand{
+		ArtifactID: id, AnnotationID: textNote.ID, ResolutionNote: "Added a stage table in v3. api_key=resolution-secret", Authorization: agent,
+	})
+	if err != nil || resolved.Status != "resolved" || resolved.ResolvedBy != "session:sess-agent" || resolved.ResolvedAt == nil ||
+		!strings.HasPrefix(resolved.ResolutionNote, "Added a stage table in v3.") || strings.Contains(resolved.ResolutionNote, "resolution-secret") {
+		t.Fatalf("resolved annotation = %+v err=%v", resolved, err)
+	}
+	// Without the artifact id (the MCP tool passes only the annotation id).
+	if _, err := service.ResolveAnnotation(ctx, ResolveArtifactAnnotationCommand{AnnotationID: elementNote.ID, Authorization: agent}); err != nil {
+		t.Fatal(err)
+	}
+	// Through the wrong artifact, an annotation cannot be touched.
+	if _, err := service.ResolveAnnotation(ctx, ResolveArtifactAnnotationCommand{ArtifactID: "other", AnnotationID: unlabeled.ID, Authorization: agent}); !ErrorIsKind(err, ErrorNotFound) {
+		t.Fatalf("wrong artifact err = %v", err)
+	}
+	if _, err := service.ResolveAnnotation(ctx, ResolveArtifactAnnotationCommand{AnnotationID: 99999, Authorization: agent}); !ErrorIsKind(err, ErrorNotFound) {
+		t.Fatalf("missing annotation err = %v", err)
+	}
+	if _, err := service.ResolveAnnotation(ctx, ResolveArtifactAnnotationCommand{AnnotationID: 0, Authorization: agent}); !ErrorIsKind(err, ErrorValidation) {
+		t.Fatalf("zero annotation id err = %v", err)
+	}
+	if _, err := service.ResolveAnnotation(ctx, ResolveArtifactAnnotationCommand{AnnotationID: unlabeled.ID}); !ErrorIsKind(err, ErrorValidation) {
+		t.Fatalf("resolve without actor err = %v", err)
+	}
+
+	stillOpen, err := service.ListAnnotations(ctx, id, "")
+	if err != nil || len(stillOpen) != 3 {
+		t.Fatalf("all annotations = %+v err=%v", stillOpen, err)
+	}
+	if done, err := service.ListAnnotations(ctx, id, "resolved"); err != nil || len(done) != 2 {
+		t.Fatalf("resolved annotations = %+v err=%v", done, err)
+	}
+	if _, err := service.ListAnnotations(ctx, id, "pending"); !ErrorIsKind(err, ErrorValidation) {
+		t.Fatalf("bogus status err = %v", err)
+	}
+	if _, err := service.ListAnnotations(ctx, "missing", "open"); !ErrorIsKind(err, ErrorNotFound) {
+		t.Fatalf("missing artifact list err = %v", err)
+	}
+
+	// The user disagrees and reopens.
+	reopened, err := service.ReopenAnnotation(ctx, ResolveArtifactAnnotationCommand{ArtifactID: id, AnnotationID: textNote.ID, Authorization: user})
+	if err != nil || reopened.Status != "open" || reopened.ResolutionNote != "" || reopened.ResolvedBy != "" || reopened.ResolvedAt != nil {
+		t.Fatalf("reopened annotation = %+v err=%v", reopened, err)
+	}
+	if view, err := service.Get(ctx, id); err != nil || view.OpenAnnotations != 2 {
+		t.Fatalf("artifact open annotations after reopen = %+v err=%v", view, err)
+	}
+
+	// 3 creates + 2 resolves + 1 reopen were announced; failures were not.
+	if len(notifier.annotationChanges) != 6 || len(effects.changes)-effectsBefore != 6 {
+		t.Fatalf("annotation notifications=%d effects=%d, want 6/6", len(notifier.annotationChanges), len(effects.changes)-effectsBefore)
 	}
 }

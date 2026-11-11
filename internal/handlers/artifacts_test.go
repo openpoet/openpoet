@@ -35,6 +35,10 @@ func artifactTestRouter(t *testing.T) (*API, http.Handler) {
 		r.Patch("/artifacts/{id}", api.PatchArtifact)
 		r.Get("/artifacts/{id}/versions/{version}", api.GetArtifactVersion)
 		r.Get("/artifacts/{id}/render", api.RenderArtifact)
+		r.Get("/artifacts/{id}/annotations", api.ListArtifactAnnotations)
+		r.Post("/artifacts/{id}/annotations", api.CreateArtifactAnnotation)
+		r.Post("/artifacts/{id}/annotations/{annotationId}/resolve", api.ResolveArtifactAnnotation)
+		r.Post("/artifacts/{id}/annotations/{annotationId}/reopen", api.ReopenArtifactAnnotation)
 		r.Get("/sessions/{id}/documents", api.ListSessionDocuments)
 		r.Get("/projects/{id}/tasks/{taskId}/documents", api.ListTaskDocuments)
 	})
@@ -322,5 +326,134 @@ func TestArtifactsAppearInSessionAndTaskDocumentListings(t *testing.T) {
 		if len(entries) != 1 || entries[0]["id"] != "artifact:"+id || entries[0]["type"] != "artifact" || entries[0]["title"] != "Plan" || entries[0]["status"] != "v1" {
 			t.Fatalf("%s: entries = %v", path, entries)
 		}
+	}
+}
+
+func TestArtifactAnnotationREST(t *testing.T) {
+	_, router := artifactTestRouter(t)
+	recorder, created := artifactRequest(t, router, http.MethodPost, "/api/artifacts", map[string]any{"title": "Annotated", "html": artifactHandlerHTML}, nil)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("create status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	id, _ := created["id"].(string)
+	base := "/api/artifacts/" + id + "/annotations"
+
+	// The user (UI actor) annotates a text range.
+	recorder, note := artifactRequest(t, router, http.MethodPost, base, map[string]any{
+		"version": 1, "body": "Shorten the title",
+		"anchor": map[string]any{"type": "text", "selector": "h1", "exact": "Roadmap", "start": 0, "end": 7},
+	}, nil)
+	if recorder.Code != http.StatusCreated || note["status"] != "open" || note["quote"] != "Roadmap" || note["version"] != float64(1) {
+		t.Fatalf("annotation create status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	noteID := strconv.FormatInt(int64(note["id"].(float64)), 10)
+	if anchor, _ := note["anchor"].(map[string]any); anchor["type"] != "text" || anchor["selector"] != "h1" || anchor["exact"] != "Roadmap" {
+		t.Fatalf("anchor = %v", note["anchor"])
+	}
+
+	if recorder, body := artifactRequest(t, router, http.MethodPost, base, map[string]any{"body": "x", "anchor": map[string]any{"type": "nope"}}, nil); recorder.Code != http.StatusBadRequest || body["code"] != "invalid_annotation_anchor" {
+		t.Fatalf("bad anchor status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder, _ := artifactRequest(t, router, http.MethodPost, "/api/artifacts/missing/annotations", map[string]any{"body": "x", "anchor": map[string]any{"type": "text", "exact": "x"}}, nil); recorder.Code != http.StatusNotFound {
+		t.Fatalf("missing artifact status = %d", recorder.Code)
+	}
+
+	list := func(query string) []map[string]any {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, base+query, nil)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		var items []map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &items); err != nil || recorder.Code != http.StatusOK {
+			t.Fatalf("list %s: status=%d body=%s", query, recorder.Code, recorder.Body.String())
+		}
+		return items
+	}
+	if items := list("?status=open"); len(items) != 1 || items[0]["body"] != "Shorten the title" {
+		t.Fatalf("open annotations = %v", items)
+	}
+
+	// The agent (session actor) resolves it with a note; the resolver is the
+	// authenticated session, not a value from the request.
+	agent := application.Actor{Type: "session", ID: "sess-agent"}
+	recorder, resolved := artifactRequest(t, router, http.MethodPost, base+"/"+noteID+"/resolve", map[string]any{"resolution_note": "Title shortened in v2"}, &agent)
+	if recorder.Code != http.StatusOK || resolved["status"] != "resolved" || resolved["resolved_by"] != "session:sess-agent" || resolved["resolution_note"] != "Title shortened in v2" {
+		t.Fatalf("resolve status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if items := list("?status=open"); len(items) != 0 {
+		t.Fatalf("resolved annotation still open: %v", items)
+	}
+	if items := list(""); len(items) != 1 {
+		t.Fatalf("all annotations = %v", items)
+	}
+	if recorder, detail := artifactRequest(t, router, http.MethodGet, "/api/artifacts/"+id, nil, nil); recorder.Code != http.StatusOK || detail["open_annotations"] != float64(0) {
+		t.Fatalf("artifact detail = %v", detail)
+	}
+
+	// Reopen without a body (what the UI sends), then the error paths.
+	recorder, reopened := artifactRequest(t, router, http.MethodPost, base+"/"+noteID+"/reopen", nil, nil)
+	if recorder.Code != http.StatusOK || reopened["status"] != "open" || reopened["resolved_by"] != nil {
+		t.Fatalf("reopen status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder, _ := artifactRequest(t, router, http.MethodPost, "/api/artifacts/other/annotations/"+noteID+"/resolve", nil, nil); recorder.Code != http.StatusNotFound {
+		t.Fatalf("resolve through another artifact status = %d", recorder.Code)
+	}
+	if recorder, _ := artifactRequest(t, router, http.MethodPost, base+"/abc/resolve", nil, nil); recorder.Code != http.StatusBadRequest {
+		t.Fatalf("non-numeric annotation id status = %d", recorder.Code)
+	}
+	if recorder, _ := artifactRequest(t, router, http.MethodPost, base+"/424242/resolve", nil, nil); recorder.Code != http.StatusNotFound {
+		t.Fatalf("missing annotation status = %d", recorder.Code)
+	}
+	if request := httptest.NewRequest(http.MethodGet, base+"?status=bogus", nil); true {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("bogus status filter = %d", recorder.Code)
+		}
+	}
+}
+
+// The annotation bridge is added when an artifact is served and never stored.
+func TestArtifactRenderInjectsBridgeWithoutStoringIt(t *testing.T) {
+	_, router := artifactTestRouter(t)
+	cases := map[string]string{
+		"with body":         `<!doctype html><html><body><p>Hello</p></body></html>`,
+		"fragment":          `<div><h1>Fragment</h1></div>`,
+		"two body closings": `<html><body><p>a</p></body><script>var s = "</body>";</script></body></html>`,
+		"uppercase":         `<HTML><BODY><P>Shout</P></BODY ></HTML>`,
+	}
+	for name, html := range cases {
+		recorder, created := artifactRequest(t, router, http.MethodPost, "/api/artifacts", map[string]any{"title": name, "html": html}, nil)
+		if recorder.Code != http.StatusCreated {
+			t.Fatalf("%s: create status = %d body=%s", name, recorder.Code, recorder.Body.String())
+		}
+		id, _ := created["id"].(string)
+
+		request := httptest.NewRequest(http.MethodGet, "/api/artifacts/"+id+"/render", nil)
+		rendered := httptest.NewRecorder()
+		router.ServeHTTP(rendered, request)
+		body := rendered.Body.String()
+		if strings.Count(body, "<script data-openpoet-bridge>") != 1 || !strings.Contains(body, "openpoet-artifact-bridge") {
+			t.Fatalf("%s: rendered document does not carry exactly one bridge", name)
+		}
+		// Removing the bridge gives back the stored HTML byte for byte.
+		start := strings.Index(body, "<script data-openpoet-bridge>")
+		end := strings.Index(body[start:], "</script>") + start + len("</script>")
+		if restored := strings.TrimSuffix(body[:start], "\n") + strings.TrimPrefix(body[end:], "\n"); restored != html {
+			t.Fatalf("%s: artifact HTML was altered by the injection:\n got %q\nwant %q", name, restored, html)
+		}
+		// With a closing body tag, the bridge goes right before the last one.
+		if closing := strings.LastIndex(strings.ToLower(html), "</body"); closing >= 0 && start != closing {
+			t.Fatalf("%s: bridge at %d, want before the last </body> at %d", name, start, closing)
+		}
+
+		recorder, version := artifactRequest(t, router, http.MethodGet, "/api/artifacts/"+id+"/versions/1", nil, nil)
+		if recorder.Code != http.StatusOK || version["content"] != html {
+			t.Fatalf("%s: stored HTML = %v", name, version["content"])
+		}
+	}
+	// The embedded script cannot close its own <script> element early.
+	if strings.Contains(strings.ToLower(artifactRenderDocument("<p>x</p>")[len("<p>x</p>\n<script data-openpoet-bridge>"):len(artifactRenderDocument("<p>x</p>"))-len("</script>")]), "</script") {
+		t.Fatal("bridge source contains a closing script tag")
 	}
 }

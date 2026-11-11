@@ -128,6 +128,239 @@
     display: none;
 }
 
+/* Header toggles (annotate mode, annotations panel) */
+.artifact-viewer-toggle {
+    position: relative;
+}
+.artifact-viewer-toggle[aria-pressed="true"] {
+    color: var(--color-primary);
+    background-color: var(--color-bg);
+    box-shadow: inset 0 0 0 1px var(--color-primary);
+}
+.artifact-viewer-count {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    box-sizing: border-box;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 16px;
+    text-align: center;
+    color: #fff;
+    background-color: #b45309;
+}
+.artifact-viewer-count.hidden {
+    display: none;
+}
+
+/* Annotations panel */
+.artifact-viewer-panel {
+    width: 340px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    color: var(--color-text);
+    background-color: var(--color-bg);
+    border-left: 1px solid var(--color-border);
+}
+.artifact-viewer-panel.hidden {
+    display: none;
+}
+.artifact-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+}
+.artifact-panel-title {
+    font-size: 13px;
+    font-weight: 600;
+}
+.artifact-panel-tabs {
+    display: flex;
+    gap: 2px;
+}
+.artifact-panel-tab {
+    padding: 4px 9px;
+    font: inherit;
+    font-size: 12px;
+    color: var(--color-text-muted);
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+}
+.artifact-panel-tab.active {
+    color: var(--color-text);
+    background-color: var(--color-bg-secondary);
+    border-color: var(--color-border);
+}
+.artifact-panel-tab span {
+    font-variant-numeric: tabular-nums;
+}
+.artifact-panel-composer {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    background-color: var(--color-bg-secondary);
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+}
+.artifact-panel-composer.hidden {
+    display: none;
+}
+.artifact-composer-quote,
+.artifact-annotation-quote {
+    margin: 0;
+    padding: 4px 8px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--color-text-muted);
+    border-left: 3px solid #d97706;
+    overflow-wrap: anywhere;
+    max-height: 5.8em;
+    overflow: hidden;
+}
+.artifact-panel-composer textarea {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 8px;
+    font: inherit;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--color-text);
+    background-color: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    resize: vertical;
+}
+.artifact-composer-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+.artifact-panel-hint {
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--color-text-muted);
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+}
+.artifact-panel-hint.hidden {
+    display: none;
+}
+.artifact-panel-hint.is-error {
+    color: var(--color-danger, #dc2626);
+}
+.artifact-panel-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.artifact-panel-empty {
+    padding: 16px 8px;
+    font-size: 12px;
+    line-height: 1.5;
+    text-align: center;
+    color: var(--color-text-muted);
+}
+.artifact-annotation {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background-color: var(--color-bg-secondary);
+    cursor: pointer;
+}
+.artifact-annotation:hover,
+.artifact-annotation:focus-visible,
+.artifact-annotation.is-active {
+    border-color: #d97706;
+}
+.artifact-annotation-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--color-text-muted);
+}
+.artifact-annotation-number {
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    box-sizing: border-box;
+    border-radius: 9px;
+    font-weight: 600;
+    line-height: 18px;
+    text-align: center;
+    color: #fff;
+    background-color: #b45309;
+}
+.artifact-annotation.is-resolved .artifact-annotation-number {
+    background-color: #64748b;
+}
+.artifact-annotation-tag {
+    padding: 0 6px;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+}
+.artifact-annotation-tag.is-orphan {
+    color: #b45309;
+    border-color: #b45309;
+}
+.artifact-annotation-time {
+    margin-left: auto;
+}
+.artifact-annotation-body {
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.artifact-annotation-resolution {
+    padding: 6px 8px;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    border-radius: 6px;
+    background-color: var(--color-bg);
+}
+.artifact-annotation-resolution strong {
+    display: block;
+    margin-bottom: 2px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+}
+.artifact-annotation-actions {
+    display: flex;
+    justify-content: flex-end;
+}
+.artifact-panel-footer {
+    display: flex;
+    justify-content: flex-end;
+    padding: 10px 12px;
+    border-top: 1px solid var(--color-border);
+    flex-shrink: 0;
+}
+
 /* Artifacts section in the project detail view */
 .project-artifacts-row {
     display: flex;
@@ -190,5 +423,15 @@
     }
     #artifact-viewer-fullscreen {
         display: none; /* the viewer is already full-screen on phones */
+    }
+    /* The annotations panel becomes a bottom sheet under the artifact. */
+    .artifact-viewer-body {
+        flex-direction: column;
+    }
+    .artifact-viewer-panel {
+        width: auto;
+        max-height: 48%;
+        border-left: none;
+        border-top: 1px solid var(--color-border);
     }
 }

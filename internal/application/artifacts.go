@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -37,6 +38,7 @@ type ArtifactStore interface {
 	GetArtifactVersion(context.Context, string, int) (*database.ArtifactVersion, error)
 	AppendArtifactVersion(context.Context, string, int, *database.ArtifactVersion) (*database.Artifact, bool, error)
 	UpdateArtifactMeta(context.Context, string, *string, *string, *string) error
+	ArtifactAnnotationStore
 }
 
 type ArtifactView struct {
@@ -121,6 +123,9 @@ type ArtifactListQuery struct {
 // its card. It carries no HTML.
 type ArtifactNotifier interface {
 	ArtifactPublished(ctx context.Context, artifact ArtifactView, isNew bool)
+	// ArtifactAnnotationsChanged fires when an annotation is created, resolved
+	// or reopened. It carries no annotation text.
+	ArtifactAnnotationsChanged(ctx context.Context, artifact ArtifactView)
 }
 
 type ArtifactService struct {
@@ -352,6 +357,9 @@ func (s *ArtifactService) Get(ctx context.Context, artifactID string) (ArtifactV
 			view.SizeBytes = versions[i].SizeBytes
 		}
 	}
+	if view.OpenAnnotations, err = s.store.CountOpenArtifactAnnotations(ctx, id); err != nil {
+		return ArtifactView{}, err
+	}
 	return view, nil
 }
 
@@ -487,6 +495,281 @@ func artifactVersionView(version *database.ArtifactVersion, includeContent bool)
 	}
 	if includeContent {
 		view.Content = version.Content
+	}
+	return view
+}
+
+// ---- Annotations ----
+
+const (
+	maxArtifactAnnotationBodyRunes     = 4000
+	maxArtifactAnnotationQuoteRunes    = 2000
+	maxArtifactAnnotationContextRunes  = 200
+	maxArtifactAnnotationSelectorRunes = 1000
+	maxArtifactAnnotationLabelRunes    = 300
+)
+
+// ArtifactAnchor locates an annotation inside one version of an artifact. It
+// is produced inside the sandboxed artifact frame, so every field is untrusted
+// input: bounded, stored as data and never interpreted by the server.
+//
+// A "text" anchor is a quote (Exact, with the text just before and after it and
+// its offsets inside the element at Selector). An "element" anchor is a whole
+// element (Selector, with its tag and a short label).
+type ArtifactAnchor struct {
+	Type     string `json:"type"`
+	Selector string `json:"selector,omitempty"`
+	Exact    string `json:"exact,omitempty"`
+	Prefix   string `json:"prefix,omitempty"`
+	Suffix   string `json:"suffix,omitempty"`
+	Start    int    `json:"start,omitempty"`
+	End      int    `json:"end,omitempty"`
+	Tag      string `json:"tag,omitempty"`
+	Label    string `json:"label,omitempty"`
+}
+
+type ArtifactAnnotationView struct {
+	ID             int64          `json:"id"`
+	ArtifactID     string         `json:"artifact_id"`
+	Version        int            `json:"version"`
+	Anchor         ArtifactAnchor `json:"anchor"`
+	Quote          string         `json:"quote,omitempty"`
+	Body           string         `json:"body"`
+	Status         string         `json:"status"`
+	ResolutionNote string         `json:"resolution_note,omitempty"`
+	ResolvedBy     string         `json:"resolved_by,omitempty"`
+	ResolvedAt     *time.Time     `json:"resolved_at,omitempty"`
+	CreatedBy      string         `json:"created_by,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+}
+
+type CreateArtifactAnnotationCommand struct {
+	ArtifactID    string
+	Version       int // 0 means the current version
+	Anchor        ArtifactAnchor
+	Body          string
+	Authorization ActionAuthorization
+}
+
+type ResolveArtifactAnnotationCommand struct {
+	// ArtifactID is optional. When set, the annotation must belong to it.
+	ArtifactID     string
+	AnnotationID   int64
+	ResolutionNote string
+	Authorization  ActionAuthorization
+}
+
+// ArtifactAnnotationStore is the persistence the annotation methods need.
+type ArtifactAnnotationStore interface {
+	CreateArtifactAnnotation(context.Context, *database.ArtifactAnnotation) error
+	GetArtifactAnnotation(context.Context, int64) (*database.ArtifactAnnotation, error)
+	ListArtifactAnnotations(context.Context, string, string) ([]database.ArtifactAnnotation, error)
+	CountOpenArtifactAnnotations(context.Context, string) (int, error)
+	ResolveArtifactAnnotation(context.Context, int64, string, string) error
+	ReopenArtifactAnnotation(context.Context, int64) error
+}
+
+// CreateAnnotation attaches a note to a text range or element of one version.
+func (s *ArtifactService) CreateAnnotation(ctx context.Context, command CreateArtifactAnnotationCommand) (ArtifactAnnotationView, error) {
+	if err := requireActionActor(command.Authorization); err != nil {
+		return ArtifactAnnotationView{}, err
+	}
+	store := s.store
+	id, err := normalizeArtifactID(command.ArtifactID)
+	if err != nil {
+		return ArtifactAnnotationView{}, err
+	}
+	body, err := boundedRedactedInput(command.Body, maxArtifactAnnotationBodyRunes, "Annotation text", true)
+	if err != nil {
+		return ArtifactAnnotationView{}, err
+	}
+	anchor, quote, err := normalizeArtifactAnchor(command.Anchor)
+	if err != nil {
+		return ArtifactAnnotationView{}, err
+	}
+	artifact, err := s.artifact(ctx, id)
+	if err != nil {
+		return ArtifactAnnotationView{}, err
+	}
+	version := command.Version
+	if version == 0 {
+		version = artifact.CurrentVersion
+	}
+	if version < 1 || version > artifact.CurrentVersion {
+		return ArtifactAnnotationView{}, notFoundError("artifact_version_not_found", "Artifact version not found", nil)
+	}
+	encoded, err := json.Marshal(anchor)
+	if err != nil {
+		return ArtifactAnnotationView{}, err
+	}
+	annotation := &database.ArtifactAnnotation{
+		ArtifactID: id, Version: version, AnchorJSON: string(encoded), Quote: quote, Body: body,
+		CreatedBy: command.Authorization.Actor.eventValue(),
+	}
+	if err := store.CreateArtifactAnnotation(ctx, annotation); err != nil {
+		return ArtifactAnnotationView{}, err
+	}
+	stored, err := store.GetArtifactAnnotation(ctx, annotation.ID)
+	if err != nil {
+		return ArtifactAnnotationView{}, err
+	}
+	s.annotationsChanged(ctx, artifact, "annotation_created")
+	return artifactAnnotationView(stored), nil
+}
+
+// ListAnnotations returns an artifact's annotations in creation order. status
+// is "open", "resolved" or "" / "all" for both.
+func (s *ArtifactService) ListAnnotations(ctx context.Context, artifactID, status string) ([]ArtifactAnnotationView, error) {
+	store := s.store
+	id, err := normalizeArtifactID(artifactID)
+	if err != nil {
+		return nil, err
+	}
+	status = strings.TrimSpace(status)
+	switch status {
+	case "all":
+		status = ""
+	case "", "open", "resolved":
+	default:
+		return nil, validationError("invalid_annotation_status", "Annotation status must be open, resolved or all")
+	}
+	if _, err := s.artifact(ctx, id); err != nil {
+		return nil, err
+	}
+	annotations, err := store.ListArtifactAnnotations(ctx, id, status)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]ArtifactAnnotationView, 0, len(annotations))
+	for i := range annotations {
+		views = append(views, artifactAnnotationView(&annotations[i]))
+	}
+	return views, nil
+}
+
+// ResolveAnnotation marks an annotation resolved with a note saying what was
+// done about it.
+func (s *ArtifactService) ResolveAnnotation(ctx context.Context, command ResolveArtifactAnnotationCommand) (ArtifactAnnotationView, error) {
+	if err := requireActionActor(command.Authorization); err != nil {
+		return ArtifactAnnotationView{}, err
+	}
+	note, err := boundedRedactedInput(command.ResolutionNote, maxArtifactAnnotationBodyRunes, "Resolution note", false)
+	if err != nil {
+		return ArtifactAnnotationView{}, err
+	}
+	return s.changeAnnotation(ctx, command, "annotation_resolved", func(store ArtifactAnnotationStore) error {
+		return store.ResolveArtifactAnnotation(ctx, command.AnnotationID, note, command.Authorization.Actor.eventValue())
+	})
+}
+
+// ReopenAnnotation puts a resolved annotation back to open.
+func (s *ArtifactService) ReopenAnnotation(ctx context.Context, command ResolveArtifactAnnotationCommand) (ArtifactAnnotationView, error) {
+	if err := requireActionActor(command.Authorization); err != nil {
+		return ArtifactAnnotationView{}, err
+	}
+	return s.changeAnnotation(ctx, command, "annotation_reopened", func(store ArtifactAnnotationStore) error {
+		return store.ReopenArtifactAnnotation(ctx, command.AnnotationID)
+	})
+}
+
+func (s *ArtifactService) changeAnnotation(ctx context.Context, command ResolveArtifactAnnotationCommand, action string, change func(ArtifactAnnotationStore) error) (ArtifactAnnotationView, error) {
+	store := s.store
+	if command.AnnotationID <= 0 {
+		return ArtifactAnnotationView{}, validationError("invalid_annotation_id", "Annotation ID must be positive")
+	}
+	existing, err := store.GetArtifactAnnotation(ctx, command.AnnotationID)
+	if err != nil || existing == nil {
+		return ArtifactAnnotationView{}, notFoundError("annotation_not_found", "Annotation not found", err)
+	}
+	if expected := strings.TrimSpace(command.ArtifactID); expected != "" && expected != existing.ArtifactID {
+		return ArtifactAnnotationView{}, notFoundError("annotation_not_found", "Annotation not found on this artifact", nil)
+	}
+	if err := change(store); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ArtifactAnnotationView{}, notFoundError("annotation_not_found", "Annotation not found", err)
+		}
+		return ArtifactAnnotationView{}, err
+	}
+	stored, err := store.GetArtifactAnnotation(ctx, command.AnnotationID)
+	if err != nil {
+		return ArtifactAnnotationView{}, err
+	}
+	if artifact, err := s.store.GetArtifact(ctx, stored.ArtifactID); err == nil && artifact != nil {
+		s.annotationsChanged(ctx, artifact, action)
+	}
+	return artifactAnnotationView(stored), nil
+}
+
+func (s *ArtifactService) annotationsChanged(ctx context.Context, artifact *database.Artifact, action string) {
+	publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "artifacts", Action: action, Meta: artifactChangeMeta(artifact)})
+	if s.notifier != nil {
+		s.notifier.ArtifactAnnotationsChanged(ctx, artifactView(artifact))
+	}
+}
+
+// normalizeArtifactAnchor bounds an anchor coming from the artifact frame and
+// returns it with the quote stored next to the annotation (what the agent
+// reads to know which part of the document the note is about).
+func normalizeArtifactAnchor(anchor ArtifactAnchor) (ArtifactAnchor, string, error) {
+	clean := func(value string, limit int) string {
+		value = strings.Map(func(r rune) rune {
+			if r == '\n' || r == '\t' || r >= 0x20 && r != 0x7f {
+				return r
+			}
+			return -1
+		}, value)
+		value = redactReportSecrets(value)
+		if runes := []rune(value); len(runes) > limit {
+			value = string(runes[:limit])
+		}
+		return value
+	}
+	normalized := ArtifactAnchor{
+		Type:     strings.TrimSpace(anchor.Type),
+		Selector: strings.TrimSpace(clean(anchor.Selector, maxArtifactAnnotationSelectorRunes)),
+		Tag:      strings.ToLower(strings.TrimSpace(clean(anchor.Tag, 40))),
+		Label:    strings.TrimSpace(clean(anchor.Label, maxArtifactAnnotationLabelRunes)),
+	}
+	switch normalized.Type {
+	case "text":
+		normalized.Exact = clean(anchor.Exact, maxArtifactAnnotationQuoteRunes)
+		if strings.TrimSpace(normalized.Exact) == "" {
+			return ArtifactAnchor{}, "", validationError("invalid_annotation_anchor", "A text annotation needs the selected text")
+		}
+		normalized.Prefix = clean(anchor.Prefix, maxArtifactAnnotationContextRunes)
+		normalized.Suffix = clean(anchor.Suffix, maxArtifactAnnotationContextRunes)
+		if anchor.Start < 0 || anchor.End < anchor.Start || anchor.End > 64<<20 {
+			return ArtifactAnchor{}, "", validationError("invalid_annotation_anchor", "The annotation text range is invalid")
+		}
+		normalized.Start, normalized.End = anchor.Start, anchor.End
+		return normalized, strings.TrimSpace(normalized.Exact), nil
+	case "element":
+		if normalized.Selector == "" {
+			return ArtifactAnchor{}, "", validationError("invalid_annotation_anchor", "An element annotation needs the element selector")
+		}
+		quote := normalized.Label
+		if quote == "" && normalized.Tag != "" {
+			quote = "<" + normalized.Tag + ">"
+		}
+		return normalized, quote, nil
+	default:
+		return ArtifactAnchor{}, "", validationError("invalid_annotation_anchor", "Annotation anchor type must be text or element")
+	}
+}
+
+func artifactAnnotationView(annotation *database.ArtifactAnnotation) ArtifactAnnotationView {
+	view := ArtifactAnnotationView{
+		ID: annotation.ID, ArtifactID: annotation.ArtifactID, Version: annotation.Version,
+		Quote: annotation.Quote, Body: annotation.Body, Status: annotation.Status,
+		ResolutionNote: annotation.ResolutionNote, ResolvedBy: annotation.ResolvedBy,
+		CreatedBy: annotation.CreatedBy, CreatedAt: annotation.CreatedAt,
+	}
+	// A stored anchor that no longer decodes is shown without an anchor rather
+	// than failing the whole listing.
+	_ = json.Unmarshal([]byte(annotation.AnchorJSON), &view.Anchor)
+	if annotation.ResolvedAt.Valid {
+		resolvedAt := annotation.ResolvedAt.Time
+		view.ResolvedAt = &resolvedAt
 	}
 	return view
 }

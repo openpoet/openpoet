@@ -134,8 +134,8 @@ func collaborationApproval(t *testing.T) PlatformApprovalDecision {
 
 func TestCollaborationPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := collaborationDefinitionsForTest()
-	if len(definitions) != 54 {
-		t.Fatalf("collaboration surface has %d capabilities, want 54", len(definitions))
+	if len(definitions) != 58 {
+		t.Fatalf("collaboration surface has %d capabilities, want 58", len(definitions))
 	}
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -223,9 +223,9 @@ func TestCollaborationPlatformMutationMetadataMatchesManifest(t *testing.T) {
 		counts[route.ApplicationService]++
 		checked++
 	}
-	wantCounts := map[string]int{"DocumentService": 2, "ArtifactService": 3, "ProposalService": 9, "AIAssistantService": 16, "NotificationService": 2, "NotificationDeliveryService": 4, "TokenUsageService": 1}
-	if checked != 37 || !reflect.DeepEqual(counts, wantCounts) {
-		t.Fatalf("checked mutations=%d counts=%v, want 37/%v", checked, counts, wantCounts)
+	wantCounts := map[string]int{"DocumentService": 2, "ArtifactService": 6, "ProposalService": 9, "AIAssistantService": 16, "NotificationService": 2, "NotificationDeliveryService": 4, "TokenUsageService": 1}
+	if checked != 40 || !reflect.DeepEqual(counts, wantCounts) {
+		t.Fatalf("checked mutations=%d counts=%v, want 40/%v", checked, counts, wantCounts)
 	}
 }
 
@@ -233,7 +233,8 @@ func TestCollaborationOperationalReadsUseDedicatedLeastPrivilegeScopes(t *testin
 	want := map[string]string{
 		"documents.get_memory": "documents:read", "documents.get_temp": "documents:read",
 		"artifacts.list": "documents:read", "artifacts.get": "documents:read", "artifacts.get_version": "documents:read",
-		"ai.conversations.list": "ai:read", "ai.conversations.get": "ai:read", "ai.messages.list": "ai:read",
+		"artifacts.annotations.list": "documents:read",
+		"ai.conversations.list":      "ai:read", "ai.conversations.get": "ai:read", "ai.messages.list": "ai:read",
 		"ai.suggestions.list": "ai:read", "ai.suggestions.get": "ai:read", "ai.status": "ai:read",
 		"notifications.list": "notifications:read", "notifications.active": "notifications:read",
 		"notifications.unread_count": "notifications:read", "notifications.preference": "notifications:read",
@@ -272,6 +273,9 @@ func collaborationMutationDryRunCases() []collaborationDryRunCase {
 		{"artifacts.create", `{}`, `{"title":"Plan","html":"<html><body>artifact-secret-content</body></html>"}`},
 		{"artifacts.update", `{"id":"art00001"}`, `{"html":"<html><body>artifact-secret-content</body></html>","base_version":1}`},
 		{"artifacts.update_meta", `{"id":"art00001"}`, `{"title":"artifact-secret-content"}`},
+		{"artifacts.annotations.create", `{"id":"art00001"}`, `{"anchor":{"type":"text","exact":"artifact-secret-content"},"body":"artifact-secret-content"}`},
+		{"artifacts.annotations.resolve", `{"id":"art00001"}`, `{"annotation_id":3,"resolution_note":"artifact-secret-content"}`},
+		{"artifacts.annotations.reopen", `{"id":"art00001"}`, `{"annotation_id":3}`},
 		{"proposals.memory.create", `{"id":1}`, `{"content":"proposal-secret-content"}`},
 		{"proposals.memory.approve", proposal, `{}`}, {"proposals.memory.reject", proposal, `{}`},
 		{"proposals.task.approve", proposal, `{}`}, {"proposals.task.reject", proposal, `{}`},
@@ -302,8 +306,8 @@ func TestCollaborationEveryManifestMutationDryRunsWithoutEffectOrSecretEcho(t *t
 	_, registry := collaborationTestRegistry(t, collaborationTestServices())
 	actor := collaborationActor(definitions)
 	cases := collaborationMutationDryRunCases()
-	if len(cases) != 38 {
-		t.Fatalf("dry-run cases=%d want=38", len(cases))
+	if len(cases) != 41 {
+		t.Fatalf("dry-run cases=%d want=41", len(cases))
 	}
 	seen := map[string]struct{}{}
 	for _, testCase := range cases {
@@ -326,7 +330,7 @@ func TestCollaborationEveryManifestMutationDryRunsWithoutEffectOrSecretEcho(t *t
 		}
 		seen[testCase.capability] = struct{}{}
 	}
-	if len(seen) != 38 {
+	if len(seen) != 41 {
 		t.Fatalf("dry-run covered %d unique mutations", len(seen))
 	}
 }

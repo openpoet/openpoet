@@ -831,6 +831,12 @@ class OpenPoet {
             case 'artifact_updated':
                 this.handleArtifactUpdated(msg.data);
                 break;
+            case 'artifact_annotations_changed':
+                window.artifactViewer?.handleAnnotationsChanged(msg.data);
+                if (this.currentView === 'project-detail' && this._detailProject && msg.data?.project_id === this._detailProject.id) {
+                    this.loadProjectArtifacts(this._detailProject.id);
+                }
+                break;
             default:
                 // Route hook messages to HookManager
                 if (msg.type && msg.type.startsWith('hook_') && window.hookManager) {

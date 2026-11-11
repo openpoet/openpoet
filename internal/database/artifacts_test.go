@@ -153,3 +153,73 @@ func TestListArtifactsFiltersAndMeta(t *testing.T) {
 		t.Fatalf("meta update on missing artifact err = %v", err)
 	}
 }
+
+func TestArtifactAnnotationLifecycle(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	artifact, v := newTestArtifact("art0000n", 1, "sess-n")
+	if err := db.CreateArtifact(ctx, artifact, v); err != nil {
+		t.Fatal(err)
+	}
+
+	first := &ArtifactAnnotation{ArtifactID: "art0000n", Version: 1, AnchorJSON: `{"type":"text","exact":"quote"}`, Quote: "quote", Body: "fix this", CreatedBy: "user:ui"}
+	second := &ArtifactAnnotation{ArtifactID: "art0000n", Version: 1, Body: "and this", CreatedBy: "user:ui"}
+	for _, annotation := range []*ArtifactAnnotation{first, second} {
+		if err := db.CreateArtifactAnnotation(ctx, annotation); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if first.ID == 0 || second.ID <= first.ID {
+		t.Fatalf("annotation ids = %d, %d", first.ID, second.ID)
+	}
+	stored, err := db.GetArtifactAnnotation(ctx, second.ID)
+	if err != nil || stored.Status != "open" || stored.AnchorJSON != "{}" || stored.ResolvedAt.Valid {
+		t.Fatalf("stored annotation = %+v err=%v", stored, err)
+	}
+	if count, err := db.CountOpenArtifactAnnotations(ctx, "art0000n"); err != nil || count != 2 {
+		t.Fatalf("open count = %d err=%v", count, err)
+	}
+
+	if err := db.ResolveArtifactAnnotation(ctx, first.ID, "done in v2", "session:sess-n"); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := db.GetArtifactAnnotation(ctx, first.ID)
+	if err != nil || resolved.Status != "resolved" || resolved.ResolutionNote != "done in v2" || resolved.ResolvedBy != "session:sess-n" || !resolved.ResolvedAt.Valid {
+		t.Fatalf("resolved annotation = %+v err=%v", resolved, err)
+	}
+	listed := func(status string) []int64 {
+		t.Helper()
+		annotations, err := db.ListArtifactAnnotations(ctx, "art0000n", status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids := make([]int64, 0, len(annotations))
+		for _, annotation := range annotations {
+			ids = append(ids, annotation.ID)
+		}
+		return ids
+	}
+	if open, done, all := listed("open"), listed("resolved"), listed(""); len(open) != 1 || open[0] != second.ID || len(done) != 1 || done[0] != first.ID || len(all) != 2 || all[0] != first.ID {
+		t.Fatalf("open=%v resolved=%v all=%v", open, done, all)
+	}
+	if items, err := db.ListArtifacts(ctx, ArtifactFilter{SessionID: "sess-n"}); err != nil || len(items) != 1 || items[0].OpenAnnotations != 1 {
+		t.Fatalf("listing open annotations = %+v err=%v", items, err)
+	}
+
+	if err := db.ReopenArtifactAnnotation(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := db.GetArtifactAnnotation(ctx, first.ID)
+	if err != nil || reopened.Status != "open" || reopened.ResolutionNote != "" || reopened.ResolvedBy != "" || reopened.ResolvedAt.Valid {
+		t.Fatalf("reopened annotation = %+v err=%v", reopened, err)
+	}
+	if err := db.ResolveArtifactAnnotation(ctx, 9999, "", ""); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("resolve missing err = %v", err)
+	}
+	if err := db.ReopenArtifactAnnotation(ctx, 9999); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("reopen missing err = %v", err)
+	}
+	if _, err := db.GetArtifactAnnotation(ctx, 9999); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("get missing err = %v", err)
+	}
+}

@@ -146,9 +146,10 @@ func validateUIActionManifest(t *testing.T, manifest uiActionManifest) (map[stri
 	// 128 with the chunked voice upload completion (voice.transcribe); 129 with
 	// sessions.set_permission_mode; 128 after the Node sidecar's /api/ai/execute-tool
 	// route was removed; 131 with the three HTML artifact mutations
-	// (artifacts.create/update/update_meta).
-	if implemented != 131 || internal != 3 {
-		t.Errorf("manifest convergence = %d implemented/%d internal, want 131/3", implemented, internal)
+	// (artifacts.create/update/update_meta); 134 with the three artifact
+	// annotation mutations (create/resolve/reopen).
+	if implemented != 134 || internal != 3 {
+		t.Errorf("manifest convergence = %d implemented/%d internal, want 134/3", implemented, internal)
 	}
 	allowlist := make(map[string]struct{}, len(manifest.Allowlist))
 	for _, item := range manifest.Allowlist {

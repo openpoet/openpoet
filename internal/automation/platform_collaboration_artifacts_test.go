@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -114,6 +115,54 @@ func TestArtifactCapabilitiesPublishVersionAndReadThroughTheSharedService(t *tes
 	}
 	if _, err = dispatch("artifacts.update_meta", target, `{}`); !errors.As(err, &dispatchErr) || dispatchErr.Code != "platform_payload_invalid" {
 		t.Fatalf("empty update_meta err = %v", err)
+	}
+
+	// Annotations: created on the artifact, listed open by default, resolved
+	// and reopened by annotation id through the artifact in the target.
+	note, err := dispatch("artifacts.annotations.create", target, `{"anchor":{"type":"text","selector":"h1","exact":"v2"},"body":"Rename the heading"}`)
+	if err != nil || note["status"] != "open" || note["quote"] != "v2" || note["version"] != float64(2) || note["created_by"] != "automation_client:assistant" {
+		t.Fatalf("annotation create = %v err=%v", note, err)
+	}
+	annotationID := int64(note["id"].(float64))
+	listAnnotations := func(payload string) []application.ArtifactAnnotationView {
+		t.Helper()
+		result, err := DispatchPlatformCapability(ctx, registry, PlatformDispatchRequest{
+			Capability: "artifacts.annotations.list", Target: json.RawMessage(target), Payload: json.RawMessage(payload), Actor: actor,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		items, ok := result.Result.([]application.ArtifactAnnotationView)
+		if !ok {
+			t.Fatalf("annotation list result type = %T", result.Result)
+		}
+		return items
+	}
+	if open := listAnnotations(`{}`); len(open) != 1 || open[0].ID != annotationID || open[0].Body != "Rename the heading" {
+		t.Fatalf("open annotations = %+v", open)
+	}
+	change := `{"annotation_id":` + strconv.FormatInt(annotationID, 10) + `,"resolution_note":"Renamed in v3"}`
+	resolvedNote, err := dispatch("artifacts.annotations.resolve", target, change)
+	if err != nil || resolvedNote["status"] != "resolved" || resolvedNote["resolution_note"] != "Renamed in v3" || resolvedNote["resolved_by"] != "automation_client:assistant" {
+		t.Fatalf("annotation resolve = %v err=%v", resolvedNote, err)
+	}
+	if open := listAnnotations(`{}`); len(open) != 0 {
+		t.Fatalf("resolved annotation still listed as open: %+v", open)
+	}
+	if done := listAnnotations(`{"status":"resolved"}`); len(done) != 1 {
+		t.Fatalf("resolved annotations = %+v", done)
+	}
+	if _, err = dispatch("artifacts.annotations.resolve", `{"id":"another"}`, change); dispatchCode(err) != "annotation_not_found" {
+		t.Fatalf("resolve through another artifact err = %v", err)
+	}
+	if reopened, err := dispatch("artifacts.annotations.reopen", target, change); err != nil || reopened["status"] != "open" {
+		t.Fatalf("annotation reopen = %v err=%v", reopened, err)
+	}
+	if _, err = dispatch("artifacts.annotations.resolve", target, `{}`); dispatchCode(err) != "platform_payload_invalid" {
+		t.Fatalf("resolve without annotation_id err = %v", err)
+	}
+	if _, err = dispatch("artifacts.annotations.create", target, `{"anchor":{"type":"shape"},"body":"x"}`); dispatchCode(err) != "invalid_annotation_anchor" {
+		t.Fatalf("bad anchor err = %v", err)
 	}
 
 	// Without documents:write the mutations are refused.

@@ -2,10 +2,13 @@ package handlers
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -253,6 +256,94 @@ func parseArtifactVersion(raw string) (int, bool) {
 	return version, true
 }
 
+// ListArtifactAnnotations returns an artifact's annotations
+// (?status=open|resolved|all, default all).
+func (a *API) ListArtifactAnnotations(w http.ResponseWriter, r *http.Request) {
+	service, ok := a.artifactService(w)
+	if !ok {
+		return
+	}
+	views, err := service.ListAnnotations(platformUIContext(r), chi.URLParam(r, "id"), r.URL.Query().Get("status"))
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, views)
+}
+
+// CreateArtifactAnnotation stores the user's note on a text range or element.
+// The anchor was computed inside the sandboxed artifact frame, so the service
+// treats it as untrusted data.
+func (a *API) CreateArtifactAnnotation(w http.ResponseWriter, r *http.Request) {
+	service, ok := a.artifactService(w)
+	if !ok {
+		return
+	}
+	var input struct {
+		Version flexibleID                 `json:"version"`
+		Anchor  application.ArtifactAnchor `json:"anchor"`
+		Body    string                     `json:"body"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&input); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	view, err := service.CreateAnnotation(platformUIContext(r), application.CreateArtifactAnnotationCommand{
+		ArtifactID: chi.URLParam(r, "id"), Version: int(input.Version), Anchor: input.Anchor, Body: input.Body,
+		Authorization: platformUIAuthorization(r),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusCreated, view)
+}
+
+// ResolveArtifactAnnotation marks an annotation resolved, with an optional note.
+func (a *API) ResolveArtifactAnnotation(w http.ResponseWriter, r *http.Request) {
+	a.changeArtifactAnnotation(w, r, true)
+}
+
+// ReopenArtifactAnnotation puts a resolved annotation back to open.
+func (a *API) ReopenArtifactAnnotation(w http.ResponseWriter, r *http.Request) {
+	a.changeArtifactAnnotation(w, r, false)
+}
+
+func (a *API) changeArtifactAnnotation(w http.ResponseWriter, r *http.Request, resolve bool) {
+	service, ok := a.artifactService(w)
+	if !ok {
+		return
+	}
+	annotationID, err := strconv.ParseInt(chi.URLParam(r, "annotationId"), 10, 64)
+	if err != nil || annotationID <= 0 {
+		respondError(w, http.StatusBadRequest, "Invalid annotation ID")
+		return
+	}
+	var input struct {
+		ResolutionNote string `json:"resolution_note"`
+	}
+	// The body is optional: the UI resolves and reopens without one.
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&input); err != nil && !errors.Is(err, io.EOF) {
+		respondError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	command := application.ResolveArtifactAnnotationCommand{
+		ArtifactID: chi.URLParam(r, "id"), AnnotationID: annotationID, ResolutionNote: input.ResolutionNote,
+		Authorization: platformUIAuthorization(r),
+	}
+	var view application.ArtifactAnnotationView
+	if resolve {
+		view, err = service.ResolveAnnotation(platformUIContext(r), command)
+	} else {
+		view, err = service.ReopenAnnotation(platformUIContext(r), command)
+	}
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, view)
+}
+
 // artifactDocumentIDPrefix marks an artifact in the document listings and doc
 // cards that also carry Docs and plans ("plan:<session>" is the precedent). The
 // UI document viewer hands any id with this prefix to the artifact viewer.
@@ -332,6 +423,17 @@ func (n platformArtifactNotifier) ArtifactPublished(_ context.Context, artifact 
 	n.api.hub.BroadcastArtifactUpdated(update)
 }
 
+func (n platformArtifactNotifier) ArtifactAnnotationsChanged(_ context.Context, artifact application.ArtifactView) {
+	if n.api == nil || n.api.hub == nil {
+		return
+	}
+	update := map[string]interface{}{"artifact_id": artifact.ID, "session_id": artifact.SessionID}
+	if artifact.ProjectID != nil {
+		update["project_id"] = *artifact.ProjectID
+	}
+	n.api.hub.BroadcastArtifactAnnotationsChanged(update)
+}
+
 // artifactContentSecurityPolicy is sent with every rendered artifact. The HTML
 // is agent-generated and treated as hostile:
 //   - sandbox allow-scripts: scripts run, but in an opaque origin (no cookies,
@@ -398,8 +500,29 @@ func (a *API) RenderArtifact(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(artifactRenderDocument(view.Content)))
 }
 
+// artifactBridgeScript is the annotation bridge appended to an artifact when it
+// is served to the viewer. It is never stored with the artifact.
+//
+//go:embed artifact_bridge.js
+var artifactBridgeScript string
+
+var artifactBodyClosePattern = regexp.MustCompile(`(?i)</body\s*>`)
+
 // artifactRenderDocument returns the HTML sent to the sandboxed iframe for a
-// stored version.
+// stored version: the artifact plus the annotation bridge, placed before the
+// last </body> or, when there is none, at the end of the document.
+//
+// The bridge runs inside the same sandbox as the artifact and gets no extra
+// capability: it only reports selections to the embedding page and draws
+// highlights. If an artifact's own markup swallows it (an unclosed <script>,
+// for instance) the artifact still renders and annotations are simply
+// unavailable for that version.
 func artifactRenderDocument(html string) string {
-	return html
+	bridge := "<script data-openpoet-bridge>" + strings.ReplaceAll(artifactBridgeScript, "</script", "<\\/script") + "</script>"
+	matches := artifactBodyClosePattern.FindAllStringIndex(html, -1)
+	if len(matches) == 0 {
+		return html + "\n" + bridge
+	}
+	at := matches[len(matches)-1][0]
+	return html[:at] + bridge + "\n" + html[at:]
 }

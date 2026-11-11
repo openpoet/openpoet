@@ -1052,6 +1052,10 @@ func main() {
 		r.Patch("/artifacts/{id}", api.PatchArtifact)
 		r.Get("/artifacts/{id}/versions/{version}", api.GetArtifactVersion)
 		r.Get("/artifacts/{id}/render", api.RenderArtifact)
+		r.Get("/artifacts/{id}/annotations", api.ListArtifactAnnotations)
+		r.Post("/artifacts/{id}/annotations", api.CreateArtifactAnnotation)
+		r.Post("/artifacts/{id}/annotations/{annotationId}/resolve", api.ResolveArtifactAnnotation)
+		r.Post("/artifacts/{id}/annotations/{annotationId}/reopen", api.ReopenArtifactAnnotation)
 
 		// AI
 		r.Get("/ai/status", aiHandler.HandleStatus)
