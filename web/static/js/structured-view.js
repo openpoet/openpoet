@@ -607,7 +607,7 @@ class StructuredViewManager {
                 </svg>
             </div>
             <div class="sv-doc-card-title">${this._escapeHtml(title)}</div>
-            <button class="sv-doc-card-btn"${docId ? '' : ' disabled'}>View Document</button>
+            <button class="sv-doc-card-btn"${docId ? '' : ' disabled'}>${data.type === 'artifact' ? 'Open artifact' : 'View Document'}</button>
         `;
 
         if (docId) {
@@ -1398,6 +1398,11 @@ class StructuredViewManager {
                 if (block.tool_name?.endsWith('openpoet_create_document')) {
                     return this._renderDocCardBlock(view, block);
                 }
+                // Artifact publishes carry a whole HTML document as input: show
+                // a card that opens the artifact instead of dumping the HTML.
+                if (this._isArtifactPublishTool(block.tool_name)) {
+                    return this._renderDocCardBlock(view, block, { artifact: true });
+                }
                 return this._renderToolUseBlock(block);
             case 'tool_result': {
                 // If this tool_result corresponds to a create_document, render as doc card update
@@ -1412,6 +1417,19 @@ class StructuredViewManager {
                         }
                     }
                     return null; // suppress generic tool_result for doc cards
+                }
+                if (this._isArtifactPublishTool(meta?.tool_name)) {
+                    const content = block.content || '';
+                    // create: "Internal link: /app/artifact/<id>"; update: "Artifact <id> is now at version N"
+                    const match = content.match(/\/app\/artifact\/([a-zA-Z0-9-]+)/) || content.match(/\bArtifact ([a-zA-Z0-9-]+) is now at version/);
+                    const artifactId = match ? match[1] : meta.artifactId;
+                    const btn = meta.cardEl?.querySelector('.sv-doc-card-btn');
+                    if (artifactId && btn) {
+                        btn.disabled = false;
+                        btn.onclick = () => window.artifactViewer?.open(artifactId);
+                        return null; // the card stands for the result
+                    }
+                    // A failed publish: fall through so the error text is shown.
                 }
                 if (meta?.tool_name === 'AskUserQuestion' && meta.cardEl) {
                     this._applyAskUserAnswers(meta, block.content || '');
@@ -1490,7 +1508,12 @@ class StructuredViewManager {
         }
     }
 
-    _renderDocCardBlock(view, block) {
+    _isArtifactPublishTool(toolName) {
+        return !!toolName && (toolName.endsWith('openpoet_create_artifact') || toolName.endsWith('openpoet_update_artifact'));
+    }
+
+    _renderDocCardBlock(view, block, options = {}) {
+        if (options.artifact) return this._renderArtifactCardBlock(view, block);
         const title = block.tool_input?.title || 'Document';
         const div = document.createElement('div');
         div.className = 'sv-doc-card';
@@ -1517,6 +1540,31 @@ class StructuredViewManager {
             });
         }
 
+        return div;
+    }
+
+    _renderArtifactCardBlock(view, block) {
+        const input = block.tool_input || {};
+        const isUpdate = block.tool_name.endsWith('openpoet_update_artifact');
+        const artifactId = typeof input.artifact_id === 'string' ? input.artifact_id.replace(/^artifact:/, '') : '';
+        const title = input.title || (isUpdate ? `Artifact ${artifactId} — new version` : 'Artifact');
+        const div = document.createElement('div');
+        div.className = 'sv-doc-card';
+        div.innerHTML = `
+            <div class="sv-doc-card-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="4" width="18" height="16" rx="2"/>
+                    <line x1="3" y1="9" x2="21" y2="9"/>
+                    <line x1="9" y1="9" x2="9" y2="20"/>
+                </svg>
+            </div>
+            <div class="sv-doc-card-title">${this._escapeHtml(title)}</div>
+            <button class="sv-doc-card-btn" disabled>Open artifact</button>
+        `;
+        // The tool_result enables the button once the publish succeeded.
+        if (view?.toolIdMap) {
+            view.toolIdMap.set(block.tool_id, { tool_name: block.tool_name, title, cardEl: div, artifactId });
+        }
         return div;
     }
 

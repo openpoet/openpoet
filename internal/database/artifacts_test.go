@@ -3,7 +3,9 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -25,8 +27,8 @@ func TestMigrationV81CreatesArtifactTables(t *testing.T) {
 		}
 	}
 	var version int
-	if err := db.Get(&version, `SELECT version FROM schema_version LIMIT 1`); err != nil || version < 81 {
-		t.Fatalf("schema version = %d (err %v), want >= 81", version, err)
+	if err := db.Get(&version, `SELECT version FROM schema_version LIMIT 1`); err != nil || version < 82 {
+		t.Fatalf("schema version = %d (err %v), want >= 82", version, err)
 	}
 }
 
@@ -221,5 +223,157 @@ func TestArtifactAnnotationLifecycle(t *testing.T) {
 	}
 	if _, err := db.GetArtifactAnnotation(ctx, 9999); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("get missing err = %v", err)
+	}
+}
+
+func TestExtendToolPolicyWithArtifactTools(t *testing.T) {
+	cases := []struct {
+		name    string
+		policy  string
+		want    []string // names that must be in "allowed" afterwards
+		absent  []string // names that must not be
+		changed bool
+	}{
+		{
+			name:    "session allowlist with both doc tools",
+			policy:  `{"mode":"deny_all","allowed":["openpoet_create_document","openpoet_read_document","openpoet_get_my_task"]}`,
+			want:    []string{"openpoet_get_my_task", "openpoet_create_artifact", "openpoet_update_artifact", "openpoet_resolve_artifact_annotation", "openpoet_read_artifact", "openpoet_list_artifacts", "openpoet_list_artifact_annotations"},
+			absent:  []string{"create_artifact"},
+			changed: true,
+		},
+		{
+			name:    "read-only allowlist gets only the read tools",
+			policy:  `{"mode":"deny_all","allowed":["openpoet_read_document"]}`,
+			want:    []string{"openpoet_read_artifact", "openpoet_list_artifacts", "openpoet_list_artifact_annotations"},
+			absent:  []string{"openpoet_create_artifact", "openpoet_update_artifact", "openpoet_resolve_artifact_annotation"},
+			changed: true,
+		},
+		{
+			name:    "chat policy uses unprefixed names",
+			policy:  `{"mode":"custom","allowed":["create_document","list_tasks"],"denied":["delete_task"]}`,
+			want:    []string{"list_tasks", "create_artifact", "update_artifact", "resolve_artifact_annotation"},
+			absent:  []string{"openpoet_create_artifact", "read_artifact"},
+			changed: true,
+		},
+		{name: "allowlist without doc tools is left alone", policy: `{"mode":"deny_all","allowed":["openpoet_list_tasks"]}`},
+		{name: "allow_all needs nothing", policy: `{"mode":"allow_all","denied":["openpoet_delete_task"]}`},
+		{name: "custom with only a deny list allows new tools already", policy: `{"mode":"custom","allowed":[],"denied":["openpoet_delete_task"]}`},
+		{name: "deny everything stays deny everything", policy: `{"mode":"deny_all","allowed":[]}`},
+		{name: "empty object", policy: `{}`},
+		{name: "not JSON", policy: `not json`},
+		{
+			name:   "already extended is not changed again",
+			policy: `{"mode":"deny_all","allowed":["openpoet_read_document","openpoet_read_artifact","openpoet_list_artifacts","openpoet_list_artifact_annotations"]}`,
+		},
+	}
+	for _, tc := range cases {
+		updated, changed := extendToolPolicyWithArtifactTools(tc.policy)
+		if changed != tc.changed {
+			t.Fatalf("%s: changed = %v, want %v (%s)", tc.name, changed, tc.changed, updated)
+		}
+		if !changed {
+			if updated != tc.policy {
+				t.Fatalf("%s: unchanged policy was rewritten: %s", tc.name, updated)
+			}
+			continue
+		}
+		var parsed struct {
+			Mode    string   `json:"mode"`
+			Allowed []string `json:"allowed"`
+			Denied  []string `json:"denied"`
+		}
+		if err := json.Unmarshal([]byte(updated), &parsed); err != nil {
+			t.Fatalf("%s: result is not JSON: %s", tc.name, updated)
+		}
+		allowed := map[string]int{}
+		for _, name := range parsed.Allowed {
+			allowed[name]++
+		}
+		for _, name := range tc.want {
+			if allowed[name] != 1 {
+				t.Fatalf("%s: %q appears %d times in %v", tc.name, name, allowed[name], parsed.Allowed)
+			}
+		}
+		for _, name := range tc.absent {
+			if allowed[name] != 0 {
+				t.Fatalf("%s: %q must not be granted: %v", tc.name, name, parsed.Allowed)
+			}
+		}
+		// Running it again changes nothing.
+		if again, changedAgain := extendToolPolicyWithArtifactTools(updated); changedAgain || again != updated {
+			t.Fatalf("%s: not idempotent: %s", tc.name, again)
+		}
+	}
+	// The deny list and the mode of a changed policy are preserved.
+	updated, _ := extendToolPolicyWithArtifactTools(`{"mode":"custom","allowed":["create_document"],"denied":["delete_task"]}`)
+	var kept struct {
+		Mode   string   `json:"mode"`
+		Denied []string `json:"denied"`
+	}
+	if err := json.Unmarshal([]byte(updated), &kept); err != nil || kept.Mode != "custom" || len(kept.Denied) != 1 || kept.Denied[0] != "delete_task" {
+		t.Fatalf("mode/denied not preserved: %s", updated)
+	}
+}
+
+// TestMigrationV82ExtendsStoredAllowlists runs the migration against stored
+// policies the way an upgraded install has them.
+func TestMigrationV82ExtendsStoredAllowlists(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	restricted := &Project{Name: "restricted", Path: "/tmp/restricted", Type: "local"}
+	open := &Project{Name: "open", Path: "/tmp/open", Type: "local"}
+	for _, project := range []*Project{restricted, open} {
+		if err := db.CreateProject(ctx, project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE projects SET tool_policy = ? WHERE id = ?`,
+		`{"mode":"deny_all","allowed":["openpoet_create_document","openpoet_read_document","openpoet_get_my_task"]}`, restricted.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT OR REPLACE INTO settings (key, value) VALUES ('mcp_tool_policy_session', ?), ('mcp_tool_policy_chat', ?), ('unrelated_setting', ?)`,
+		`{"mode":"allow_all","denied":["openpoet_delete_task"]}`,
+		`{"mode":"custom","allowed":["read_document"],"denied":[]}`,
+		`{"mode":"deny_all","allowed":["openpoet_create_document"]}`); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := db.Beginx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateV82(tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	read := func(query string, args ...any) string {
+		t.Helper()
+		var value string
+		if err := db.Get(&value, query, args...); err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	restrictedPolicy := read(`SELECT tool_policy FROM projects WHERE id = ?`, restricted.ID)
+	for _, name := range []string{"openpoet_create_artifact", "openpoet_update_artifact", "openpoet_read_artifact", "openpoet_list_artifacts", "openpoet_list_artifact_annotations", "openpoet_resolve_artifact_annotation", "openpoet_get_my_task"} {
+		if !strings.Contains(restrictedPolicy, `"`+name+`"`) {
+			t.Fatalf("restricted project policy lacks %s: %s", name, restrictedPolicy)
+		}
+	}
+	if policy := read(`SELECT tool_policy FROM projects WHERE id = ?`, open.ID); policy != "" {
+		t.Fatalf("project without a policy got one: %s", policy)
+	}
+	if policy := read(`SELECT value FROM settings WHERE key = 'mcp_tool_policy_session'`); policy != `{"mode":"allow_all","denied":["openpoet_delete_task"]}` {
+		t.Fatalf("allow_all global policy was rewritten: %s", policy)
+	}
+	chat := read(`SELECT value FROM settings WHERE key = 'mcp_tool_policy_chat'`)
+	if !strings.Contains(chat, `"read_artifact"`) || strings.Contains(chat, `"create_artifact"`) {
+		t.Fatalf("chat policy = %s", chat)
+	}
+	if policy := read(`SELECT value FROM settings WHERE key = 'unrelated_setting'`); strings.Contains(policy, "artifact") {
+		t.Fatalf("a setting that is not a tool policy was rewritten: %s", policy)
 	}
 }

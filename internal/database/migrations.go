@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 
@@ -97,6 +98,7 @@ var migrations = []Migration{
 	{Version: 79, Description: "retire the coordinator tier: delete the session-report skill and the coordinator lease/spawn blackboard keys (the conflict radar and lifecycle reports stay)", Up: migrateV79},
 	{Version: 80, Description: "sessions: effective_effort (reported by the runtime) and model_source/effort_source (request, session, project or global) for explicit model/effort", Up: migrateV80},
 	{Version: 81, Description: "artifacts: versioned interactive HTML artifacts stored in the database (artifacts, artifact_versions) and user annotations on them (artifact_annotations)", Up: migrateV81},
+	{Version: 82, Description: "tool policies: allowlists that grant the Docs tools also grant the HTML artifact tools, so artifacts are available wherever Docs already are", Up: migrateV82},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2208,6 +2210,110 @@ func migrateV81(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV81 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// artifactToolsFollowing maps each Docs tool to the HTML artifact tools that an
+// allowlist granting it should also grant: publishing follows create_document,
+// reading follows read_document.
+var artifactToolsFollowing = map[string][]string{
+	"create_document": {"create_artifact", "update_artifact", "resolve_artifact_annotation"},
+	"read_document":   {"read_artifact", "list_artifacts", "list_artifact_annotations"},
+}
+
+// extendToolPolicyWithArtifactTools returns the policy JSON with the artifact
+// tools added to its allowlist, and whether anything changed. Only policies
+// that work as an allowlist are touched ("deny_all", or "custom" with a
+// non-empty allowed list); a policy that allows everything by default already
+// allows the new tools, and its denied list is left alone. Tool names are
+// matched with or without the "openpoet_" prefix (session policies use it,
+// chat policies do not), and the added names follow the same form. Every other
+// field of the policy is preserved as it is.
+func extendToolPolicyWithArtifactTools(policyJSON string) (string, bool) {
+	var policy map[string]json.RawMessage
+	if json.Unmarshal([]byte(policyJSON), &policy) != nil {
+		return policyJSON, false
+	}
+	var mode string
+	_ = json.Unmarshal(policy["mode"], &mode)
+	var allowed []string
+	if json.Unmarshal(policy["allowed"], &allowed) != nil {
+		return policyJSON, false
+	}
+	if mode != "deny_all" && !(mode == "custom" && len(allowed) > 0) {
+		return policyJSON, false
+	}
+	present := make(map[string]bool, len(allowed))
+	for _, name := range allowed {
+		present[name] = true
+	}
+	changed := false
+	for _, prefix := range []string{"openpoet_", ""} {
+		for _, docTool := range []string{"create_document", "read_document"} {
+			if !present[prefix+docTool] {
+				continue
+			}
+			for _, artifactTool := range artifactToolsFollowing[docTool] {
+				if name := prefix + artifactTool; !present[name] {
+					allowed = append(allowed, name)
+					present[name] = true
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return policyJSON, false
+	}
+	encoded, err := json.Marshal(allowed)
+	if err != nil {
+		return policyJSON, false
+	}
+	policy["allowed"] = encoded
+	updated, err := json.Marshal(policy)
+	if err != nil {
+		return policyJSON, false
+	}
+	return string(updated), true
+}
+
+// migrateV82 makes the HTML artifact tools available wherever the Docs tools
+// already are. A project, agent or global tool policy written as an allowlist
+// names every tool it grants, so tools added later stay unavailable until the
+// user finds and ticks them; here the policies that grant create_document /
+// read_document get the matching artifact tools added. The user can still
+// remove them in the tool policy settings afterwards.
+func migrateV82(tx *sqlx.Tx) error {
+	type target struct {
+		selectSQL string
+		updateSQL string
+	}
+	targets := []target{
+		{`SELECT key AS id, value AS policy FROM settings WHERE key IN ('mcp_tool_policy_session', 'mcp_tool_policy_chat', 'mcp_tool_policy_http')`,
+			`UPDATE settings SET value = ? WHERE key = ?`},
+		{`SELECT CAST(id AS TEXT) AS id, tool_policy AS policy FROM projects WHERE tool_policy != ''`,
+			`UPDATE projects SET tool_policy = ? WHERE id = ?`},
+		{`SELECT CAST(id AS TEXT) AS id, tool_policy AS policy FROM ai_agents WHERE tool_policy != ''`,
+			`UPDATE ai_agents SET tool_policy = ? WHERE id = ?`},
+	}
+	for _, t := range targets {
+		var rows []struct {
+			ID     string `db:"id"`
+			Policy string `db:"policy"`
+		}
+		if err := tx.Select(&rows, t.selectSQL); err != nil {
+			return fmt.Errorf("migrateV82 failed: %w\nSQL: %s", err, t.selectSQL)
+		}
+		for _, row := range rows {
+			updated, changed := extendToolPolicyWithArtifactTools(row.Policy)
+			if !changed {
+				continue
+			}
+			if _, err := tx.Exec(t.updateSQL, updated, row.ID); err != nil {
+				return fmt.Errorf("migrateV82 failed: %w\nSQL: %s", err, t.updateSQL)
+			}
 		}
 	}
 	return nil

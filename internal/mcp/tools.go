@@ -46,6 +46,26 @@ func toolsDef(context string) []MCPTool {
 
 // executeTool runs a tool by name with the given arguments, calling the OpenPoet API.
 func executeTool(client *APIClient, name string, args json.RawMessage, sessionID, conversationID string) (string, error) {
+	return executeToolWithOptions(client, name, args, sessionID, conversationID, toolExecutionOptions{})
+}
+
+// ExecuteTool runs one MCP tool against an OpenPoet API, exactly as the MCP
+// server does for a session: sessionID is the calling session ("" for none)
+// and conversationID the chat conversation ("" for none). No tool policy is
+// applied here; callers that serve untrusted clients filter by policy first.
+func ExecuteTool(client *APIClient, name string, args json.RawMessage, sessionID, conversationID string) (string, error) {
+	return executeTool(client, name, args, sessionID, conversationID)
+}
+
+// toolExecutionOptions carries what differs between transports.
+type toolExecutionOptions struct {
+	// LocalFiles is set only by the openpoet CLI, which runs as a process on
+	// the caller's own machine: there a tool argument may name a local file to
+	// read (html_file). The MCP server never honors such an argument.
+	LocalFiles bool
+}
+
+func executeToolWithOptions(client *APIClient, name string, args json.RawMessage, sessionID, conversationID string, options toolExecutionOptions) (string, error) {
 	var params map[string]interface{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &params); err != nil {
@@ -54,6 +74,10 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 	}
 	if params == nil {
 		params = make(map[string]interface{})
+	}
+
+	if artifactToolNames[name] {
+		return executeArtifactTool(client, name, params, sessionID, conversationID, options.LocalFiles)
 	}
 
 	switch name {
@@ -699,6 +723,10 @@ func executeTool(client *APIClient, name string, args json.RawMessage, sessionID
 		docID, _ := params["document_id"].(string)
 		if docID == "" {
 			return "", fmt.Errorf("document_id is required")
+		}
+		// Document listings also carry HTML artifacts, as "artifact:<id>".
+		if strings.HasPrefix(docID, "artifact:") {
+			return readArtifactForTool(client, strings.TrimPrefix(docID, "artifact:"), "", false)
 		}
 		if strings.HasPrefix(docID, "plan:") {
 			sessionID := strings.TrimPrefix(docID, "plan:")
@@ -2031,12 +2059,14 @@ func formatTaskDetail(client *APIClient, projectID int64, taskID int64, taskBody
 				icon := "[D]"
 				if d.Type == "plan" {
 					icon = "[P]"
+				} else if d.Type == "artifact" {
+					icon = "[A]"
 				} else if strings.HasPrefix(d.Title, "Verification") {
 					icon = "[V]"
 				}
 				sb.WriteString(fmt.Sprintf("- %s %s (id: %s, status: %s)\n", icon, d.Title, d.ID, d.Status))
 			}
-			sb.WriteString("\nUse openpoet_read_document to read a document's content.\n")
+			sb.WriteString("\nUse openpoet_read_document to read a document's content. [A] entries are HTML artifacts: read them with openpoet_read_artifact (the id after \"artifact:\").\n")
 		}
 	}
 

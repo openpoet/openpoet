@@ -501,6 +501,97 @@ func AllToolDefs() []ToolDef {
 			},
 			Context: ToolContextBoth,
 		},
+		// ──── HTML artifacts (versioned interactive documents stored in OpenPoet) ────
+		{
+			Name: "create_artifact",
+			Description: "Publish an interactive HTML artifact: one self-contained HTML document stored in OpenPoet (not in the project directory) and shown to the user in a sandboxed viewer. " +
+				"Prefer this over create_document for plans, reports, documentation and any deliverable the user will read or review: build a small site with navigation, visual components, inline charts and restrained motion. " +
+				"Rules: a complete HTML document with ALL CSS and JavaScript inline; no external scripts, stylesheets, fonts or images (the viewer blocks every network request, so use inline SVG/canvas and data: URIs); must work in light and dark themes and on a phone; at most 2 MiB. " +
+				"The user gets a card to open it — do not paste the HTML or a link in your reply. The user can annotate the artifact; read their notes with list_artifact_annotations.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"title":   {Type: "string", Description: "Short title shown in the viewer and in listings"},
+					"html":    {Type: "string", Description: "The complete, self-contained HTML document (inline CSS and JS only)"},
+					"summary": {Type: "string", Description: "One or two sentences on what the artifact contains"},
+					"task_id": {Type: "string", Description: "Optional task ID to link the artifact to (defaults to the task of the current session)"},
+				},
+				Required: []string{"title", "html"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name: "update_artifact",
+			Description: "Publish a new version of an existing HTML artifact (the full new HTML document, same rules as create_artifact). Earlier versions stay available to the user. " +
+				"Before updating, read the open annotations with list_artifact_annotations and address them; afterwards resolve each one with resolve_artifact_annotation. " +
+				"Pass base_version (the version you read) so a concurrent change is reported as a conflict instead of being overwritten.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"artifact_id":  {Type: "string", Description: "The artifact ID (8 characters)"},
+					"html":         {Type: "string", Description: "The complete new HTML document"},
+					"change_note":  {Type: "string", Description: "One line on what changed in this version"},
+					"base_version": {Type: "string", Description: "The version number this change is based on; the update is refused if the artifact has moved on"},
+				},
+				Required: []string{"artifact_id", "html"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "read_artifact",
+			Description: "Read an HTML artifact: title, links, version history and its open annotations. Set include_html to also get the HTML of a version (the current one by default) — needed before update_artifact when you do not have the HTML at hand.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"artifact_id":  {Type: "string", Description: "The artifact ID (8 characters; an 'artifact:' prefix is accepted)"},
+					"version":      {Type: "string", Description: "Version number to read (default: the current version)"},
+					"include_html": {Type: "boolean", Description: "Also return the HTML of that version (default: false)"},
+				},
+				Required: []string{"artifact_id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "list_artifacts",
+			Description: "List HTML artifacts (id, title, current version, open annotation count), newest first. Without filters, a session gets the artifacts of its own project.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"project_id":       {Type: "string", Description: "Only artifacts of this project"},
+					"task_id":          {Type: "string", Description: "Only artifacts linked to this task"},
+					"session_id":       {Type: "string", Description: "Only artifacts published by this session"},
+					"include_archived": {Type: "boolean", Description: "Include archived artifacts (default: false)"},
+				},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "list_artifact_annotations",
+			Description: "List the user's annotations on an HTML artifact: for each, its id, the version it was made on, the quoted text or element it points at, and the user's note. Returns the open ones by default — these are the changes the user is asking for.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"artifact_id": {Type: "string", Description: "The artifact ID"},
+					"status":      {Type: "string", Description: "Which annotations to list (default: open)", Enum: []string{"open", "resolved", "all"}},
+				},
+				Required: []string{"artifact_id"},
+			},
+			Context: ToolContextBoth,
+		},
+		{
+			Name:        "resolve_artifact_annotation",
+			Description: "Mark one annotation on an HTML artifact as resolved, with a note telling the user what you did about it (usually after publishing the fix with update_artifact). Resolve only what you actually addressed.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"artifact_id":     {Type: "string", Description: "The artifact ID the annotation belongs to"},
+					"annotation_id":   {Type: "string", Description: "The annotation ID (number) from list_artifact_annotations"},
+					"resolution_note": {Type: "string", Description: "What you changed, or why no change was needed"},
+				},
+				Required: []string{"artifact_id", "annotation_id", "resolution_note"},
+			},
+			Context: ToolContextBoth,
+		},
 		{
 			Name:           "list_directory",
 			MCPName:        "openpoet_list_project_files",

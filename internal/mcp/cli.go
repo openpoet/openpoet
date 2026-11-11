@@ -80,6 +80,10 @@ Examples:
   openpoet cli tools
   openpoet cli call openpoet_list_tasks '{"project_id":"1"}'
   openpoet cli call openpoet_create_task '{"project_id":"1","title":"Fix bug"}'
+  openpoet cli call openpoet_create_artifact '{"title":"Plan","html_file":"/tmp/plan.html"}'
+
+For openpoet_create_artifact and openpoet_update_artifact, html_file names a
+local file to publish instead of passing the document inline in html.
 `)
 }
 
@@ -120,7 +124,8 @@ func cliCallTool(handler *RequestHandler, toolName, argsJSON string) {
 		os.Exit(1)
 	}
 
-	result, err := executeTool(handler.client, toolName, json.RawMessage(argsJSON), handler.sessionID, handler.conversationID)
+	result, err := executeToolWithOptions(handler.client, toolName, json.RawMessage(argsJSON), handler.sessionID, handler.conversationID,
+		toolExecutionOptions{LocalFiles: true})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
 		os.Exit(1)

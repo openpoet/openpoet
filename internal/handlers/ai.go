@@ -1762,6 +1762,10 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		}
 	}
 
+	if artifactChatTools[name] {
+		return h.executeArtifactChatTool(ctx, name, input, conversationID, authorization)
+	}
+
 	switch name {
 	case "create_skill":
 		skillName, _ := input["name"].(string)
