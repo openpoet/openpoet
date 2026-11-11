@@ -75,6 +75,7 @@ class ArtifactViewer {
         this._bridgeMissing = false; // the frame loaded but no bridge announced itself
         this._bridgeTimer = null;
         this._orphaned = new Set(); // annotation ids the bridge could not place
+        this._hidden = new Set();   // annotation ids placed in a part of the page that is not shown
         this._pendingAnchor = null; // anchor of the note being written
         this._activeAnnotation = 0;
         this._notice = null;        // {text, error} shown in the panel hint
@@ -234,6 +235,7 @@ class ArtifactViewer {
         this._bridgeReady = false;
         this._bridgeMissing = false;
         this._orphaned = new Set();
+        this._hidden = new Set();
         this._cancelComposer();
         clearTimeout(this._bridgeTimer);
         // Questions belong to a version: forget the previous one's.
@@ -336,6 +338,7 @@ class ArtifactViewer {
         this._bridgeReady = false;
         this._bridgeMissing = false;
         this._orphaned = new Set();
+        this._hidden = new Set();
         this._pendingAnchor = null;
         this._activeAnnotation = 0;
         this._notice = null;
@@ -488,6 +491,7 @@ class ArtifactViewer {
             case 'anchors':
                 if (Array.isArray(data.orphaned)) {
                     this._orphaned = new Set(data.orphaned.filter(Number.isInteger).slice(0, 500));
+                    this._hidden = new Set((Array.isArray(data.hidden) ? data.hidden : []).filter(Number.isInteger).slice(0, 500));
                     this._renderPanel();
                 }
                 break;
@@ -736,6 +740,17 @@ class ArtifactViewer {
                 ? 'The version being shown does not ask this question'
                 : 'The annotated text or element was not found in the version being shown';
             head.appendChild(orphan);
+        } else if (!isAnswer && this._bridgeReady && this._hidden.has(annotation.id)) {
+            const hiddenTag = el('span', 'artifact-annotation-tag is-hidden-part', 'in a closed part');
+            hiddenTag.title = 'The annotated text or element is in a part of the page that is not shown right now (a closed tab or section)';
+            head.appendChild(hiddenTag);
+        }
+        // The id or data-id of the panel the note was made in.
+        const near = !isAnswer && annotation.anchor && typeof annotation.anchor.near === 'string' ? annotation.anchor.near : '';
+        if (near) {
+            const nearTag = el('span', 'artifact-annotation-tag is-near', near.replace(/^\[data-id="(.*)"\]$/, '$1'));
+            nearTag.title = `Made inside ${near}`;
+            head.appendChild(nearTag);
         }
         if (annotation.created_at) {
             head.appendChild(el('span', 'artifact-annotation-time', new Date(annotation.created_at).toLocaleString()));
@@ -1132,10 +1147,13 @@ ArtifactViewer.sanitizeAnchor = function (anchor) {
     if (!anchor || typeof anchor !== 'object') return null;
     const text = (value, limit) => (typeof value === 'string' ? value.slice(0, limit) : '');
     const selector = text(anchor.selector, 1000);
+    // The id or data-id of the panel the anchor sits in, in its one known form.
+    const near = /^(#[A-Za-z][\w.:-]{0,79}|\[data-id="[\w.:-]{1,80}"\])$/.test(text(anchor.near, 120)) ? text(anchor.near, 120) : '';
     if (anchor.type === 'text') {
         const exact = text(anchor.exact, 2000);
         if (!exact.trim()) return null;
         const clean = { type: 'text', selector, exact, prefix: text(anchor.prefix, 200), suffix: text(anchor.suffix, 200) };
+        if (near) clean.near = near;
         if (Number.isInteger(anchor.start) && Number.isInteger(anchor.end) && anchor.start >= 0 && anchor.end >= anchor.start) {
             clean.start = anchor.start;
             clean.end = anchor.end;
@@ -1144,7 +1162,9 @@ ArtifactViewer.sanitizeAnchor = function (anchor) {
     }
     if (anchor.type === 'element') {
         if (!selector) return null;
-        return { type: 'element', selector, tag: text(anchor.tag, 40).toLowerCase(), label: text(anchor.label, 300) };
+        const clean = { type: 'element', selector, tag: text(anchor.tag, 40).toLowerCase(), label: text(anchor.label, 300) };
+        if (near) clean.near = near;
+        return clean;
     }
     return null;
 };

@@ -324,6 +324,16 @@
     color: #b45309;
     border-color: #b45309;
 }
+.artifact-annotation-tag.is-hidden-part {
+    border-style: dashed;
+}
+.artifact-annotation-tag.is-near {
+    max-width: 14ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 .artifact-annotation-time {
     margin-left: auto;
 }

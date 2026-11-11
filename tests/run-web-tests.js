@@ -32,6 +32,7 @@ const GROUPS = {
     'tests/voice-chunked-upload-smoke.js',
   ],
   server: [
+    'tests/artifact-annotation-panels-smoke.js',
     'tests/artifact-annotations-smoke.js',
     'tests/artifact-deep-link-smoke.js',
     'tests/artifact-questions-smoke.js',

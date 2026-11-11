@@ -120,6 +120,43 @@
     return !!node && node.nodeType === 1 && node.tagName === 'OPENPOET-ANNOTATIONS';
   }
 
+  // A value of id or data-id that can be written into a selector as it is.
+  var MARK = /^[\w.:-]{1,80}$/;
+
+  function dataIdSelector(value) {
+    return '[data-id="' + value + '"]';
+  }
+
+  // The closest id or data-id at or above an element, as "#stage-2" or
+  // [data-id="TM8"], or '' when there is none. A page made of tabs or panels
+  // usually marks each one that way: the mark says which panel an annotation
+  // belongs to, for the agent that reads it and for placing it again.
+  function nearMark(element) {
+    var el = element;
+    for (var depth = 0; el && el.nodeType === 1 && el !== document.body && el !== document.documentElement && depth < 60; depth++) {
+      var id = el.getAttribute('id');
+      if (id && /^[A-Za-z]/.test(id) && MARK.test(id)) return '#' + id;
+      var mark = el.getAttribute('data-id');
+      if (mark && MARK.test(mark)) return dataIdSelector(mark);
+      el = el.parentElement;
+    }
+    return '';
+  }
+
+  // The element a mark names, or null. Only the two forms nearMark writes are
+  // understood; anything else in a stored anchor is ignored.
+  function nearElement(near) {
+    if (typeof near !== 'string' || !near) return null;
+    var el = null;
+    if (near.charAt(0) === '#' && MARK.test(near.slice(1))) {
+      el = document.getElementById(near.slice(1));
+    } else {
+      var match = /^\[data-id="([\w.:-]{1,80})"\]$/.exec(near);
+      if (match) el = query(dataIdSelector(match[1]));
+    }
+    return el && !isOwn(el) ? el : null;
+  }
+
   function cssPath(element) {
     var parts = [];
     var el = element;
@@ -128,6 +165,13 @@
       var id = el.getAttribute('id');
       if (id && /^[A-Za-z][\w-]*$/.test(id) && document.querySelectorAll('#' + id).length === 1) {
         parts.unshift('#' + id);
+        break;
+      }
+      // A unique data-id anchors the path as an id does. Panels that are
+      // mounted one at a time into the same container differ only by it.
+      var mark = el.getAttribute('data-id');
+      if (mark && MARK.test(mark) && document.querySelectorAll(dataIdSelector(mark)).length === 1) {
+        parts.unshift(dataIdSelector(mark));
         break;
       }
       var tag = el.tagName.toLowerCase();
@@ -223,6 +267,17 @@
         if (range) return range;
       }
     }
+    // Then inside the panel the annotation was made in, when it is in the
+    // page: the same sentence in another panel is not the annotated one.
+    var near = nearElement(anchor.near);
+    if (near && near !== scoped) {
+      var panel = textIndex(near);
+      var inPanel = findQuote(panel.text, anchor);
+      if (inPanel !== -1) {
+        var panelRange = rangeFromOffsets(panel, inPanel, inPanel + anchor.exact.length);
+        if (panelRange) return panelRange;
+      }
+    }
     if (!document.body) return null;
     var whole = textIndex(document.body);
     var position = findQuote(whole.text, anchor);
@@ -235,6 +290,13 @@
       var el = query(anchor.selector);
       if (!el || isOwn(el)) return null;
       if (anchor.tag && el.tagName.toLowerCase() !== anchor.tag) return null;
+      // An element anchor that names its panel is placed only inside it. A
+      // page that mounts one tab at a time puts different content at the same
+      // position, and the annotation belongs to one of them.
+      if (anchor.near) {
+        var scope = nearElement(anchor.near);
+        if (!scope || !scope.contains(el)) return null;
+      }
       return { element: el, rects: [el.getBoundingClientRect()] };
     }
     if (anchor.type === 'text') {
@@ -258,12 +320,21 @@
     var root = ensureLayer();
     var found = [];
     var orphaned = [];
+    var hidden = [];
     for (var i = 0; i < annotations.length; i++) {
       var annotation = annotations[i];
       var hit = locate(annotation.anchor);
       if (!hit) { orphaned.push(annotation.id); continue; }
       found.push(annotation.id);
       resolved[annotation.id] = hit;
+      // In the page but not rendered (a closed tab, a collapsed section):
+      // there is nothing to outline, and a box of no size would pile every
+      // such badge in the corner of the page.
+      var rendered = false;
+      for (var k = 0; k < hit.rects.length; k++) {
+        if (hit.rects[k].width > 0 || hit.rects[k].height > 0) { rendered = true; break; }
+      }
+      if (!rendered) { hidden.push(annotation.id); continue; }
       var kind = (annotation.anchor.type === 'element' ? 'element' : 'text') + (annotation.status === 'resolved' ? ' resolved' : '');
       var first = null;
       for (var j = 0; j < hit.rects.length; j++) {
@@ -284,10 +355,10 @@
       }
     }
     // Report only changes: an animated artifact redraws many times a second.
-    var report = found.join(',') + '|' + orphaned.join(',');
+    var report = found.join(',') + '|' + orphaned.join(',') + '|' + hidden.join(',');
     if (report !== lastAnchorReport) {
       lastAnchorReport = report;
-      post('anchors', { found: found, orphaned: orphaned });
+      post('anchors', { found: found, orphaned: orphaned, hidden: hidden });
     }
   }
 
@@ -358,6 +429,8 @@
     var flat = index.text;
     if (start === -1 || flat.substr(start, exact.length) !== exact) start = flat.indexOf(exact);
     var anchor = { type: 'text', selector: cssPath(container), exact: clip(exact, MAX_QUOTE) };
+    var textNear = nearMark(container);
+    if (textNear) anchor.near = textNear;
     if (start !== -1) {
       anchor.start = start;
       anchor.end = start + anchor.exact.length;
@@ -412,10 +485,10 @@
       return;
     }
     lastSelectionReport = '';
-    post('selection', {
-      anchor: { type: 'element', selector: cssPath(el), tag: el.tagName.toLowerCase(), label: elementLabel(el) },
-      rect: viewportRect(el.getBoundingClientRect())
-    });
+    var picked = { type: 'element', selector: cssPath(el), tag: el.tagName.toLowerCase(), label: elementLabel(el) };
+    var elementNear = nearMark(el);
+    if (elementNear) picked.near = elementNear;
+    post('selection', { anchor: picked, rect: viewportRect(el.getBoundingClientRect()) });
   }
 
   function onMouseUp() {
