@@ -22,6 +22,7 @@ func TestDocsInstructionBlockPerHarness(t *testing.T) {
 	for _, token := range []string{
 		"openpoet_create_artifact", "openpoet_update_artifact", "openpoet_list_artifact_annotations", "openpoet_resolve_artifact_annotation",
 		"self-contained", "no external resources", "navigation", "charts", "html-artifact", "html_file",
+		"html_path", "openpoet_patch_artifact", "output_path",
 	} {
 		if !strings.Contains(block, token) {
 			t.Fatalf("steering block missing %q:\n%s", token, block)

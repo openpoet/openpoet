@@ -26,7 +26,7 @@ const htmlArtifactSkillSetting = "builtin_skill_html_artifact_registered"
 // was offered. When the guide changes, bump the revision and add the SHA-256
 // of the text it replaces to htmlArtifactSkillSuperseded.
 const (
-	htmlArtifactSkillRevision        = 2
+	htmlArtifactSkillRevision        = 3
 	htmlArtifactSkillRevisionSetting = "builtin_skill_html_artifact_revision"
 )
 
@@ -36,6 +36,7 @@ const (
 // user's own and is left alone.
 var htmlArtifactSkillSuperseded = map[string]bool{
 	"326d24eab92e2d87211c3291790053c376570be2409b32eff246051139045e06": true, // revision 1
+	"50443d4ee9bd35229bf8c417e7b19093f52f3e730c0a3d8b2deddd42b0fe1341": true, // revision 2
 }
 
 const htmlArtifactSkillContent = `Design and publish interactive HTML artifacts in OpenPoet for plans, reports and documentation.
@@ -192,30 +193,62 @@ saying what you did.
 Put the recommendation and the trade-offs of each option in the page, next to
 the option. The label in the data block is only the name of the option.
 
+## Publish from a file, change with a patch
+
+Do not type the page into a tool argument when you can avoid it. A page of
+150 KB passed inline in ` + "`html`" + ` costs minutes and its whole size in tokens, and
+costs them again on every revision.
+
+- **Write the page to an ` + "`.html`" + ` file** with your file tools and pass its path
+  as ` + "`html_path`" + ` to ` + "`openpoet_create_artifact`" + ` or ` + "`openpoet_update_artifact`" + `.
+  OpenPoet reads the file. The path has to be inside your workspace (a relative
+  path resolves against it) or the temporary directory. Use a scratch or
+  temporary directory, so the file does not end up in the project's repository;
+  if you had to put it in the project, delete it when the review is over.
+- **Change a published page with ` + "`openpoet_patch_artifact`" + `**: a list of
+  ` + "`{old, new}`" + ` replacements applied to the current version, with
+  ` + "`base_version`" + `. Each ` + "`old`" + ` has to match the stored HTML exactly (whitespace
+  and line breaks included) and occur once; give it enough surrounding text to
+  be unique, or set ` + "`replace_all`" + `. Edits apply in order. If one does not match,
+  nothing is published and the error names it. Only the replacements travel, so
+  a one-line fix to a large page costs one line. Make the same edit in your
+  file to keep it in step.
+- **Get the HTML back into a file** with ` + "`openpoet_read_artifact`" + ` and
+  ` + "`output_path`" + `: the stored version is written byte for byte, and is not
+  returned in the result. Use ` + "`include_html`" + ` only for a small page.
+- **Check what was stored.** Every publish reports the exact size in bytes and
+  the SHA-256 of the stored HTML, and says whether it is byte for byte what
+  you sent (it is, unless credential-looking text was masked). Compare it with
+  ` + "`sha256sum`" + ` of your file when it matters.
+- Pass the page inline in ` + "`html`" + ` only when you cannot write a file.
+
 ## The review loop
 
-1. Publish with ` + "`openpoet_create_artifact`" + ` (` + "`title`" + `, ` + "`html`" + `, ` + "`summary`" + `). The user
-   gets a card that opens it. Tell them in one or two sentences what it
+1. Publish with ` + "`openpoet_create_artifact`" + ` (` + "`title`" + `, ` + "`html_path`" + `, ` + "`summary`" + `). The
+   user gets a card that opens it. Tell them in one or two sentences what it
    contains. Do not paste the HTML or a link.
 2. When the user asks for changes or says they annotated it, call
    ` + "`openpoet_list_artifact_annotations`" + `. Each open annotation has the quoted
    text or element and the user's note, or is the user's answer to one of your
    questions. They are feedback on the document.
 3. If you no longer have the HTML, get it with ` + "`openpoet_read_artifact`" + ` and
-   ` + "`include_html: true`" + `.
-4. Publish the whole corrected page with ` + "`openpoet_update_artifact`" + `, passing
-   ` + "`base_version`" + ` (the version you worked from) and a one-line ` + "`change_note`" + `.
-   If it reports a version conflict, read the current version, reapply your
-   change and update again.
+   ` + "`output_path`" + `.
+4. Publish the change, passing ` + "`base_version`" + ` (the version you worked from)
+   and a one-line ` + "`change_note`" + `: ` + "`openpoet_patch_artifact`" + ` for changes to parts
+   of the page, ` + "`openpoet_update_artifact`" + ` with ` + "`html_path`" + ` for a rewrite. If it
+   reports a version conflict, read the current version, reapply your change
+   and publish again.
 5. Call ` + "`openpoet_resolve_artifact_annotation`" + ` for each annotation you
    addressed, with a note saying what you changed. Leave open what you did not
    address, and say why in your reply.
 6. When the user asks for a link to the artifact, get it with
-   ` + "`openpoet_get_link`" + `. Never build a URL yourself.
+   ` + "`openpoet_get_link`" + `, or use the shareable link a publish or
+   ` + "`openpoet_read_artifact`" + ` returned. Never build a URL yourself.
 
-Through the CLI (when ` + "`$OPENPOET_BIN`" + ` is set in your session), write the page
-to a temporary file outside the project and publish it with ` + "`html_file`" + `:
-` + "`$OPENPOET_BIN cli call openpoet_create_artifact '{\"title\":\"Plan\",\"html_file\":\"/tmp/plan.html\"}'`" + `.
+The same tools are available from a shell when ` + "`$OPENPOET_BIN`" + ` is set (it is in
+local sessions): ` + "`$OPENPOET_BIN cli call openpoet_create_artifact '{\"title\":\"Plan\",\"html_file\":\"/tmp/plan.html\"}'`" + `.
+There, ` + "`html_file`" + ` and ` + "`output_file`" + ` name files anywhere on your machine,
+read and written by the CLI itself.
 
 ## Starting point
 

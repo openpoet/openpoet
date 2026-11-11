@@ -29,14 +29,19 @@ read or review, and whenever the user asks you to document something, publish it
 as an HTML artifact with the ` + "`openpoet_create_artifact`" + ` tool: one self-contained
 HTML page (inline CSS and JavaScript, no external resources) built like a small
 site, with navigation between sections, visual components, inline SVG or canvas
-charts and restrained motion. Do not write a ` + "`.md`" + ` or ` + "`.html`" + ` file into the
+charts and restrained motion. Do not leave a ` + "`.md`" + ` or ` + "`.html`" + ` file in the
 project for this, and do not use harness-native artifacts. The
 ` + "`html-artifact`" + ` skill has the design guide.
 
+- Do not type the page into the tool call: write it to an ` + "`.html`" + ` file in a
+  temporary or scratch directory and pass its path as ` + "`html_path`" + `. Change a
+  published page with ` + "`openpoet_patch_artifact`" + ` (only the replacements are
+  sent), and get its HTML back into a file with ` + "`openpoet_read_artifact`" + ` and
+  ` + "`output_path`" + `.
 - The user annotates artifacts. Before changing one, read the open annotations
   with ` + "`openpoet_list_artifact_annotations`" + `; publish the new version with
-  ` + "`openpoet_update_artifact`" + `; then resolve each annotation you addressed with
-  ` + "`openpoet_resolve_artifact_annotation`" + `.
+  ` + "`openpoet_patch_artifact`" + ` or ` + "`openpoet_update_artifact`" + `; then resolve each
+  annotation you addressed with ` + "`openpoet_resolve_artifact_annotation`" + `.
 - When the user has to decide or answer something, declare questions in the
   artifact (the ` + "`html-artifact`" + ` skill shows how). The user answers them in the
   viewer and the answers arrive with the annotations.

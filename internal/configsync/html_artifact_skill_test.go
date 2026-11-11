@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -92,6 +93,9 @@ func TestHTMLArtifactSkillMatchesWhatTheViewerEnforces(t *testing.T) {
 		"openpoet_create_artifact", "openpoet_update_artifact", "openpoet_list_artifact_annotations", "openpoet_resolve_artifact_annotation",
 		"openpoet_read_artifact", "base_version", "self-contained", "2 MiB", "prefers-color-scheme", "prefers-reduced-motion",
 		"localStorage", "[REDACTED]", "stable", "html_file",
+		// Publishing from a file and changing with a patch, instead of typing
+		// the page into a tool argument.
+		"html_path", "openpoet_patch_artifact", "output_path", "SHA-256", "$OPENPOET_BIN",
 	} {
 		if !strings.Contains(content, phrase) {
 			t.Fatalf("skill content lacks %q", phrase)
@@ -129,8 +133,13 @@ func TestEnsureHTMLArtifactSkillUpdatesOnlyAnUneditedCopy(t *testing.T) {
 	t.Cleanup(func() { delete(htmlArtifactSkillSuperseded, htmlArtifactSkillHash(oldBuiltIn)) })
 	// The text shipped as revision 1 is known, so installations that still
 	// have it are brought up to date.
-	if !htmlArtifactSkillSuperseded["326d24eab92e2d87211c3291790053c376570be2409b32eff246051139045e06"] {
-		t.Fatal("the revision 1 text is not listed as superseded")
+	for revision, hash := range map[int]string{
+		1: "326d24eab92e2d87211c3291790053c376570be2409b32eff246051139045e06",
+		2: "50443d4ee9bd35229bf8c417e7b19093f52f3e730c0a3d8b2deddd42b0fe1341",
+	} {
+		if !htmlArtifactSkillSuperseded[hash] {
+			t.Fatalf("the revision %d text is not listed as superseded", revision)
+		}
 	}
 	if htmlArtifactSkillSuperseded[htmlArtifactSkillHash(htmlArtifactSkillContent)] {
 		t.Fatal("the current text is listed as superseded")
@@ -170,7 +179,7 @@ func TestEnsureHTMLArtifactSkillUpdatesOnlyAnUneditedCopy(t *testing.T) {
 	if len(versions) != 2 || versions[0] != oldBuiltIn || versions[1] != htmlArtifactSkillContent {
 		t.Fatalf("skill versions = %d, want the old text and the new one", len(versions))
 	}
-	if revision, _ := db.GetSetting(ctx, htmlArtifactSkillRevisionSetting); revision != "2" {
+	if revision, _ := db.GetSetting(ctx, htmlArtifactSkillRevisionSetting); revision != strconv.Itoa(htmlArtifactSkillRevision) {
 		t.Fatalf("recorded revision = %q", revision)
 	}
 	// The user edits the updated guide: the next start leaves it alone.
@@ -195,7 +204,7 @@ func TestEnsureHTMLArtifactSkillUpdatesOnlyAnUneditedCopy(t *testing.T) {
 	if rows = htmlArtifactSkillRows(t, db); len(rows) != 1 || rows[0].Content != "my own guide" {
 		t.Fatalf("edited skill = %+v", rows)
 	}
-	if revision, _ := db.GetSetting(ctx, htmlArtifactSkillRevisionSetting); revision != "2" {
+	if revision, _ := db.GetSetting(ctx, htmlArtifactSkillRevisionSetting); revision != strconv.Itoa(htmlArtifactSkillRevision) {
 		t.Fatalf("recorded revision for an edited skill = %q", revision)
 	}
 
