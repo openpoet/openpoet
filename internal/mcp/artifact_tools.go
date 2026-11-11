@@ -419,8 +419,9 @@ func FormatArtifactPublished(body []byte, toolPrefix string) string {
 	}
 	if result.Duplicate {
 		return fmt.Sprintf("Artifact already published: this session created artifact_id %s a moment ago with the same title and identical HTML, so no second artifact was created. "+
-			"It is at version %d; what you sent is %s. To change it, call %spatch_artifact or %supdate_artifact with artifact_id %s and base_version %d. Internal link: %s%s",
-			result.ID, result.Version, artifactIntegrity(result), toolPrefix, toolPrefix, result.ID, result.Version, result.Link, ShareableLinkNote(result.URL, toolPrefix))
+			"It is at version %d; the document of this call is stored as %s, sha256 %s. To change it, call %spatch_artifact or %supdate_artifact with artifact_id %s and base_version %d. Internal link: %s%s%s",
+			result.ID, result.Version, formatArtifactSize(result.SizeBytes), result.SHA256, toolPrefix, toolPrefix, result.ID, result.Version, result.Link,
+			ShareableLinkNote(result.URL, toolPrefix), artifactRedactionNote(result))
 	}
 	return fmt.Sprintf("Artifact published: artifact_id %s, version %d (%s).%s The user was shown a card to open it in the artifact viewer — do NOT paste the HTML or generate links. "+
 		"To change it, call %spatch_artifact (a few replacements) or %supdate_artifact (the whole page) with artifact_id %s and base_version %d. Internal link: %s%s%s",
@@ -572,8 +573,8 @@ func FormatArtifactAnnotations(artifactID, status string, body []byte, toolPrefi
 	writeArtifactAnnotations(&sb, annotations)
 	sb.WriteString(unanswered)
 	if status != "resolved" {
-		sb.WriteString(fmt.Sprintf("\n%s Address them in a new version (%supdate_artifact), then call %sresolve_artifact_annotation for each one you addressed.\n",
-			artifactAnnotationCaveatFor(annotations), toolPrefix, toolPrefix))
+		sb.WriteString(fmt.Sprintf("\n%s Address them in a new version (%spatch_artifact or %supdate_artifact), then resolve the ones you addressed, in one call, with %sresolve_artifact_annotation (resolutions).\n",
+			artifactAnnotationCaveatFor(annotations), toolPrefix, toolPrefix, toolPrefix))
 	}
 	return sb.String()
 }

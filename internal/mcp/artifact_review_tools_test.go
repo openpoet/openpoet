@@ -28,7 +28,7 @@ func TestArtifactToolsReportMaskingDryRunAndRetries(t *testing.T) {
 			case decoded["dry_run"] == true:
 				fmt.Fprint(w, `{"id":"","version":1,"created":false,"dry_run":true,"questions":2,"redacted":true,"redaction_count":3,"redactions":[{"line":12,"kind":"password"},{"line":40,"kind":"api_key"}],`+tail+`,"artifact":{"id":""}}`)
 			case decoded["title"] == "Again":
-				fmt.Fprint(w, `{"id":"ab12cd34","version":2,"created":false,"duplicate":true,`+tail+`,"artifact":{"id":"ab12cd34"}}`)
+				fmt.Fprint(w, `{"id":"ab12cd34","version":2,"created":false,"duplicate":true,"redacted":true,"redaction_count":1,"redactions":[{"line":7,"kind":"secret"}],`+tail+`,"artifact":{"id":"ab12cd34"}}`)
 			default:
 				w.WriteHeader(http.StatusCreated)
 				fmt.Fprint(w, `{"id":"ab12cd34","version":1,"created":true,"redacted":true,"redaction_count":1,"redactions":[{"line":7,"kind":"secret"}],`+tail+`,"artifact":{"id":"ab12cd34"}}`)
@@ -74,7 +74,9 @@ func TestArtifactToolsReportMaskingDryRunAndRetries(t *testing.T) {
 	// A repeated create gets the artifact already created.
 	result, err = call("openpoet_create_artifact", `{"title":"Again","html":"<html></html>"}`)
 	if err != nil || !strings.HasPrefix(result, "Artifact already published: this session created artifact_id ab12cd34 a moment ago") ||
-		!strings.Contains(result, "no second artifact was created") || !strings.Contains(result, "base_version 2") {
+		!strings.Contains(result, "no second artifact was created") || !strings.Contains(result, "base_version 2") ||
+		!strings.Contains(result, "the document of this call is stored as 39 bytes, sha256 "+artifactTestSHA+".") ||
+		!strings.Contains(result, "line 7 (secret)") || strings.Contains(result, "hash of what you sent") {
 		t.Fatalf("repeated create = %q err=%v", result, err)
 	}
 
