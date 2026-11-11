@@ -5,13 +5,26 @@
 // frame (opaque origin, no network), next to the artifact's own scripts, and
 // talks to the OpenPoet page only through postMessage:
 //
-//   frame -> page   ready | selection | annotation-click | anchors | key
-//   page  -> frame  set-mode | show-annotations | focus | clear-selection
+//   frame -> page   ready | selection | annotation-click | anchors | key |
+//                   answer-intent
+//   page  -> frame  set-mode | show-annotations | focus | clear-selection |
+//                   answers | focus-question
 //
 // It reports where the user selected text or clicked an element, and draws the
 // highlights of saved annotations. It never receives annotation text: the note
-// is typed and stored outside the frame. It does not modify the artifact's DOM
-// either; highlights live in one shadow-rooted element appended to <html>.
+// is typed and stored outside the frame. Highlights live in one shadow-rooted
+// element appended to <html>, not in the artifact's DOM.
+//
+// Questions: an artifact marks an element with data-openpoet-question="<id>"
+// and the choices inside it with data-openpoet-option="<id>" (the questions
+// themselves are declared in the document's openpoet-questions data block,
+// which the server reads). A click on a choice tells the page which one; the
+// page decides what that means, shows it to the user and stores it only when
+// the user confirms there. The page then tells the frame which options are
+// chosen, and the bridge reflects that on the marked elements as
+// data-openpoet-selected / data-openpoet-answered and the matching ARIA state:
+// the only attributes it ever sets on the artifact's elements. Comments and
+// free-text answers never enter the frame.
 (function () {
   'use strict';
   if (window.__openpoetArtifactBridge) return;
@@ -32,6 +45,9 @@
   var lastAnchorReport = '';
   var lastSelectionReport = '';
   var selectionTimer = null;
+  var answers = {};       // question id -> {options: [ids], state} from the page
+  var hostSeen = false;   // the embedding page has spoken to the bridge
+  var applyTimer = null;
 
   function post(type, payload) {
     var message = payload || {};
@@ -424,6 +440,131 @@
     queueDraw();
   }
 
+  // ---- questions ------------------------------------------------------------
+
+  var MAX_ID = 64;
+
+  function attr(el, name, value) {
+    if (value === null) {
+      if (el.hasAttribute(name)) el.removeAttribute(name);
+    } else if (el.getAttribute(name) !== value) {
+      el.setAttribute(name, value);
+    }
+  }
+
+  function closestMarked(el, name) {
+    return el && el.closest ? el.closest('[' + name + ']') : null;
+  }
+
+  // Tells the page which choice was clicked. The page checks it against the
+  // questions the server stored for this version; nothing is saved here.
+  function onAnswerClick(event) {
+    if (annotate || event.isTrusted === false) return; // annotate mode annotates
+    var el = event.target;
+    if (el && el.nodeType !== 1) el = el.parentElement;
+    var option = closestMarked(el, 'data-openpoet-option');
+    var holder = option || closestMarked(el, 'data-openpoet-answer');
+    var question = closestMarked(holder, 'data-openpoet-question');
+    if (!question) return;
+    var message = { question: clip(question.getAttribute('data-openpoet-question') || '', MAX_ID) };
+    if (!message.question) return;
+    if (option) message.option = clip(option.getAttribute('data-openpoet-option') || '', MAX_ID);
+    post('answer-intent', message);
+  }
+
+  // Reflects the chosen options on the elements the artifact marked.
+  function applyAnswers() {
+    applyTimer = null;
+    var questions = document.querySelectorAll('[data-openpoet-question]');
+    for (var i = 0; i < questions.length; i++) {
+      var question = questions[i];
+      var answer = answers[question.getAttribute('data-openpoet-question')];
+      attr(question, 'data-openpoet-answered', answer ? answer.state : null);
+      var options = question.querySelectorAll('[data-openpoet-option]');
+      for (var j = 0; j < options.length; j++) {
+        var option = options[j];
+        if (closestMarked(option.parentElement, 'data-openpoet-question') !== question) continue; // a nested question's
+        var chosen = !!answer && answer.options.indexOf(option.getAttribute('data-openpoet-option')) !== -1;
+        attr(option, 'data-openpoet-selected', chosen ? '' : null);
+        if (option.tagName === 'INPUT' && (option.type === 'radio' || option.type === 'checkbox')) {
+          if (option.checked !== chosen) option.checked = chosen;
+          continue;
+        }
+        var role = option.getAttribute('role');
+        var state = role === 'radio' || role === 'checkbox' || role === 'switch' || role === 'menuitemradio' || role === 'menuitemcheckbox'
+          ? 'aria-checked' : (role === 'option' || role === 'tab' ? 'aria-selected' : 'aria-pressed');
+        attr(option, state, chosen ? 'true' : 'false');
+      }
+    }
+  }
+
+  function queueApplyAnswers() {
+    if (applyTimer || !hostSeen) return;
+    applyTimer = setTimeout(applyAnswers, 60);
+  }
+
+  function copyAnswers() {
+    var copy = {};
+    for (var id in answers) {
+      if (Object.prototype.hasOwnProperty.call(answers, id)) copy[id] = { options: answers[id].options.slice(), state: answers[id].state };
+    }
+    return copy;
+  }
+
+  function announce(name, detail) {
+    try { document.dispatchEvent(new CustomEvent(name, { detail: detail })); } catch (e) { /* old engines */ }
+  }
+
+  function setAnswers(list) {
+    answers = {};
+    if (Array.isArray(list)) {
+      for (var i = 0; i < list.length && i < 500; i++) {
+        var item = list[i];
+        if (!item || typeof item.question !== 'string' || !Array.isArray(item.options)) continue;
+        answers[item.question] = {
+          options: item.options.filter(function (o) { return typeof o === 'string'; }).slice(0, 100),
+          state: item.state === 'saved' ? 'saved' : 'pending'
+        };
+      }
+    }
+    applyAnswers();
+    announce('openpoet:answers', { answers: copyAnswers() });
+  }
+
+  function focusQuestion(id) {
+    var questions = document.querySelectorAll('[data-openpoet-question]');
+    for (var i = 0; i < questions.length; i++) {
+      if (questions[i].getAttribute('data-openpoet-question') === id) {
+        questions[i].scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+        return;
+      }
+    }
+  }
+
+  // What an artifact's own script may call. It is a convenience over the
+  // marked elements, not a privilege: it sends the same message a click does.
+  var api = {
+    available: false,
+    answer: function (question, option) {
+      post('answer-intent', { question: clip(String(question), MAX_ID), option: clip(String(option), MAX_ID) });
+    },
+    ask: function (question) {
+      post('answer-intent', { question: clip(String(question), MAX_ID) });
+    }
+  };
+  try {
+    Object.defineProperty(api, 'answers', { enumerable: true, get: copyAnswers });
+    if (!window.openpoet) window.openpoet = api;
+  } catch (e) { /* the artifact defined its own */ }
+
+  function sawHost() {
+    if (hostSeen) return;
+    hostSeen = true;
+    api.available = true;
+    document.documentElement.setAttribute('data-openpoet-host', '');
+    announce('openpoet:ready', {});
+  }
+
   // ---- messages from the page ----------------------------------------------
 
   window.addEventListener('message', function (event) {
@@ -432,7 +573,14 @@
     if (event.source !== window.parent || window.parent === window) return;
     var data = event.data;
     if (!data || data.source !== HOST) return;
+    sawHost();
     switch (data.type) {
+      case 'answers':
+        setAnswers(data.answers);
+        break;
+      case 'focus-question':
+        if (typeof data.question === 'string') focusQuestion(data.question);
+        break;
       case 'set-mode':
         setMode(data.annotate);
         break;
@@ -453,6 +601,7 @@
   });
 
   document.addEventListener('click', onClickCapture, true);
+  document.addEventListener('click', onAnswerClick, true);
   document.addEventListener('mouseup', onMouseUp, true);
   document.addEventListener('touchend', onMouseUp, true);
   document.addEventListener('selectionchange', onSelectionChange);
@@ -470,7 +619,8 @@
   if (window.MutationObserver) {
     new MutationObserver(function (records) {
       for (var i = 0; i < records.length; i++) {
-        if (!isOwn(records[i].target)) { queueSlowDraw(); return; }
+        // The artifact redrew something: highlights and chosen options follow.
+        if (!isOwn(records[i].target)) { queueSlowDraw(); queueApplyAnswers(); return; }
       }
     }).observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'style', 'hidden', 'open'] });
   }

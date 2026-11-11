@@ -1261,6 +1261,10 @@
                 <div class="artifact-viewer-stage">
                     <iframe id="artifact-viewer-frame" title="Artifact" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
                     <div id="artifact-viewer-status" class="artifact-viewer-status hidden"></div>
+                    <div id="artifact-viewer-pending" class="artifact-viewer-pending hidden" role="status">
+                        <span id="artifact-viewer-pending-text"></span>
+                        <button id="artifact-viewer-pending-review" class="btn btn-primary btn-sm">Review</button>
+                    </div>
                 </div>
                 <aside id="artifact-viewer-panel" class="artifact-viewer-panel hidden" aria-label="Annotations">
                     <div class="artifact-panel-header">
@@ -1268,6 +1272,7 @@
                         <div class="artifact-panel-tabs" role="tablist">
                             <button id="artifact-panel-tab-open" class="artifact-panel-tab active" role="tab" aria-selected="true">Open <span id="artifact-panel-count-open">0</span></button>
                             <button id="artifact-panel-tab-resolved" class="artifact-panel-tab" role="tab" aria-selected="false">Resolved <span id="artifact-panel-count-resolved">0</span></button>
+                            <button id="artifact-panel-tab-answers" class="artifact-panel-tab hidden" role="tab" aria-selected="false">Answers <span id="artifact-panel-count-answers">0/0</span></button>
                         </div>
                     </div>
                     <div id="artifact-panel-composer" class="artifact-panel-composer hidden">
@@ -1280,8 +1285,10 @@
                     </div>
                     <div id="artifact-panel-hint" class="artifact-panel-hint hidden" role="status"></div>
                     <div id="artifact-panel-list" class="artifact-panel-list"></div>
+                    <div id="artifact-panel-answers" class="artifact-panel-list hidden"></div>
                     <div class="artifact-panel-footer">
-                        <button id="artifact-panel-send" class="btn btn-primary btn-sm" disabled>Send to agent</button>
+                        <button id="artifact-panel-confirm" class="btn btn-primary btn-sm hidden">Confirm answers</button>
+                        <button id="artifact-panel-send" class="btn btn-secondary btn-sm" disabled>Send to agent</button>
                     </div>
                 </aside>
             </div>
