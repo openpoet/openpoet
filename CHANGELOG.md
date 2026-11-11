@@ -57,6 +57,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The artifact tools report the exact size in bytes and the SHA-256 of the
   stored HTML on create, update, patch and read, and whether it is byte for
   byte what was sent.
+- A publish says where credential-looking text was masked: how many values,
+  and for each the line of the document sent and the kind of text, never the
+  value. `dry_run` on create, update and patch checks a document without
+  storing it.
+- `openpoet_update_artifact` and `openpoet_patch_artifact` take `title` and
+  `summary`; an update with only those renames the artifact without publishing
+  a version. `openpoet_resolve_artifact_annotation` resolves several
+  annotations in one call (`resolutions`).
+- A create repeated by the same session with the same title and identical HTML
+  within ten minutes returns the artifact already created, so a call that
+  timed out can be retried without leaving a duplicate.
+- An annotation records the closest `id` or `data-id` of the element it was
+  made in. The agent reads which panel a note is about, the viewer shows it,
+  and a note made in one tab is no longer drawn on the content another tab
+  mounts in the same position.
+- `openpoet_list_artifact_annotations` says, for a note made on an earlier
+  version, whether its quoted text or element is still in the current version,
+  and for a resolved one the version it was resolved on.
 
 ### Changed
 
@@ -77,6 +95,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The built-in `html-artifact` skill and the steering block teach publishing
   from a file and changing a page with a patch instead of typing the page into
   a tool argument.
+- An annotation whose text or element is in a part of the page that is not
+  shown (a closed tab or section) is no longer drawn as a badge in the corner
+  of the page; the panel marks it "in a closed part".
 - "Send to agent" says it is OpenPoet reporting a button press, counts answers
   and notes separately, and asks the agent to act on each one or leave it open
   saying why.

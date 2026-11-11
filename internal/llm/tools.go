@@ -525,7 +525,8 @@ func AllToolDefs() []ToolDef {
 				"Rules: a complete HTML document with ALL CSS and JavaScript inline; no external scripts, stylesheets, fonts or images (the viewer blocks every network request, so use inline SVG/canvas and data: URIs); must work in light and dark themes and on a phone; at most 2 MiB. " +
 				"The user gets a card to open it — do not paste the HTML or a link in your reply. The user can annotate the artifact; read their notes with list_artifact_annotations. " +
 				"When the user has to decide or answer something, declare questions in the page (a JSON block with id openpoet-questions; the html-artifact skill shows how): the answers come back with the annotations. " +
-				"In a session, write the page to an .html file and pass html_path instead of html: the document is then read from the file instead of being typed again as a tool argument. The result reports the exact size and SHA-256 of what was stored.",
+				"In a session, write the page to an .html file and pass html_path instead of html: the document is then read from the file instead of being typed again as a tool argument. The result reports the exact size and SHA-256 of what was stored, and where credential-looking text was masked (line and kind). " +
+				"Calling it again from the same session with the same title and identical HTML within a few minutes returns the artifact already created instead of a duplicate, so a call that timed out can be repeated.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
@@ -534,6 +535,7 @@ func AllToolDefs() []ToolDef {
 					"html":      {Type: "string", Description: "The complete, self-contained HTML document (inline CSS and JS only). Use it when you cannot write a file"},
 					"summary":   {Type: "string", Description: "One or two sentences on what the artifact contains"},
 					"task_id":   {Type: "string", Description: "Optional task ID to link the artifact to (defaults to the task of the current session)"},
+					"dry_run":   {Type: "boolean", Description: "Check the document without publishing: reports whether it is accepted, its size and SHA-256, the questions it declares and what would be masked (default: false)"},
 				},
 				Required: []string{"title"},
 			},
@@ -553,6 +555,9 @@ func AllToolDefs() []ToolDef {
 					"html":         {Type: "string", Description: "The complete new HTML document. Use it when you cannot write a file"},
 					"change_note":  {Type: "string", Description: "One line on what changed in this version"},
 					"base_version": {Type: "string", Description: "The version number this change is based on; the update is refused if the artifact has moved on"},
+					"title":        {Type: "string", Description: "New title of the artifact. Passed without a document, it changes the title without publishing a version"},
+					"summary":      {Type: "string", Description: "New summary of the artifact. Passed without a document, it changes the summary without publishing a version"},
+					"dry_run":      {Type: "boolean", Description: "Check the document without publishing (default: false)"},
 				},
 				Required: []string{"artifact_id"},
 			},
@@ -579,6 +584,9 @@ func AllToolDefs() []ToolDef {
 						Required: []string{"old", "new"},
 					}},
 					"change_note": {Type: "string", Description: "One line on what changed in this version"},
+					"title":       {Type: "string", Description: "New title of the artifact, when the change calls for one"},
+					"summary":     {Type: "string", Description: "New summary of the artifact, when the change calls for one"},
+					"dry_run":     {Type: "boolean", Description: "Apply the edits and check the result without publishing (default: false)"},
 				},
 				Required: []string{"artifact_id", "base_version", "edits"},
 			},
@@ -617,7 +625,7 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:        "list_artifact_annotations",
-			Description: "List the user's annotations on an HTML artifact: for each, its id, the version it was made on, the quoted text or element it points at, and the user's note. Answers to the questions the artifact asks are listed too (the question, the option chosen and the comment), with the questions still unanswered. Returns the open ones by default — these are the changes the user is asking for.",
+			Description: "List the user's annotations on an HTML artifact: for each, its id, the version it was made on, the quoted text or element it points at (with the id or data-id of the panel it sits in), and the user's note. A note made on an earlier version says whether its quoted text or element is still in the current version, and a resolved one the version it was resolved on. Answers to the questions the artifact asks are listed too (the question, the option chosen and the comment), with the questions still unanswered. Returns the open ones by default — these are the changes the user is asking for.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
@@ -629,16 +637,25 @@ func AllToolDefs() []ToolDef {
 			Context: ToolContextBoth,
 		},
 		{
-			Name:        "resolve_artifact_annotation",
-			Description: "Mark one annotation on an HTML artifact as resolved, with a note telling the user what you did about it (usually after publishing the fix with update_artifact). Resolve only what you actually addressed.",
+			Name: "resolve_artifact_annotation",
+			Description: "Mark annotations on an HTML artifact as resolved, each with a note telling the user what you did about it (usually after publishing the fix with patch_artifact or update_artifact). " +
+				"Pass resolutions to resolve several in one call, or annotation_id and resolution_note for one. Resolve only what you actually addressed. The result names the ones that could not be resolved, if any; the others stay resolved.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
-					"artifact_id":     {Type: "string", Description: "The artifact ID the annotation belongs to"},
-					"annotation_id":   {Type: "string", Description: "The annotation ID (number) from list_artifact_annotations"},
-					"resolution_note": {Type: "string", Description: "What you changed, or why no change was needed"},
+					"artifact_id": {Type: "string", Description: "The artifact ID the annotations belong to"},
+					"resolutions": {Type: "array", Description: "The annotations to resolve, each with its own note", Items: &ToolPropertySchema{
+						Type: "object",
+						Properties: map[string]ToolPropertySchema{
+							"annotation_id":   {Type: "string", Description: "The annotation ID (number) from list_artifact_annotations"},
+							"resolution_note": {Type: "string", Description: "What you changed for this annotation, or why no change was needed"},
+						},
+						Required: []string{"annotation_id", "resolution_note"},
+					}},
+					"annotation_id":   {Type: "string", Description: "To resolve a single annotation: its ID (number) from list_artifact_annotations"},
+					"resolution_note": {Type: "string", Description: "To resolve a single annotation: what you changed, or why no change was needed. With resolutions, the note for the entries that have none"},
 				},
-				Required: []string{"artifact_id", "annotation_id", "resolution_note"},
+				Required: []string{"artifact_id"},
 			},
 			Context: ToolContextBoth,
 		},

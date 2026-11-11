@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -195,6 +196,30 @@ func (d *DB) ListArtifacts(ctx context.Context, filter ArtifactFilter) ([]Artifa
 	items := []ArtifactListItem{}
 	err := d.SelectContext(ctx, &items, query, args...)
 	return items, err
+}
+
+// FindRecentArtifactByContent returns the newest active artifact that the
+// session created within the window with this title and whose first version
+// has this hash, or nil when there is none.
+func (d *DB) FindRecentArtifactByContent(ctx context.Context, sessionID, title, sha256 string, window time.Duration) (*Artifact, error) {
+	if sessionID == "" || sha256 == "" {
+		return nil, nil
+	}
+	var artifact Artifact
+	err := d.GetContext(ctx, &artifact,
+		`SELECT `+artifactColumns+` FROM artifacts
+		 WHERE session_id = ? AND title = ? AND status = 'active'
+		   AND created_at >= datetime('now', ?)
+		   AND EXISTS (SELECT 1 FROM artifact_versions v WHERE v.artifact_id = artifacts.id AND v.version = 1 AND v.sha256 = ?)
+		 ORDER BY created_at DESC, id LIMIT 1`,
+		sessionID, title, fmt.Sprintf("-%d seconds", int(window.Seconds())), sha256)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &artifact, nil
 }
 
 // ListArtifactVersions returns every version of an artifact, newest first,

@@ -26,8 +26,17 @@ Rules the server enforces on every publish:
   size in bytes and its SHA-256.
 - Credential-looking text (`password=…`, `api_key: …`, private keys) is masked
   as `[REDACTED]`, as in Docs. That is the one case in which the stored HTML
-  differs from the input; the publish result says when it happened, because
-  masking inside a script can break it.
+  differs from the input. Because masking inside a script can break it, the
+  publish result says how many values were masked and where: the line of the
+  document that was sent and the kind of text (the keyword, never the value),
+  for up to 50 places.
+- A create repeated by the same session with the same title and identical HTML
+  within ten minutes returns the artifact the first call created
+  (`duplicate: true`, HTTP 200) instead of a second one, so a call that timed
+  out on the caller's side can be retried.
+- `dry_run: true` on a create, update or patch validates the document and
+  answers what would be stored (size, hash, questions, masking, the version it
+  would create) without storing anything.
 - An update names the version it was based on (`base_version`). If the artifact
   has moved on, the update is refused with a conflict that names the current
   version; nothing is overwritten.
@@ -120,6 +129,24 @@ artifact and gets no extra capability; it talks to the page with `postMessage`.
 - An annotation belongs to the version it was made on. On another version it is
   placed again by its quote and context; when it no longer matches, the panel
   marks it "not in this version" and it stays open.
+- An anchor also records `near`: the closest `id` or `data-id` at or above the
+  annotated element (`#stage-2`, `[data-id="TM8"]`), and its selector starts at
+  a unique `data-id` as it does at a unique `id`. A page made of tabs or panels
+  usually marks each one that way. The agent is told which panel a note is
+  about, the panel shows it next to the note, and an element note is placed
+  only inside that panel: a page that mounts one tab at a time puts different
+  content at the same position, and the note belongs to one of them.
+- A note whose text or element is in the page but not rendered (a closed tab, a
+  collapsed section) is not outlined; the panel marks it "in a closed part".
+
+The viewer places annotations in the rendered page. The server does not render
+anything, so for the agent it checks the stored HTML instead:
+`GET /api/artifacts/{id}/annotations?placement=1` adds, to each note made on an
+earlier version, whether its quoted text is still in the text of the current
+version, or whether the `id` / `data-id` its element sits in is still in the
+markup (`placement: {version, checked, found}`; `checked` is false when there
+was nothing to look for), and to each resolved annotation the version that was
+current when it was resolved (`resolved_on_version`). The agent tools use it.
 - **Send to agent** posts a short message to the session that published the
   artifact (through the existing session input route), asking it to read the
   open annotations. The message starts with `[OpenPoet]`, says how many answers
@@ -204,13 +231,13 @@ message from the frame proves nothing about what the user did.
 | `POST /api/artifacts` | Publish a new artifact (`title`, `html` or `html_path`, `summary`, optional `project_id`, `task_id`, `conversation_id`, `session_id`) |
 | `GET /api/artifacts?project_id=&session_id=&task_id=&include_archived=` | List artifacts, without HTML |
 | `GET /api/artifacts/{id}` | Metadata, version history (size and SHA-256 of each version), open-annotation count, `link` and `url` |
-| `PUT /api/artifacts/{id}` | Publish a new version (`html` or `html_path`, `base_version`, `change_note`) |
-| `POST /api/artifacts/{id}/patch` | Publish a new version from replacements (`base_version`, `edits: [{old, new, replace_all}]`, `change_note`) |
+| `PUT /api/artifacts/{id}` | Publish a new version (`html` or `html_path`, `base_version`, `change_note`, optional `title`, `summary`, `dry_run`) |
+| `POST /api/artifacts/{id}/patch` | Publish a new version from replacements (`base_version`, `edits: [{old, new, replace_all}]`, `change_note`, optional `title`, `summary`, `dry_run`) |
 | `PATCH /api/artifacts/{id}` | Change `title`, `summary` or `status` |
 | `GET /api/artifacts/{id}/versions/{n\|current}` | One version with its HTML, as JSON |
 | `POST /api/artifacts/{id}/versions/{n\|current}/export` | Write the HTML of a version to a file in the calling session's workspace (`path`) |
 | `GET /api/artifacts/{id}/render?v=n` | The sandboxed document for the viewer |
-| `GET /api/artifacts/{id}/annotations?status=open\|resolved\|all` | List annotations |
+| `GET /api/artifacts/{id}/annotations?status=open\|resolved\|all&placement=1` | List annotations; with `placement=1`, whether each older note still applies to the current version |
 | `POST /api/artifacts/{id}/annotations` | Create an annotation (`version`, `anchor`, `body`) |
 | `POST /api/artifacts/{id}/annotations/{annotationId}/resolve` | Resolve, with an optional `resolution_note` |
 | `POST /api/artifacts/{id}/annotations/{annotationId}/reopen` | Reopen |
@@ -223,8 +250,8 @@ Artifacts also appear in the session and task document listings with ids of
 the form `artifact:<id>` and type `artifact`.
 
 A create, update or patch answers with `version`, `created`, `size_bytes` and
-`sha256` (the exact size and hash of the stored HTML), `redacted`, `link` and
-`url`. The HTML is stored as it was sent: `sha256` is the hash of the input
+`sha256` (the exact size and hash of the stored HTML), `redacted` (with
+`redaction_count` and `redactions: [{line, kind}]`), `link` and `url`. The HTML is stored as it was sent: `sha256` is the hash of the input
 unless `redacted` is true.
 
 ### Publishing without resending the document
@@ -258,13 +285,13 @@ to the chat assistant, and through `openpoet cli call`.
 
 | Tool | Arguments |
 | --- | --- |
-| `openpoet_create_artifact` | `title`, `html_path` or `html`, `summary`, `task_id` |
-| `openpoet_update_artifact` | `artifact_id`, `html_path` or `html`, `change_note`, `base_version` |
-| `openpoet_patch_artifact` | `artifact_id`, `base_version`, `edits` (`[{old, new, replace_all}]`), `change_note` |
+| `openpoet_create_artifact` | `title`, `html_path` or `html`, `summary`, `task_id`, `dry_run` |
+| `openpoet_update_artifact` | `artifact_id`, `html_path` or `html`, `change_note`, `base_version`, `title`, `summary`, `dry_run`. With only `title` / `summary`, it renames without publishing a version |
+| `openpoet_patch_artifact` | `artifact_id`, `base_version`, `edits` (`[{old, new, replace_all}]`), `change_note`, `title`, `summary`, `dry_run` |
 | `openpoet_read_artifact` | `artifact_id`, `version`, `output_path` (write the HTML to a file) or `include_html` (return it) |
 | `openpoet_list_artifacts` | `project_id`, `task_id`, `session_id`, `include_archived` |
-| `openpoet_list_artifact_annotations` | `artifact_id`, `status` (default `open`). Lists notes and answers, and names the questions of the current version that have no open answer |
-| `openpoet_resolve_artifact_annotation` | `artifact_id`, `annotation_id`, `resolution_note` |
+| `openpoet_list_artifact_annotations` | `artifact_id`, `status` (default `open`). Lists notes and answers, and names the questions of the current version that have no open answer. Each note names the panel it was made in and, when it was made on an earlier version, whether it still applies to the current one |
+| `openpoet_resolve_artifact_annotation` | `artifact_id`, and either `resolutions` (`[{annotation_id, resolution_note}]`, several in one call) or `annotation_id` with `resolution_note`. One that fails does not undo the others; the result names it |
 
 The link that opens an artifact for someone else comes from `openpoet_get_link`
 (see [`links.md`](links.md)); the results of create, update, patch and read

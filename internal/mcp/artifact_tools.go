@@ -63,6 +63,17 @@ type artifactPublishToolResult struct {
 	SourcePath string `json:"source_path"`
 	// Replacements is how many places a patch changed.
 	Replacements int `json:"replacements"`
+	// Redactions are the places where text was masked (line of the document
+	// sent, kind of text); RedactionCount is how many there were in all.
+	Redactions []struct {
+		Line int    `json:"line"`
+		Kind string `json:"kind"`
+	} `json:"redactions"`
+	RedactionCount int `json:"redaction_count"`
+	// DryRun: nothing was stored. Duplicate: the artifact this session had
+	// just created with the same title and HTML was returned.
+	DryRun    bool `json:"dry_run"`
+	Duplicate bool `json:"duplicate"`
 }
 
 type artifactAnnotationToolView struct {
@@ -75,10 +86,20 @@ type artifactAnnotationToolView struct {
 		Type     string `json:"type"`
 		Selector string `json:"selector"`
 		Tag      string `json:"tag"`
+		// Near is the closest id or data-id at or above the annotated element.
+		Near string `json:"near"`
 	} `json:"anchor"`
-	ResolutionNote string `json:"resolution_note"`
-	ResolvedBy     string `json:"resolved_by"`
-	CreatedBy      string `json:"created_by"`
+	// Placement says whether a note made on an earlier version still has
+	// something to point at in the current one.
+	Placement *struct {
+		Version int  `json:"version"`
+		Checked bool `json:"checked"`
+		Found   bool `json:"found"`
+	} `json:"placement"`
+	ResolvedOnVersion int    `json:"resolved_on_version"`
+	ResolutionNote    string `json:"resolution_note"`
+	ResolvedBy        string `json:"resolved_by"`
+	CreatedBy         string `json:"created_by"`
 	// Kind is "note" or "answer". An answer names the question it answers
 	// (QuestionID, with the prompt in Quote) and the options chosen; its Body
 	// is the user's comment, or the text of a free-text answer.
@@ -226,6 +247,7 @@ func executeArtifactTool(client *APIClient, name string, params map[string]inter
 		payload, _ := json.Marshal(map[string]interface{}{
 			"title": stringParam(params, "title"), "html": html, "html_path": htmlPath, "summary": stringParam(params, "summary"),
 			"task_id": stringParam(params, "task_id"), "conversation_id": conversationID, "session_id": sessionID,
+			"dry_run": boolParam(params, "dry_run"),
 		})
 		body, err := client.Post("/api/artifacts", string(payload))
 		if err != nil {
@@ -238,19 +260,34 @@ func executeArtifactTool(client *APIClient, name string, params map[string]inter
 		if err != nil {
 			return "", err
 		}
+		meta := artifactMetaParams(params)
+		// A title or summary on its own changes them without a new version.
+		if _, hasHTML := params["html"].(string); !hasHTML && stringParam(params, "html_path") == "" && stringParam(params, "html_file") == "" && len(meta) > 0 {
+			encoded, _ := json.Marshal(meta)
+			body, err := client.Patch("/api/artifacts/"+url.PathEscape(id), string(encoded))
+			if err != nil {
+				return "", artifactAPIError(err)
+			}
+			return FormatArtifactMetaUpdated(body, meta), nil
+		}
 		html, htmlPath, err := resolveArtifactHTML(params, allowFiles)
 		if err != nil {
 			return "", err
 		}
-		payload, _ := json.Marshal(map[string]interface{}{
+		request := map[string]interface{}{
 			"html": html, "html_path": htmlPath, "change_note": stringParam(params, "change_note"),
 			"base_version": stringParam(params, "base_version"), "session_id": sessionID,
-		})
+			"dry_run": boolParam(params, "dry_run"),
+		}
+		for key, value := range meta {
+			request[key] = value
+		}
+		payload, _ := json.Marshal(request)
 		body, err := client.Put("/api/artifacts/"+url.PathEscape(id), string(payload))
 		if err != nil {
 			return "", artifactAPIError(err)
 		}
-		return FormatArtifactUpdated(body, countOpenArtifactAnnotations(client, id), "openpoet_"), nil
+		return FormatArtifactUpdated(body, countOpenArtifactAnnotations(client, id), "openpoet_") + ArtifactMetaNote(body, meta), nil
 
 	case "openpoet_patch_artifact":
 		id, err := artifactIDParam(params)
@@ -265,15 +302,21 @@ func executeArtifactTool(client *APIClient, name string, params map[string]inter
 		if baseVersion == "" {
 			return "", fmt.Errorf("base_version is required: the version whose HTML your edits were written against")
 		}
-		payload, _ := json.Marshal(map[string]interface{}{
+		meta := artifactMetaParams(params)
+		request := map[string]interface{}{
 			"edits": edits, "change_note": stringParam(params, "change_note"),
 			"base_version": baseVersion, "session_id": sessionID,
-		})
+			"dry_run": boolParam(params, "dry_run"),
+		}
+		for key, value := range meta {
+			request[key] = value
+		}
+		payload, _ := json.Marshal(request)
 		body, err := client.Post("/api/artifacts/"+url.PathEscape(id)+"/patch", string(payload))
 		if err != nil {
 			return "", artifactAPIError(err)
 		}
-		return FormatArtifactUpdated(body, countOpenArtifactAnnotations(client, id), "openpoet_"), nil
+		return FormatArtifactUpdated(body, countOpenArtifactAnnotations(client, id), "openpoet_") + ArtifactMetaNote(body, meta), nil
 
 	case "openpoet_read_artifact":
 		id, err := artifactIDParam(params)
@@ -325,7 +368,7 @@ func executeArtifactTool(client *APIClient, name string, params map[string]inter
 		if status == "" {
 			status = "open"
 		}
-		body, err := client.Get(fmt.Sprintf("/api/artifacts/%s/annotations?status=%s", url.PathEscape(id), url.QueryEscape(status)))
+		body, err := client.Get(fmt.Sprintf("/api/artifacts/%s/annotations?placement=1&status=%s", url.PathEscape(id), url.QueryEscape(status)))
 		if err != nil {
 			return "", artifactAPIError(err)
 		}
@@ -345,19 +388,17 @@ func executeArtifactTool(client *APIClient, name string, params map[string]inter
 		if err != nil {
 			return "", err
 		}
-		annotationID, err := strconv.ParseInt(stringParam(params, "annotation_id"), 10, 64)
-		if err != nil || annotationID <= 0 {
-			return "", fmt.Errorf("annotation_id must be the numeric id from openpoet_list_artifact_annotations")
+		resolutions, err := ArtifactResolutionsParam(params, "openpoet_")
+		if err != nil {
+			return "", err
 		}
-		note := stringParam(params, "resolution_note")
-		if note == "" {
-			return "", fmt.Errorf("resolution_note is required: tell the user what you changed")
+		outcome := make([]ArtifactResolutionOutcome, 0, len(resolutions))
+		for _, resolution := range resolutions {
+			payload, _ := json.Marshal(map[string]string{"resolution_note": resolution.Note})
+			_, err := client.Post(fmt.Sprintf("/api/artifacts/%s/annotations/%d/resolve", url.PathEscape(id), resolution.AnnotationID), string(payload))
+			outcome = append(outcome, ArtifactResolutionOutcome{AnnotationID: resolution.AnnotationID, Err: artifactAPIError(err)})
 		}
-		payload, _ := json.Marshal(map[string]string{"resolution_note": note})
-		if _, err := client.Post(fmt.Sprintf("/api/artifacts/%s/annotations/%d/resolve", url.PathEscape(id), annotationID), string(payload)); err != nil {
-			return "", artifactAPIError(err)
-		}
-		return FormatArtifactAnnotationResolved(id, annotationID, countOpenArtifactAnnotations(client, id)), nil
+		return FormatArtifactAnnotationsResolved(id, outcome, countOpenArtifactAnnotations(client, id))
 	}
 	return "", fmt.Errorf("unknown tool: %s", name)
 }
@@ -370,13 +411,42 @@ func executeArtifactTool(client *APIClient, name string, params map[string]inter
 // FormatArtifactPublished describes a newly created artifact.
 func FormatArtifactPublished(body []byte, toolPrefix string) string {
 	var result artifactPublishToolResult
-	if err := json.Unmarshal(body, &result); err != nil || result.ID == "" {
+	if err := json.Unmarshal(body, &result); err == nil && result.DryRun {
+		return formatArtifactDryRun(result, toolPrefix)
+	}
+	if result.ID == "" {
 		return string(body)
+	}
+	if result.Duplicate {
+		return fmt.Sprintf("Artifact already published: this session created artifact_id %s a moment ago with the same title and identical HTML, so no second artifact was created. "+
+			"It is at version %d; what you sent is %s. To change it, call %spatch_artifact or %supdate_artifact with artifact_id %s and base_version %d. Internal link: %s%s",
+			result.ID, result.Version, artifactIntegrity(result), toolPrefix, toolPrefix, result.ID, result.Version, result.Link, ShareableLinkNote(result.URL, toolPrefix))
 	}
 	return fmt.Sprintf("Artifact published: artifact_id %s, version %d (%s).%s The user was shown a card to open it in the artifact viewer — do NOT paste the HTML or generate links. "+
 		"To change it, call %spatch_artifact (a few replacements) or %supdate_artifact (the whole page) with artifact_id %s and base_version %d. Internal link: %s%s%s",
 		result.ID, result.Version, artifactIntegrity(result), artifactSourceNote(result.SourcePath), toolPrefix, toolPrefix, result.ID, result.Version, result.Link,
-		ShareableLinkNote(result.URL, toolPrefix), artifactQuestionsNote(result.Questions, toolPrefix)+artifactRedactionNote(result.Redacted))
+		ShareableLinkNote(result.URL, toolPrefix), artifactQuestionsNote(result.Questions, toolPrefix)+artifactRedactionNote(result))
+}
+
+// formatArtifactDryRun describes what a publish would have done.
+func formatArtifactDryRun(result artifactPublishToolResult, toolPrefix string) string {
+	outcome := "it would be published as a new artifact"
+	switch {
+	case result.ID != "" && result.Created:
+		outcome = fmt.Sprintf("it would become version %d of artifact %s", result.Version, result.ID)
+	case result.ID != "":
+		outcome = fmt.Sprintf("it is identical to version %d of artifact %s, so no new version would be created", result.Version, result.ID)
+	}
+	patched := ""
+	if result.Replacements > 0 {
+		patched = fmt.Sprintf(" %d replacement(s) would be applied.", result.Replacements)
+	}
+	masking := " Nothing would be masked."
+	if result.Redacted {
+		masking = artifactRedactionNote(result)
+	}
+	return fmt.Sprintf("Dry run, nothing was published. The document is accepted: %s, stored as %s, sha256 %s.%s%s%s",
+		outcome, formatArtifactSize(result.SizeBytes), result.SHA256, patched, artifactQuestionsNote(result.Questions, toolPrefix), masking)
 }
 
 // artifactIntegrity states the exact size and hash of the stored HTML of a
@@ -431,6 +501,9 @@ func FormatArtifactUpdated(body []byte, openAnnotations int, toolPrefix string) 
 	if err := json.Unmarshal(body, &result); err != nil || result.ID == "" {
 		return string(body)
 	}
+	if result.DryRun {
+		return formatArtifactDryRun(result, toolPrefix)
+	}
 	links := fmt.Sprintf(" Internal link: %s%s", result.Link, ShareableLinkNote(result.URL, toolPrefix))
 	if !result.Created {
 		return fmt.Sprintf("No new version: the HTML is identical to version %d of artifact %s (%s).%s",
@@ -442,7 +515,7 @@ func FormatArtifactUpdated(body []byte, openAnnotations int, toolPrefix string) 
 	}
 	message := fmt.Sprintf("Artifact %s is now at version %d (%s).%s%s The user's open viewer is offered the new version.%s%s%s",
 		result.ID, result.Version, artifactIntegrity(result), patched, artifactSourceNote(result.SourcePath),
-		artifactQuestionsNote(result.Questions, toolPrefix), artifactRedactionNote(result.Redacted), links)
+		artifactQuestionsNote(result.Questions, toolPrefix), artifactRedactionNote(result), links)
 	if openAnnotations > 0 {
 		message += fmt.Sprintf(" %d annotation(s) are still open: resolve the ones this version addresses with %sresolve_artifact_annotation.", openAnnotations, toolPrefix)
 	}
@@ -539,6 +612,168 @@ func FormatArtifactUnanswered(questions, open []byte) string {
 // FormatArtifactAnnotationResolved confirms a resolution.
 func FormatArtifactAnnotationResolved(artifactID string, annotationID int64, remainingOpen int) string {
 	return fmt.Sprintf("Annotation #%d on artifact %s resolved. %d annotation(s) remain open.", annotationID, artifactID, remainingOpen)
+}
+
+// ArtifactResolution is one annotation to resolve, with what to tell the user.
+type ArtifactResolution struct {
+	AnnotationID int64
+	Note         string
+}
+
+// ArtifactResolutionOutcome is what happened to one resolution.
+type ArtifactResolutionOutcome struct {
+	AnnotationID int64
+	Err          error
+}
+
+// maxArtifactResolutions bounds one resolve call.
+const maxArtifactResolutions = 200
+
+// ArtifactResolutionsParam reads what to resolve from the arguments of
+// resolve_artifact_annotation: either annotation_id with resolution_note, or
+// resolutions, a list of {annotation_id, resolution_note} (also accepted as a
+// JSON string). A resolution in the list without its own note takes the
+// top-level resolution_note. toolPrefix names the listing tool in errors.
+func ArtifactResolutionsParam(params map[string]interface{}, toolPrefix string) ([]ArtifactResolution, error) {
+	shared := stringParam(params, "resolution_note")
+	parseID := func(object map[string]interface{}) (int64, error) {
+		id, err := strconv.ParseInt(stringParam(object, "annotation_id"), 10, 64)
+		if err != nil || id <= 0 {
+			return 0, fmt.Errorf("annotation_id must be the numeric id from %slist_artifact_annotations", toolPrefix)
+		}
+		return id, nil
+	}
+	raw, given := params["resolutions"]
+	if text, ok := raw.(string); ok && strings.TrimSpace(text) != "" {
+		var decoded []interface{}
+		if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+			return nil, fmt.Errorf("resolutions must be a list of {annotation_id, resolution_note} objects")
+		}
+		raw = decoded
+	} else if ok {
+		given = false
+	}
+	if !given || raw == nil {
+		id, err := parseID(params)
+		if err != nil {
+			return nil, err
+		}
+		if shared == "" {
+			return nil, fmt.Errorf("resolution_note is required: tell the user what you changed")
+		}
+		return []ArtifactResolution{{AnnotationID: id, Note: shared}}, nil
+	}
+	if stringParam(params, "annotation_id") != "" {
+		return nil, fmt.Errorf("pass annotation_id or resolutions, not both")
+	}
+	list, ok := raw.([]interface{})
+	if !ok || len(list) == 0 {
+		return nil, fmt.Errorf("resolutions must be a list of {annotation_id, resolution_note} objects")
+	}
+	if len(list) > maxArtifactResolutions {
+		return nil, fmt.Errorf("resolutions takes at most %d annotations per call", maxArtifactResolutions)
+	}
+	resolutions := make([]ArtifactResolution, 0, len(list))
+	seen := map[int64]bool{}
+	for i, item := range list {
+		object, ok := item.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("resolution %d must be an object with annotation_id and resolution_note", i+1)
+		}
+		id, err := parseID(object)
+		if err != nil {
+			return nil, fmt.Errorf("resolution %d: %w", i+1, err)
+		}
+		if seen[id] {
+			return nil, fmt.Errorf("resolution %d: annotation #%d is listed twice", i+1, id)
+		}
+		seen[id] = true
+		note := stringParam(object, "resolution_note")
+		if note == "" {
+			note = shared
+		}
+		if note == "" {
+			return nil, fmt.Errorf("resolution %d (annotation #%d) has no resolution_note: tell the user what you changed", i+1, id)
+		}
+		resolutions = append(resolutions, ArtifactResolution{AnnotationID: id, Note: note})
+	}
+	return resolutions, nil
+}
+
+// FormatArtifactAnnotationsResolved reports a resolve call. One annotation
+// that fails does not undo the others: the result says which were resolved and
+// which were not, and why. It is an error only when none was resolved.
+func FormatArtifactAnnotationsResolved(artifactID string, outcome []ArtifactResolutionOutcome, remainingOpen int) (string, error) {
+	var resolved, failed []string
+	for _, item := range outcome {
+		if item.Err != nil {
+			failed = append(failed, fmt.Sprintf("#%d (%s)", item.AnnotationID, oneLine(item.Err.Error(), 300)))
+			continue
+		}
+		resolved = append(resolved, fmt.Sprintf("#%d", item.AnnotationID))
+	}
+	if len(resolved) == 0 {
+		return "", fmt.Errorf("no annotation was resolved on artifact %s: %s", artifactID, strings.Join(failed, "; "))
+	}
+	if len(outcome) == 1 {
+		return FormatArtifactAnnotationResolved(artifactID, outcome[0].AnnotationID, remainingOpen), nil
+	}
+	message := fmt.Sprintf("Resolved %d annotation(s) on artifact %s: %s.", len(resolved), artifactID, strings.Join(resolved, ", "))
+	if len(failed) > 0 {
+		message += fmt.Sprintf(" NOT resolved (%d): %s.", len(failed), strings.Join(failed, "; "))
+	}
+	return message + fmt.Sprintf(" %d annotation(s) remain open.", remainingOpen), nil
+}
+
+// artifactMetaParams reads the title and summary a publish may carry. Only
+// the ones present in the arguments are returned.
+func artifactMetaParams(params map[string]interface{}) map[string]string {
+	meta := map[string]string{}
+	for _, key := range []string{"title", "summary"} {
+		if value, ok := params[key].(string); ok {
+			meta[key] = value
+		}
+	}
+	return meta
+}
+
+// ArtifactMetaParams is artifactMetaParams for the chat assistant's tools.
+func ArtifactMetaParams(params map[string]interface{}) map[string]string {
+	return artifactMetaParams(params)
+}
+
+// ArtifactMetaNote is appended to a publish result that also changed the
+// title or the summary. Nothing is said for a dry run.
+func ArtifactMetaNote(body []byte, meta map[string]string) string {
+	var result artifactPublishToolResult
+	if len(meta) == 0 || json.Unmarshal(body, &result) != nil || result.DryRun || result.ID == "" {
+		return ""
+	}
+	return " " + artifactMetaChanged(meta) + fmt.Sprintf(" The title is now %q.", oneLine(result.Artifact.Title, 200))
+}
+
+func artifactMetaChanged(meta map[string]string) string {
+	_, title := meta["title"]
+	_, summary := meta["summary"]
+	switch {
+	case title && summary:
+		return "Title and summary updated."
+	case title:
+		return "Title updated."
+	}
+	return "Summary updated."
+}
+
+// FormatArtifactMetaUpdated confirms a change of title or summary that
+// published no version. body is the artifact as PATCH /api/artifacts/{id}
+// answers it.
+func FormatArtifactMetaUpdated(body []byte, meta map[string]string) string {
+	var artifact artifactToolView
+	if err := json.Unmarshal(body, &artifact); err != nil || artifact.ID == "" {
+		return string(body)
+	}
+	return fmt.Sprintf("%s Artifact %s is still at version %d (no new version was published). The title is now %q.",
+		artifactMetaChanged(meta), artifact.ID, artifact.CurrentVersion, oneLine(artifact.Title, 200))
 }
 
 // FormatArtifactDetail renders an artifact with its version history, its open
@@ -646,7 +881,7 @@ func readArtifactForTool(client *APIClient, id, version string, includeHTML bool
 	}
 	// The annotations are part of what an agent needs, but a failure to read
 	// them must not hide the artifact itself.
-	annotations, _ := client.Get(fmt.Sprintf("/api/artifacts/%s/annotations?status=open", url.PathEscape(id)))
+	annotations, _ := client.Get(fmt.Sprintf("/api/artifacts/%s/annotations?placement=1&status=open", url.PathEscape(id)))
 	var versionBody []byte
 	if includeHTML {
 		if version == "" {
@@ -756,9 +991,14 @@ func writeArtifactAnnotations(sb *strings.Builder, annotations []artifactAnnotat
 				target = "<" + annotation.Anchor.Tag + "> element"
 			}
 		}
-		sb.WriteString(fmt.Sprintf("- #%d [%s, made on v%d] on %s %q", annotation.ID, annotation.Status, annotation.Version, target, oneLine(annotation.Quote, 400)))
-		if annotation.Anchor.Selector != "" {
-			sb.WriteString(fmt.Sprintf(" (at %s)", oneLine(annotation.Anchor.Selector, 200)))
+		sb.WriteString(fmt.Sprintf("- #%d [%s] on %s %q", annotation.ID, artifactAnnotationState(annotation), target, oneLine(annotation.Quote, 400)))
+		switch selector, near := oneLine(annotation.Anchor.Selector, 200), oneLine(annotation.Anchor.Near, 120); {
+		case selector != "" && near != "" && !strings.HasPrefix(selector, near):
+			sb.WriteString(fmt.Sprintf(" (at %s, inside %s)", selector, near))
+		case selector != "":
+			sb.WriteString(fmt.Sprintf(" (at %s)", selector))
+		case near != "":
+			sb.WriteString(fmt.Sprintf(" (inside %s)", near))
 		}
 		// The UI user is the expected author; anyone else is named.
 		author := ""
@@ -772,9 +1012,36 @@ func writeArtifactAnnotations(sb *strings.Builder, annotations []artifactAnnotat
 	}
 }
 
+// artifactAnnotationState is the bracketed state of a note: its status, the
+// version it was made on and, for a note made on an earlier version, whether
+// what it points at is still in the current one.
+func artifactAnnotationState(annotation artifactAnnotationToolView) string {
+	state := annotation.Status
+	if annotation.Status == "resolved" && annotation.ResolvedOnVersion > 0 {
+		state += fmt.Sprintf(" on v%d", annotation.ResolvedOnVersion)
+	}
+	state += fmt.Sprintf(", made on v%d", annotation.Version)
+	if placement := annotation.Placement; placement != nil && placement.Checked {
+		subject := "the quoted text"
+		if annotation.Anchor.Type == "element" {
+			subject = "its element"
+		}
+		if placement.Found {
+			state += fmt.Sprintf("; %s is still in v%d", subject, placement.Version)
+		} else {
+			state += fmt.Sprintf("; %s is no longer in v%d", subject, placement.Version)
+		}
+	}
+	return state
+}
+
 // writeArtifactAnswer renders the user's answer to one question.
 func writeArtifactAnswer(sb *strings.Builder, annotation artifactAnnotationToolView) {
-	sb.WriteString(fmt.Sprintf("- #%d [%s, answered on v%d] answer to question %s %q", annotation.ID, annotation.Status, annotation.Version,
+	status := annotation.Status
+	if annotation.Status == "resolved" && annotation.ResolvedOnVersion > 0 {
+		status += fmt.Sprintf(" on v%d", annotation.ResolvedOnVersion)
+	}
+	sb.WriteString(fmt.Sprintf("- #%d [%s, answered on v%d] answer to question %s %q", annotation.ID, status, annotation.Version,
 		oneLine(annotation.QuestionID, 64), oneLine(annotation.Quote, 500)))
 	author := ""
 	if annotation.CreatedBy != "" && !strings.HasPrefix(annotation.CreatedBy, "user:") {
@@ -816,12 +1083,31 @@ func formatArtifactSize(bytes int64) string {
 	return fmt.Sprintf("%d bytes (%.1f KiB)", bytes, float64(bytes)/1024)
 }
 
-func artifactRedactionNote(redacted bool) string {
-	if !redacted {
+// artifactRedactionNote reports the masking of a publish: how many values
+// were masked and where, by line of the document that was sent and by the kind
+// of text (the keyword, never the value).
+func artifactRedactionNote(result artifactPublishToolResult) string {
+	if !result.Redacted {
 		return ""
 	}
-	return " NOTE: credential-looking text (password=…, api_key=…, secret: …) was masked as [REDACTED] in the stored HTML. " +
-		"If that was code in a script, the script may be broken: rename the identifiers and publish again."
+	consequence := "If that was code in a script, the script may be broken: rename the identifiers and publish again."
+	if result.RedactionCount == 0 || len(result.Redactions) == 0 {
+		return " NOTE: credential-looking text (password=…, api_key=…, secret: …) was masked as [REDACTED] in the stored HTML. " + consequence
+	}
+	places := make([]string, 0, len(result.Redactions))
+	for _, redaction := range result.Redactions {
+		places = append(places, fmt.Sprintf("line %d (%s)", redaction.Line, oneLine(redaction.Kind, 40)))
+	}
+	more := ""
+	if result.RedactionCount > len(result.Redactions) {
+		more = fmt.Sprintf(", and %d more", result.RedactionCount-len(result.Redactions))
+	}
+	lines := "the document you sent"
+	if result.Replacements > 0 {
+		lines = "the patched document"
+	}
+	return fmt.Sprintf(" NOTE: %d credential-looking value(s) were masked as [REDACTED] in the stored HTML: %s%s. Lines are those of %s; what is named is the kind of text, never its value. %s",
+		result.RedactionCount, strings.Join(places, ", "), more, lines, consequence)
 }
 
 func sessionProjectID(client *APIClient, sessionID string) int64 {

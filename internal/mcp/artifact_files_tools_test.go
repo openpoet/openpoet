@@ -40,7 +40,7 @@ func TestArtifactToolsPublishFromAFilePatchAndExport(t *testing.T) {
 			fmt.Fprintf(w, `{"id":"ab12cd34","title":"Plan","status":"active","current_version":3,"size_bytes":170213,"link":"/app/artifact/ab12cd34","url":"https://poet.example.com/app/artifact/ab12cd34","versions":[{"version":3,"size_bytes":170213,"sha256":%q,"created_at":"2026-11-10T10:00:00Z"}]}`, artifactTestSHA)
 		case "GET /api/artifacts/ab12cd34/versions/current":
 			fmt.Fprintf(w, `{"artifact_id":"ab12cd34","version":3,"size_bytes":28,"sha256":"e9c7f4c5a6e9b0c9e9c6a4a3f0b7b0f0b1f0c2d3e4f5a6b7c8d9e0f1a2b3c4d5","content":"<html><body>v3</body></html>"}`)
-		case "GET /api/artifacts/ab12cd34/annotations?status=open":
+		case "GET /api/artifacts/ab12cd34/annotations?status=open", "GET /api/artifacts/ab12cd34/annotations?placement=1&status=open":
 			fmt.Fprint(w, `[]`)
 		default:
 			http.NotFound(w, r)

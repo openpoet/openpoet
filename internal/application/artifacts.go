@@ -38,6 +38,7 @@ type ArtifactStore interface {
 	GetArtifactVersion(context.Context, string, int) (*database.ArtifactVersion, error)
 	AppendArtifactVersion(context.Context, string, int, *database.ArtifactVersion) (*database.Artifact, bool, error)
 	UpdateArtifactMeta(context.Context, string, *string, *string, *string) error
+	FindRecentArtifactByContent(ctx context.Context, sessionID, title, sha256 string, window time.Duration) (*database.Artifact, error)
 	ArtifactAnnotationStore
 	ArtifactQuestionStore
 }
@@ -91,7 +92,24 @@ type ArtifactPublishResult struct {
 	SHA256    string `json:"sha256"`
 	// Replacements is how many places a patch changed (0 for a full publish).
 	Replacements int `json:"replacements,omitempty"`
+	// Redactions lists where text was masked (at most
+	// maxArtifactRedactionsReported places); RedactionCount is how many there
+	// were in all.
+	Redactions     []ArtifactRedaction `json:"redactions,omitempty"`
+	RedactionCount int                 `json:"redaction_count,omitempty"`
+	// DryRun is set when the request only asked what a publish would do:
+	// nothing was stored, and Version is the version it would have created.
+	DryRun bool `json:"dry_run,omitempty"`
+	// Duplicate is set when a create found that the same session had just
+	// published an artifact with the same title and HTML: that artifact is
+	// returned and nothing new was created.
+	Duplicate bool `json:"duplicate,omitempty"`
 }
+
+// artifactCreateRetryWindow is how long after a create the same session
+// publishing the same title and HTML gets the artifact it already created. A
+// tool call that timed out on the caller's side is retried well within it.
+const artifactCreateRetryWindow = 10 * time.Minute
 
 type CreateArtifactCommand struct {
 	Title          string
@@ -101,15 +119,25 @@ type CreateArtifactCommand struct {
 	TaskID         *int64
 	ConversationID *int64
 	SessionID      string
-	Authorization  ActionAuthorization
+	// DryRun validates the document and reports what would be stored,
+	// without creating anything.
+	DryRun        bool
+	Authorization ActionAuthorization
 }
 
 type UpdateArtifactCommand struct {
-	ArtifactID    string
-	Content       string
-	ChangeNote    string
-	BaseVersion   int
-	SessionID     string
+	ArtifactID  string
+	Content     string
+	ChangeNote  string
+	BaseVersion int
+	SessionID   string
+	// Title and Summary, when not nil, replace the artifact's title and
+	// summary together with the publish.
+	Title   *string
+	Summary *string
+	// DryRun validates the document and reports what would be stored,
+	// without publishing a version.
+	DryRun        bool
 	Authorization ActionAuthorization
 }
 
@@ -130,6 +158,9 @@ type PatchArtifactCommand struct {
 	Edits         []ArtifactEdit
 	ChangeNote    string
 	SessionID     string
+	Title         *string
+	Summary       *string
+	DryRun        bool
 	Authorization ActionAuthorization
 }
 
@@ -219,7 +250,7 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 	if err != nil {
 		return ArtifactPublishResult{}, err
 	}
-	content, redacted, err := normalizeArtifactHTML(command.Content)
+	content, redactions, err := normalizeArtifactHTML(command.Content)
 	if err != nil {
 		return ArtifactPublishResult{}, err
 	}
@@ -230,6 +261,21 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 	sessionID := strings.TrimSpace(command.SessionID)
 	if len(sessionID) > 200 {
 		return ArtifactPublishResult{}, validationError("invalid_session_id", "Session ID exceeds its bounded limit")
+	}
+	stored := ArtifactPublishResult{Version: 1, Questions: len(questions), SizeBytes: int64(len(content)), SHA256: artifactContentHash(content)}
+	stored.setRedactions(redactions)
+	if command.DryRun {
+		stored.DryRun = true
+		return stored, nil
+	}
+	// A create repeated by the same session (a retry after a timeout on the
+	// caller's side) returns the artifact the first call created.
+	if sessionID != "" {
+		if existing, err := s.store.FindRecentArtifactByContent(ctx, sessionID, title, stored.SHA256, artifactCreateRetryWindow); err == nil && existing != nil {
+			stored.Artifact, stored.Version, stored.Duplicate = artifactView(existing), existing.CurrentVersion, true
+			stored.Artifact.SizeBytes = stored.SizeBytes
+			return stored, nil
+		}
 	}
 	if command.ConversationID != nil && *command.ConversationID <= 0 {
 		return ArtifactPublishResult{}, validationError("invalid_conversation_id", "Conversation ID must be positive")
@@ -288,16 +334,46 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 	if err := s.store.CreateArtifact(ctx, artifact, version); err != nil {
 		return ArtifactPublishResult{}, err
 	}
-	stored, err := s.store.GetArtifact(ctx, artifact.ID)
+	created, err := s.store.GetArtifact(ctx, artifact.ID)
 	if err != nil {
 		return ArtifactPublishResult{}, err
 	}
-	publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "artifacts", Action: "created", Meta: artifactChangeMeta(stored)})
-	view := artifactView(stored)
+	publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "artifacts", Action: "created", Meta: artifactChangeMeta(created)})
+	view := artifactView(created)
 	view.SizeBytes = version.SizeBytes
 	s.notifyPublished(ctx, view, true)
-	return ArtifactPublishResult{Artifact: view, Version: 1, Created: true, Redacted: redacted, Questions: len(questions),
-		SizeBytes: version.SizeBytes, SHA256: version.SHA256}, nil
+	stored.Artifact, stored.Created = view, true
+	return stored, nil
+}
+
+// setRedactions records where masking changed the document.
+func (r *ArtifactPublishResult) setRedactions(redactions []ArtifactRedaction) {
+	r.Redacted = len(redactions) > 0
+	r.RedactionCount = len(redactions)
+	if len(redactions) > maxArtifactRedactionsReported {
+		redactions = redactions[:maxArtifactRedactionsReported]
+	}
+	r.Redactions = redactions
+}
+
+// artifactMetaInput validates a title and a summary that may accompany a
+// publish. Nil stays nil.
+func artifactMetaInput(title, summary *string) (*string, *string, error) {
+	if title != nil {
+		value, err := boundedRedactedInput(singleLine(*title), maxApplicationTitleRunes, "Artifact title", true)
+		if err != nil {
+			return nil, nil, err
+		}
+		title = &value
+	}
+	if summary != nil {
+		value, err := boundedRedactedInput(*summary, maxApplicationSummaryRunes, "Artifact summary", false)
+		if err != nil {
+			return nil, nil, err
+		}
+		summary = &value
+	}
+	return title, summary, nil
 }
 
 func (s *ArtifactService) Update(ctx context.Context, command UpdateArtifactCommand) (ArtifactPublishResult, error) {
@@ -311,7 +387,7 @@ func (s *ArtifactService) Update(ctx context.Context, command UpdateArtifactComm
 	if command.BaseVersion < 0 {
 		return ArtifactPublishResult{}, validationError("invalid_base_version", "base_version cannot be negative")
 	}
-	content, redacted, err := normalizeArtifactHTML(command.Content)
+	content, redactions, err := normalizeArtifactHTML(command.Content)
 	if err != nil {
 		return ArtifactPublishResult{}, err
 	}
@@ -323,9 +399,18 @@ func (s *ArtifactService) Update(ctx context.Context, command UpdateArtifactComm
 	if err != nil {
 		return ArtifactPublishResult{}, err
 	}
+	title, summary, err := artifactMetaInput(command.Title, command.Summary)
+	if err != nil {
+		return ArtifactPublishResult{}, err
+	}
 	sessionID := strings.TrimSpace(command.SessionID)
 	if len(sessionID) > 200 {
 		return ArtifactPublishResult{}, validationError("invalid_session_id", "Session ID exceeds its bounded limit")
+	}
+	result := ArtifactPublishResult{Questions: len(questions), SizeBytes: int64(len(content)), SHA256: artifactContentHash(content)}
+	result.setRedactions(redactions)
+	if command.DryRun {
+		return s.updateDryRun(ctx, id, command.BaseVersion, result)
 	}
 	version := &database.ArtifactVersion{
 		Content: content, SizeBytes: int64(len(content)), SHA256: artifactContentHash(content),
@@ -343,14 +428,51 @@ func (s *ArtifactService) Update(ctx context.Context, command UpdateArtifactComm
 		}
 		return ArtifactPublishResult{}, err
 	}
+	if title != nil || summary != nil {
+		if err := s.store.UpdateArtifactMeta(ctx, id, title, summary, nil); err != nil {
+			return ArtifactPublishResult{}, err
+		}
+		if stored, err = s.artifact(ctx, id); err != nil {
+			return ArtifactPublishResult{}, err
+		}
+		if !created {
+			publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "artifacts", Action: "updated", Meta: artifactChangeMeta(stored)})
+		}
+	}
 	view := artifactView(stored)
 	view.SizeBytes = version.SizeBytes
 	if created {
 		publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "artifacts", Action: "version_published", Meta: artifactChangeMeta(stored)})
 		s.notifyPublished(ctx, view, false)
 	}
-	return ArtifactPublishResult{Artifact: view, Version: stored.CurrentVersion, Created: created, Redacted: redacted, Questions: len(questions),
-		SizeBytes: version.SizeBytes, SHA256: version.SHA256}, nil
+	result.Artifact, result.Version, result.Created = view, stored.CurrentVersion, created
+	return result, nil
+}
+
+// updateDryRun reports what an update would do without publishing: the
+// conflict it would hit, or the version it would create (none when the HTML is
+// the current version's).
+func (s *ArtifactService) updateDryRun(ctx context.Context, id string, baseVersion int, result ArtifactPublishResult) (ArtifactPublishResult, error) {
+	artifact, err := s.artifact(ctx, id)
+	if err != nil {
+		return ArtifactPublishResult{}, err
+	}
+	if baseVersion > 0 && baseVersion != artifact.CurrentVersion {
+		return ArtifactPublishResult{}, conflictError("artifact_version_conflict",
+			fmt.Sprintf("Artifact %s is at version %d, not base_version %d. Read the current version, reapply your change and update again.", id, artifact.CurrentVersion, baseVersion))
+	}
+	current, err := s.store.GetArtifactVersion(ctx, id, artifact.CurrentVersion)
+	if err != nil || current == nil {
+		return ArtifactPublishResult{}, notFoundError("artifact_version_not_found", "Artifact version not found", err)
+	}
+	result.Artifact, result.DryRun = artifactView(artifact), true
+	result.Artifact.SizeBytes = current.SizeBytes
+	result.Version = artifact.CurrentVersion
+	if current.SHA256 != result.SHA256 {
+		result.Version++
+		result.Created = true // a version would be created
+	}
+	return result, nil
 }
 
 // Patch publishes a new version by applying text replacements to the HTML of
@@ -396,7 +518,8 @@ func (s *ArtifactService) Patch(ctx context.Context, command PatchArtifactComman
 	// version published between the read above and the write is a conflict.
 	result, err := s.Update(ctx, UpdateArtifactCommand{
 		ArtifactID: id, Content: content, ChangeNote: command.ChangeNote, BaseVersion: command.BaseVersion,
-		SessionID: command.SessionID, Authorization: command.Authorization,
+		SessionID: command.SessionID, Title: command.Title, Summary: command.Summary, DryRun: command.DryRun,
+		Authorization: command.Authorization,
 	})
 	if err != nil {
 		return ArtifactPublishResult{}, err
@@ -593,37 +716,37 @@ func normalizeArtifactID(id string) (string, error) {
 }
 
 // normalizeArtifactHTML validates the HTML of a version and masks credentials
-// in it. It reports whether masking changed the content.
-func normalizeArtifactHTML(content string) (string, bool, error) {
+// in it. It reports each place where masking changed the content.
+func normalizeArtifactHTML(content string) (string, []ArtifactRedaction, error) {
 	if strings.TrimSpace(content) == "" {
-		return "", false, validationError("content_required", "Artifact HTML is required")
+		return "", nil, validationError("content_required", "Artifact HTML is required")
 	}
 	if len(content) > MaxArtifactHTMLBytes {
-		return "", false, validationError("content_too_large",
+		return "", nil, validationError("content_too_large",
 			fmt.Sprintf("Artifact HTML is %d bytes; the limit is %d bytes per version", len(content), MaxArtifactHTMLBytes))
 	}
 	if !utf8.ValidString(content) || strings.ContainsRune(content, 0) {
-		return "", false, validationError("invalid_artifact_html", "Artifact HTML must be valid UTF-8 text")
+		return "", nil, validationError("invalid_artifact_html", "Artifact HTML must be valid UTF-8 text")
 	}
 	if !artifactHTMLPattern.MatchString(content) {
-		return "", false, validationError("invalid_artifact_html", "Artifact content must be an HTML document (use a Doc for markdown or plain text)")
+		return "", nil, validationError("invalid_artifact_html", "Artifact content must be an HTML document (use a Doc for markdown or plain text)")
 	}
 	// The document is stored as it was sent: its size and SHA-256 are reported
 	// back so the publisher can compare them with its own copy. Masking is the
 	// only thing that changes it.
-	masked := redactReportSecrets(content)
-	return masked, masked != content, nil
+	masked, redactions := maskArtifactSecrets(content)
+	return masked, redactions, nil
 }
 
 // CheckArtifactHTML reports whether content would be accepted as an artifact
 // version, and whether storing it would mask credential-looking text in it.
 func CheckArtifactHTML(content string) (redacted bool, err error) {
-	normalized, redacted, err := normalizeArtifactHTML(content)
+	normalized, redactions, err := normalizeArtifactHTML(content)
 	if err != nil {
-		return redacted, err
+		return false, err
 	}
 	_, err = artifactQuestionsOf(normalized)
-	return redacted, err
+	return len(redactions) > 0, err
 }
 
 // artifactQuestionsOf returns the rows for the questions a document declares.
@@ -718,6 +841,28 @@ type ArtifactAnchor struct {
 	// the question it answers. Such an anchor is only ever written by
 	// AnswerQuestions; CreateAnnotation refuses the type.
 	Question string `json:"question,omitempty"`
+	// Near names the closest element, at or above the annotated one, that
+	// carries an id or a data-id: "#stage-2" or `[data-id="TM8"]`. A page made
+	// of tabs or panels usually marks each one that way, so it tells the agent
+	// which panel a note is about, and lets the viewer place the note only
+	// while that panel is in the page.
+	Near string `json:"near,omitempty"`
+}
+
+// artifactAnchorNearPattern is the only form Near is stored in: a selector for
+// one id or one data-id, made of characters that need no escaping.
+var artifactAnchorNearPattern = regexp.MustCompile(`^(#[A-Za-z][\w.:-]{0,79}|\[data-id="[\w.:-]{1,80}"\])$`)
+
+// ArtifactAnnotationPlacement says whether an annotation made on an earlier
+// version still has something to point at in the current one. The server does
+// not render the page: Found is a check of the stored HTML (the quoted text is
+// in the document's text, or the element named by Near or by the selector's id
+// is in the markup), which is what the agent needs to know before acting on an
+// old note. Checked is false when there was nothing the server could look for.
+type ArtifactAnnotationPlacement struct {
+	Version int  `json:"version"`
+	Checked bool `json:"checked"`
+	Found   bool `json:"found"`
 }
 
 type ArtifactAnnotationView struct {
@@ -740,6 +885,12 @@ type ArtifactAnnotationView struct {
 	QuestionID string              `json:"question_id,omitempty"`
 	Answer     *ArtifactAnswerView `json:"answer,omitempty"`
 	UpdatedAt  *time.Time          `json:"updated_at,omitempty"`
+	// Placement is filled by ListAnnotationsWithPlacement for a note made on a
+	// version that is no longer the current one.
+	Placement *ArtifactAnnotationPlacement `json:"placement,omitempty"`
+	// ResolvedOnVersion is the version that was current when the annotation
+	// was resolved (filled by ListAnnotationsWithPlacement).
+	ResolvedOnVersion int `json:"resolved_on_version,omitempty"`
 }
 
 type CreateArtifactAnnotationCommand struct {
@@ -852,6 +1003,91 @@ func (s *ArtifactService) ListAnnotations(ctx context.Context, artifactID, statu
 	return views, nil
 }
 
+// ListAnnotationsWithPlacement is ListAnnotations with, for each note made on
+// an earlier version, whether what it points at is still in the current
+// version, and for each resolved annotation the version it was resolved on. It
+// reads the current version's HTML, so it is for the agent tools, not for the
+// viewer (which places annotations in the rendered page itself).
+func (s *ArtifactService) ListAnnotationsWithPlacement(ctx context.Context, artifactID, status string) ([]ArtifactAnnotationView, error) {
+	views, err := s.ListAnnotations(ctx, artifactID, status)
+	if err != nil || len(views) == 0 {
+		return views, err
+	}
+	id := strings.TrimSpace(artifactID)
+	artifact, err := s.artifact(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	var versions []database.ArtifactVersion
+	var markup, text string
+	loaded := false
+	for i := range views {
+		view := &views[i]
+		if view.ResolvedAt != nil {
+			if versions == nil {
+				if versions, err = s.store.ListArtifactVersions(ctx, id); err != nil {
+					return nil, err
+				}
+			}
+			// Versions come newest first: the first one published before the
+			// resolution was the current one at that moment.
+			for _, version := range versions {
+				if !version.CreatedAt.After(*view.ResolvedAt) {
+					view.ResolvedOnVersion = version.Version
+					break
+				}
+			}
+		}
+		if view.Kind != database.ArtifactAnnotationKindNote || view.Version >= artifact.CurrentVersion {
+			continue
+		}
+		if !loaded {
+			current, err := s.store.GetArtifactVersion(ctx, id, artifact.CurrentVersion)
+			if err != nil || current == nil {
+				return nil, notFoundError("artifact_version_not_found", "Artifact version not found", err)
+			}
+			markup, loaded = current.Content, true
+			text = artifactPlainText(markup)
+		}
+		view.Placement = artifactAnnotationPlacement(view.Anchor, artifact.CurrentVersion, markup, text)
+	}
+	return views, nil
+}
+
+var artifactSelectorIDPattern = regexp.MustCompile(`^#([A-Za-z][\w-]*)`)
+
+// artifactAnnotationPlacement checks one anchor against the HTML of a version.
+func artifactAnnotationPlacement(anchor ArtifactAnchor, version int, markup, text string) *ArtifactAnnotationPlacement {
+	placement := &ArtifactAnnotationPlacement{Version: version}
+	if anchor.Type == "text" {
+		if quote := foldArtifactWhitespace(anchor.Exact); quote != "" {
+			placement.Checked, placement.Found = true, strings.Contains(text, quote)
+		}
+		return placement
+	}
+	// An element: the id or data-id it sits in, or the id its selector starts at.
+	attribute, value := "", ""
+	switch {
+	case strings.HasPrefix(anchor.Near, "#"):
+		attribute, value = "id", anchor.Near[1:]
+	case strings.HasPrefix(anchor.Near, `[data-id="`):
+		attribute, value = "data-id", strings.TrimSuffix(strings.TrimPrefix(anchor.Near, `[data-id="`), `"]`)
+	default:
+		if match := artifactSelectorIDPattern.FindStringSubmatch(anchor.Selector); match != nil {
+			attribute, value = "id", match[1]
+		}
+	}
+	if attribute == "" {
+		return placement
+	}
+	pattern, err := regexp.Compile(`(?i)[\s"']` + attribute + `\s*=\s*("` + regexp.QuoteMeta(value) + `"|'` + regexp.QuoteMeta(value) + `'|` + regexp.QuoteMeta(value) + `[\s/>])`)
+	if err != nil {
+		return placement
+	}
+	placement.Checked, placement.Found = true, pattern.MatchString(markup)
+	return placement
+}
+
 // ResolveAnnotation marks an annotation resolved with a note saying what was
 // done about it.
 func (s *ArtifactService) ResolveAnnotation(ctx context.Context, command ResolveArtifactAnnotationCommand) (ArtifactAnnotationView, error) {
@@ -937,6 +1173,11 @@ func normalizeArtifactAnchor(anchor ArtifactAnchor) (ArtifactAnchor, string, err
 		Selector: strings.TrimSpace(clean(anchor.Selector, maxArtifactAnnotationSelectorRunes)),
 		Tag:      strings.ToLower(strings.TrimSpace(clean(anchor.Tag, 40))),
 		Label:    strings.TrimSpace(clean(anchor.Label, maxArtifactAnnotationLabelRunes)),
+	}
+	// Near is kept only in its one known form; anything else is dropped
+	// rather than refused, since the annotation works without it.
+	if near := strings.TrimSpace(anchor.Near); artifactAnchorNearPattern.MatchString(near) {
+		normalized.Near = near
 	}
 	switch normalized.Type {
 	case "text":

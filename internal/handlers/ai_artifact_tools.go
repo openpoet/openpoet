@@ -88,6 +88,19 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		}
 	}
 
+	// A title or summary sent with an update or a patch replaces the artifact's.
+	meta := mcp.ArtifactMetaParams(input)
+	var title, summary *string
+	if name == "update_artifact" || name == "patch_artifact" {
+		if value, ok := meta["title"]; ok {
+			title = &value
+		}
+		if value, ok := meta["summary"]; ok {
+			summary = &value
+		}
+	}
+	dryRun := chatToolBool(input, "dry_run")
+
 	switch name {
 	case "create_artifact":
 		html, _ := input["html"].(string)
@@ -97,7 +110,7 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		}
 		command := application.CreateArtifactCommand{
 			Title: chatToolString(input, "title"), Summary: chatToolString(input, "summary"), Content: html,
-			TaskID: taskID, Authorization: authorization,
+			TaskID: taskID, DryRun: dryRun, Authorization: authorization,
 		}
 		if conversationID > 0 {
 			command.ConversationID = &conversationID
@@ -116,7 +129,17 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		if artifactID == "" {
 			return "", fmt.Errorf("artifact_id is required")
 		}
-		html, _ := input["html"].(string)
+		html, hasHTML := input["html"].(string)
+		// A title or summary on its own changes them without a new version.
+		if !hasHTML && (title != nil || summary != nil) {
+			view, err := service.UpdateMeta(ctx, application.UpdateArtifactMetaCommand{
+				ArtifactID: artifactID, Title: title, Summary: summary, Authorization: authorization,
+			})
+			if err != nil {
+				return "", err
+			}
+			return mcp.FormatArtifactMetaUpdated(encode(view), meta), nil
+		}
 		baseVersion := 0
 		if raw := chatToolString(input, "base_version"); raw != "" {
 			parsed, err := strconv.Atoi(raw)
@@ -127,12 +150,13 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		}
 		result, err := service.Update(ctx, application.UpdateArtifactCommand{
 			ArtifactID: artifactID, Content: html, ChangeNote: chatToolString(input, "change_note"),
-			BaseVersion: baseVersion, Authorization: authorization,
+			BaseVersion: baseVersion, Title: title, Summary: summary, DryRun: dryRun, Authorization: authorization,
 		})
 		if err != nil {
 			return "", err
 		}
-		return mcp.FormatArtifactUpdated(encode(h.api.artifactPublishResponse(ctx, result, "")), openAnnotations(artifactID), ""), nil
+		body := encode(h.api.artifactPublishResponse(ctx, result, ""))
+		return mcp.FormatArtifactUpdated(body, openAnnotations(artifactID), "") + mcp.ArtifactMetaNote(body, meta), nil
 
 	case "patch_artifact":
 		if artifactID == "" {
@@ -153,12 +177,14 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		}
 		result, err := service.Patch(ctx, application.PatchArtifactCommand{
 			ArtifactID: artifactID, BaseVersion: baseVersion, Edits: edits,
-			ChangeNote: chatToolString(input, "change_note"), Authorization: authorization,
+			ChangeNote: chatToolString(input, "change_note"), Title: title, Summary: summary, DryRun: dryRun,
+			Authorization: authorization,
 		})
 		if err != nil {
 			return "", err
 		}
-		return mcp.FormatArtifactUpdated(encode(h.api.artifactPublishResponse(ctx, result, "")), openAnnotations(artifactID), ""), nil
+		body := encode(h.api.artifactPublishResponse(ctx, result, ""))
+		return mcp.FormatArtifactUpdated(body, openAnnotations(artifactID), "") + mcp.ArtifactMetaNote(body, meta), nil
 
 	case "read_artifact":
 		if artifactID == "" {
@@ -169,7 +195,7 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 			return "", err
 		}
 		var annotationsJSON, versionJSON []byte
-		if annotations, err := service.ListAnnotations(ctx, artifactID, "open"); err == nil {
+		if annotations, err := service.ListAnnotationsWithPlacement(ctx, artifactID, "open"); err == nil {
 			annotationsJSON = encode(annotations)
 		}
 		if chatToolBool(input, "include_html") {
@@ -231,7 +257,7 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		if status == "" {
 			status = "open"
 		}
-		annotations, err := service.ListAnnotations(ctx, artifactID, status)
+		annotations, err := service.ListAnnotationsWithPlacement(ctx, artifactID, status)
 		if err != nil {
 			return "", err
 		}
@@ -250,20 +276,18 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		if artifactID == "" {
 			return "", fmt.Errorf("artifact_id is required")
 		}
-		annotationID, err := strconv.ParseInt(chatToolString(input, "annotation_id"), 10, 64)
-		if err != nil || annotationID <= 0 {
-			return "", fmt.Errorf("annotation_id must be the numeric id from list_artifact_annotations")
-		}
-		note := chatToolString(input, "resolution_note")
-		if note == "" {
-			return "", fmt.Errorf("resolution_note is required: tell the user what you changed")
-		}
-		if _, err := service.ResolveAnnotation(ctx, application.ResolveArtifactAnnotationCommand{
-			ArtifactID: artifactID, AnnotationID: annotationID, ResolutionNote: note, Authorization: authorization,
-		}); err != nil {
+		resolutions, err := mcp.ArtifactResolutionsParam(input, "")
+		if err != nil {
 			return "", err
 		}
-		return mcp.FormatArtifactAnnotationResolved(artifactID, annotationID, openAnnotations(artifactID)), nil
+		outcome := make([]mcp.ArtifactResolutionOutcome, 0, len(resolutions))
+		for _, resolution := range resolutions {
+			_, err := service.ResolveAnnotation(ctx, application.ResolveArtifactAnnotationCommand{
+				ArtifactID: artifactID, AnnotationID: resolution.AnnotationID, ResolutionNote: resolution.Note, Authorization: authorization,
+			})
+			outcome = append(outcome, mcp.ArtifactResolutionOutcome{AnnotationID: resolution.AnnotationID, Err: err})
+		}
+		return mcp.FormatArtifactAnnotationsResolved(artifactID, outcome, openAnnotations(artifactID))
 	}
 	return "", fmt.Errorf("unknown tool: %s", name)
 }

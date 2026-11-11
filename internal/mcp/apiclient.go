@@ -78,6 +78,11 @@ func (c *APIClient) Put(path string, jsonBody string) ([]byte, error) {
 }
 
 // PostRaw performs a POST request with raw bytes and returns the response body.
+// Patch performs a PATCH request with a JSON body.
+func (c *APIClient) Patch(path string, jsonBody string) ([]byte, error) {
+	return c.do("PATCH", path, "application/json", strings.NewReader(jsonBody))
+}
+
 func (c *APIClient) PostRaw(path string, data []byte) ([]byte, error) {
 	return c.do("POST", path, "application/octet-stream", bytes.NewReader(data))
 }

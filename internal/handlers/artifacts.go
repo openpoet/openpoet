@@ -85,6 +85,16 @@ func (a *API) artifactPublishResponse(ctx context.Context, result application.Ar
 	if result.Replacements > 0 {
 		response["replacements"] = result.Replacements
 	}
+	if result.RedactionCount > 0 {
+		response["redaction_count"] = result.RedactionCount
+		response["redactions"] = result.Redactions
+	}
+	if result.DryRun {
+		response["dry_run"] = true
+	}
+	if result.Duplicate {
+		response["duplicate"] = true
+	}
 	return response
 }
 
@@ -143,6 +153,7 @@ func (a *API) CreateArtifact(w http.ResponseWriter, r *http.Request) {
 		TaskID         flexibleID `json:"task_id"`
 		ConversationID flexibleID `json:"conversation_id"`
 		SessionID      string     `json:"session_id"`
+		DryRun         bool       `json:"dry_run"`
 	}
 	if !decodeArtifactRequest(w, r, &input) {
 		return
@@ -155,13 +166,17 @@ func (a *API) CreateArtifact(w http.ResponseWriter, r *http.Request) {
 	result, err := service.Create(platformUIContext(r), application.CreateArtifactCommand{
 		Title: input.Title, Summary: input.Summary, Content: html,
 		ProjectID: input.ProjectID.pointer(), TaskID: input.TaskID.pointer(), ConversationID: input.ConversationID.pointer(),
-		SessionID: artifactSessionID(r, input.SessionID), Authorization: platformUIAuthorization(r),
+		SessionID: artifactSessionID(r, input.SessionID), DryRun: input.DryRun, Authorization: platformUIAuthorization(r),
 	})
 	if err != nil {
 		respondApplicationError(w, err)
 		return
 	}
-	respondJSON(w, http.StatusCreated, a.artifactPublishResponse(r.Context(), result, sourcePath))
+	status := http.StatusCreated
+	if !result.Created {
+		status = http.StatusOK // a dry run, or the artifact this session had just created
+	}
+	respondJSON(w, status, a.artifactPublishResponse(r.Context(), result, sourcePath))
 }
 
 // UpdateArtifact publishes a new version of an existing artifact.
@@ -176,6 +191,9 @@ func (a *API) UpdateArtifact(w http.ResponseWriter, r *http.Request) {
 		ChangeNote  string     `json:"change_note"`
 		BaseVersion flexibleID `json:"base_version"`
 		SessionID   string     `json:"session_id"`
+		Title       *string    `json:"title"`
+		Summary     *string    `json:"summary"`
+		DryRun      bool       `json:"dry_run"`
 	}
 	if !decodeArtifactRequest(w, r, &input) {
 		return
@@ -188,6 +206,7 @@ func (a *API) UpdateArtifact(w http.ResponseWriter, r *http.Request) {
 	result, err := service.Update(platformUIContext(r), application.UpdateArtifactCommand{
 		ArtifactID: chi.URLParam(r, "id"), Content: html, ChangeNote: input.ChangeNote,
 		BaseVersion: int(input.BaseVersion), SessionID: artifactSessionID(r, input.SessionID),
+		Title: input.Title, Summary: input.Summary, DryRun: input.DryRun,
 		Authorization: platformUIAuthorization(r),
 	})
 	if err != nil {
@@ -211,6 +230,9 @@ func (a *API) PatchArtifactContent(w http.ResponseWriter, r *http.Request) {
 		Edits       []application.ArtifactEdit `json:"edits"`
 		ChangeNote  string                     `json:"change_note"`
 		SessionID   string                     `json:"session_id"`
+		Title       *string                    `json:"title"`
+		Summary     *string                    `json:"summary"`
+		DryRun      bool                       `json:"dry_run"`
 	}
 	if !decodeArtifactRequest(w, r, &input) {
 		return
@@ -218,6 +240,7 @@ func (a *API) PatchArtifactContent(w http.ResponseWriter, r *http.Request) {
 	result, err := service.Patch(platformUIContext(r), application.PatchArtifactCommand{
 		ArtifactID: chi.URLParam(r, "id"), BaseVersion: int(input.BaseVersion), Edits: input.Edits,
 		ChangeNote: input.ChangeNote, SessionID: artifactSessionID(r, input.SessionID),
+		Title: input.Title, Summary: input.Summary, DryRun: input.DryRun,
 		Authorization: platformUIAuthorization(r),
 	})
 	if err != nil {
@@ -369,13 +392,19 @@ func parseArtifactVersion(raw string) (int, bool) {
 }
 
 // ListArtifactAnnotations returns an artifact's annotations
-// (?status=open|resolved|all, default all).
+// (?status=open|resolved|all, default all). With ?placement=1 each note made
+// on an earlier version also says whether what it points at is still in the
+// current version, and each resolved one the version it was resolved on.
 func (a *API) ListArtifactAnnotations(w http.ResponseWriter, r *http.Request) {
 	service, ok := a.artifactService(w)
 	if !ok {
 		return
 	}
-	views, err := service.ListAnnotations(platformUIContext(r), chi.URLParam(r, "id"), r.URL.Query().Get("status"))
+	list := service.ListAnnotations
+	if placement := r.URL.Query().Get("placement"); placement == "1" || placement == "true" {
+		list = service.ListAnnotationsWithPlacement
+	}
+	views, err := list(platformUIContext(r), chi.URLParam(r, "id"), r.URL.Query().Get("status"))
 	if err != nil {
 		respondApplicationError(w, err)
 		return
