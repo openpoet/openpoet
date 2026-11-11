@@ -36,6 +36,15 @@ says so instead of handing out `localhost`.
 | `/app/task/<project>/<task>` | The task |
 | `/app/project/<id>` | The project |
 
+The app keeps its state in the query string, so a link path is rewritten on
+load into the canonical form (`/?view=projects&doc=artifact%3A<id>`) and then
+opened. An `/app/...` path that is not a link goes to the home page. A link to
+an artifact that does not exist opens the viewer with a message saying so.
+
+Through the tunnel, a device that is not paired is sent to the pairing page
+with the link it was opening (`/pair?next=<path>`), and lands on it once the
+pairing is approved. `next` is only ever a path on the same site.
+
 ## Getting a link
 
 | Where | How |

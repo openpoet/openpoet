@@ -333,6 +333,8 @@ class OpenPoet {
         const docRoute = window.artifactViewer?.getURLState?.() || window.docViewer?.getURLState?.();
         const doc = this._documentURLToken(docRoute);
         if (doc) state.doc = doc;
+        // An artifact opened on an older version keeps that version in the URL.
+        if (doc && docRoute?.kind === 'artifact' && docRoute.version) state.docVersion = String(docRoute.version);
         if (!state.project && docRoute?.projectId) state.project = String(docRoute.projectId);
         if (!state.project && docRoute?.kind === 'plan' && docRoute.sessionId) {
             const planSession = this.sessions.find(s => s.id === docRoute.sessionId);
@@ -360,7 +362,7 @@ class OpenPoet {
     _urlForState(state) {
         const url = new URL(window.location.href);
         const ownedParams = [
-            'view', 'project', 'session', 'doc',
+            'view', 'project', 'session', 'doc', 'v',
             'task_status', 'task_priority', 'task_project', 'task_q', 'task_mode',
             'config_tab', 'skill_q', 'skill_category', 'skill_status'
         ];
@@ -370,6 +372,7 @@ class OpenPoet {
         if (state.project) url.searchParams.set('project', state.project);
         if (state.session) url.searchParams.set('session', state.session);
         if (state.doc) url.searchParams.set('doc', state.doc);
+        if (state.doc && state.docVersion) url.searchParams.set('v', state.docVersion);
 
         if (state.view === 'tasks') {
             if (state.taskStatus) url.searchParams.set('task_status', state.taskStatus);
@@ -388,6 +391,48 @@ class OpenPoet {
 
         url.hash = '';
         return `${url.pathname}${url.search}`;
+    }
+
+    // Links handed out by the server are paths (see docs/links.md). The app
+    // keeps its state in the query string, so a path link is translated into
+    // that form as soon as the page loads. Returns the query parameters the
+    // path stands for, or null when it is not a link path.
+    static routeFromAppPath(pathname, search = '') {
+        const match = String(pathname || '').match(/^\/app\/(artifact|doc|session|project|task)\/([^/]+)(?:\/([^/]+))?\/?$/);
+        if (!match) return null;
+        let first, second;
+        try {
+            first = decodeURIComponent(match[2]);
+            second = match[3] ? decodeURIComponent(match[3]) : '';
+        } catch {
+            return null;
+        }
+        const kind = match[1];
+        if (kind === 'task') {
+            return /^\d+$/.test(first) && /^\d+$/.test(second) ? { view: 'tasks', doc: `task:${first}:${second}` } : null;
+        }
+        if (second) return null;
+        if (kind === 'artifact') {
+            if (!/^[a-zA-Z0-9-]+$/.test(first)) return null;
+            const route = { doc: `artifact:${first}` };
+            const version = new URLSearchParams(search).get('v') || '';
+            if (/^[1-9]\d*$/.test(version)) route.v = version;
+            return route;
+        }
+        if (kind === 'doc') return /^[a-zA-Z0-9:_-]+$/.test(first) ? { doc: first } : null;
+        if (kind === 'session') return /^[a-zA-Z0-9:_-]+$/.test(first) ? { view: 'terminal', session: first } : null;
+        if (kind === 'project') return /^\d+$/.test(first) ? { view: 'project-detail', project: first } : null;
+        return null;
+    }
+
+    // Rewrites a /app/... link path into the canonical query-string URL, in
+    // place. Returns true when the address was a link path.
+    _adoptAppPathRoute() {
+        if (!/^\/app(\/|$)/.test(window.location.pathname)) return false;
+        const route = OpenPoet.routeFromAppPath(window.location.pathname, window.location.search);
+        const query = route ? new URLSearchParams(route).toString() : '';
+        window.history.replaceState(null, '', `/${query ? '?' + query : ''}${window.location.hash}`);
+        return true;
     }
 
     _syncURLState(options = {}) {
@@ -414,6 +459,7 @@ class OpenPoet {
             project: params.get('project') || '',
             session: params.get('session') || '',
             doc,
+            docVersion: /^[1-9]\d*$/.test(params.get('v') || '') ? params.get('v') : '',
             taskStatus: params.get('task_status') || '',
             taskPriority: params.get('task_priority') || '',
             taskProject: params.get('task_project') || '',
@@ -491,10 +537,17 @@ class OpenPoet {
         return window.docViewer;
     }
 
-    async _restoreDocumentFromURL(token) {
+    async _restoreDocumentFromURL(token, version = '') {
         if (!token) return;
         const viewer = await this._waitForDocViewer();
         if (!viewer) return;
+
+        if (token.startsWith('artifact:')) {
+            const opts = { recordHistory: false };
+            if (version) opts.version = Number(version);
+            await window.artifactViewer?.open(token.slice('artifact:'.length), opts);
+            return;
+        }
 
         const taskMatch = token.match(/^task:(\d+):(\d+)$/);
         if (taskMatch) {
@@ -539,7 +592,7 @@ class OpenPoet {
                 this.showView(state.view, { updateURL: false });
             }
 
-            await this._restoreDocumentFromURL(state.doc);
+            await this._restoreDocumentFromURL(state.doc, state.docVersion);
         } finally {
             this._restoringURLState = false;
             this._initialURLRestored = true;
@@ -1068,6 +1121,10 @@ class OpenPoet {
         // The old delayed restore could replace a copied project/session route.
         await this.restoreTabsFromStorage();
 
+        // A link path (/app/artifact/<id>, /app/doc/<id>, ...) becomes the
+        // canonical query-string URL, which the restore below then opens.
+        this._adoptAppPathRoute();
+
         // Handle legacy hash links from push notifications. All new navigation
         // is then written back as the canonical query-string URL.
         if (location.hash) {
@@ -1106,7 +1163,17 @@ class OpenPoet {
         // #link={encoded_link} — navigate to link (session, project, or doc)
         const linkMatch = hash.match(/^#link=(.+)$/);
         if (linkMatch) {
-            const link = decodeURIComponent(linkMatch[1]);
+            let link = '';
+            try { link = decodeURIComponent(linkMatch[1]); } catch { link = ''; }
+            // Everything but a session (which may have a pending dialog to
+            // show) opens the same way a link path does.
+            const queryAt = link.indexOf('?');
+            const route = OpenPoet.routeFromAppPath(queryAt < 0 ? link : link.slice(0, queryAt), queryAt < 0 ? '' : link.slice(queryAt));
+            if (route && !route.session) {
+                history.replaceState(null, '', `/?${new URLSearchParams(route).toString()}`);
+                this._restoreURLState();
+                return true;
+            }
             history.replaceState(null, '', `${location.pathname}${location.search}`);
             // Try notifBadge navigator, fallback to direct session open
             if (window.notifBadge) {

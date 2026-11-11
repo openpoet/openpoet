@@ -18,7 +18,7 @@ func (pm *PairingManager) HandlePairingPage(w http.ResponseWriter, r *http.Reque
 	}
 
 	log.Printf("[PAIRING] Pending session created: %s (code: %s..., expires in %ds)", sessionID[:8], code[:3], expirySecs)
-	servePairingDisplayHTML(w, code, sessionID, expirySecs)
+	servePairingDisplayHTML(w, code, sessionID, expirySecs, SafeNextPath(r.URL.Query().Get("next")))
 }
 
 // HandlePairingStatus is the polling endpoint for remote devices waiting for approval.
@@ -64,7 +64,19 @@ func (pm *PairingManager) HandlePairingStatus(w http.ResponseWriter, r *http.Req
 	log.Printf("[PAIRING] Device paired via reversed flow, session: %s", sessionID[:8])
 }
 
-func servePairingDisplayHTML(w http.ResponseWriter, code string, sessionID string, expirySecs int) {
+// servePairingDisplayHTML renders the pairing page. next is where the device
+// goes once paired; it has already been through SafeNextPath, and "" means the
+// home page.
+func servePairingDisplayHTML(w http.ResponseWriter, code string, sessionID string, expirySecs int, next string) {
+	if next == "" {
+		next = "/"
+	}
+	// json.Marshal escapes <, > and &, so the value cannot close the script.
+	nextJSON, err := json.Marshal(next)
+	if err != nil {
+		nextJSON = []byte(`"/"`)
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 
@@ -212,6 +224,7 @@ p {
 <script>
 const SESSION_ID = "` + sessionID + `";
 const EXPIRY_SECONDS = ` + fmt.Sprintf("%d", expirySecs) + `;
+const NEXT = ` + string(nextJSON) + `;
 let remaining = EXPIRY_SECONDS;
 let pollTimer = null;
 let countdownTimer = null;
@@ -247,7 +260,7 @@ async function pollStatus() {
 			clearInterval(countdownTimer);
 			document.getElementById('statusText').textContent = 'Paired! Redirecting...';
 			document.getElementById('statusDot').className = 'status-dot approved';
-			setTimeout(() => { window.location.href = '/'; }, 500);
+			setTimeout(() => { window.location.href = NEXT; }, 500);
 		}
 	} catch (e) {
 		// Network error, keep polling

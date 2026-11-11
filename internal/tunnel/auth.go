@@ -3,6 +3,7 @@ package tunnel
 import (
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -175,7 +176,46 @@ func redirectToPairing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// For page requests, redirect to pairing page
-	http.Redirect(w, r, "/pair", http.StatusTemporaryRedirect)
+	// For page requests, redirect to the pairing page, remembering where the
+	// device was going: a link opened on an unpaired phone still lands on what
+	// it points at once the device is paired.
+	target := "/pair"
+	if r.Method == http.MethodGet {
+		if next := SafeNextPath(r.URL.RequestURI()); next != "" && next != "/" {
+			target += "?next=" + url.QueryEscape(next)
+		}
+	}
+	http.Redirect(w, r, target, http.StatusTemporaryRedirect)
 	log.Printf("[TUNNEL-AUTH] Unauthenticated request redirected to /pair: %s", r.URL.Path)
+}
+
+// maxNextPathLength bounds the destination carried through pairing.
+const maxNextPathLength = 2000
+
+// SafeNextPath returns next when it is a path on this same site that a device
+// may be sent to after pairing, and "" otherwise. The value travels in a URL
+// the visitor controls, so anything that could leave the site is refused: it
+// must start with a single "/", and cannot contain a backslash, a control
+// character or a scheme-relative "//" start. The pairing pages themselves are
+// not a destination.
+func SafeNextPath(next string) string {
+	if next == "" || len(next) > maxNextPathLength || next[0] != '/' {
+		return ""
+	}
+	if strings.HasPrefix(next, "//") || strings.HasPrefix(next, "/\\") {
+		return ""
+	}
+	for _, r := range next {
+		if r < 0x20 || r == 0x7f || r == '\\' {
+			return ""
+		}
+	}
+	parsed, err := url.Parse(next)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" || parsed.User != nil {
+		return ""
+	}
+	if parsed.Path == "/pair" || strings.HasPrefix(parsed.Path, "/pair/") {
+		return ""
+	}
+	return next
 }

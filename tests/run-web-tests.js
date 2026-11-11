@@ -22,6 +22,7 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 
 const GROUPS = {
   unit: [
+    'tests/app-link-routes-unit.js',
     'tests/structured-view-session-status-unit.js',
     'tests/url-state-unit.js',
   ],
@@ -32,6 +33,7 @@ const GROUPS = {
   ],
   server: [
     'tests/artifact-annotations-smoke.js',
+    'tests/artifact-deep-link-smoke.js',
     'tests/artifact-viewer-smoke.js',
     'tests/codex-slash-palette-smoke.js',
     'tests/codex-transcript-snapshot-smoke.js',

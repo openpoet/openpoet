@@ -39,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A link path opens what it points at. `/app/artifact/<id>` (with `?v=<n>`
+  for a version), `/app/doc/<id>`, `/app/session/<id>`, `/app/project/<id>`
+  and `/app/task/<project>/<task>` used to load the app on the projects list;
+  they are now rewritten into the canonical address and opened, also from a
+  notification link. An artifact opened on an older version keeps the version
+  in its address.
+- Through the tunnel, a device that has to pair first is sent back to the link
+  it was opening once the pairing is approved.
 - Agents are now steered to publish plans, reports and documentation as HTML
   artifacts. Docs remain for short plain-text answers. The managed instruction
   block in each project is replaced on the next config sync.

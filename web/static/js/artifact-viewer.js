@@ -84,8 +84,14 @@ class ArtifactViewer {
         this.closeBtn?.addEventListener('click', () => this.close());
         this.downloadBtn?.addEventListener('click', () => this._download());
         this.fullscreenBtn?.addEventListener('click', () => this._toggleFullscreen());
-        this.bannerBtn?.addEventListener('click', () => this._showVersion(this._artifact?.current_version));
-        this.versionSelect?.addEventListener('change', () => this._showVersion(Number(this.versionSelect.value)));
+        this.bannerBtn?.addEventListener('click', () => {
+            this._showVersion(this._artifact?.current_version);
+            this._notifyURLStateChanged({ replace: true });
+        });
+        this.versionSelect?.addEventListener('change', () => {
+            this._showVersion(Number(this.versionSelect.value));
+            this._notifyURLStateChanged({ replace: true });
+        });
         this.overlay.addEventListener('click', (e) => {
             if (e.target === this.overlay) this.close();
         });
@@ -122,7 +128,9 @@ class ArtifactViewer {
             if (token !== this._openToken) return;
             console.error('ArtifactViewer: failed to open artifact', e);
             this._artifact = null;
-            this._setStatus('This artifact could not be loaded.');
+            this._setStatus(/HTTP 404/.test(e?.message || '')
+                ? 'This artifact does not exist in this OpenPoet instance. The link may be from another instance, or the artifact was removed.'
+                : 'This artifact could not be loaded.');
         }
     }
 
@@ -147,7 +155,10 @@ class ArtifactViewer {
 
     getURLState() {
         if (!this.isOpen() || !this._artifact) return null;
-        return { kind: 'artifact', id: this._artifact.id, projectId: this._artifact.project_id || null };
+        // The version is part of the address only when it is not the current
+        // one, so a plain artifact link always opens the latest.
+        const version = this._version && this._version !== this._artifact.current_version ? this._version : null;
+        return { kind: 'artifact', id: this._artifact.id, projectId: this._artifact.project_id || null, version };
     }
 
     /** Called by the events WebSocket when any artifact gets a new version. */
