@@ -37,6 +37,11 @@ project for this, and do not use harness-native artifacts. The
   with ` + "`openpoet_list_artifact_annotations`" + `; publish the new version with
   ` + "`openpoet_update_artifact`" + `; then resolve each annotation you addressed with
   ` + "`openpoet_resolve_artifact_annotation`" + `.
+- When the user has to decide or answer something, declare questions in the
+  artifact (the ` + "`html-artifact`" + ` skill shows how). The user answers them in the
+  viewer and the answers arrive with the annotations.
+- When the user asks for a link to an artifact, a Doc, a session or a task, get
+  it with ` + "`openpoet_get_link`" + `. Never build a URL yourself.
 - For a short plain-text answer that only needs to leave the chat (a list, a
   snippet, a quick explanation), create an OpenPoet Doc with
   ` + "`openpoet_create_document`" + ` instead. Use it too when the artifact tools are

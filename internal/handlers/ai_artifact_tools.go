@@ -150,7 +150,11 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 			}
 			versionJSON = encode(stored)
 		}
-		return mcp.FormatArtifactDetail(encode(view), annotationsJSON, versionJSON, ""), nil
+		var questionsJSON []byte
+		if questions, err := service.Questions(ctx, artifactID, 0); err == nil {
+			questionsJSON = encode(questions)
+		}
+		return mcp.FormatArtifactDetail(encode(view), annotationsJSON, versionJSON, "", questionsJSON), nil
 
 	case "list_artifacts":
 		query := application.ArtifactListQuery{
@@ -196,7 +200,16 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		if err != nil {
 			return "", err
 		}
-		return mcp.FormatArtifactAnnotations(artifactID, status, encode(annotations), ""), nil
+		var questionsJSON, openJSON []byte
+		if status != "resolved" {
+			if questions, err := service.Questions(ctx, artifactID, 0); err == nil {
+				questionsJSON = encode(questions)
+			}
+			if open, err := service.ListAnnotations(ctx, artifactID, "open"); err == nil {
+				openJSON = encode(open)
+			}
+		}
+		return mcp.FormatArtifactAnnotations(artifactID, status, encode(annotations), "", questionsJSON, openJSON), nil
 
 	case "resolve_artifact_annotation":
 		if artifactID == "" {

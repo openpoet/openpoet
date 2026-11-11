@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `openpoet_list_artifact_annotations`, `openpoet_resolve_artifact_annotation`),
   and the matching Automation API capabilities under `artifacts.*`.
 - A built-in `html-artifact` skill with the design guide for artifacts.
+- **Questions in artifacts**: an artifact can ask the reader to decide or
+  answer something. A version declares its questions in a JSON data block
+  (single choice, multiple choice or free text) and marks the page with
+  `data-openpoet-question` / `data-openpoet-option`; the reader taps a choice
+  and confirms the answers in a new Answers tab of the viewer. Each answer is
+  stored as a structured annotation, replaceable and withdrawable, and reaches
+  the agent through `openpoet_list_artifact_annotations`, which also names the
+  questions still unanswered. See [`docs/artifacts.md`](docs/artifacts.md).
 - **Public base URL**: a setting (Config → Settings → Public Address, or
   `OPENPOET_PUBLIC_BASE_URL`) with the address the instance is reached at from
   other devices. Links handed out by OpenPoet are built on it, and its host is
@@ -39,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The built-in `html-artifact` skill teaches how to ask questions, tells
+  agents to keep the content of tabs in the DOM, and states the sandbox policy.
+  An installed copy that was never edited is updated on start; an edited one is
+  left as it is.
+- "Send to agent" says it is OpenPoet reporting a button press, counts answers
+  and notes separately, and asks the agent to act on each one or leave it open
+  saying why.
 - A link path opens what it points at. `/app/artifact/<id>` (with `?v=<n>`
   for a version), `/app/doc/<id>`, `/app/session/<id>`, `/app/project/<id>`
   and `/app/task/<project>/<task>` used to load the app on the projects list;
@@ -56,6 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- An artifact's own script cannot answer for the reader. A choice proposed
+  from the sandboxed frame is checked against the questions the server stored
+  for that version, is only staged, and is saved when the user confirms it in
+  the OpenPoet page. Comments and free-text answers are typed in the page and
+  never enter the frame. Sessions cannot write answers.
 - Rendered artifacts neuter WebRTC. The `webrtc 'block'` CSP directive is
   ignored by Chromium (a peer connection could still gather candidates against
   an external STUN host), so a guard script runs as the first script of every

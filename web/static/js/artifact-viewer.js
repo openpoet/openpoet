@@ -611,10 +611,19 @@ class ArtifactViewer {
         // This text is typed into the agent's terminal: keep the title to
         // printable characters on one line.
         const title = String(artifact.title || '').replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();
-        const text = `The user left ${open} open annotation${open === 1 ? '' : 's'} on the HTML artifact "${title}" ` +
-            `(artifact_id ${artifact.id}, current version ${artifact.current_version}). ` +
-            `Read them with openpoet_list_artifact_annotations, publish a corrected version with openpoet_update_artifact, ` +
-            `then resolve each one with openpoet_resolve_artifact_annotation, saying what you changed.`;
+        // The message says where it comes from: it is typed into the session
+        // like user input, but it is OpenPoet reporting a button press.
+        const openAnnotations = this._annotations.filter(a => a.status !== 'resolved');
+        const answers = openAnnotations.filter(a => this._isAnswer(a)).length;
+        const notes = openAnnotations.length - answers;
+        const parts = [];
+        if (answers > 0) parts.push(`${answers} answer${answers === 1 ? '' : 's'} to your questions`);
+        if (notes > 0) parts.push(`${notes} note${notes === 1 ? '' : 's'}`);
+        const text = `[OpenPoet] The user pressed "Send to agent" on the HTML artifact "${title}" ` +
+            `(artifact_id ${artifact.id}, current version ${artifact.current_version}): ${parts.join(' and ')} ${open === 1 ? 'is' : 'are'} open. ` +
+            `Read them with openpoet_list_artifact_annotations. For each one, act on it (publish a corrected version with openpoet_update_artifact ` +
+            `when the document has to change) and resolve it with openpoet_resolve_artifact_annotation saying what you did, ` +
+            `or leave it open and tell the user why.`;
         this.sendBtn.disabled = true;
         try {
             await this._api('POST', `/api/sessions/${encodeURIComponent(artifact.session_id)}/input`, { text });

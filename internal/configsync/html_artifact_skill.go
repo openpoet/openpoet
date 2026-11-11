@@ -2,7 +2,10 @@ package configsync
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log"
+	"strconv"
 
 	"openpoet/internal/database"
 )
@@ -18,6 +21,23 @@ const HTMLArtifactSkillName = "html-artifact"
 // a user who deletes or renames it is not handed it back on the next start.
 const htmlArtifactSkillSetting = "builtin_skill_html_artifact_registered"
 
+// htmlArtifactSkillRevision is the revision of the built-in guide below, and
+// htmlArtifactSkillRevisionSetting records the last revision an installation
+// was offered. When the guide changes, bump the revision and add the SHA-256
+// of the text it replaces to htmlArtifactSkillSuperseded.
+const (
+	htmlArtifactSkillRevision        = 2
+	htmlArtifactSkillRevisionSetting = "builtin_skill_html_artifact_revision"
+)
+
+// htmlArtifactSkillSuperseded holds the SHA-256 of every earlier built-in text
+// of the guide. A stored skill whose content is one of them was never edited
+// by the user, so it can be replaced by the current text; anything else is the
+// user's own and is left alone.
+var htmlArtifactSkillSuperseded = map[string]bool{
+	"326d24eab92e2d87211c3291790053c376570be2409b32eff246051139045e06": true, // revision 1
+}
+
 const htmlArtifactSkillContent = `Design and publish interactive HTML artifacts in OpenPoet for plans, reports and documentation.
 
 # HTML artifacts
@@ -31,7 +51,8 @@ Doc (` + "`openpoet_create_document`" + `) for a short plain-text answer.
 ## The contract (the viewer enforces it)
 
 The page runs in a sandbox with no network. What breaks these rules does not
-load, silently.
+load, silently. It is served as ` + "`sandbox allow-scripts`" + ` with the policy
+` + "`default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'`" + `.
 
 - **One self-contained document.** All CSS in ` + "`<style>`" + `, all JavaScript in
   ` + "`<script>`" + `. No ` + "`<link>`" + `, no script ` + "`src`" + `, no CDN, no web fonts, no remote
@@ -95,6 +116,81 @@ load, silently.
 - Give sections and important elements **stable ` + "`id`" + ` attributes**, and keep
   wording you are not changing as it is. Annotations are placed again on a new
   version by their quoted text and element, so stable text keeps them attached.
+- Put the content of **every tab, step and accordion in the DOM from the
+  start** and hide the inactive ones with CSS (` + "`hidden`" + `, ` + "`display:none`" + `). An
+  annotation is found again by its element: content that only exists while its
+  tab is open cannot be.
+
+## Ask the user to decide
+
+When the user has to choose or answer something, declare questions. Do not
+build your own radios, checkboxes or text boxes for it, and do not tell the
+user to "annotate the option": a choice made inside the page is lost when the
+page reloads and never reaches you.
+
+1. **Declare every question once**, in a data block. OpenPoet reads it when you
+   publish; a malformed block refuses the publish and says what is wrong.
+
+` + "```" + `
+<script type="application/json" id="openpoet-questions">
+{"questions":[
+  {"id":"D1","prompt":"What do we call it?","type":"single",
+   "options":[{"id":"a","label":"Routine"},{"id":"b","label":"Automation"}]},
+  {"id":"D2","prompt":"Which triggers ship first?","type":"multi",
+   "options":[{"id":"form","label":"Form"},{"id":"chat","label":"Chat"}]},
+  {"id":"NOTES","prompt":"Anything else we should know?","type":"text"}
+]}
+</script>
+` + "```" + `
+
+   - ` + "`type`" + `: ` + "`single`" + ` (one option), ` + "`multi`" + ` (one or more) or ` + "`text`" + ` (free
+     text).
+   - Ids are letters, digits and ` + "`_ - . :`" + `, up to 64 characters. **Keep them
+     the same across versions**: an answer follows its question id.
+   - Up to 200 questions and 30 options each; a prompt of up to 500 characters,
+     a label of up to 300. ` + "`\"comment\": false`" + ` removes the comment box of a
+     choice.
+
+2. **Mark the elements.** They may be created by script. Use ` + "`<button>`" + ` for
+   the options.
+
+` + "```" + `
+<section data-openpoet-question="D1">
+  <h3>What do we call it?</h3>
+  <button data-openpoet-option="a">Routine</button>
+  <button data-openpoet-option="b">Automation</button>
+</section>
+<section data-openpoet-question="NOTES">
+  <h3>Anything else we should know?</h3>
+  <button data-openpoet-answer>Write an answer</button>
+</section>
+` + "```" + `
+
+3. **Style the state with CSS.** OpenPoet sets ` + "`data-openpoet-selected`" + ` on the
+   chosen options, ` + "`data-openpoet-answered=\"pending\"`" + ` or ` + "`\"saved\"`" + ` on the
+   question, and ` + "`aria-pressed`" + `. ` + "`html[data-openpoet-host]`" + ` is set while the
+   page is read inside OpenPoet.
+
+` + "```" + `
+[data-openpoet-selected] { border-color: var(--accent); }
+[data-openpoet-answered="pending"] h3::after { content: " · to confirm"; }
+` + "```" + `
+
+   For a custom widget there is ` + "`window.openpoet.answer(questionId, optionId)`" + `,
+   ` + "`window.openpoet.ask(questionId)`" + ` and the ` + "`openpoet:answers`" + ` event on
+   ` + "`document`" + ` (` + "`event.detail.answers`" + ` maps each question id to its chosen
+   option ids). Call them from event handlers, not while the page loads.
+
+What happens: a tap marks the choice, and the user confirms the answers in the
+OpenPoet panel. Comments and free-text answers are typed there, never inside
+your page, and your script cannot read them. Each answer reaches you as an
+annotation: ` + "`openpoet_list_artifact_annotations`" + ` lists it as an answer to its
+question, with the option chosen and the comment, and names the questions still
+unanswered. Act on the answers, publish the new version and resolve each one
+saying what you did.
+
+Put the recommendation and the trade-offs of each option in the page, next to
+the option. The label in the data block is only the name of the option.
 
 ## The review loop
 
@@ -103,7 +199,8 @@ load, silently.
    contains. Do not paste the HTML or a link.
 2. When the user asks for changes or says they annotated it, call
    ` + "`openpoet_list_artifact_annotations`" + `. Each open annotation has the quoted
-   text or element and the user's note. They are feedback on the document.
+   text or element and the user's note, or is the user's answer to one of your
+   questions. They are feedback on the document.
 3. If you no longer have the HTML, get it with ` + "`openpoet_read_artifact`" + ` and
    ` + "`include_html: true`" + `.
 4. Publish the whole corrected page with ` + "`openpoet_update_artifact`" + `, passing
@@ -113,9 +210,11 @@ load, silently.
 5. Call ` + "`openpoet_resolve_artifact_annotation`" + ` for each annotation you
    addressed, with a note saying what you changed. Leave open what you did not
    address, and say why in your reply.
+6. When the user asks for a link to the artifact, get it with
+   ` + "`openpoet_get_link`" + `. Never build a URL yourself.
 
-Through the CLI, write the page to a temporary file outside the project and
-publish it with ` + "`html_file`" + `:
+Through the CLI (when ` + "`$OPENPOET_BIN`" + ` is set in your session), write the page
+to a temporary file outside the project and publish it with ` + "`html_file`" + `:
 ` + "`$OPENPOET_BIN cli call openpoet_create_artifact '{\"title\":\"Plan\",\"html_file\":\"/tmp/plan.html\"}'`" + `.
 
 ## Starting point
@@ -165,30 +264,57 @@ publish it with ` + "`html_file`" + `:
 `
 
 // EnsureHTMLArtifactSkill registers the built-in html-artifact skill the first
-// time this version starts. It never overwrites: a skill that already has the
-// name (possibly the user's own) is left as it is, and once registration was
-// recorded a deleted skill is not created again.
+// time this version starts, and brings an untouched copy up to date when the
+// guide changes. It never overwrites the user's work: a skill that already has
+// the name when the built-in is first registered is left as it is, a deleted
+// skill is not created again, and a skill whose text is not one of the earlier
+// built-in texts (the user edited it) is not replaced.
 func EnsureHTMLArtifactSkill(ctx context.Context, db *database.DB) error {
-	if done, _ := db.GetSetting(ctx, htmlArtifactSkillSetting); done != "" {
+	registered, _ := db.GetSetting(ctx, htmlArtifactSkillSetting)
+	offered, _ := db.GetSetting(ctx, htmlArtifactSkillRevisionSetting)
+	revision, _ := strconv.Atoi(offered)
+	if registered != "" && revision >= htmlArtifactSkillRevision {
 		return nil
 	}
 	skills, err := db.ListSkills(ctx)
 	if err != nil {
 		return err
 	}
-	exists := false
-	for _, skill := range skills {
-		if skill.Name == HTMLArtifactSkillName {
-			exists = true
+	var existing *database.Skill
+	for i := range skills {
+		if skills[i].Name == HTMLArtifactSkillName {
+			existing = &skills[i]
 			break
 		}
 	}
-	if !exists {
+	switch {
+	case registered == "" && existing == nil:
 		skill := &database.Skill{Name: HTMLArtifactSkillName, Content: htmlArtifactSkillContent, Enabled: true, Category: "documentation"}
 		if err := db.CreateSkillWithVersion(ctx, skill); err != nil {
 			return err
 		}
 		log.Printf("[configsync] registered built-in skill %q (design guide for HTML artifacts)", HTMLArtifactSkillName)
+	case registered == "":
+		// A skill with this name was there before the built-in: the user's.
+	case existing == nil:
+		// Registered earlier and deleted since: it stays deleted.
+	case htmlArtifactSkillSuperseded[htmlArtifactSkillHash(existing.Content)]:
+		existing.Content = htmlArtifactSkillContent
+		if err := db.UpdateSkillWithVersion(ctx, existing, true); err != nil {
+			return err
+		}
+		log.Printf("[configsync] updated built-in skill %q to revision %d (it had not been edited)", HTMLArtifactSkillName, htmlArtifactSkillRevision)
+	case existing.Content != htmlArtifactSkillContent:
+		log.Printf("[configsync] built-in skill %q has a new revision (%d), but the stored one was edited and is left as it is; the current text is in the OpenPoet source (internal/configsync/html_artifact_skill.go)",
+			HTMLArtifactSkillName, htmlArtifactSkillRevision)
 	}
-	return db.SetSetting(ctx, htmlArtifactSkillSetting, "1")
+	if err := db.SetSetting(ctx, htmlArtifactSkillSetting, "1"); err != nil {
+		return err
+	}
+	return db.SetSetting(ctx, htmlArtifactSkillRevisionSetting, strconv.Itoa(htmlArtifactSkillRevision))
+}
+
+func htmlArtifactSkillHash(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
 }

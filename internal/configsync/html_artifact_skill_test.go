@@ -121,3 +121,127 @@ func TestHTMLArtifactSkillMatchesWhatTheViewerEnforces(t *testing.T) {
 		}
 	}
 }
+
+func TestEnsureHTMLArtifactSkillUpdatesOnlyAnUneditedCopy(t *testing.T) {
+	ctx := context.Background()
+	const oldBuiltIn = "The previous built-in guide.\n\n# HTML artifacts\n"
+	htmlArtifactSkillSuperseded[htmlArtifactSkillHash(oldBuiltIn)] = true
+	t.Cleanup(func() { delete(htmlArtifactSkillSuperseded, htmlArtifactSkillHash(oldBuiltIn)) })
+	// The text shipped as revision 1 is known, so installations that still
+	// have it are brought up to date.
+	if !htmlArtifactSkillSuperseded["326d24eab92e2d87211c3291790053c376570be2409b32eff246051139045e06"] {
+		t.Fatal("the revision 1 text is not listed as superseded")
+	}
+	if htmlArtifactSkillSuperseded[htmlArtifactSkillHash(htmlArtifactSkillContent)] {
+		t.Fatal("the current text is listed as superseded")
+	}
+
+	// An installation from before this revision: registered, no revision recorded.
+	install := func(name, content string) *database.DB {
+		db, err := database.New(filepath.Join(t.TempDir(), name+".db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		if content != "" {
+			if err := db.CreateSkillWithVersion(ctx, &database.Skill{Name: HTMLArtifactSkillName, Content: content, Enabled: true, Category: "documentation"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := db.SetSetting(ctx, htmlArtifactSkillSetting, "1"); err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+
+	// Never edited: replaced by the current guide, keeping the old text as a version.
+	db := install("unedited", oldBuiltIn)
+	if err := EnsureHTMLArtifactSkill(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	rows := htmlArtifactSkillRows(t, db)
+	if len(rows) != 1 || rows[0].Content != htmlArtifactSkillContent || !rows[0].Enabled {
+		t.Fatalf("unedited skill after the update = %+v", rows)
+	}
+	var versions []string
+	if err := db.Select(&versions, `SELECT content FROM skill_versions WHERE skill_id = ? ORDER BY version`, rows[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 2 || versions[0] != oldBuiltIn || versions[1] != htmlArtifactSkillContent {
+		t.Fatalf("skill versions = %d, want the old text and the new one", len(versions))
+	}
+	if revision, _ := db.GetSetting(ctx, htmlArtifactSkillRevisionSetting); revision != "2" {
+		t.Fatalf("recorded revision = %q", revision)
+	}
+	// The user edits the updated guide: the next start leaves it alone.
+	rows[0].Content = "edited after the update"
+	if err := db.UpdateSkill(ctx, &rows[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureHTMLArtifactSkill(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if rows = htmlArtifactSkillRows(t, db); rows[0].Content != "edited after the update" {
+		t.Fatalf("edited skill was replaced: %+v", rows)
+	}
+
+	// Edited before the update: left as it is, and not offered again.
+	db = install("edited", "my own guide")
+	for i := 0; i < 2; i++ {
+		if err := EnsureHTMLArtifactSkill(ctx, db); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rows = htmlArtifactSkillRows(t, db); len(rows) != 1 || rows[0].Content != "my own guide" {
+		t.Fatalf("edited skill = %+v", rows)
+	}
+	if revision, _ := db.GetSetting(ctx, htmlArtifactSkillRevisionSetting); revision != "2" {
+		t.Fatalf("recorded revision for an edited skill = %q", revision)
+	}
+
+	// Deleted before the update: not created again.
+	db = install("deleted", "")
+	if err := EnsureHTMLArtifactSkill(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if rows = htmlArtifactSkillRows(t, db); len(rows) != 0 {
+		t.Fatalf("deleted skill came back: %+v", rows)
+	}
+}
+
+// The guide's question examples have to be what the server accepts and what
+// the bridge looks for.
+func TestHTMLArtifactSkillTeachesQuestions(t *testing.T) {
+	content := htmlArtifactSkillContent
+	for _, phrase := range []string{
+		`id="openpoet-questions"`, `type="application/json"`, "data-openpoet-question", "data-openpoet-option", "data-openpoet-answer",
+		"data-openpoet-selected", "data-openpoet-answered", "window.openpoet.answer", "openpoet:answers",
+		"same across versions", "never inside", "every tab, step and accordion in the DOM", "openpoet_get_link", "sandbox allow-scripts", "connect-src 'none'",
+	} {
+		if !strings.Contains(content, phrase) {
+			t.Fatalf("skill content lacks %q", phrase)
+		}
+	}
+	block := regexp.MustCompile(`(?s)<script type="application/json" id="openpoet-questions">.*?</script>`).FindString(content)
+	if block == "" {
+		t.Fatal("skill content has no questions block")
+	}
+	questions, err := application.ParseArtifactQuestions("<html><body>" + block + "</body></html>")
+	if err != nil || len(questions) != 3 {
+		t.Fatalf("the skill's questions block = %+v err=%v", questions, err)
+	}
+	types := questions[0].Type + " " + questions[1].Type + " " + questions[2].Type
+	if types != "single multi text" {
+		t.Fatalf("question types in the example = %q", types)
+	}
+	// The elements of the example name questions the block declares.
+	for _, id := range regexp.MustCompile(`data-openpoet-question="([^"]+)"`).FindAllStringSubmatch(content, -1) {
+		found := false
+		for _, question := range questions {
+			found = found || question.ID == id[1]
+		}
+		if !found {
+			t.Fatalf("the example marks a question %q the block does not declare", id[1])
+		}
+	}
+}

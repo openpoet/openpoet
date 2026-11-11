@@ -215,6 +215,29 @@ async function main() {
     await page.locator('#artifact-composer-cancel').click();
     await page.locator('#artifact-viewer-annotate').click();
 
+    // --- "Send to agent": only confirmed answers are announced, and the
+    // message carries counts, not what the user wrote
+    let sent = [];
+    await page.route('**/api/sessions/*/input', route => {
+      sent.push(JSON.parse(route.request().postData()).text);
+      return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+    });
+    await frame().locator('[data-openpoet-question="D1"] [data-openpoet-option="b"]').click();
+    await page.waitForFunction(() => window.artifactViewer._pending.size === 1);
+    await page.evaluate(() => window.artifactViewer._reviewAnswers()); // the panel, on the Answers tab
+    await page.locator('#artifact-panel-send').click();
+    await page.waitForFunction(() => /Confirm your 1 pending answer first/.test(document.getElementById('artifact-panel-hint').textContent));
+    assert.equal(sent.length, 0, 'nothing is sent while an answer waits for confirmation');
+    await card('D1').locator('[data-action="discard"]').click();
+    await page.locator('#artifact-panel-send').click();
+    await page.waitForFunction(() => /Sent to the session/.test(document.getElementById('artifact-panel-hint').textContent));
+    assert.equal(sent.length, 1);
+    assert.match(sent[0], /^\[OpenPoet\] The user pressed "Send to agent" on the HTML artifact "E2E questions"/);
+    assert.ok(sent[0].includes('2 answers to your questions are open'), sent[0]);
+    assert.ok(sent[0].includes('or leave it open and tell the user why'), sent[0]);
+    assert.ok(!sent[0].includes('e2e-comment-marker'), 'the message carries no answer text');
+    await page.unroute('**/api/sessions/*/input');
+
     // --- a session cannot answer for the user
     const forgedBySession = await page.evaluate(async id => {
       const response = await fetch(`/api/artifacts/${id}/answers`, {

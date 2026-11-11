@@ -15,7 +15,8 @@ remain the place for short plain-text answers.
 | --- | --- |
 | `artifacts` | Title, summary, status (`active` / `archived`), current version, and the links to the project, session, task and chat conversation that produced it |
 | `artifact_versions` | The HTML of every version, with its size, SHA-256, change note and author. Versions are never rewritten or deleted |
-| `artifact_annotations` | The user's notes: the version they were made on, where they point (a text quote or an element), the note, and its resolution |
+| `artifact_annotations` | The user's notes: the version they were made on, where they point (a text quote or an element), the note, and its resolution. Also the user's answers to the questions an artifact asks (`kind = 'answer'`) |
+| `artifact_questions` | The questions each version declares for the reader |
 
 Rules the server enforces on every publish:
 
@@ -107,8 +108,8 @@ artifact and gets no extra capability; it talks to the page with `postMessage`.
   do not reach the artifact's own handlers.
 - The note is typed in the OpenPoet page and stored through the API. **Its text
   is never sent into the frame.** The frame only receives anchors, ids and
-  statuses, to draw numbered highlights in a layer of its own (it does not
-  modify the artifact's DOM).
+  statuses, to draw numbered highlights in a layer of its own, outside the
+  artifact's DOM.
 - The bridge shares the frame with the artifact's scripts, so the page treats
   every message as untrusted: it checks the sender and the shape, renders
   quotes as text, and opens the note composer only while the user has annotate
@@ -118,7 +119,80 @@ artifact and gets no extra capability; it talks to the page with `postMessage`.
   marks it "not in this version" and it stays open.
 - **Send to agent** posts a short message to the session that published the
   artifact (through the existing session input route), asking it to read the
-  open annotations.
+  open annotations. The message starts with `[OpenPoet]`, says how many answers
+  and notes are open, and carries none of their text.
+
+## Questions and answers
+
+An artifact can ask the reader to decide or answer something, and get the
+answer back as structured data instead of a free note.
+
+**Declaring.** A version declares its questions in one JSON data block:
+
+```html
+<script type="application/json" id="openpoet-questions">
+{"questions":[
+  {"id":"D1","prompt":"What do we call it?","type":"single",
+   "options":[{"id":"a","label":"Routine"},{"id":"b","label":"Automation"}]},
+  {"id":"D2","prompt":"Which triggers ship first?","type":"multi","comment":false,
+   "options":[{"id":"form","label":"Form"},{"id":"chat","label":"Chat"}]},
+  {"id":"NOTES","prompt":"Anything else?","type":"text"}
+]}
+</script>
+```
+
+- `type` is `single` (exactly one option), `multi` (one or more) or `text`
+  (free text). Without it, a question with options is `single` and one without
+  is `text`. `comment: false` removes the comment box of a choice.
+- Ids are 1 to 64 letters, digits, `_`, `-`, `.` or `:`. At most 200 questions
+  and 30 options per question; a prompt of up to 500 characters and a label of
+  up to 300.
+- The server reads the block when the version is published and stores the
+  questions with that version. A block that is present but malformed refuses
+  the publish (`invalid_artifact_questions`) with a message that says what is
+  wrong. The publish result reports how many questions were declared.
+
+**Marking the page.** The element of a question carries
+`data-openpoet-question="<id>"`, each choice inside it
+`data-openpoet-option="<id>"`, and a control that opens a free-text answer
+`data-openpoet-answer`. The elements may be created by script. The bridge sets
+`data-openpoet-selected` on the chosen options and
+`data-openpoet-answered="pending"` or `"saved"` on the question, with the
+matching ARIA state, and `data-openpoet-host` on `<html>`: these are the only
+attributes it sets on the artifact's elements. A script can also call
+`window.openpoet.answer(question, option)` and `window.openpoet.ask(question)`,
+and listen to `openpoet:answers` on `document`.
+
+**Answering.** A tap on a choice marks it. Marked answers wait in the
+**Answers** tab of the panel, where the questions of the version are native
+controls of the OpenPoet page; a bar over the artifact says how many are
+waiting. They are saved together when the user presses **Confirm** there.
+Waiting answers survive a reload (they are kept in the page's session storage).
+In annotate mode a click annotates instead.
+
+**What is stored.** An answer is an annotation of kind `answer`: the question,
+the options chosen (with the labels they had) and a comment, or the text of a
+free-text answer. A question of an artifact has one open answer: answering
+again replaces it, and it can be withdrawn. An answer the agent resolved stays
+as the record; answering that question again opens a new one. Answers are
+listed with the notes, count as open annotations, and one whose question a
+later version no longer asks is flagged "not in this version".
+
+**Trust.** The bridge shares the frame with the artifact's scripts, so a
+message from the frame proves nothing about what the user did.
+
+- A proposal from the frame can only name a question and an option that the
+  server stored for that version; anything else is ignored. The server checks
+  again when the answer is saved.
+- Nothing is stored on a proposal. An answer exists only after the user
+  confirms it in the OpenPoet page, which shows the question and the chosen
+  option from the server's list, not from the frame.
+- Comments and free-text answers are typed in the OpenPoet page and are never
+  sent into the frame. The frame learns which option ids are chosen, so the
+  artifact can show them.
+- A proposal never changes what the user typed.
+- A session cannot answer or withdraw an answer, and the notes route refuses a
+  question anchor: the answer route is the only way an answer is written.
 
 ## API
 
@@ -135,6 +209,9 @@ artifact and gets no extra capability; it talks to the page with `postMessage`.
 | `POST /api/artifacts/{id}/annotations` | Create an annotation (`version`, `anchor`, `body`) |
 | `POST /api/artifacts/{id}/annotations/{annotationId}/resolve` | Resolve, with an optional `resolution_note` |
 | `POST /api/artifacts/{id}/annotations/{annotationId}/reopen` | Reopen |
+| `GET /api/artifacts/{id}/questions?v=n` | The questions a version declares |
+| `PUT /api/artifacts/{id}/answers` | Save answers (`version`, `answers: [{question, options, text, comment}]`): all of them or none |
+| `DELETE /api/artifacts/{id}/answers/{questionId}` | Withdraw the open answer to a question |
 
 A caller authenticated as a session is always attributed to its own session.
 Artifacts also appear in the session and task document listings with ids of
@@ -151,7 +228,7 @@ to the chat assistant, and through `openpoet cli call`.
 | `openpoet_update_artifact` | `artifact_id`, `html`, `change_note`, `base_version` |
 | `openpoet_read_artifact` | `artifact_id`, `version`, `include_html` |
 | `openpoet_list_artifacts` | `project_id`, `task_id`, `session_id`, `include_archived` |
-| `openpoet_list_artifact_annotations` | `artifact_id`, `status` (default `open`) |
+| `openpoet_list_artifact_annotations` | `artifact_id`, `status` (default `open`). Lists notes and answers, and names the questions of the current version that have no open answer |
 | `openpoet_resolve_artifact_annotation` | `artifact_id`, `annotation_id`, `resolution_note` |
 
 The link that opens an artifact for someone else comes from `openpoet_get_link`
@@ -177,7 +254,8 @@ a project out.
 Automation API capabilities (`artifacts.list`, `artifacts.get`,
 `artifacts.get_version`, `artifacts.create`, `artifacts.update`,
 `artifacts.update_meta`, `artifacts.annotations.list`, `.create`, `.resolve`,
-`.reopen`) use the `documents:read` and `documents:write` scopes. One automation
+`.reopen`, `artifacts.questions.list`, `artifacts.answers.save`, `.withdraw`)
+use the `documents:read` and `documents:write` scopes. One automation
 command is limited to the Automation API's 1 MiB request body, so larger
 documents are published through the REST route or the MCP tools.
 
@@ -189,5 +267,8 @@ documents are published through the REST route or the MCP tools.
   Doc for short plain text or when the artifact tools are unavailable.
 - The built-in `html-artifact` skill is the design guide: what the sandbox
   enforces, how to structure a page with navigation, visual components, inline
-  charts and restrained motion, how to keep it easy to annotate, and the review
-  loop. It is registered once; edit or delete it like any other skill.
+  charts and restrained motion, how to keep it easy to annotate, how to ask
+  the user questions, and the review loop. It is registered once; edit or
+  delete it like any other skill. When the guide changes in a release, a copy
+  that was never edited is replaced by the new text (the old one is kept as a
+  skill version); an edited or deleted one is left as it is.

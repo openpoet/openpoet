@@ -523,7 +523,8 @@ func AllToolDefs() []ToolDef {
 			Description: "Publish an interactive HTML artifact: one self-contained HTML document stored in OpenPoet (not in the project directory) and shown to the user in a sandboxed viewer. " +
 				"Prefer this over create_document for plans, reports, documentation and any deliverable the user will read or review: build a small site with navigation, visual components, inline charts and restrained motion. " +
 				"Rules: a complete HTML document with ALL CSS and JavaScript inline; no external scripts, stylesheets, fonts or images (the viewer blocks every network request, so use inline SVG/canvas and data: URIs); must work in light and dark themes and on a phone; at most 2 MiB. " +
-				"The user gets a card to open it — do not paste the HTML or a link in your reply. The user can annotate the artifact; read their notes with list_artifact_annotations.",
+				"The user gets a card to open it — do not paste the HTML or a link in your reply. The user can annotate the artifact; read their notes with list_artifact_annotations. " +
+				"When the user has to decide or answer something, declare questions in the page (a JSON block with id openpoet-questions; the html-artifact skill shows how): the answers come back with the annotations.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
@@ -583,7 +584,7 @@ func AllToolDefs() []ToolDef {
 		},
 		{
 			Name:        "list_artifact_annotations",
-			Description: "List the user's annotations on an HTML artifact: for each, its id, the version it was made on, the quoted text or element it points at, and the user's note. Returns the open ones by default — these are the changes the user is asking for.",
+			Description: "List the user's annotations on an HTML artifact: for each, its id, the version it was made on, the quoted text or element it points at, and the user's note. Answers to the questions the artifact asks are listed too (the question, the option chosen and the comment), with the questions still unanswered. Returns the open ones by default — these are the changes the user is asking for.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
