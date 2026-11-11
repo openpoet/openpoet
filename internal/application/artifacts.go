@@ -154,11 +154,27 @@ func (s *ArtifactService) CapabilityServiceName() CapabilityServiceName {
 	return CapabilityServiceName("artifacts")
 }
 
+// singleLine removes control characters and folds line breaks into spaces. A
+// title and a change note are shown in listings, cards and tool output, and a
+// title is typed into an agent's terminal by "Send to agent": they are one
+// line of printable text.
+func singleLine(value string) string {
+	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		if r < 0x20 || r == 0x7f || r >= 0x80 && r < 0xa0 {
+			return -1
+		}
+		return r
+	}, value)), " ")
+}
+
 func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactCommand) (ArtifactPublishResult, error) {
 	if err := requireActionActor(command.Authorization); err != nil {
 		return ArtifactPublishResult{}, err
 	}
-	title, err := boundedRedactedInput(command.Title, maxApplicationTitleRunes, "Artifact title", false)
+	title, err := boundedRedactedInput(singleLine(command.Title), maxApplicationTitleRunes, "Artifact title", false)
 	if err != nil {
 		return ArtifactPublishResult{}, err
 	}
@@ -260,7 +276,7 @@ func (s *ArtifactService) Update(ctx context.Context, command UpdateArtifactComm
 	if err != nil {
 		return ArtifactPublishResult{}, err
 	}
-	note, err := boundedRedactedInput(command.ChangeNote, maxArtifactChangeNoteRunes, "Artifact change note", false)
+	note, err := boundedRedactedInput(singleLine(command.ChangeNote), maxArtifactChangeNoteRunes, "Artifact change note", false)
 	if err != nil {
 		return ArtifactPublishResult{}, err
 	}
@@ -302,7 +318,7 @@ func (s *ArtifactService) UpdateMeta(ctx context.Context, command UpdateArtifact
 	}
 	var title, summary, status *string
 	if command.Title != nil {
-		value, err := boundedRedactedInput(*command.Title, maxApplicationTitleRunes, "Artifact title", true)
+		value, err := boundedRedactedInput(singleLine(*command.Title), maxApplicationTitleRunes, "Artifact title", true)
 		if err != nil {
 			return ArtifactView{}, err
 		}
@@ -580,6 +596,12 @@ type ArtifactAnnotationStore interface {
 func (s *ArtifactService) CreateAnnotation(ctx context.Context, command CreateArtifactAnnotationCommand) (ArtifactAnnotationView, error) {
 	if err := requireActionActor(command.Authorization); err != nil {
 		return ArtifactAnnotationView{}, err
+	}
+	// Annotations are the reviewer's notes, and agents are told to treat them
+	// as the user's feedback. A session (an agent) therefore cannot write one:
+	// it would be putting words in the user's mouth for the next agent.
+	if strings.TrimSpace(command.Authorization.Actor.Type) == "session" {
+		return ArtifactAnnotationView{}, validationError("annotation_author_not_allowed", "Annotations are written by the user reviewing the artifact, not by a session")
 	}
 	store := s.store
 	id, err := normalizeArtifactID(command.ArtifactID)

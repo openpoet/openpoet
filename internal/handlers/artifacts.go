@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -444,11 +443,16 @@ func (n platformArtifactNotifier) ArtifactAnnotationsChanged(_ context.Context, 
 //     cannot call the OpenPoet API or send anything out by fetch/XHR/WebSocket,
 //     and cannot pull scripts, styles, images or fonts from any host;
 //   - only inline scripts/styles and data:/blob: media are allowed, which is
-//     what a self-contained artifact needs.
+//     what a self-contained artifact needs;
+//   - webrtc 'block' closes peer connections in browsers that implement the
+//     directive (others ignore it).
+//
+// CSP does not govern navigation: the artifact can still navigate its own
+// frame to another URL, carrying only what the artifact itself contains.
 const artifactContentSecurityPolicy = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; " +
 	"style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; " +
 	"connect-src 'none'; form-action 'none'; base-uri 'none'; frame-src 'none'; child-src 'none'; " +
-	"worker-src 'none'; object-src 'none'; frame-ancestors 'self'"
+	"worker-src 'none'; object-src 'none'; webrtc 'block'; frame-ancestors 'self'"
 
 func setArtifactRenderHeaders(w http.ResponseWriter) {
 	header := w.Header()
@@ -506,23 +510,21 @@ func (a *API) RenderArtifact(w http.ResponseWriter, r *http.Request) {
 //go:embed artifact_bridge.js
 var artifactBridgeScript string
 
-var artifactBodyClosePattern = regexp.MustCompile(`(?i)</body\s*>`)
-
 // artifactRenderDocument returns the HTML sent to the sandboxed iframe for a
-// stored version: the artifact plus the annotation bridge, placed before the
-// last </body> or, when there is none, at the end of the document.
+// stored version: the artifact, byte for byte, followed by the annotation
+// bridge.
+//
+// The bridge goes after the whole document rather than before </body>: finding
+// "the" closing tag in agent-written markup is guesswork (the text "</body>"
+// can sit inside a script string), and a wrong guess would cut one of the
+// artifact's own scripts in half. Browsers run a script that follows </html>
+// as part of the body.
 //
 // The bridge runs inside the same sandbox as the artifact and gets no extra
 // capability: it only reports selections to the embedding page and draws
-// highlights. If an artifact's own markup swallows it (an unclosed <script>,
-// for instance) the artifact still renders and annotations are simply
-// unavailable for that version.
+// highlights. If an artifact's markup swallows it (a document that ends inside
+// an unclosed <script> or comment) the artifact still renders and annotations
+// are simply unavailable for that version; the viewer says so.
 func artifactRenderDocument(html string) string {
-	bridge := "<script data-openpoet-bridge>" + strings.ReplaceAll(artifactBridgeScript, "</script", "<\\/script") + "</script>"
-	matches := artifactBodyClosePattern.FindAllStringIndex(html, -1)
-	if len(matches) == 0 {
-		return html + "\n" + bridge
-	}
-	at := matches[len(matches)-1][0]
-	return html[:at] + bridge + "\n" + html[at:]
+	return html + "\n<script data-openpoet-bridge>" + strings.ReplaceAll(artifactBridgeScript, "</script", "<\\/script") + "</script>"
 }

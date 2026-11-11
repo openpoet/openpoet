@@ -162,6 +162,22 @@ async function main() {
     assert.equal(conflict.status, 409, conflict.text);
     assert.equal(conflict.json.code, 'artifact_version_conflict');
 
+    // --- awkward markup: "</body>" inside a script string, and no closing tags.
+    // The artifact's script must run whole and the annotation layer must load.
+    const awkward = await api(page, 'POST', '/api/artifacts', {
+      title: 'E2E awkward markup',
+      html: '<html><body><p id="x">pending</p><script>var s = "</body>"; document.getElementById("x").textContent = "script ran " + s.length;</script>',
+    });
+    assert.equal(awkward.status, 201, awkward.text);
+    await page.evaluate(id => window.artifactViewer.open(id), awkward.json.id);
+    await frame.locator('#x:text-is("script ran 7")').waitFor({ timeout: 10000 });
+    assert.equal(await frame.locator('body').evaluate(() => window.__openpoetArtifactBridge === true), true,
+      'the annotation bridge did not load next to the artifact');
+    assert.equal(await frame.locator('script[data-openpoet-bridge]').count(), 1);
+    await api(page, 'PATCH', `/api/artifacts/${awkward.json.id}`, { status: 'archived' });
+    await page.evaluate(id => window.artifactViewer.open(id), artifactId);
+    await frame.locator('#label:text-is("probe v2")').waitFor({ timeout: 10000 });
+
     // --- reload: the URL reopens the artifact
     await page.reload({ waitUntil: 'networkidle' });
     await page.locator('#artifact-viewer-overlay:not(.hidden)').waitFor({ timeout: 10000 });

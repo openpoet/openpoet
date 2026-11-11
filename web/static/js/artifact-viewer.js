@@ -250,7 +250,10 @@ class ArtifactViewer {
             const resp = await fetch(`/api/artifacts/${encodeURIComponent(this._artifact.id)}/versions/${this._version}`);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const version = await resp.json();
-            const blob = new Blob([version.content || ''], { type: 'text/html;charset=utf-8' });
+            // Not text/html: this blob URL belongs to the OpenPoet origin, and a
+            // browser that opens it instead of saving it (some in-app WebViews
+            // ignore the download attribute) must not run the artifact there.
+            const blob = new Blob([version.content || ''], { type: 'application/octet-stream' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
@@ -404,6 +407,10 @@ class ArtifactViewer {
                 this._pushToFrame();
                 break;
             case 'selection': {
+                // Once the user has typed something, the note stays attached to
+                // the text they were looking at: a later "selection" (which the
+                // artifact's own script can forge) must not re-point it.
+                if (this._noteInProgress()) break;
                 const anchor = ArtifactViewer.sanitizeAnchor(data.anchor);
                 if (anchor && this._annotate) this._openComposer(anchor);
                 break;
@@ -418,9 +425,17 @@ class ArtifactViewer {
                 }
                 break;
             case 'key':
-                if (data.key === 'Escape') this._onEscape();
+                // Escape pressed inside the frame. It may cancel an empty
+                // composer or close the viewer, but never throws away text the
+                // user typed: the frame cannot be trusted with that.
+                if (data.key === 'Escape' && !this._noteInProgress()) this._onEscape();
                 break;
         }
+    }
+
+    _noteInProgress() {
+        return !!this.composerEl && !this.composerEl.classList.contains('hidden') &&
+            (this.composerTextEl?.value || '').trim() !== '';
     }
 
     _onEscape() {
@@ -509,7 +524,10 @@ class ArtifactViewer {
         const artifact = this._artifact;
         const open = this._annotations.filter(a => a.status !== 'resolved').length;
         if (!artifact?.session_id || open === 0) return;
-        const text = `The user left ${open} open annotation${open === 1 ? '' : 's'} on the HTML artifact "${artifact.title}" ` +
+        // This text is typed into the agent's terminal: keep the title to
+        // printable characters on one line.
+        const title = String(artifact.title || '').replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();
+        const text = `The user left ${open} open annotation${open === 1 ? '' : 's'} on the HTML artifact "${title}" ` +
             `(artifact_id ${artifact.id}, current version ${artifact.current_version}). ` +
             `Read them with openpoet_list_artifact_annotations, publish a corrected version with openpoet_update_artifact, ` +
             `then resolve each one with openpoet_resolve_artifact_annotation, saying what you changed.`;

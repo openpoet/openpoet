@@ -106,6 +106,17 @@ async function main() {
     await page.locator('#artifact-panel-composer:not(.hidden)').waitFor();
     assert.equal(await page.locator('#artifact-composer-quote').textContent(), 'rollback point');
     await page.locator('#artifact-composer-text').fill(NOTE_TEXT);
+
+    // While the user is typing, the artifact cannot re-point the note at other
+    // text, nor throw the typed text away with a forged Escape.
+    await frame.locator('body').evaluate(() => {
+      forge({ type: 'text', selector: 'body', exact: 'something the user never selected' });
+      parent.postMessage({ source: 'openpoet-artifact-bridge', type: 'key', key: 'Escape' }, '*');
+    });
+    await page.waitForTimeout(300);
+    assert.equal(await page.locator('#artifact-composer-quote').textContent(), 'rollback point', 'a forged selection re-pointed the note being typed');
+    assert.equal(await page.locator('#artifact-composer-text').inputValue(), NOTE_TEXT, 'a forged Escape discarded the typed note');
+
     await page.locator('#artifact-composer-save').click();
     await items.first().waitFor();
     assert.equal(await items.count(), 1);
@@ -207,6 +218,16 @@ async function main() {
     await page.locator('#artifact-panel-send').click();
     await page.locator('#artifact-panel-hint.is-error').waitFor();
     assert.match(await page.locator('#artifact-panel-hint').textContent(), /annotations stay open/);
+
+    // --- the downloaded copy is never a text/html blob in the OpenPoet origin
+    const blobType = await page.evaluate(async () => {
+      const original = URL.createObjectURL;
+      let type = null;
+      URL.createObjectURL = blob => { type = blob.type; return original.call(URL, blob); };
+      try { await window.artifactViewer._download(); } finally { URL.createObjectURL = original; }
+      return type;
+    });
+    assert.equal(blobType, 'application/octet-stream');
 
     // --- validation at the API
     const bad = await api(page, 'POST', `/api/artifacts/${artifactId}/annotations`, { anchor: { type: 'weird' }, body: 'x' });

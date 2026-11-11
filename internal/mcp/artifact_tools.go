@@ -62,6 +62,7 @@ type artifactAnnotationToolView struct {
 	} `json:"anchor"`
 	ResolutionNote string `json:"resolution_note"`
 	ResolvedBy     string `json:"resolved_by"`
+	CreatedBy      string `json:"created_by"`
 }
 
 func stringParam(params map[string]interface{}, key string) string {
@@ -347,7 +348,9 @@ func FormatArtifactDetail(artifactBody, openAnnotations, version []byte, toolPre
 	}
 	sb.WriteString("\n")
 	if artifact.Summary != "" {
-		sb.WriteString("\n" + artifact.Summary + "\n")
+		// One line: the summary is the publisher's text and must not be able
+		// to imitate the sections that follow.
+		sb.WriteString("\nSummary: " + oneLine(artifact.Summary, 1000) + "\n")
 	}
 	sb.WriteString("\n### Versions\n")
 	for _, v := range artifact.Versions {
@@ -443,9 +446,14 @@ func writeArtifactAnnotations(sb *strings.Builder, annotations []artifactAnnotat
 		if annotation.Anchor.Selector != "" {
 			sb.WriteString(fmt.Sprintf(" (at %s)", oneLine(annotation.Anchor.Selector, 200)))
 		}
-		sb.WriteString("\n  Note: " + oneLine(annotation.Body, 4000) + "\n")
+		// The UI user is the expected author; anyone else is named.
+		author := ""
+		if annotation.CreatedBy != "" && !strings.HasPrefix(annotation.CreatedBy, "user:") {
+			author = " (written by " + oneLine(annotation.CreatedBy, 120) + ")"
+		}
+		sb.WriteString("\n  Note" + author + ": " + oneLine(annotation.Body, 4000) + "\n")
 		if annotation.Status == "resolved" && annotation.ResolutionNote != "" {
-			sb.WriteString(fmt.Sprintf("  Resolved by %s: %s\n", annotation.ResolvedBy, oneLine(annotation.ResolutionNote, 2000)))
+			sb.WriteString(fmt.Sprintf("  Resolved by %s: %s\n", oneLine(annotation.ResolvedBy, 120), oneLine(annotation.ResolutionNote, 2000)))
 		}
 	}
 }

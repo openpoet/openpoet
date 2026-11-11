@@ -1421,8 +1421,12 @@ class StructuredViewManager {
                 if (this._isArtifactPublishTool(meta?.tool_name)) {
                     const content = block.content || '';
                     // create: "Internal link: /app/artifact/<id>"; update: "Artifact <id> is now at version N"
-                    const match = content.match(/\/app\/artifact\/([a-zA-Z0-9-]+)/) || content.match(/\bArtifact ([a-zA-Z0-9-]+) is now at version/);
-                    const artifactId = match ? match[1] : meta.artifactId;
+                    // Only a result that reports success enables the card; a
+                    // conflict or validation error falls through and is shown.
+                    const match = content.match(/\/app\/artifact\/([a-zA-Z0-9-]+)/) ||
+                        content.match(/\bArtifact ([a-zA-Z0-9-]+) is now at version/) ||
+                        content.match(/\bNo new version: .* of artifact ([a-zA-Z0-9-]+)\./);
+                    const artifactId = match ? match[1] : '';
                     const btn = meta.cardEl?.querySelector('.sv-doc-card-btn');
                     if (artifactId && btn) {
                         btn.disabled = false;
