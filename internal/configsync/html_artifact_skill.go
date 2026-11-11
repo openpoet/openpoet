@@ -26,7 +26,7 @@ const htmlArtifactSkillSetting = "builtin_skill_html_artifact_registered"
 // was offered. When the guide changes, bump the revision and add the SHA-256
 // of the text it replaces to htmlArtifactSkillSuperseded.
 const (
-	htmlArtifactSkillRevision        = 3
+	htmlArtifactSkillRevision        = 4
 	htmlArtifactSkillRevisionSetting = "builtin_skill_html_artifact_revision"
 )
 
@@ -37,6 +37,7 @@ const (
 var htmlArtifactSkillSuperseded = map[string]bool{
 	"326d24eab92e2d87211c3291790053c376570be2409b32eff246051139045e06": true, // revision 1
 	"50443d4ee9bd35229bf8c417e7b19093f52f3e730c0a3d8b2deddd42b0fe1341": true, // revision 2
+	"a894910e960c94469a52eb71433b739728dfbee6743219b8e45f6b6d8ac9ee6a": true, // revision 3
 }
 
 const htmlArtifactSkillContent = `Design and publish interactive HTML artifacts in OpenPoet for plans, reports and documentation.
@@ -74,7 +75,11 @@ load, silently. It is served as ` + "`sandbox allow-scripts`" + ` with the polic
   ` + "`secret = ...`" + ` are replaced with ` + "`[REDACTED]`" + ` when stored, also inside
   scripts. Never put real credentials in an artifact, and do not name script
   variables ` + "`password`" + `, ` + "`secret`" + `, ` + "`api_key`" + ` or ` + "`token`" + `-like names followed
-  by ` + "`=`" + ` or ` + "`:`" + `. The tool result tells you when masking happened.
+  by ` + "`=`" + ` or ` + "`:`" + `. The tool result says how many values were masked and where:
+  the line of the document you sent and the kind of text (` + "`password`" + `,
+  ` + "`api_key`" + `...), never the value. To check a page before publishing it, pass
+  ` + "`dry_run: true`" + `: nothing is stored, and the result says whether the page is
+  accepted, its size and hash, and what would be masked.
 
 ## Build it like a small site
 
@@ -121,6 +126,11 @@ load, silently. It is served as ` + "`sandbox allow-scripts`" + ` with the polic
   start** and hide the inactive ones with CSS (` + "`hidden`" + `, ` + "`display:none`" + `). An
   annotation is found again by its element: content that only exists while its
   tab is open cannot be.
+- Give **every tab, panel and card its own ` + "`id`" + ` or ` + "`data-id`" + `** (` + "`data-id=\"TM8\"`" + `).
+  An annotation records the nearest one: the listing tells you which panel a
+  note is about ("inside #stage-2"), and the viewer places the note only in
+  that panel. Without it, a note made in one tab can land on the content that
+  another tab puts in the same position.
 
 ## Ask the user to decide
 
@@ -221,6 +231,9 @@ costs them again on every revision.
   you sent (it is, unless credential-looking text was masked). Compare it with
   ` + "`sha256sum`" + ` of your file when it matters.
 - Pass the page inline in ` + "`html`" + ` only when you cannot write a file.
+- A create that timed out can be repeated: the same title and identical HTML
+  from the same session within a few minutes returns the artifact already
+  created, not a second one.
 
 ## The review loop
 
@@ -230,16 +243,21 @@ costs them again on every revision.
 2. When the user asks for changes or says they annotated it, call
    ` + "`openpoet_list_artifact_annotations`" + `. Each open annotation has the quoted
    text or element and the user's note, or is the user's answer to one of your
-   questions. They are feedback on the document.
+   questions. They are feedback on the document. A note made on an earlier
+   version says whether its quoted text or element is still in the current
+   one: when it is not, the passage was already rewritten or removed.
 3. If you no longer have the HTML, get it with ` + "`openpoet_read_artifact`" + ` and
    ` + "`output_path`" + `.
 4. Publish the change, passing ` + "`base_version`" + ` (the version you worked from)
    and a one-line ` + "`change_note`" + `: ` + "`openpoet_patch_artifact`" + ` for changes to parts
    of the page, ` + "`openpoet_update_artifact`" + ` with ` + "`html_path`" + ` for a rewrite. If it
    reports a version conflict, read the current version, reapply your change
-   and publish again.
-5. Call ` + "`openpoet_resolve_artifact_annotation`" + ` for each annotation you
-   addressed, with a note saying what you changed. Leave open what you did not
+   and publish again. Either one takes ` + "`title`" + ` and ` + "`summary`" + ` when the change
+   calls for new ones; ` + "`openpoet_update_artifact`" + ` with only those renames the
+   artifact without publishing a version.
+5. Resolve what you addressed in one call: ` + "`openpoet_resolve_artifact_annotation`" + `
+   with ` + "`resolutions`" + `, a list of ` + "`{annotation_id, resolution_note}`" + `, each note
+   saying what you changed for that annotation. Leave open what you did not
    address, and say why in your reply.
 6. When the user asks for a link to the artifact, get it with
    ` + "`openpoet_get_link`" + `, or use the shareable link a publish or

@@ -40,8 +40,8 @@ project for this, and do not use harness-native artifacts. The
   ` + "`output_path`" + `.
 - The user annotates artifacts. Before changing one, read the open annotations
   with ` + "`openpoet_list_artifact_annotations`" + `; publish the new version with
-  ` + "`openpoet_patch_artifact`" + ` or ` + "`openpoet_update_artifact`" + `; then resolve each
-  annotation you addressed with ` + "`openpoet_resolve_artifact_annotation`" + `.
+  ` + "`openpoet_patch_artifact`" + ` or ` + "`openpoet_update_artifact`" + `; then resolve the
+  ones you addressed, in one call, with ` + "`openpoet_resolve_artifact_annotation`" + `.
 - When the user has to decide or answer something, declare questions in the
   artifact (the ` + "`html-artifact`" + ` skill shows how). The user answers them in the
   viewer and the answers arrive with the annotations.

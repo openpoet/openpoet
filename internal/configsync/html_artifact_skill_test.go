@@ -96,6 +96,8 @@ func TestHTMLArtifactSkillMatchesWhatTheViewerEnforces(t *testing.T) {
 		// Publishing from a file and changing with a patch, instead of typing
 		// the page into a tool argument.
 		"html_path", "openpoet_patch_artifact", "output_path", "SHA-256", "$OPENPOET_BIN",
+		// What a publish reports and what a revision can carry.
+		"dry_run", "data-id", "resolutions", "`title`", "returns the artifact already",
 	} {
 		if !strings.Contains(content, phrase) {
 			t.Fatalf("skill content lacks %q", phrase)
@@ -136,6 +138,7 @@ func TestEnsureHTMLArtifactSkillUpdatesOnlyAnUneditedCopy(t *testing.T) {
 	for revision, hash := range map[int]string{
 		1: "326d24eab92e2d87211c3291790053c376570be2409b32eff246051139045e06",
 		2: "50443d4ee9bd35229bf8c417e7b19093f52f3e730c0a3d8b2deddd42b0fe1341",
+		3: "a894910e960c94469a52eb71433b739728dfbee6743219b8e45f6b6d8ac9ee6a",
 	} {
 		if !htmlArtifactSkillSuperseded[hash] {
 			t.Fatalf("the revision %d text is not listed as superseded", revision)
