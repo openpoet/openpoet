@@ -85,6 +85,10 @@ class ArtifactViewer {
         this._activeQuestion = '';
         this._intentWindow = { at: 0, count: 0 }; // rate limit for proposals coming from the frame
 
+        // The page's viewport meta, and the value the app ships with (see _syncPageZoom).
+        this._viewportMeta = document.querySelector('meta[name="viewport"]');
+        this._lockedViewport = this._viewportMeta?.getAttribute('content') || '';
+
         if (!this.overlay) return;
 
         this.tabAnswersBtn?.addEventListener('click', () => this._setTab('answers'));
@@ -120,6 +124,9 @@ class ArtifactViewer {
         this.overlay.addEventListener('click', (e) => {
             if (e.target === this.overlay) this.close();
         });
+        this.overlay.addEventListener('focusin', () => this._syncPageZoom());
+        // The element losing focus is still the active one while focusout runs.
+        this.overlay.addEventListener('focusout', () => setTimeout(() => this._syncPageZoom(), 0));
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape' && this.isOpen()) {
                 e.stopPropagation();
@@ -136,6 +143,7 @@ class ArtifactViewer {
         if (!this.overlay || !artifactId) return;
         const token = ++this._openToken;
         this.overlay.classList.remove('hidden');
+        this._syncPageZoom();
         this._setStatus('Loading artifact…');
         this.nameEl.textContent = 'Artifact';
         this._hideBanner();
@@ -164,6 +172,7 @@ class ArtifactViewer {
         this._openToken++;
         this.overlay.classList.add('hidden');
         this.overlay.classList.remove('is-fullscreen');
+        this._syncPageZoom();
         // Unload the artifact so its scripts and timers stop.
         if (this.frame) this.frame.src = 'about:blank';
         this._artifact = null;
@@ -285,6 +294,43 @@ class ArtifactViewer {
 
     _toggleFullscreen() {
         this.overlay.classList.toggle('is-fullscreen');
+    }
+
+    // The app locks page zoom in its viewport meta (maximum-scale=1,
+    // user-scalable=no). The artifact's frame is part of this page and a frame
+    // cannot be zoomed apart from the page that holds it, so the same lock
+    // keeps a phone from pinch-zooming an artifact to read an image or a chart.
+    //
+    // The lock is lifted while the viewer is open and comes back when it closes,
+    // which also returns the page to its normal scale. It comes back too while
+    // the user types in one of the viewer's own fields: a zoomed page is hard to
+    // use under the keyboard, and iOS zooms by itself into a small text field
+    // wherever zoom is allowed.
+    _syncPageZoom() {
+        const meta = this._viewportMeta;
+        if (!meta || !this._lockedViewport) return;
+        const focused = document.activeElement;
+        const typing = !!focused && this.overlay.contains(focused) &&
+            focused.matches('textarea, select, input:not([type="radio"]):not([type="checkbox"])');
+        const content = this.isOpen() && !typing
+            ? ArtifactViewer.zoomableViewport(this._lockedViewport)
+            : this._lockedViewport;
+        if (meta.getAttribute('content') === content) return;
+        meta.setAttribute('content', content);
+        // Chromium takes new zoom limits at the next layout of the page, not when
+        // the attribute changes. Nothing else here is sure to cause one (focus
+        // moving does not), so make one: both writes land before the next paint.
+        const body = document.body;
+        body.style.paddingBottom = '1px';
+        void body.offsetHeight;
+        body.style.paddingBottom = '';
+    }
+
+    // The viewport value with the zoom lock taken out; everything else is kept.
+    static zoomableViewport(content) {
+        const kept = String(content || '').split(',').map(part => part.trim())
+            .filter(part => part && !/^(maximum-scale|user-scalable)\s*=/i.test(part));
+        return [...kept, 'maximum-scale=5.0', 'user-scalable=yes'].join(', ');
     }
 
     async _download() {
