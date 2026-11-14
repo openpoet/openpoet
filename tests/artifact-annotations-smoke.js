@@ -213,11 +213,89 @@ async function main() {
     await page.locator(`#artifact-panel-list .artifact-annotation.is-active[data-annotation-id="${textNote.id}"]`).waitFor();
     await frame.locator('openpoet-annotations .box.flash').first().waitFor({ state: 'attached' });
 
-    // --- "Send to agent" with no live session says so and keeps the notes
-    assert.equal(await page.locator('#artifact-panel-send').isEnabled(), true);
-    await page.locator('#artifact-panel-send').click();
+    // --- "Send to agent": an open note says whether the agent was told about it
+    const delivery = items.locator('.artifact-annotation-delivery');
+    const sendStatus = page.locator('#artifact-panel-send-status');
+    const sendBtn = page.locator('#artifact-panel-send');
+    assert.deepEqual(await delivery.evaluateAll(nodes => nodes.map(n => [n.classList.contains('is-unsent'), n.textContent])), [
+      [true, '○Not sent to agent'], [true, '○Not sent to agent'],
+    ]);
+    assert.equal(await items.evaluateAll(nodes => nodes.every(n => n.classList.contains('is-unsent') && !n.classList.contains('is-sent'))), true);
+    assert.equal(await sendStatus.textContent(), '2 not sent to agent');
+    assert.equal(await sendBtn.textContent(), 'Send to agent');
+
+    // With no live session the send fails: the panel says so, and no note is
+    // shown (or stored) as sent.
+    assert.equal(await sendBtn.isEnabled(), true);
+    await sendBtn.click();
     await page.locator('#artifact-panel-hint.is-error').waitFor();
-    assert.match(await page.locator('#artifact-panel-hint').textContent(), /annotations stay open/);
+    assert.match(await page.locator('#artifact-panel-hint').textContent(), /^Not sent to session e2e: .*annotations stay open/);
+    assert.equal(await sendStatus.textContent(), 'Send failed · 2 not sent');
+    assert.equal(await sendStatus.evaluate(el => el.classList.contains('is-error')), true);
+    assert.equal(await items.locator('.artifact-annotation-delivery.is-sent').count(), 0);
+    assert.equal(await sendBtn.isEnabled(), true, 'a failed send can be tried again');
+    const afterFailure = await api(page, 'GET', `/api/artifacts/${artifactId}/annotations?status=open`);
+    assert.deepEqual(afterFailure.json.map(a => [a.sent_at, a.sent_session_id]), [[undefined, undefined], [undefined, undefined]]);
+
+    // A send that reaches the session. No agent runs under this test, so the
+    // server's side of it is played here: the send answers as it does when the
+    // session took the line, and the listing carries the record the server
+    // then stores (internal/handlers/artifacts_test.go checks the real one).
+    const sentAt = new Date().toISOString();
+    const sentSession = '0f9d2c1e-aaaa-bbbb-cccc-000000000000';
+    const sentIds = new Set();
+    const stamp = annotation => (sentIds.has(annotation.id) && annotation.status === 'open'
+      ? { ...annotation, sent_at: sentAt, sent_session_id: sentSession } : annotation);
+    await page.route(/\/api\/artifacts\/[^/]+\/annotations(\?.*)?$/, async route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      const response = await route.fetch();
+      return route.fulfill({ response, json: (await response.json()).map(stamp) });
+    });
+    let sends = 0;
+    await page.route('**/api/artifacts/*/send-to-agent', async route => {
+      sends++;
+      const open = (await api(page, 'GET', `/api/artifacts/${artifactId}/annotations?status=open`)).json;
+      open.forEach(a => sentIds.add(a.id));
+      return route.fulfill({ json: { artifact_id: artifactId, session_id: sentSession, sent_at: sentAt, sent: open.length, annotations: open.map(stamp) } });
+    });
+    await sendBtn.click();
+    await page.locator('#artifact-panel-hint.is-success').waitFor();
+    assert.match(await page.locator('#artifact-panel-hint').textContent(), /^Sent to the session that published this artifact \(session 0f9d2c1e\): 2 annotations at \d/);
+    assert.equal(sends, 1);
+    const sentRows = () => items.evaluateAll(nodes => nodes.map(n => ({
+      sent: n.classList.contains('is-sent'), unsent: n.classList.contains('is-unsent'),
+      text: n.querySelector('.artifact-annotation-delivery')?.textContent || '',
+      title: n.querySelector('.artifact-annotation-delivery')?.title || '',
+    })));
+    for (const row of await sentRows()) {
+      assert.equal(row.sent && !row.unsent, true, JSON.stringify(row));
+      assert.match(row.text, /^✓Sent to agent · \d{1,2}:\d{2}.*session 0f9d2c1e$/);
+      assert.ok(row.title.includes(sentSession), row.title);
+    }
+    assert.match(await sendStatus.textContent(), /^All 2 sent to agent · \d/);
+    assert.equal(await sendStatus.evaluate(el => el.classList.contains('is-sent')), true);
+    assert.equal(await sendBtn.textContent(), 'Send again');
+
+    // The state comes from the server, so it is there again after the viewer
+    // is closed and opened (and after a page reload, which does the same).
+    await page.evaluate(() => window.artifactViewer.close());
+    await page.evaluate(id => window.artifactViewer.open(id), artifactId);
+    await page.locator('#artifact-viewer-panel-toggle').click();
+    await items.nth(1).waitFor();
+    assert.equal((await sentRows()).every(row => row.sent && /session 0f9d2c1e$/.test(row.text)), true);
+
+    // A note written after the send is the one that stands out as not sent.
+    const late = await api(page, 'POST', `/api/artifacts/${artifactId}/annotations`, {
+      version: 2, anchor: { type: 'text', selector: '#p1', exact: 'three stages' }, body: 'Written after the send',
+    });
+    assert.equal(late.status, 201, late.text);
+    await page.waitForFunction(() => document.querySelectorAll('#artifact-panel-list .artifact-annotation').length === 3);
+    assert.deepEqual((await sentRows()).map(row => row.sent), [true, true, false]);
+    assert.equal((await sentRows())[2].text, '○Not sent to agent');
+    assert.match(await sendStatus.textContent(), /^1 not sent · 2 sent \d/);
+    assert.equal(await sendBtn.textContent(), 'Send to agent (1 new)');
+    await page.unroute('**/api/artifacts/*/send-to-agent');
+    await page.unroute(/\/api\/artifacts\/[^/]+\/annotations(\?.*)?$/);
 
     // --- the downloaded copy is never a text/html blob in the OpenPoet origin
     const blobType = await page.evaluate(async () => {

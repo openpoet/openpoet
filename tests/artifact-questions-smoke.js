@@ -215,12 +215,14 @@ async function main() {
     await page.locator('#artifact-composer-cancel').click();
     await page.locator('#artifact-viewer-annotate').click();
 
-    // --- "Send to agent": only confirmed answers are announced, and the
-    // message carries counts, not what the user wrote
+    // --- "Send to agent": nothing is sent while an answer waits for
+    // confirmation, and the request carries nothing the user wrote (the server
+    // writes the line the session receives, from what is stored)
+    assert.equal((await card('D1').locator('.artifact-question-sent').textContent()).trim(), '○ not sent to agent');
     let sent = [];
-    await page.route('**/api/sessions/*/input', route => {
-      sent.push(JSON.parse(route.request().postData()).text);
-      return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+    await page.route('**/api/artifacts/*/send-to-agent', route => {
+      sent.push(route.request().postData() || '');
+      return route.fulfill({ json: { artifact_id: artifactId, session_id: 'e2e-session', sent_at: new Date().toISOString(), sent: 2, annotations: [] } });
     });
     await frame().locator('[data-openpoet-question="D1"] [data-openpoet-option="b"]').click();
     await page.waitForFunction(() => window.artifactViewer._pending.size === 1);
@@ -232,11 +234,8 @@ async function main() {
     await page.locator('#artifact-panel-send').click();
     await page.waitForFunction(() => /Sent to the session/.test(document.getElementById('artifact-panel-hint').textContent));
     assert.equal(sent.length, 1);
-    assert.match(sent[0], /^\[OpenPoet\] The user pressed "Send to agent" on the HTML artifact "E2E questions"/);
-    assert.ok(sent[0].includes('2 answers to your questions are open'), sent[0]);
-    assert.ok(sent[0].includes('or leave it open and tell the user why'), sent[0]);
-    assert.ok(!sent[0].includes('e2e-comment-marker'), 'the message carries no answer text');
-    await page.unroute('**/api/sessions/*/input');
+    assert.ok(!sent[0].includes('e2e-comment-marker'), 'the request carries no answer text');
+    await page.unroute('**/api/artifacts/*/send-to-agent');
 
     // --- a session cannot answer for the user
     const forgedBySession = await page.evaluate(async id => {

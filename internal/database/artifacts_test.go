@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestArtifact(id string, projectID int64, sessionID string) (*Artifact, *ArtifactVersion) {
@@ -215,6 +216,47 @@ func TestArtifactAnnotationLifecycle(t *testing.T) {
 	if err != nil || reopened.Status != "open" || reopened.ResolutionNote != "" || reopened.ResolvedBy != "" || reopened.ResolvedAt.Valid {
 		t.Fatalf("reopened annotation = %+v err=%v", reopened, err)
 	}
+	// "Send to agent": only the open annotations named are marked, with the
+	// session they were sent to. Reopening one clears the mark.
+	if marked, err := db.MarkArtifactAnnotationsSent(ctx, "art0000n", nil, "sess-n"); err != nil || marked != 0 {
+		t.Fatalf("marking nothing = %d err=%v", marked, err)
+	}
+	if marked, err := db.MarkArtifactAnnotationsSent(ctx, "other-artifact", []int64{first.ID, second.ID}, "sess-n"); err != nil || marked != 0 {
+		t.Fatalf("marking through another artifact = %d err=%v", marked, err)
+	}
+	if err := db.ResolveArtifactAnnotation(ctx, second.ID, "", "session:sess-n"); err != nil {
+		t.Fatal(err)
+	}
+	if marked, err := db.MarkArtifactAnnotationsSent(ctx, "art0000n", []int64{first.ID, second.ID, 9999}, "sess-n"); err != nil || marked != 1 {
+		t.Fatalf("marked = %d err=%v, want only the open annotation", marked, err)
+	}
+	sent, err := db.GetArtifactAnnotation(ctx, first.ID)
+	if err != nil || !sent.SentAt.Valid || time.Since(sent.SentAt.Time) > time.Minute || sent.SentSessionID != "sess-n" {
+		t.Fatalf("sent annotation = %+v err=%v", sent, err)
+	}
+	if unsent, err := db.GetArtifactAnnotation(ctx, second.ID); err != nil || unsent.SentAt.Valid || unsent.SentSessionID != "" {
+		t.Fatalf("resolved annotation was marked as sent: %+v err=%v", unsent, err)
+	}
+	// Reopening an annotation that is already open is not a change to it.
+	if err := db.ReopenArtifactAnnotation(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if still, err := db.GetArtifactAnnotation(ctx, first.ID); err != nil || !still.SentAt.Valid || still.SentSessionID != "sess-n" {
+		t.Fatalf("reopening an open annotation dropped the send record: %+v err=%v", still, err)
+	}
+	if err := db.ResolveArtifactAnnotation(ctx, first.ID, "done", "session:sess-n"); err != nil {
+		t.Fatal(err)
+	}
+	if kept, err := db.GetArtifactAnnotation(ctx, first.ID); err != nil || !kept.SentAt.Valid || kept.SentSessionID != "sess-n" {
+		t.Fatalf("resolving dropped the send record: %+v err=%v", kept, err)
+	}
+	if err := db.ReopenArtifactAnnotation(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if cleared, err := db.GetArtifactAnnotation(ctx, first.ID); err != nil || cleared.SentAt.Valid || cleared.SentSessionID != "" {
+		t.Fatalf("reopening kept the send record: %+v err=%v", cleared, err)
+	}
+
 	if err := db.ResolveArtifactAnnotation(ctx, 9999, "", ""); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("resolve missing err = %v", err)
 	}

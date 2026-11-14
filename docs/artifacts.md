@@ -147,10 +147,20 @@ version, or whether the `id` / `data-id` its element sits in is still in the
 markup (`placement: {version, checked, found}`; `checked` is false when there
 was nothing to look for), and to each resolved annotation the version that was
 current when it was resolved (`resolved_on_version`). The agent tools use it.
-- **Send to agent** posts a short message to the session that published the
-  artifact (through the existing session input route), asking it to read the
-  open annotations. The message starts with `[OpenPoet]`, says how many answers
-  and notes are open, and carries none of their text.
+- **Send to agent** (`POST /api/artifacts/{id}/send-to-agent`) types a short
+  message into the session that published the artifact, asking it to read the
+  open annotations. The server writes the message: it starts with `[OpenPoet]`,
+  says how many answers and notes are open, and carries none of their text.
+- A send leaves a record on every annotation that was open: `sent_at` and
+  `sent_session_id`. The panel shows it on each note ("Sent to agent", the
+  time, the session) and marks the ones the agent has not been told about
+  ("Not sent to agent"); because it is stored, it is the same after a reload.
+  The record is written only after the line was typed into the session, so a
+  send that fails (the session is not running, for instance) marks nothing and
+  the panel says why. An annotation loses the record when it changes after the
+  send: an answer that is replaced, a resolved annotation that is reopened.
+  "Sent" means the line reached the session's input; it does not say the agent
+  has acted on it, which is what resolving an annotation records.
 
 ## Questions and answers
 
@@ -241,6 +251,7 @@ message from the frame proves nothing about what the user did.
 | `POST /api/artifacts/{id}/annotations` | Create an annotation (`version`, `anchor`, `body`) |
 | `POST /api/artifacts/{id}/annotations/{annotationId}/resolve` | Resolve, with an optional `resolution_note` |
 | `POST /api/artifacts/{id}/annotations/{annotationId}/reopen` | Reopen |
+| `POST /api/artifacts/{id}/send-to-agent` | Tell the publishing session about the open annotations and record the send on them (`session_id`, `sent_at`, `sent`, `annotations` in the answer) |
 | `GET /api/artifacts/{id}/questions?v=n` | The questions a version declares |
 | `PUT /api/artifacts/{id}/answers` | Save answers (`version`, `answers: [{question, options, text, comment}]`): all of them or none |
 | `DELETE /api/artifacts/{id}/answers/{questionId}` | Withdraw the open answer to a question |
@@ -327,7 +338,7 @@ a project out.
 Automation API capabilities (`artifacts.list`, `artifacts.get`,
 `artifacts.get_version`, `artifacts.create`, `artifacts.update`,
 `artifacts.patch`, `artifacts.update_meta`, `artifacts.annotations.list`, `.create`, `.resolve`,
-`.reopen`, `artifacts.questions.list`, `artifacts.answers.save`, `.withdraw`)
+`.reopen`, `.send`, `artifacts.questions.list`, `artifacts.answers.save`, `.withdraw`)
 use the `documents:read` and `documents:write` scopes. One automation
 command is limited to the Automation API's 1 MiB request body, so larger
 documents are published through the REST route or the MCP tools.

@@ -104,6 +104,7 @@ func artifactCollaborationDefinitions() []PlatformCapabilityDefinition {
 		collaborationWriteCapability("artifacts.annotations.create", "artifacts", "documents:write"),
 		collaborationWriteCapability("artifacts.annotations.resolve", "artifacts", "documents:write"),
 		collaborationWriteCapability("artifacts.annotations.reopen", "artifacts", "documents:write"),
+		collaborationWriteCapability("artifacts.annotations.send", "artifacts", "documents:write"),
 		collaborationReadCapability("artifacts.questions.list", "artifacts", "documents:read"),
 		collaborationWriteCapability("artifacts.answers.save", "artifacts", "documents:write"),
 		collaborationDestructiveCapability("artifacts.answers.withdraw", "artifacts", "documents:write"),
@@ -363,6 +364,18 @@ func (e *artifactCollaborationExecutor) Validate(_ context.Context, input Platfo
 				return e.service.ResolveAnnotation(ctx, command)
 			}
 			return e.service.ReopenAnnotation(ctx, command)
+		}}, nil
+	case "artifacts.annotations.send":
+		var payload struct{}
+		if err := decodeCollaborationPayload(input.Payload, &payload); err != nil {
+			return nil, err
+		}
+		id, err := collaborationStringID(target, "", "artifact id")
+		if err != nil {
+			return nil, err
+		}
+		return &collaborationValidatedCommand{preview: collaborationPreview(input.Handler, map[string]any{"artifact_id": id}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+			return e.service.SendAnnotationsToAgent(ctx, application.SendArtifactAnnotationsCommand{ArtifactID: id, Authorization: authorization})
 		}}, nil
 	case "artifacts.questions.list":
 		var payload artifactGetVersionPayload

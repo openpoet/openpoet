@@ -189,14 +189,15 @@ type ArtifactListQuery struct {
 type ArtifactNotifier interface {
 	ArtifactPublished(ctx context.Context, artifact ArtifactView, isNew bool)
 	// ArtifactAnnotationsChanged fires when an annotation is created, resolved
-	// or reopened. It carries no annotation text.
+	// or reopened, or sent to the agent. It carries no annotation text.
 	ArtifactAnnotationsChanged(ctx context.Context, artifact ArtifactView)
 }
 
 type ArtifactService struct {
-	store    ArtifactStore
-	effects  ApplicationEffects
-	notifier ArtifactNotifier
+	store      ArtifactStore
+	effects    ApplicationEffects
+	notifier   ArtifactNotifier
+	agentInput ArtifactAgentInput
 }
 
 func NewArtifactService(store ArtifactStore, effects ApplicationEffects) *ArtifactService {
@@ -885,6 +886,11 @@ type ArtifactAnnotationView struct {
 	QuestionID string              `json:"question_id,omitempty"`
 	Answer     *ArtifactAnswerView `json:"answer,omitempty"`
 	UpdatedAt  *time.Time          `json:"updated_at,omitempty"`
+	// SentAt is when "Send to agent" last told a session about this
+	// annotation, and SentSessionID is that session. Both are absent for an
+	// annotation the agent has not been told about.
+	SentAt        *time.Time `json:"sent_at,omitempty"`
+	SentSessionID string     `json:"sent_session_id,omitempty"`
 	// Placement is filled by ListAnnotationsWithPlacement for a note made on a
 	// version that is no longer the current one.
 	Placement *ArtifactAnnotationPlacement `json:"placement,omitempty"`
@@ -917,6 +923,7 @@ type ArtifactAnnotationStore interface {
 	CountOpenArtifactAnnotations(context.Context, string) (int, error)
 	ResolveArtifactAnnotation(context.Context, int64, string, string) error
 	ReopenArtifactAnnotation(context.Context, int64) error
+	MarkArtifactAnnotationsSent(ctx context.Context, artifactID string, ids []int64, sessionID string) (int, error)
 }
 
 // CreateAnnotation attaches a note to a text range or element of one version.
@@ -1234,6 +1241,11 @@ func artifactAnnotationView(annotation *database.ArtifactAnnotation) ArtifactAnn
 	if annotation.ResolvedAt.Valid {
 		resolvedAt := annotation.ResolvedAt.Time
 		view.ResolvedAt = &resolvedAt
+	}
+	if annotation.SentAt.Valid {
+		sentAt := annotation.SentAt.Time
+		view.SentAt = &sentAt
+		view.SentSessionID = annotation.SentSessionID
 	}
 	return view
 }

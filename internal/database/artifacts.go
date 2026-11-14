@@ -351,6 +351,13 @@ type ArtifactAnnotation struct {
 	QuestionID string       `db:"question_id" json:"question_id,omitempty"`
 	AnswerJSON string       `db:"answer_json" json:"-"`
 	UpdatedAt  sql.NullTime `db:"updated_at" json:"-"`
+	// SentAt is when "Send to agent" last announced this annotation to a
+	// session, and SentSessionID is that session. Both are empty for an
+	// annotation the agent has not been told about, and are cleared when the
+	// annotation changes afterwards (an answer replaced, a resolved one
+	// reopened): what was announced is no longer what is stored.
+	SentAt        sql.NullTime `db:"sent_at" json:"-"`
+	SentSessionID string       `db:"sent_session_id" json:"-"`
 }
 
 // Annotation kinds.
@@ -359,7 +366,7 @@ const (
 	ArtifactAnnotationKindAnswer = "answer"
 )
 
-const artifactAnnotationColumns = `id, artifact_id, version, anchor_json, quote, body, status, resolution_note, resolved_by, resolved_at, created_by, created_at, kind, question_id, answer_json, updated_at`
+const artifactAnnotationColumns = `id, artifact_id, version, anchor_json, quote, body, status, resolution_note, resolved_by, resolved_at, created_by, created_at, kind, question_id, answer_json, updated_at, sent_at, sent_session_id`
 
 // CreateArtifactAnnotation stores an open annotation and sets its ID.
 func (d *DB) CreateArtifactAnnotation(ctx context.Context, annotation *ArtifactAnnotation) error {
@@ -428,11 +435,39 @@ func (d *DB) ResolveArtifactAnnotation(ctx context.Context, id int64, note, reso
 	return nil
 }
 
+// MarkArtifactAnnotationsSent records that the given annotations of an
+// artifact were announced to a session just now. Only open annotations are
+// marked: one resolved in the meantime needs nothing from the agent. It returns
+// how many were marked.
+func (d *DB) MarkArtifactAnnotationsSent(ctx context.Context, artifactID string, ids []int64, sessionID string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	query, args, err := sqlx.In(
+		`UPDATE artifact_annotations SET sent_at = CURRENT_TIMESTAMP, sent_session_id = ?
+		 WHERE artifact_id = ? AND status = 'open' AND id IN (?)`, sessionID, artifactID, ids)
+	if err != nil {
+		return 0, err
+	}
+	result, err := d.ExecContext(ctx, d.Rebind(query), args...)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	return int(affected), err
+}
+
 // ReopenArtifactAnnotation puts a resolved annotation back to open and clears
-// its resolution.
+// its resolution. It also clears the record of having been sent to the agent:
+// the agent already dealt with what it was told, and has not been told that
+// the annotation is open again. Reopening one that is already open changes
+// nothing.
 func (d *DB) ReopenArtifactAnnotation(ctx context.Context, id int64) error {
 	result, err := d.ExecContext(ctx,
-		`UPDATE artifact_annotations SET status = 'open', resolution_note = '', resolved_by = '', resolved_at = NULL WHERE id = ?`, id)
+		`UPDATE artifact_annotations SET status = 'open', resolution_note = '', resolved_by = '', resolved_at = NULL,
+			sent_at = CASE WHEN status = 'resolved' THEN NULL ELSE sent_at END,
+			sent_session_id = CASE WHEN status = 'resolved' THEN '' ELSE sent_session_id END
+		 WHERE id = ?`, id)
 	if err != nil {
 		// A question has one open answer: an older answer cannot be reopened
 		// while a newer one is open.
@@ -449,7 +484,8 @@ func (d *DB) ReopenArtifactAnnotation(ctx context.Context, id int64) error {
 
 // UpsertArtifactAnswers stores the reader's answers to questions: all of them
 // or none. There is at most one open answer per question of an artifact:
-// answering again replaces it (keeping its id), and an answer the agent
+// answering again replaces it (keeping its id, and no longer marked as sent to
+// the agent, which was told about the previous answer), and an answer the agent
 // already resolved is left as the record it is while a new open one is
 // created. It sets each annotation's ID.
 func (d *DB) UpsertArtifactAnswers(ctx context.Context, answers []*ArtifactAnnotation) error {
@@ -480,7 +516,8 @@ func upsertArtifactAnswer(ctx context.Context, tx *sqlx.Tx, answer *ArtifactAnno
 	case err == nil:
 		answer.ID = existing
 		_, err = tx.ExecContext(ctx,
-			`UPDATE artifact_annotations SET version = ?, anchor_json = ?, quote = ?, body = ?, answer_json = ?, created_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			`UPDATE artifact_annotations SET version = ?, anchor_json = ?, quote = ?, body = ?, answer_json = ?, created_by = ?, updated_at = CURRENT_TIMESTAMP,
+				sent_at = NULL, sent_session_id = '' WHERE id = ?`,
 			answer.Version, answer.AnchorJSON, answer.Quote, answer.Body, answer.AnswerJSON, answer.CreatedBy, existing)
 		return err
 	case errors.Is(err, sql.ErrNoRows):

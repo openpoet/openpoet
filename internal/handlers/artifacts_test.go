@@ -41,6 +41,7 @@ func artifactTestRouter(t *testing.T) (*API, http.Handler) {
 		r.Post("/artifacts/{id}/annotations", api.CreateArtifactAnnotation)
 		r.Post("/artifacts/{id}/annotations/{annotationId}/resolve", api.ResolveArtifactAnnotation)
 		r.Post("/artifacts/{id}/annotations/{annotationId}/reopen", api.ReopenArtifactAnnotation)
+		r.Post("/artifacts/{id}/send-to-agent", api.SendArtifactAnnotationsToAgent)
 		r.Get("/artifacts/{id}/questions", api.ListArtifactQuestions)
 		r.Put("/artifacts/{id}/answers", api.SaveArtifactAnswers)
 		r.Delete("/artifacts/{id}/answers/{questionId}", api.WithdrawArtifactAnswer)
@@ -422,6 +423,105 @@ func TestArtifactAnnotationREST(t *testing.T) {
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatalf("bogus status filter = %d", recorder.Code)
 		}
+	}
+}
+
+// stubArtifactAgentInput stands in for the session service behind "Send to
+// agent": it records the line typed, or refuses like a stopped session.
+type stubArtifactAgentInput struct {
+	commands []application.SendSessionInputCommand
+	err      error
+}
+
+func (s *stubArtifactAgentInput) SendInput(_ context.Context, command application.SendSessionInputCommand) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.commands = append(s.commands, command)
+	return nil
+}
+
+// POST /api/artifacts/{id}/send-to-agent tells the publishing session about
+// the open annotations and the annotations then say they were sent, when and
+// to which session. A session that does not take input fails the request and
+// leaves nothing marked.
+func TestArtifactSendToAgentREST(t *testing.T) {
+	api, router := artifactTestRouter(t)
+	recorder, created := artifactRequest(t, router, http.MethodPost, "/api/artifacts", map[string]any{
+		"title": "Reviewed", "html": artifactHandlerHTML, "session_id": "sess-publisher",
+	}, nil)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("create status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	id, _ := created["id"].(string)
+	sendPath := "/api/artifacts/" + id + "/send-to-agent"
+	listOpen := func() []map[string]any {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "/api/artifacts/"+id+"/annotations?status=open", nil)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		var items []map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &items); err != nil || recorder.Code != http.StatusOK {
+			t.Fatalf("list: status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		return items
+	}
+
+	// Nothing open: nothing to send.
+	if recorder, body := artifactRequest(t, router, http.MethodPost, sendPath, nil, nil); recorder.Code != http.StatusBadRequest || body["code"] != "no_open_annotations" {
+		t.Fatalf("send with nothing open: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder, _ := artifactRequest(t, router, http.MethodPost, "/api/artifacts/"+id+"/annotations", map[string]any{
+		"body": "Shorten the title rest-note-marker", "anchor": map[string]any{"type": "text", "selector": "h1", "exact": "Roadmap"},
+	}, nil); recorder.Code != http.StatusCreated {
+		t.Fatalf("annotation create status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	// The publishing session is not running in this fixture: the real session
+	// service refuses, the request fails, and the note stays unsent.
+	if recorder, body := artifactRequest(t, router, http.MethodPost, sendPath, nil, nil); recorder.Code < 400 || body["error"] == nil {
+		t.Fatalf("send to a session that is not running: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if items := listOpen(); len(items) != 1 || items[0]["sent_at"] != nil || items[0]["sent_session_id"] != nil {
+		t.Fatalf("a failed send marked the annotation: %v", items)
+	}
+
+	// With a session that takes the line, the annotation is marked.
+	services, ready := api.platformApplicationServices()
+	if !ready {
+		t.Fatal("platform services are not ready")
+	}
+	input := &stubArtifactAgentInput{}
+	services.Collaboration.Artifacts.SetAgentInput(input)
+
+	// A session cannot press the user's button.
+	agent := application.Actor{Type: "session", ID: "sess-publisher"}
+	if recorder, body := artifactRequest(t, router, http.MethodPost, sendPath, nil, &agent); recorder.Code != http.StatusBadRequest || body["code"] != "annotation_author_not_allowed" || len(input.commands) != 0 {
+		t.Fatalf("send by a session: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder, sent := artifactRequest(t, router, http.MethodPost, sendPath, nil, nil)
+	if recorder.Code != http.StatusOK || sent["session_id"] != "sess-publisher" || sent["sent"] != float64(1) || sent["artifact_id"] != id {
+		t.Fatalf("send status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	sentAt, err := time.Parse(time.RFC3339, sent["sent_at"].(string))
+	if err != nil || time.Since(sentAt) > time.Minute || time.Until(sentAt) > time.Minute {
+		t.Fatalf("sent_at = %v err=%v", sent["sent_at"], err)
+	}
+	if len(input.commands) != 1 || input.commands[0].SessionID != "sess-publisher" ||
+		!strings.HasPrefix(input.commands[0].Text, `[OpenPoet] The user pressed "Send to agent" on the HTML artifact "Reviewed" (artifact_id `+id+`, current version 1): 1 note is open.`) ||
+		strings.Contains(input.commands[0].Text, "rest-note-marker") {
+		t.Fatalf("line typed = %+v", input.commands)
+	}
+	if returned, _ := sent["annotations"].([]any); len(returned) != 1 {
+		t.Fatalf("returned annotations = %v", sent["annotations"])
+	}
+	// The record is in the listing a reload reads.
+	if items := listOpen(); len(items) != 1 || items[0]["sent_at"] != sent["sent_at"] || items[0]["sent_session_id"] != "sess-publisher" {
+		t.Fatalf("listing after send = %v", items)
+	}
+	if recorder, _ := artifactRequest(t, router, http.MethodPost, "/api/artifacts/missing0/send-to-agent", nil, nil); recorder.Code != http.StatusNotFound {
+		t.Fatalf("send on a missing artifact status = %d", recorder.Code)
 	}
 }
 

@@ -42,8 +42,11 @@ const (
 	// +2 mutations, +1 read.
 	// artifacts.patch (mutation) publishes a version from replacements
 	// instead of the whole document: +1 capability, +1 mutation.
-	expectedPlatformCapabilities = 196
-	expectedPlatformMutations    = 129
+	// artifacts.annotations.send (mutation) tells the publishing session
+	// about the open annotations and records the send on them: +1 capability,
+	// +1 mutation.
+	expectedPlatformCapabilities = 197
+	expectedPlatformMutations    = 130
 	expectedPlatformReads        = 67
 )
 
@@ -166,7 +169,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 
 	collaboration := automation.CollaborationPlatformServices{
 		Documents: application.NewDocumentService(services.DB, platformMemoryMirror{api: a}, effects),
-		Artifacts: newPlatformArtifactService(a, services.DB, effects),
+		Artifacts: newPlatformArtifactService(a, services.DB, effects, sessionService),
 		Proposals: application.NewProposalService(platformProposalBackend{api: a}, effects),
 		AI: application.NewAIAssistantService(
 			platformAIProvider{handler: services.AIHandler},

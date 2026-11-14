@@ -262,6 +262,9 @@
 .artifact-panel-hint.is-error {
     color: var(--color-danger, #dc2626);
 }
+.artifact-panel-hint.is-success {
+    color: var(--color-success, #16a34a);
+}
 .artifact-panel-list {
     flex: 1;
     min-height: 0;
@@ -361,7 +364,73 @@
 }
 .artifact-annotation-actions {
     display: flex;
+    align-items: center;
     justify-content: flex-end;
+    gap: 8px;
+}
+
+/* Whether "Send to agent" announced an annotation: a bar on the card's edge
+   and a line saying when and to which session, or that it is still to send. */
+.artifact-annotation.is-sent {
+    box-shadow: inset 3px 0 0 var(--color-success, #16a34a);
+}
+.artifact-annotation.is-unsent {
+    box-shadow: inset 3px 0 0 var(--color-warning, #d97706);
+}
+.artifact-annotation.is-resolved.is-sent {
+    box-shadow: inset 3px 0 0 #64748b;
+}
+.artifact-annotation-delivery {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 5px;
+    font-size: 11px;
+    line-height: 1.4;
+}
+.artifact-annotation-delivery.is-sent {
+    color: var(--color-success, #16a34a);
+}
+.artifact-annotation-delivery.is-unsent {
+    color: var(--color-warning, #d97706);
+}
+.artifact-annotation.is-resolved .artifact-annotation-delivery {
+    color: var(--color-text-muted);
+}
+.artifact-annotation-delivery-mark {
+    font-weight: 700;
+}
+.artifact-annotation-delivery-session {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--color-text-muted);
+}
+.artifact-panel-send-status {
+    flex: 1;
+    min-width: 0;
+    align-self: center;
+    font-size: 11px;
+    line-height: 1.35;
+    color: var(--color-text-muted);
+}
+.artifact-panel-send-status.is-sent {
+    color: var(--color-success, #16a34a);
+}
+.artifact-panel-send-status.is-unsent {
+    color: var(--color-warning, #d97706);
+}
+.artifact-panel-send-status.is-error {
+    color: var(--color-danger, #dc2626);
+}
+.artifact-question-sent {
+    margin-left: auto;
+}
+.artifact-question-sent.is-sent {
+    color: var(--color-success, #16a34a);
+}
+.artifact-question-sent.is-unsent {
+    color: var(--color-warning, #d97706);
 }
 .artifact-panel-footer {
     display: flex;

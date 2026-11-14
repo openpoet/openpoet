@@ -485,6 +485,26 @@ func (a *API) changeArtifactAnnotation(w http.ResponseWriter, r *http.Request, r
 	respondJSON(w, http.StatusOK, view)
 }
 
+// SendArtifactAnnotationsToAgent tells the session that published the artifact
+// about its open annotations and records the send on each of them:
+// POST /api/artifacts/{id}/send-to-agent. It answers with the session that was
+// told, when, and the open annotations as they are stored now. When the session
+// cannot take input the request fails and nothing is marked as sent.
+func (a *API) SendArtifactAnnotationsToAgent(w http.ResponseWriter, r *http.Request) {
+	service, ok := a.artifactService(w)
+	if !ok {
+		return
+	}
+	result, err := service.SendAnnotationsToAgent(platformUIContext(r), application.SendArtifactAnnotationsCommand{
+		ArtifactID: chi.URLParam(r, "id"), Authorization: platformUIAuthorization(r),
+	})
+	if err != nil {
+		respondApplicationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, result)
+}
+
 // ListArtifactQuestions returns the questions one version declares
 // (?v=<n>, default the current version).
 func (a *API) ListArtifactQuestions(w http.ResponseWriter, r *http.Request) {
@@ -587,9 +607,14 @@ func (a *API) artifactDocEntries(r *http.Request, filter database.ArtifactFilter
 // platformArtifactNotifier pushes artifact publishes to connected UIs.
 type platformArtifactNotifier struct{ api *API }
 
-func newPlatformArtifactService(api *API, store application.ArtifactStore, effects application.ApplicationEffects) *application.ArtifactService {
+// newPlatformArtifactService builds the artifact service. agentInput is how
+// "Send to agent" types into a session (the session service).
+func newPlatformArtifactService(api *API, store application.ArtifactStore, effects application.ApplicationEffects, agentInput application.ArtifactAgentInput) *application.ArtifactService {
 	service := application.NewArtifactService(store, effects)
 	service.SetNotifier(platformArtifactNotifier{api: api})
+	if agentInput != nil {
+		service.SetAgentInput(agentInput)
+	}
 	return service
 }
 

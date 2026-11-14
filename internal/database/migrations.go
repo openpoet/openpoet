@@ -103,6 +103,7 @@ var migrations = []Migration{
 	{Version: 83, Description: "tool policies: allowlists that grant read_document or read_artifact also grant get_link, the tool that returns the link of an artifact, Doc, session or task", Up: migrateV83},
 	{Version: 84, Description: "artifacts: questions a version declares for the reader (artifact_questions) and answers stored as annotations (kind, question_id, answer_json, updated_at; one open answer per question)", Up: migrateV84},
 	{Version: 85, Description: "tool policies: allowlists that grant update_artifact also grant patch_artifact, the tool that changes an artifact by sending only the replacements", Up: migrateV85},
+	{Version: 86, Description: "artifacts: when an annotation was last sent to the agent and to which session (artifact_annotations.sent_at, sent_session_id), so the viewer can show it after a reload", Up: migrateV86},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2496,6 +2497,27 @@ func migrateV85(tx *sqlx.Tx) error {
 			if _, err := tx.Exec(t.updateSQL, updated, row.ID); err != nil {
 				return fmt.Errorf("migrateV85 failed: %w\nSQL: %s", err, t.updateSQL)
 			}
+		}
+	}
+	return nil
+}
+
+// migrateV86 records "Send to agent" on the annotations it announced: when the
+// session was told about an annotation, and which session that was. Until now
+// the press left no trace, so the viewer could not tell a note the agent had
+// been told about from one it had not.
+//
+// Both columns are added with defaults and every reader of artifact_annotations
+// names its columns, so a binary from before this migration keeps working on
+// the migrated table.
+func migrateV86(tx *sqlx.Tx) error {
+	stmts := []string{
+		`ALTER TABLE artifact_annotations ADD COLUMN sent_at TIMESTAMP`,
+		`ALTER TABLE artifact_annotations ADD COLUMN sent_session_id TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV86 failed: %w\nSQL: %s", err, s)
 		}
 	}
 	return nil

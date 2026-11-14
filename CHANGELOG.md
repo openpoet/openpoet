@@ -101,6 +101,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - "Send to agent" says it is OpenPoet reporting a button press, counts answers
   and notes separately, and asks the agent to act on each one or leave it open
   saying why.
+- "Send to agent" leaves a record. Each annotation it announced shows "Sent to
+  agent" with the time and the session it went to, and one that was not sent
+  yet (written, replaced or reopened after the last send) shows "Not sent to
+  agent"; the footer of the panel sums it up. The record is stored
+  (`sent_at`, `sent_session_id` on the annotation), so it is still there after
+  a reload, and an open viewer follows it live. A send that does not reach the
+  session says why and marks nothing. The send is now one server route
+  (`POST /api/artifacts/{id}/send-to-agent`, capability
+  `artifacts.annotations.send`), which writes the line the session receives.
 - A link path opens what it points at. `/app/artifact/<id>` (with `?v=<n>`
   for a version), `/app/doc/<id>`, `/app/session/<id>`, `/app/project/<id>`
   and `/app/task/<project>/<task>` used to load the app on the projects list;

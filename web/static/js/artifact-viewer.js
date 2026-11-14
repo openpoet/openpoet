@@ -54,6 +54,7 @@ class ArtifactViewer {
         this.hintEl = document.getElementById('artifact-panel-hint');
         this.listEl = document.getElementById('artifact-panel-list');
         this.sendBtn = document.getElementById('artifact-panel-send');
+        this.sendStatusEl = document.getElementById('artifact-panel-send-status');
 
         // Questions and answers
         this.tabAnswersBtn = document.getElementById('artifact-panel-tab-answers');
@@ -78,7 +79,9 @@ class ArtifactViewer {
         this._hidden = new Set();   // annotation ids placed in a part of the page that is not shown
         this._pendingAnchor = null; // anchor of the note being written
         this._activeAnnotation = 0;
-        this._notice = null;        // {text, error} shown in the panel hint
+        this._notice = null;        // {text, error, success} shown in the panel hint
+        this._sending = false;      // a "Send to agent" request is on its way
+        this._sendFailed = false;   // the last "Send to agent" did not reach the session
 
         this._questions = [];       // questions the shown version declares (from the server, never from the frame)
         this._pending = new Map();  // question id -> {options, text, comment}: chosen but not confirmed yet
@@ -388,6 +391,8 @@ class ArtifactViewer {
         this._pendingAnchor = null;
         this._activeAnnotation = 0;
         this._notice = null;
+        this._sending = false;
+        this._sendFailed = false;
         this._questions = [];
         this._pending = new Map();
         this._activeQuestion = '';
@@ -644,11 +649,13 @@ class ArtifactViewer {
     }
 
     // Tells the session that published the artifact that there are notes to
-    // address. The notes stay in the database either way; this is only a nudge.
+    // address. The server types the line into the session and, only when that
+    // worked, records on each open annotation that it was sent, when and to
+    // which session: what the panel shows as sent is read back from there, so
+    // it is still shown after a reload.
     async _sendToAgent() {
         const artifact = this._artifact;
-        const open = this._annotations.filter(a => a.status !== 'resolved').length;
-        if (!artifact?.session_id) return;
+        if (!artifact?.session_id || this._sending) return;
         // Answers that were chosen but not confirmed are not saved: the agent
         // would not see them. Confirm first.
         if (this._pending.size > 0) {
@@ -657,35 +664,93 @@ class ArtifactViewer {
             this._renderPanel();
             return;
         }
-        if (open === 0) return;
-        // This text is typed into the agent's terminal: keep the title to
-        // printable characters on one line.
-        const title = String(artifact.title || '').replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();
-        // The message says where it comes from: it is typed into the session
-        // like user input, but it is OpenPoet reporting a button press.
-        const openAnnotations = this._annotations.filter(a => a.status !== 'resolved');
-        const answers = openAnnotations.filter(a => this._isAnswer(a)).length;
-        const notes = openAnnotations.length - answers;
-        const parts = [];
-        if (answers > 0) parts.push(`${answers} answer${answers === 1 ? '' : 's'} to your questions`);
-        if (notes > 0) parts.push(`${notes} note${notes === 1 ? '' : 's'}`);
-        const text = `[OpenPoet] The user pressed "Send to agent" on the HTML artifact "${title}" ` +
-            `(artifact_id ${artifact.id}, current version ${artifact.current_version}): ${parts.join(' and ')} ${open === 1 ? 'is' : 'are'} open. ` +
-            `Read them with openpoet_list_artifact_annotations. For each one, act on it (publish a corrected version with openpoet_update_artifact ` +
-            `when the document has to change) and resolve it with openpoet_resolve_artifact_annotation saying what you did, ` +
-            `or leave it open and tell the user why.`;
-        this.sendBtn.disabled = true;
+        if (!this._annotations.some(a => a.status !== 'resolved')) return;
+        const session = ArtifactViewer.shortSessionId(artifact.session_id);
+        this._sending = true;
+        this._sendFailed = false;
+        this._notice = null;
+        this._renderPanel();
+        let notice;
         try {
-            await this._api('POST', `/api/sessions/${encodeURIComponent(artifact.session_id)}/input`, { text });
-            this._notice = { text: `Sent to the session that published this artifact (${open} open).`, error: false };
+            const result = await this._api('POST', `/api/artifacts/${encodeURIComponent(artifact.id)}/send-to-agent`, {});
+            const sent = Number(result?.sent) || 0;
+            const when = ArtifactViewer.formatSentTime(result?.sent_at);
+            // The server says which session it told.
+            const target = ArtifactViewer.shortSessionId(result?.session_id) || session;
+            notice = {
+                text: `Sent to the session that published this artifact (session ${target}): ${sent} annotation${sent === 1 ? '' : 's'}${when ? ` at ${when}` : ''}.`,
+                error: false, success: true,
+            };
         } catch (e) {
-            this._notice = {
-                text: 'The session that published this artifact is not accepting input right now. ' +
+            console.error('ArtifactViewer: send to agent failed', e);
+            this._sendFailed = true;
+            notice = {
+                text: `Not sent to session ${session}: ${ArtifactViewer.sendFailureReason(e)} ` +
                     'The annotations stay open: an agent sees them when it reads this artifact.',
                 error: true,
             };
         }
+        // The viewer may have moved to another artifact while the request ran.
+        if (!this._artifact || this._artifact.id !== artifact.id) return;
+        this._sending = false;
+        this._notice = notice;
+        await this._loadAnnotations();
         this._renderPanel();
+    }
+
+    // Whether an annotation was announced to the agent by "Send to agent".
+    _isSent(annotation) {
+        return !!annotation.sent_at;
+    }
+
+    // The Send button and the line next to it: how many open annotations the
+    // agent has not been told about, and when the others were sent.
+    _renderSendChrome() {
+        const open = this._annotations.filter(a => a.status !== 'resolved');
+        const unsent = open.filter(a => !this._isSent(a)).length;
+        const sent = open.length - unsent;
+        const hasSession = !!this._artifact?.session_id;
+
+        this.sendBtn.disabled = open.length === 0 || !hasSession || this._sending;
+        if (this._sending) {
+            this.sendBtn.textContent = 'Sending…';
+        } else if (hasSession && open.length > 0 && unsent === 0) {
+            this.sendBtn.textContent = 'Send again';
+        } else if (sent > 0 && unsent > 0) {
+            this.sendBtn.textContent = `Send to agent (${unsent} new)`;
+        } else {
+            this.sendBtn.textContent = 'Send to agent';
+        }
+        this.sendBtn.title = !hasSession
+            ? 'This artifact was not published by a session'
+            : (open.length > 0 && unsent === 0
+                ? 'Every open annotation was already sent. Tell the session again about the open annotations'
+                : 'Tell the session that published this artifact to address the open annotations');
+
+        if (!this.sendStatusEl) return;
+        let text = '';
+        let state = '';
+        if (hasSession && open.length > 0) {
+            const lastSent = open.filter(a => this._isSent(a)).map(a => a.sent_at).sort().pop();
+            const when = ArtifactViewer.formatSentTime(lastSent);
+            if (this._sending) {
+                text = 'Sending to the agent…';
+            } else if (this._sendFailed) {
+                text = unsent > 0 ? `Send failed · ${unsent} not sent` : 'Send failed';
+                state = 'is-error';
+            } else if (unsent === 0) {
+                text = `All ${open.length} sent to agent${when ? ` · ${when}` : ''}`;
+                state = 'is-sent';
+            } else if (sent === 0) {
+                text = `${unsent} not sent to agent`;
+                state = 'is-unsent';
+            } else {
+                text = `${unsent} not sent · ${sent} sent${when ? ` ${when}` : ''}`;
+                state = 'is-unsent';
+            }
+        }
+        this.sendStatusEl.textContent = text;
+        this.sendStatusEl.className = 'artifact-panel-send-status' + (state ? ' ' + state : '') + (text ? '' : ' hidden');
     }
 
     _renderPanel() {
@@ -732,11 +797,9 @@ class ArtifactViewer {
         this.hintEl.textContent = hint;
         this.hintEl.classList.toggle('hidden', !hint);
         this.hintEl.classList.toggle('is-error', hintError);
+        this.hintEl.classList.toggle('is-success', !!this._notice?.success && !hintError);
 
-        this.sendBtn.disabled = openCount === 0 || !this._artifact?.session_id;
-        this.sendBtn.title = !this._artifact?.session_id
-            ? 'This artifact was not published by a session'
-            : 'Tell the session that published this artifact to address the open annotations';
+        this._renderSendChrome();
 
         if (onAnswers) {
             this._renderAnswers();
@@ -762,8 +825,13 @@ class ArtifactViewer {
     // and resolution notes from an agent.
     _renderAnnotation(annotation) {
         const resolved = annotation.status === 'resolved';
+        const sent = this._isSent(annotation);
+        // An open annotation is either sent or still to send. On an artifact
+        // no session published there is nobody to send to, so nothing is said.
+        const unsent = !resolved && !sent && !!this._artifact?.session_id;
         const item = document.createElement('div');
         item.className = 'artifact-annotation' + (resolved ? ' is-resolved' : '') +
+            (sent ? ' is-sent' : '') + (unsent ? ' is-unsent' : '') +
             (annotation.id === this._activeAnnotation ? ' is-active' : '');
         item.dataset.annotationId = String(annotation.id);
         item.tabIndex = 0;
@@ -821,6 +889,7 @@ class ArtifactViewer {
         }
 
         const actions = el('div', 'artifact-annotation-actions');
+        if (sent || unsent) actions.appendChild(this._renderDelivery(annotation, el));
         const action = el('button', 'btn btn-secondary btn-sm', resolved ? 'Reopen' : 'Resolve');
         action.type = 'button';
         action.addEventListener('click', (e) => {
@@ -836,6 +905,27 @@ class ArtifactViewer {
             if (e.key === 'Enter' && e.target === item) activate();
         });
         return item;
+    }
+
+    // The "sent to agent" state of one annotation: when it was sent and to
+    // which session, or that it has not been sent yet. Both come from the
+    // server, so they are the same after a reload.
+    _renderDelivery(annotation, el) {
+        const delivery = el('div', 'artifact-annotation-delivery ' + (this._isSent(annotation) ? 'is-sent' : 'is-unsent'));
+        if (!this._isSent(annotation)) {
+            delivery.appendChild(el('span', 'artifact-annotation-delivery-mark', '○'));
+            delivery.appendChild(el('span', '', 'Not sent to agent'));
+            delivery.title = 'The agent has not been told about this annotation. Use Send to agent.';
+            return delivery;
+        }
+        const when = ArtifactViewer.formatSentTime(annotation.sent_at);
+        const session = annotation.sent_session_id || '';
+        delivery.appendChild(el('span', 'artifact-annotation-delivery-mark', '✓'));
+        delivery.appendChild(el('span', '', `Sent to agent${when ? ` · ${when}` : ''}`));
+        if (session) delivery.appendChild(el('span', 'artifact-annotation-delivery-session', `session ${ArtifactViewer.shortSessionId(session)}`));
+        const fullWhen = new Date(annotation.sent_at);
+        delivery.title = `Sent to the agent${isNaN(fullWhen) ? '' : ` on ${fullWhen.toLocaleString()}`}${session ? `, session ${session}` : ''}`;
+        return delivery;
     }
 
     // ---- Questions and answers ----
@@ -876,7 +966,7 @@ class ArtifactViewer {
         const declared = new Set((question.options || []).map(o => o.id));
         const options = (saved.answer?.options || []).map(o => o.id).filter(id => declared.has(id));
         const isText = question.type === 'text';
-        return { kind: 'saved', options, text: isText ? saved.body || '' : '', comment: isText ? '' : saved.body || '', version: saved.version };
+        return { kind: 'saved', options, text: isText ? saved.body || '' : '', comment: isText ? '' : saved.body || '', version: saved.version, sentAt: saved.sent_at || '' };
     }
 
     // Stages a change to one answer. Nothing is saved until the user confirms.
@@ -1040,6 +1130,16 @@ class ArtifactViewer {
             chip.classList.toggle('is-pending', state.kind === 'pending');
             chip.classList.toggle('is-answered', state.kind === 'saved');
         }
+        // A saved answer also says whether the agent was told about it.
+        const sentChip = card.querySelector('.artifact-question-sent');
+        if (sentChip) {
+            const show = state.kind === 'saved' && !!this._artifact?.session_id;
+            const when = show && state.sentAt ? ArtifactViewer.formatSentTime(state.sentAt) : '';
+            sentChip.hidden = !show;
+            sentChip.textContent = !show ? '' : (state.sentAt ? `✓ sent to agent${when ? ` · ${when}` : ''}` : '○ not sent to agent');
+            sentChip.classList.toggle('is-sent', show && !!state.sentAt);
+            sentChip.classList.toggle('is-unsent', show && !state.sentAt);
+        }
         const discard = card.querySelector('[data-action="discard"]');
         if (discard) discard.hidden = state.kind !== 'pending';
         const withdraw = card.querySelector('[data-action="withdraw"]');
@@ -1065,6 +1165,7 @@ class ArtifactViewer {
             const head = el('div', 'artifact-question-head');
             head.appendChild(el('span', 'artifact-question-id', question.id));
             head.appendChild(el('span', 'artifact-question-state'));
+            head.appendChild(el('span', 'artifact-question-sent'));
             card.appendChild(head);
             card.appendChild(el('div', 'artifact-question-prompt', question.prompt));
 
@@ -1213,6 +1314,35 @@ ArtifactViewer.sanitizeAnchor = function (anchor) {
         return clean;
     }
     return null;
+};
+
+/** The first block of a session id: how a session is named in short. */
+ArtifactViewer.shortSessionId = function (sessionId) {
+    return String(sessionId || '').split('-')[0].slice(0, 12);
+};
+
+/**
+ * When an annotation was sent, for a line of the panel: the time for today,
+ * the date and the time otherwise. Empty when the value is not a date.
+ */
+ArtifactViewer.formatSentTime = function (value, now = new Date()) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (isNaN(date)) return '';
+    const time = { hour: '2-digit', minute: '2-digit' };
+    return date.toDateString() === now.toDateString()
+        ? date.toLocaleTimeString([], time)
+        : date.toLocaleString([], { day: '2-digit', month: '2-digit', ...time });
+};
+
+/**
+ * Why a "Send to agent" request failed, as a sentence for the panel: what the
+ * server answered ("Session is not running"), or that it did not answer.
+ */
+ArtifactViewer.sendFailureReason = function (error) {
+    if (!error?.status) return 'OpenPoet could not be reached.';
+    const message = String(error.message || `HTTP ${error.status}`).replace(/[.\s]+$/, '');
+    return `${message}.`;
 };
 
 /** Ids of this form in document listings, cards and URLs are artifacts. */
