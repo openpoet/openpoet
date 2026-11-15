@@ -1544,17 +1544,22 @@ func (d *DB) CreateTempDocument(ctx context.Context, doc *TempDocument) error {
 	return err
 }
 
+// docsNotCopied restricts a query on temp_documents to the Docs that are still
+// only Docs. One that was copied into an artifact (artifact_legacy_docs) is
+// listed as that artifact, by the artifact listings, and must not show twice.
+const docsNotCopied = ` AND id NOT IN (SELECT doc_id FROM artifact_legacy_docs)`
+
 func (d *DB) ListDocumentsByTask(ctx context.Context, taskID int64) ([]TempDocument, error) {
 	var docs []TempDocument
 	err := d.SelectContext(ctx, &docs,
-		"SELECT id, title, status, task_id, created_at FROM temp_documents WHERE task_id = ? ORDER BY created_at DESC", taskID)
+		"SELECT id, title, status, task_id, created_at FROM temp_documents WHERE task_id = ?"+docsNotCopied+" ORDER BY created_at DESC", taskID)
 	return docs, err
 }
 
 func (d *DB) ListDocumentsBySession(ctx context.Context, sessionID string) ([]TempDocument, error) {
 	var docs []TempDocument
 	err := d.SelectContext(ctx, &docs,
-		"SELECT id, title, status, session_id, created_at FROM temp_documents WHERE session_id = ? ORDER BY created_at DESC", sessionID)
+		"SELECT id, title, status, session_id, created_at FROM temp_documents WHERE session_id = ?"+docsNotCopied+" ORDER BY created_at DESC", sessionID)
 	return docs, err
 }
 
@@ -1565,7 +1570,7 @@ func (d *DB) UpdateTempDocumentStatus(ctx context.Context, id string, status str
 
 func (d *DB) ListTempDocumentsByConversation(ctx context.Context, conversationID int64) ([]TempDocument, error) {
 	var docs []TempDocument
-	err := d.SelectContext(ctx, &docs, "SELECT * FROM temp_documents WHERE conversation_id = ? ORDER BY created_at ASC", conversationID)
+	err := d.SelectContext(ctx, &docs, "SELECT * FROM temp_documents WHERE conversation_id = ?"+docsNotCopied+" ORDER BY created_at ASC", conversationID)
 	return docs, err
 }
 

@@ -314,11 +314,19 @@ func (t *ReportTx) ListTaskActivityForSession(ctx context.Context, sessionID str
 
 func (t *ReportTx) ListSessionDocumentRefs(ctx context.Context, sessionID string) ([]StructuredReportDocumentRef, error) {
 	var documents []StructuredReportDocumentRef
+	// The documents of a session are its artifacts, and the Docs it still has
+	// that were not copied into one. An artifact's status is its version.
 	err := t.tx.SelectContext(ctx, &documents, `
-		SELECT id, title, status
-		FROM temp_documents
-		WHERE session_id = ?
-		ORDER BY created_at ASC, id ASC`, sessionID)
+		SELECT id, title, status FROM (
+			SELECT id, title, status, created_at
+			FROM temp_documents
+			WHERE session_id = ?`+docsNotCopied+`
+			UNION ALL
+			SELECT id, title, 'v' || current_version AS status, created_at
+			FROM artifacts
+			WHERE session_id = ?
+		)
+		ORDER BY created_at ASC, id ASC`, sessionID, sessionID)
 	if documents == nil {
 		documents = []StructuredReportDocumentRef{}
 	}

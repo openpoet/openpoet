@@ -109,6 +109,24 @@ func (d *DB) ListConversationReviewArtifacts(ctx context.Context, conversationID
 	return artifacts, err
 }
 
+// ListConversationDocumentArtifacts returns the documents a chat conversation
+// published (its artifacts that are not proposals), oldest first. An artifact
+// does not record the message it was published from, so MessageID is the
+// assistant message that was being written at the time: the latest one of the
+// conversation created at or before the artifact (0 when there is none).
+func (d *DB) ListConversationDocumentArtifacts(ctx context.Context, conversationID int64) ([]ConversationReviewArtifact, error) {
+	artifacts := []ConversationReviewArtifact{}
+	err := d.SelectContext(ctx, &artifacts, `SELECT a.id, a.title, a.summary, '' AS kind, '' AS status, a.created_at,
+			COALESCE((SELECT m.id FROM ai_messages m
+				WHERE m.conversation_id = a.conversation_id AND m.role = 'assistant' AND m.created_at <= a.created_at
+				ORDER BY m.created_at DESC, m.id DESC LIMIT 1), 0) AS message_id
+		FROM artifacts a
+		WHERE a.conversation_id = ? AND a.status != 'archived'
+		  AND NOT EXISTS (SELECT 1 FROM artifact_reviews r WHERE r.artifact_id = a.id)
+		ORDER BY a.created_at, a.id`, conversationID)
+	return artifacts, err
+}
+
 // TakeArtifactReviewFeedbackTx returns the proposals of a conversation that
 // were decided and not yet reported to the assistant, oldest first, and marks
 // them as reported, in the transaction that builds the assistant's next turn.
