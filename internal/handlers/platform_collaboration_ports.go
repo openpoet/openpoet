@@ -604,34 +604,22 @@ func (b platformAIConversationBackend) PrepareChatAtomic(ctx context.Context, re
 	if _, err = tx.ExecContext(ctx, `INSERT INTO ai_messages (conversation_id,role,content,tool_calls,status) VALUES (?,'user',?,'[]','completed')`, conversation.ID, request.Prompt); err != nil {
 		return nil, err
 	}
-	var feedbackDocuments []database.TempDocument
-	if err = tx.SelectContext(ctx, &feedbackDocuments, `SELECT * FROM temp_documents WHERE conversation_id=? AND status IN ('approved','rejected') AND feedback_ack=0 ORDER BY created_at ASC`, conversation.ID); err != nil {
-		return nil, err
-	}
-	// Proposals are artifacts with a review; the Docs query above still reports
-	// the ones decided before they were.
+	// The proposals of the conversation that were decided since the assistant
+	// last spoke are reported to it, once. Proposals are artifacts with a
+	// review; the ones that were Docs were copied with their state.
 	decidedProposals, err := database.TakeArtifactReviewFeedbackTx(ctx, tx, conversation.ID)
 	if err != nil {
 		return nil, err
 	}
 	var feedback strings.Builder
-	if len(feedbackDocuments)+len(decidedProposals) > 0 {
+	if len(decidedProposals) > 0 {
 		feedback.WriteString("[System notification — Proposal feedback]\n")
-		line := func(title, summary, decided string) {
+		for _, proposal := range decidedProposals {
 			status := "APPROVED"
-			if decided == "rejected" {
+			if proposal.Status == "rejected" {
 				status = "REJECTED"
 			}
-			feedback.WriteString(fmt.Sprintf("- %s: %s — %s\n", title, summary, status))
-		}
-		for _, document := range feedbackDocuments {
-			line(document.Title, document.Summary, document.Status)
-			if _, err = tx.ExecContext(ctx, `UPDATE temp_documents SET feedback_ack=1 WHERE id=? AND feedback_ack=0`, document.ID); err != nil {
-				return nil, err
-			}
-		}
-		for _, proposal := range decidedProposals {
-			line(proposal.Title, proposal.Summary, proposal.Status)
+			feedback.WriteString(fmt.Sprintf("- %s: %s — %s\n", proposal.Title, proposal.Summary, status))
 		}
 		feedback.WriteString("\n---\n")
 	}

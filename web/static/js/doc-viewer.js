@@ -80,16 +80,11 @@ class DocViewer {
                 return;
             }
 
-            // A proposal made before proposals were artifacts is a Doc, told
-            // apart by its title. It gets the same buttons as one read in the
-            // artifact viewer (see proposal-actions.js).
-            const kind = window.ProposalActions?.kindFromTitle(doc.title);
-            const actions = kind
-                ? window.ProposalActions.build({ id: docId, kind, title: doc.title, status: doc.status, close: () => this.close() })
-                : [];
+            // What is left to show here is markdown that is not an artifact: a
+            // project's memory document, as it is now. Documents and proposals
+            // are artifacts, and were handed over above.
             this.openWithContent(doc.title || 'Document', doc.content, {
                 ...opts,
-                ...(actions.length > 0 ? { actions } : {}),
                 urlState: opts.urlState || { kind: 'document', id: docId, projectId: doc.project_id || null }
             });
         } catch (e) {

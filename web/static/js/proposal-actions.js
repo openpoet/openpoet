@@ -3,10 +3,8 @@
  *
  * A proposal waits for the user: a change to a project's memory document,
  * tasks to create, change or delete, a project skill, a project tool to run.
- * It is an artifact with a review, read in the artifact viewer. One made
- * before proposals were artifacts is a Doc, read in the document viewer and
- * told apart by the prefix of its title. Both viewers get their buttons here,
- * so a proposal is decided the same way wherever it is read.
+ * It is an artifact with a review, read in the artifact viewer, which gets
+ * its buttons here.
  *
  *   ProposalActions.build({ id, kind, title, status, close })
  *     -> [{ label, class, onClick }]   (empty once the proposal was decided)
@@ -16,16 +14,6 @@
  * the viewer that shows the proposal.
  */
 const ProposalActions = {
-    // The kind of a proposal that is still a Doc, from the prefix of its title.
-    kindFromTitle(title) {
-        const text = String(title || '');
-        if (text.startsWith('Memory Doc:')) return 'memory';
-        if (text.startsWith('Task:') || text.startsWith('Update Task:') || text.startsWith('Delete Task:')) return 'task';
-        if (text.startsWith('Tool:')) return 'tool';
-        if (text.startsWith('Skill:')) return 'skill';
-        return null;
-    },
-
     build({ id, kind, title, status, close }) {
         if (!id || status === 'approved' || status === 'rejected') return [];
         const done = typeof close === 'function' ? close : () => {};
