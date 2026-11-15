@@ -750,16 +750,7 @@ func executeToolWithOptions(client *APIClient, name string, args json.RawMessage
 		if err != nil {
 			return "", err
 		}
-		var doc struct {
-			ID      string `json:"id"`
-			Title   string `json:"title"`
-			Content string `json:"content"`
-			Status  string `json:"status"`
-		}
-		if json.Unmarshal(body, &doc) == nil {
-			return fmt.Sprintf("## %s\n\nStatus: %s | ID: %s\n\n%s", doc.Title, doc.Status, doc.ID, doc.Content), nil
-		}
-		return string(body), nil
+		return FormatDocument(body), nil
 
 	case "openpoet_update_memory_doc":
 		projectID, ok := getID(params)
@@ -2008,6 +1999,29 @@ func formatTaskList(body []byte) (string, error) {
 		result += fmt.Sprintf("%s%s [%d] %s (%s%s)%s\n", indent, icon, t.ID, t.Title, prio, due, umbrella)
 	}
 	return result, nil
+}
+
+// FormatDocument turns the JSON of a document (GET /api/documents/{id}) into
+// the text read_document returns. The MCP tool and the chat assistant's tool
+// share it. A document id may stand for an artifact (a proposal, a verification
+// document, a Doc that was copied into one): the result then names the
+// artifact, which is what the artifact tools take.
+func FormatDocument(body []byte) string {
+	var doc struct {
+		ID         string `json:"id"`
+		Title      string `json:"title"`
+		Content    string `json:"content"`
+		Status     string `json:"status"`
+		ArtifactID string `json:"artifact_id"`
+	}
+	if json.Unmarshal(body, &doc) != nil || doc.ID == "" {
+		return string(body)
+	}
+	header := fmt.Sprintf("Status: %s | ID: %s", doc.Status, doc.ID)
+	if doc.ArtifactID != "" {
+		header += " | Artifact: " + doc.ArtifactID
+	}
+	return fmt.Sprintf("## %s\n\n%s\n\n%s", doc.Title, header, doc.Content)
 }
 
 // formatTaskDetail fetches task details, history, documents, and sessions,

@@ -324,6 +324,7 @@ func (a *API) PatchArtifact(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListArtifacts lists artifacts (no HTML) filtered by project, session or task.
+// Proposals and verification documents are left out unless include_reviewed=1.
 func (a *API) ListArtifacts(w http.ResponseWriter, r *http.Request) {
 	service, ok := a.artifactService(w)
 	if !ok {
@@ -336,6 +337,7 @@ func (a *API) ListArtifacts(w http.ResponseWriter, r *http.Request) {
 	views, err := service.List(platformUIContext(r), application.ArtifactListQuery{
 		ProjectID: projectID, TaskID: taskID, SessionID: query.Get("session_id"),
 		IncludeArchived: query.Get("include_archived") == "1" || query.Get("include_archived") == "true",
+		IncludeReviewed: query.Get("include_reviewed") == "1" || query.Get("include_reviewed") == "true",
 		Limit:           limit,
 	})
 	if err != nil {
@@ -592,12 +594,24 @@ func (a *API) artifactDocEntries(r *http.Request, filter database.ArtifactFilter
 	if filter.SessionID == "" && filter.TaskID == 0 && filter.ProjectID == 0 {
 		return nil
 	}
+	// The documents of a session or a task include what waits for a decision
+	// there: a task's verification document.
+	filter.IncludeReviewed = true
 	items, err := a.db.ListArtifacts(r.Context(), filter)
 	if err != nil {
 		return nil
 	}
 	entries := make([]artifactDocEntry, 0, len(items))
 	for _, item := range items {
+		if item.ReviewKind != "" {
+			// Listed the way it was when it was a Doc: under its bare id (the
+			// one a task's verification_doc_id holds), with the state of its
+			// review as the status. The id opens the artifact.
+			entries = append(entries, artifactDocEntry{
+				ID: item.ID, Title: item.Title, Type: "document", Status: item.ReviewStatus, CreatedAt: item.CreatedAt,
+			})
+			continue
+		}
 		entries = append(entries, artifactDocEntry{
 			ID: artifactDocumentIDPrefix + item.ID, Title: item.Title, Type: "artifact",
 			Status: fmt.Sprintf("v%d", item.CurrentVersion), CreatedAt: item.UpdatedAt,
@@ -628,7 +642,9 @@ func (n platformArtifactNotifier) ArtifactPublished(_ context.Context, artifact 
 	if artifact.ConversationID != nil {
 		conversationID = strconv.FormatInt(*artifact.ConversationID, 10)
 	}
-	if isNew {
+	// A proposal or a verification document gets its card from whoever made
+	// it (the chat, the task), with what the user is asked to decide.
+	if isNew && artifact.Review == nil {
 		// Same card the Docs get, so the artifact shows up where the agent is
 		// working (floating over the terminal, in the structured view, in chat).
 		n.api.hub.BroadcastChatDocCard(map[string]interface{}{

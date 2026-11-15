@@ -61,6 +61,37 @@ func chatToolOptionalID(input map[string]interface{}, key string) (*int64, error
 	return &id, nil
 }
 
+// executeReadDocumentChatTool is read_document for the chat assistant: the
+// content of a document by its id, as the MCP tool returns it. The ids are the
+// ones the task and session listings carry: a document id (which may stand for
+// an artifact), "artifact:<id>" and "plan:<sessionId>".
+func (h *AIHandler) executeReadDocumentChatTool(ctx context.Context, input map[string]interface{}, conversationID int64, authorization application.ActionAuthorization) (string, error) {
+	id := chatToolString(input, "document_id")
+	if id == "" {
+		return "", fmt.Errorf("document_id is required")
+	}
+	if strings.HasPrefix(id, "artifact:") {
+		return h.executeArtifactChatTool(ctx, "read_artifact", map[string]interface{}{"artifact_id": id}, conversationID, authorization)
+	}
+	if strings.HasPrefix(id, "plan:") {
+		content, _, err := h.api.db.GetSessionPlan(ctx, strings.TrimPrefix(id, "plan:"))
+		if err != nil || content == "" {
+			return "", fmt.Errorf("this session has no plan")
+		}
+		return "## Session Plan\n\n" + content, nil
+	}
+	services, ready := h.api.platformApplicationServices()
+	if !ready || services.Collaboration.Documents == nil {
+		return "", fmt.Errorf("document service is unavailable")
+	}
+	document, err := services.Collaboration.Documents.GetTemp(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	encoded, _ := json.Marshal(document)
+	return mcp.FormatDocument(encoded), nil
+}
+
 // chatArtifactContent returns the content a chat tool call carries and its
 // format: the html argument (an HTML document) or the markdown argument
 // (markdown source). given is false when the call carries neither.

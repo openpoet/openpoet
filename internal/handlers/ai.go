@@ -1205,7 +1205,6 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 				contentBuilder.WriteString("\n")
 			}
 
-			docID := uuid.New().String()[:8]
 			summary := fmt.Sprintf("%s — %s", strings.Join(summaryParts, ", "), projectName)
 
 			docPrefix := "Task"
@@ -1225,16 +1224,17 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			fullContent.WriteString(fmt.Sprintf("**Summary:** %s\n\n", summary))
 			fullContent.WriteString(contentBuilder.String())
 
-			tempDoc := &database.TempDocument{
-				ID:             docID,
-				Title:          docTitle,
-				Content:        fullContent.String(),
-				ConversationID: sql.NullInt64{Int64: conv.ID, Valid: conv.ID > 0},
-				Summary:        summary,
-				MessageID:      assistantMsg.ID,
+			// The proposal is an artifact the user approves or rejects.
+			var proposalProjectID int64
+			if len(actions) > 0 {
+				proposalProjectID = actions[0].ProjectID
 			}
-			if err := h.api.db.CreateTempDocument(proposalCtx, tempDoc); err != nil {
-				log.Printf("[TaskProposal] Failed to create temp document: %v", err)
+			docID, err := h.api.createReviewArtifact(proposalCtx, reviewArtifact{
+				Kind: database.ArtifactReviewTask, Title: docTitle, Summary: summary, Markdown: fullContent.String(),
+				ProjectID: proposalProjectID, ConversationID: conv.ID, MessageID: assistantMsg.ID,
+			})
+			if err != nil {
+				log.Printf("[TaskProposal] Failed to create the proposal: %v", err)
 			} else {
 				h.api.storePendingTaskProposal(docID, actions, summary)
 
@@ -1292,20 +1292,15 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			}
 			contentBuilder.WriteString(fmt.Sprintf("\n---\n\n### Skill Content\n\n%s\n", skillContent))
 
-			docID := uuid.New().String()[:8]
 			summary := fmt.Sprintf("%s skill '%s' — %s", actionLabel, skillName, projectName)
 			docTitle := fmt.Sprintf("Skill: %s", skillName)
 
-			tempDoc := &database.TempDocument{
-				ID:             docID,
-				Title:          docTitle,
-				Content:        contentBuilder.String(),
-				ConversationID: sql.NullInt64{Int64: conv.ID, Valid: conv.ID > 0},
-				Summary:        summary,
-				MessageID:      assistantMsg.ID,
-			}
-			if err := h.api.db.CreateTempDocument(proposalCtx, tempDoc); err != nil {
-				log.Printf("[SkillProposal] Failed to create temp document: %v", err)
+			docID, err := h.api.createReviewArtifact(proposalCtx, reviewArtifact{
+				Kind: database.ArtifactReviewSkill, Title: docTitle, Summary: summary, Markdown: contentBuilder.String(),
+				ProjectID: projectID, ConversationID: conv.ID, MessageID: assistantMsg.ID,
+			})
+			if err != nil {
+				log.Printf("[SkillProposal] Failed to create the proposal: %v", err)
 				continue
 			}
 
@@ -1364,20 +1359,15 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			docID := uuid.New().String()[:8]
 			summary := fmt.Sprintf("Run '%s'", toolName)
 			docTitle := fmt.Sprintf("Tool: %s", toolName)
 
-			tempDoc := &database.TempDocument{
-				ID:             docID,
-				Title:          docTitle,
-				Content:        contentBuilder.String(),
-				ConversationID: sql.NullInt64{Int64: conv.ID, Valid: conv.ID > 0},
-				Summary:        summary,
-				MessageID:      assistantMsg.ID,
-			}
-			if err := h.api.db.CreateTempDocument(proposalCtx, tempDoc); err != nil {
-				log.Printf("[ToolProposal] Failed to create temp document: %v", err)
+			docID, err := h.api.createReviewArtifact(proposalCtx, reviewArtifact{
+				Kind: database.ArtifactReviewTool, Title: docTitle, Summary: summary, Markdown: contentBuilder.String(),
+				ProjectID: ta.ProjectID, ConversationID: conv.ID, MessageID: assistantMsg.ID,
+			})
+			if err != nil {
+				log.Printf("[ToolProposal] Failed to create the proposal: %v", err)
 				continue
 			}
 
@@ -1410,54 +1400,25 @@ func (h *AIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Emit doc_card SSE events for TempDocuments created during this stream.
+	// Emit doc_card SSE events for the cards created during this stream
+	// (proposals, file cards).
 	// - Session providers: emit ALL cards (tool loop is skipped, this is the only source)
 	// - Non-session providers: only emit "file" cards (other types are already emitted
 	//   inline by buildDocCard and the collector code above)
 	{
 		docCtx, docCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		docs, _ := h.api.db.ListTempDocumentsByConversation(docCtx, conv.ID)
+		cards := h.api.conversationDocCards(docCtx, conv.ID)
 		docCancel()
-		for _, doc := range docs {
-			// Only emit cards for documents created after the assistant message started
-			if assistantMsg != nil && doc.CreatedAt.Before(assistantMsg.CreatedAt) {
+		for _, card := range cards {
+			// Only emit cards created after the assistant message started
+			if assistantMsg != nil && card.CreatedAt.Before(assistantMsg.CreatedAt) {
 				continue
 			}
-			cardType := "document"
-			if strings.HasPrefix(doc.Title, "Memory Doc:") {
-				cardType = "proposal"
-			} else if strings.HasPrefix(doc.Title, "Task:") || strings.HasPrefix(doc.Title, "Planning:") ||
-				strings.HasPrefix(doc.Title, "Update Task:") || strings.HasPrefix(doc.Title, "Delete Task:") {
-				cardType = "task_proposal"
-			} else if strings.HasPrefix(doc.Title, "Tool:") {
-				cardType = "tool_proposal"
-			} else if strings.HasPrefix(doc.Title, "Skill:") {
-				cardType = "skill_proposal"
-			} else if strings.HasPrefix(doc.Title, "File:") {
-				cardType = "file"
-			}
-
 			// Non-session providers already emit non-file cards inline; skip to avoid duplicates
-			if !isSessionProvider && cardType != "file" {
+			if !isSessionProvider && card.Type != "file" {
 				continue
 			}
-
-			card := map[string]interface{}{
-				"doc_id":  doc.ID,
-				"type":    cardType,
-				"title":   doc.Title,
-				"summary": doc.Summary,
-				"status":  doc.Status,
-			}
-			if cardType == "file" {
-				card["title"] = strings.TrimPrefix(doc.Title, "File:")
-				var meta map[string]interface{}
-				if err := json.Unmarshal([]byte(doc.Content), &meta); err == nil {
-					card["project_id"] = meta["project_id"]
-					card["path"] = meta["path"]
-				}
-			}
-			safeSendSSE("doc_card", card)
+			safeSendSSE("doc_card", card.sse())
 		}
 	}
 
@@ -1767,6 +1728,9 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 	}
 	if name == "get_link" {
 		return h.executeLinkChatTool(ctx, input)
+	}
+	if name == "read_document" {
+		return h.executeReadDocumentChatTool(ctx, input, conversationID, authorization)
 	}
 
 	switch name {
@@ -2456,22 +2420,13 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			return fmt.Sprintf("No memory doc exists for project %d yet. Sync the project to load its CLAUDE.md.", projectID), nil
 		}
 
-		// Create temp document so user can view in the doc viewer
-		docID := uuid.New().String()[:8]
+		// The card opens the memory document itself, as it is when the user
+		// looks: nothing is copied for the view.
+		docID := application.MemoryDocumentViewID(projectID)
 		project, _ := h.api.db.GetProject(ctx, projectID)
 		projectName := fmt.Sprintf("Project %d", projectID)
 		if project != nil {
 			projectName = project.Name
-		}
-		tempDoc := &database.TempDocument{
-			ID:        docID,
-			Title:     fmt.Sprintf("Memory Doc: %s (v%d)", projectName, doc.Version),
-			Content:   doc.Content,
-			MessageID: messageID,
-		}
-		if err := h.api.db.CreateTempDocument(ctx, tempDoc); err != nil {
-			// Fallback: return link to project page if temp doc creation fails
-			return fmt.Sprintf("Memory doc loaded (v%d). [Ver Memory Doc: %s](/app/project/%d)", doc.Version, projectName, projectID), nil
 		}
 
 		// Return viewer link + internal-only content for AI editing reference
@@ -2499,17 +2454,13 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			return "", fmt.Errorf("project not found")
 		}
 
-		// Create a temp document for user review instead of saving directly
-		docID := uuid.New().String()[:8]
-		tempDoc := &database.TempDocument{
-			ID:             docID,
-			Title:          fmt.Sprintf("Memory Doc: %s", project.Name),
-			Content:        content,
-			ConversationID: sql.NullInt64{Int64: conversationID, Valid: conversationID > 0},
-			Summary:        summary,
-			MessageID:      messageID,
-		}
-		if err := h.api.db.CreateTempDocument(ctx, tempDoc); err != nil {
+		// Publish the change as a proposal for the user to review instead of
+		// saving it directly.
+		docID, err := h.api.createReviewArtifact(ctx, reviewArtifact{
+			Kind: database.ArtifactReviewMemory, Title: fmt.Sprintf("Memory Doc: %s", project.Name), Summary: summary, Markdown: content,
+			ProjectID: projectID, ConversationID: conversationID, MessageID: messageID,
+		})
+		if err != nil {
 			return "", err
 		}
 
@@ -3552,30 +3503,10 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		if len(paths) == 0 {
 			return "", fmt.Errorf("paths is required and must contain at least one file path")
 		}
-		// Persist file cards as TempDocuments (rendered on stream end + conversation reload)
+		// Record the file cards of the conversation (shown on stream end and
+		// on conversation reload).
 		for _, p := range paths {
-			fileName := p
-			if idx := strings.LastIndex(p, "/"); idx >= 0 {
-				fileName = p[idx+1:]
-			}
-			docID := uuid.New().String()[:8]
-			contentJSON, _ := json.Marshal(map[string]interface{}{
-				"project_id": fmt.Sprintf("%d", projectID),
-				"path":       p,
-			})
-			tempDoc := &database.TempDocument{
-				ID:      docID,
-				Title:   fmt.Sprintf("File:%s", fileName),
-				Content: string(contentJSON),
-				Summary: p,
-				ConversationID: sql.NullInt64{
-					Int64: conversationID,
-					Valid: conversationID > 0,
-				},
-				MessageID: messageID,
-				Status:    "file",
-			}
-			_ = h.api.db.CreateTempDocument(ctx, tempDoc)
+			_ = h.api.createChatFileCard(ctx, conversationID, messageID, projectID, p)
 		}
 		var fileList strings.Builder
 		for _, p := range paths {
@@ -4356,15 +4287,10 @@ func (h *AIHandler) HandleGetConversation(w http.ResponseWriter, r *http.Request
 		messages = []database.AIMessage{}
 	}
 
-	docCards, _ := h.api.db.ListTempDocumentsByConversation(r.Context(), id)
-	if docCards == nil {
-		docCards = []database.TempDocument{}
-	}
-
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"conversation": conv,
 		"messages":     messages,
-		"doc_cards":    docCards,
+		"doc_cards":    h.api.conversationDocCards(r.Context(), id),
 	})
 }
 
@@ -5827,17 +5753,14 @@ func (h *AIHandler) broadcastVerificationError(task *database.ProjectTask, reaso
 }
 
 // persistVerificationDoc saves the verification document and links it to the task.
+//
+// The document is an artifact with a review: it waits for the user's decision
+// on the task, which approving or rejecting the task records on it.
 func (h *AIHandler) persistVerificationDoc(ctx context.Context, task *database.ProjectTask, content string) {
-	docID := uuid.New().String()[:8]
-	doc := &database.TempDocument{
-		ID:      docID,
-		Title:   fmt.Sprintf("Verification: %s", task.Title),
-		Content: content,
-		Status:  "pending",
-		TaskID:  sql.NullInt64{Int64: task.ID, Valid: true},
-	}
-
-	if err := h.api.db.CreateTempDocument(ctx, doc); err != nil {
+	docID, err := h.api.createReviewArtifact(ctx, reviewArtifact{
+		Kind: database.ArtifactReviewVerification, Title: fmt.Sprintf("Verification: %s", task.Title), Markdown: content, TaskID: task.ID,
+	})
+	if err != nil {
 		log.Printf("[AI-Verification] Failed to create document for task %d: %v", task.ID, err)
 		return
 	}

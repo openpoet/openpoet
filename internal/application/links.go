@@ -225,6 +225,13 @@ func (s *LinkService) Link(ctx context.Context, query LinkQuery) (LinkView, erro
 		if strings.HasPrefix(id, "artifact:") {
 			return s.Link(ctx, LinkQuery{Kind: LinkKindArtifact, ID: id, Version: query.Version, LocalBase: query.LocalBase})
 		}
+		// A document id that stands for an artifact (a Doc copied into one, a
+		// proposal, a verification document) gets the link of that artifact.
+		if resolver, ok := s.store.(DocumentArtifactResolver); ok {
+			if resolved, err := resolver.ResolveDocumentArtifact(ctx, id); err == nil && resolved != nil {
+				return s.Link(ctx, LinkQuery{Kind: LinkKindArtifact, ID: resolved.Artifact.ID, Version: query.Version, LocalBase: query.LocalBase})
+			}
+		}
 		document, err := s.store.GetTempDocument(ctx, id)
 		if err != nil || document == nil {
 			return LinkView{}, notFoundError("document_not_found", "Document not found", err)

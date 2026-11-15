@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,6 +50,22 @@ type TempDocumentView struct {
 	SessionID      string    `json:"session_id,omitempty"`
 	CreatedAt      time.Time `json:"created_at,omitempty"`
 	WasTruncated   bool      `json:"was_truncated,omitempty"`
+	// ArtifactID is set when the document id stands for an artifact: a Doc
+	// that was copied into one, or a proposal or verification document, which
+	// are artifacts named by a bare id. The document is then read from that
+	// artifact (Content is the source of its current version, Format its
+	// format) and is opened in the artifact viewer.
+	ArtifactID string `json:"artifact_id,omitempty"`
+	Format     string `json:"format,omitempty"`
+	// Review is the approval state of that artifact, when it has one.
+	Review *ArtifactReviewView `json:"review,omitempty"`
+}
+
+// DocumentArtifactResolver finds the artifact a document id stands for. The
+// database implements it; a document store that does not is one where no
+// document is an artifact.
+type DocumentArtifactResolver interface {
+	ResolveDocumentArtifact(ctx context.Context, documentID string) (*database.DocumentArtifact, error)
 }
 
 type CreateTempDocumentCommand struct {
@@ -173,11 +191,88 @@ func (s *DocumentService) GetTemp(ctx context.Context, id string) (TempDocumentV
 	if id == "" || len(id) > 100 {
 		return TempDocumentView{}, validationError("invalid_document_id", "Document ID is invalid")
 	}
+	if projectID, ok := memoryDocumentViewProject(id); ok {
+		return s.memoryDocumentAsDocument(ctx, id, projectID)
+	}
+	if resolver, ok := s.store.(DocumentArtifactResolver); ok {
+		resolved, err := resolver.ResolveDocumentArtifact(ctx, id)
+		if err != nil {
+			return TempDocumentView{}, err
+		}
+		if resolved != nil {
+			return documentArtifactView(id, resolved), nil
+		}
+	}
 	doc, err := s.store.GetTempDocument(ctx, id)
 	if err != nil || doc == nil {
 		return TempDocumentView{}, notFoundError("document_not_found", "Document not found", err)
 	}
 	return tempDocumentView(doc, true), nil
+}
+
+const memoryDocumentViewPrefix = "memory-"
+
+// MemoryDocumentViewID is the document id that opens a project's memory
+// document as it is now. The chat assistant hands it to the user when it reads
+// the memory document, so nothing is copied to show it.
+func MemoryDocumentViewID(projectID int64) string {
+	return memoryDocumentViewPrefix + strconv.FormatInt(projectID, 10)
+}
+
+func memoryDocumentViewProject(id string) (int64, bool) {
+	if !strings.HasPrefix(id, memoryDocumentViewPrefix) {
+		return 0, false
+	}
+	projectID, err := strconv.ParseInt(strings.TrimPrefix(id, memoryDocumentViewPrefix), 10, 64)
+	return projectID, err == nil && projectID > 0
+}
+
+// memoryDocumentAsDocument reads a project's current memory document under a
+// MemoryDocumentViewID.
+func (s *DocumentService) memoryDocumentAsDocument(ctx context.Context, id string, projectID int64) (TempDocumentView, error) {
+	project, err := s.project(ctx, projectID)
+	if err != nil {
+		return TempDocumentView{}, err
+	}
+	doc, err := s.store.GetMemoryDoc(ctx, projectID)
+	if err != nil || doc == nil {
+		return TempDocumentView{}, notFoundError("document_not_found", "Document not found", err)
+	}
+	content, truncated := boundedRedactedOutput(doc.Content, maxApplicationContentRunes)
+	title, _ := boundedRedactedOutput(fmt.Sprintf("Memory document: %s (v%d)", project.Name, doc.Version), maxApplicationTitleRunes)
+	return TempDocumentView{ID: id, Title: title, Content: content, Status: "view", CreatedAt: doc.UpdatedAt, WasTruncated: truncated}, nil
+}
+
+// documentArtifactView is the document view of an artifact that a document id
+// stands for. The id stays the one that was asked for: it is what cards, task
+// rows and stored links carry.
+func documentArtifactView(id string, resolved *database.DocumentArtifact) TempDocumentView {
+	artifact := &resolved.Artifact
+	title, titleTruncated := boundedRedactedOutput(artifact.Title, maxApplicationTitleRunes)
+	summary, summaryTruncated := boundedRedactedOutput(artifact.Summary, maxApplicationSummaryRunes)
+	sessionID, _ := boundedRedactedOutput(artifact.SessionID, 200)
+	format := resolved.Version.Format
+	if format == "" {
+		format = database.ArtifactFormatHTML
+	}
+	view := TempDocumentView{
+		ID: id, Title: title, Summary: summary, SessionID: sessionID, CreatedAt: artifact.CreatedAt,
+		ArtifactID: artifact.ID, Format: format, Content: resolved.Version.Content,
+		Review: artifactReviewView(resolved.Review), WasTruncated: titleTruncated || summaryTruncated,
+	}
+	// A Doc had a status; for an artifact it is the state of its review.
+	if resolved.Review != nil {
+		view.Status = resolved.Review.Status
+	}
+	if artifact.ConversationID.Valid {
+		value := artifact.ConversationID.Int64
+		view.ConversationID = &value
+	}
+	if artifact.TaskID.Valid {
+		value := artifact.TaskID.Int64
+		view.TaskID = &value
+	}
+	return view
 }
 
 func memoryDocumentView(doc *database.MemoryDoc) MemoryDocumentView {

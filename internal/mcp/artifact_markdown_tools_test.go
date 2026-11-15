@@ -42,6 +42,22 @@ func TestArtifactMarkdownFileIsHonoredOnlyByTheCLI(t *testing.T) {
 	}
 }
 
+// read_document names the artifact a document id stands for, which is what
+// the artifact tools take.
+func TestReadDocumentNamesTheArtifactADocumentIDStandsFor(t *testing.T) {
+	document := FormatDocument([]byte(`{"id":"ab12cd34","title":"Verification: Ship it","content":"# Verification\n","status":"pending","artifact_id":"ab12cd34","format":"markdown"}`))
+	if document != "## Verification: Ship it\n\nStatus: pending | ID: ab12cd34 | Artifact: ab12cd34\n\n# Verification\n" {
+		t.Fatalf("artifact-backed document = %q", document)
+	}
+	doc := FormatDocument([]byte(`{"id":"0f1e2d3c","title":"Notes","content":"text","status":"pending"}`))
+	if doc != "## Notes\n\nStatus: pending | ID: 0f1e2d3c\n\ntext" {
+		t.Fatalf("Doc = %q", doc)
+	}
+	if raw := FormatDocument([]byte(`not json`)); raw != "not json" {
+		t.Fatalf("unreadable body = %q", raw)
+	}
+}
+
 func TestArtifactToolResultsNameMarkdownVersions(t *testing.T) {
 	updated := FormatArtifactUpdated([]byte(`{"id":"ab12cd34","version":2,"created":false,"format":"markdown","link":"/app/artifact/ab12cd34","artifact":{"id":"ab12cd34"}}`), 0, "openpoet_")
 	if !strings.Contains(updated, "No new version: the markdown is identical to version 2") {

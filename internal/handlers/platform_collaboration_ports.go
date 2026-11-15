@@ -35,29 +35,42 @@ func (b platformProposalBackend) CreateMemoryProposalAtomic(ctx context.Context,
 	if _, err := b.api.db.GetProject(ctx, proposal.ProjectID); err != nil {
 		return nil, err
 	}
-	id := uuid.NewString()[:8]
-	doc := &database.TempDocument{ID: id, Title: "Memory document proposal", Content: proposal.Content, Summary: proposal.Summary, Status: "pending"}
-	if proposal.ConversationID != nil {
-		doc.ConversationID = sql.NullInt64{Int64: *proposal.ConversationID, Valid: true}
+	const title = "Memory document proposal"
+	draft := reviewArtifact{
+		Kind: database.ArtifactReviewMemory, Title: title, Summary: proposal.Summary, Markdown: proposal.Content, ProjectID: proposal.ProjectID,
 	}
-	if err := b.api.db.CreateTempDocument(ctx, doc); err != nil {
+	if proposal.ConversationID != nil {
+		draft.ConversationID = *proposal.ConversationID
+	}
+	id, err := b.api.createReviewArtifact(ctx, draft)
+	if err != nil {
 		return nil, err
 	}
 	b.api.storePendingMemoryDoc(id, proposal.ProjectID, proposal.Content, proposal.Summary)
-	return &application.ProposalRecord{ID: id, Kind: application.ProposalMemory, Risk: application.ProposalRiskR2, Status: "pending", Title: doc.Title, Summary: proposal.Summary, ProjectID: proposal.ProjectID, ConversationID: proposal.ConversationID}, nil
+	return &application.ProposalRecord{ID: id, Kind: application.ProposalMemory, Risk: application.ProposalRiskR2, Status: "pending", Title: title, Summary: proposal.Summary, ProjectID: proposal.ProjectID, ConversationID: proposal.ConversationID}, nil
 }
 
 func (b platformProposalBackend) GetPendingProposal(ctx context.Context, id string, kind application.ProposalKind) (*application.ProposalRecord, error) {
 	if b.api == nil || b.api.db == nil {
 		return nil, errors.New("proposal backend unavailable")
 	}
-	doc, err := b.api.db.GetTempDocument(ctx, id)
+	// A proposal is an artifact with a review of its kind. Its payload (what
+	// approving it applies) is kept in memory, below: a proposal whose payload
+	// is gone, as after a restart, is not pending anymore.
+	review, err := b.api.db.GetArtifactReview(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	record := &application.ProposalRecord{ID: id, Kind: kind, Status: doc.Status, Title: doc.Title, Summary: doc.Summary}
-	if doc.ConversationID.Valid {
-		value := doc.ConversationID.Int64
+	if review == nil || review.Kind != string(kind) {
+		return nil, sql.ErrNoRows
+	}
+	artifact, err := b.api.db.GetArtifact(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	record := &application.ProposalRecord{ID: id, Kind: kind, Status: review.Status, Title: artifact.Title, Summary: artifact.Summary}
+	if artifact.ConversationID.Valid {
+		value := artifact.ConversationID.Int64
 		record.ConversationID = &value
 	}
 	switch kind {
@@ -369,11 +382,17 @@ func (b platformProposalBackend) acceptTool(ctx context.Context, id string) (app
 	if err = claimProposalInTx(ctx, tx, id, "approved"); err != nil {
 		return application.ProposalAcceptance{}, err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE temp_documents SET content=? WHERE id=?`, "# Tool Executed — "+toolName, id); err != nil {
-		return application.ProposalAcceptance{}, err
-	}
 	if err = tx.Commit(); err != nil {
 		return application.ProposalAcceptance{}, err
+	}
+	// The proposal now reads as what happened: a new version of its artifact.
+	// The tool already ran and the decision is stored; failing to add this
+	// note changes neither.
+	if services, ready := b.api.platformApplicationServices(); ready && services.Collaboration.Artifacts != nil {
+		_, _ = services.Collaboration.Artifacts.Update(ctx, application.UpdateArtifactCommand{
+			ArtifactID: id, Content: "# Tool Executed — " + toolName + "\n", Format: database.ArtifactFormatMarkdown,
+			ChangeNote: "Tool executed", Authorization: application.ActionAuthorization{Actor: reviewArtifactActor},
+		})
 	}
 	delete(b.api.pendingToolProposals, id)
 	return application.ProposalAcceptance{Status: "approved", Action: "executed", Output: output}, nil
@@ -411,19 +430,10 @@ func appendProposalTaskEvent(ctx context.Context, tx *sqlx.Tx, eventType string,
 	return err
 }
 
+// claimProposalInTx decides a pending proposal, in the transaction that
+// applies it: the review of its artifact goes from pending to status, once.
 func claimProposalInTx(ctx context.Context, tx *sqlx.Tx, id, status string) error {
-	result, err := tx.ExecContext(ctx, `UPDATE temp_documents SET status=? WHERE id=? AND status='pending'`, status, id)
-	if err != nil {
-		return err
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected != 1 {
-		return sql.ErrNoRows
-	}
-	return nil
+	return database.ClaimArtifactReviewTx(ctx, tx, id, status)
 }
 
 type platformAIProvider struct{ handler *AIHandler }
@@ -598,18 +608,30 @@ func (b platformAIConversationBackend) PrepareChatAtomic(ctx context.Context, re
 	if err = tx.SelectContext(ctx, &feedbackDocuments, `SELECT * FROM temp_documents WHERE conversation_id=? AND status IN ('approved','rejected') AND feedback_ack=0 ORDER BY created_at ASC`, conversation.ID); err != nil {
 		return nil, err
 	}
+	// Proposals are artifacts with a review; the Docs query above still reports
+	// the ones decided before they were.
+	decidedProposals, err := database.TakeArtifactReviewFeedbackTx(ctx, tx, conversation.ID)
+	if err != nil {
+		return nil, err
+	}
 	var feedback strings.Builder
-	if len(feedbackDocuments) > 0 {
+	if len(feedbackDocuments)+len(decidedProposals) > 0 {
 		feedback.WriteString("[System notification — Proposal feedback]\n")
-		for _, document := range feedbackDocuments {
+		line := func(title, summary, decided string) {
 			status := "APPROVED"
-			if document.Status == "rejected" {
+			if decided == "rejected" {
 				status = "REJECTED"
 			}
-			feedback.WriteString(fmt.Sprintf("- %s: %s — %s\n", document.Title, document.Summary, status))
+			feedback.WriteString(fmt.Sprintf("- %s: %s — %s\n", title, summary, status))
+		}
+		for _, document := range feedbackDocuments {
+			line(document.Title, document.Summary, document.Status)
 			if _, err = tx.ExecContext(ctx, `UPDATE temp_documents SET feedback_ack=1 WHERE id=? AND feedback_ack=0`, document.ID); err != nil {
 				return nil, err
 			}
+		}
+		for _, proposal := range decidedProposals {
+			line(proposal.Title, proposal.Summary, proposal.Status)
 		}
 		feedback.WriteString("\n---\n")
 	}
@@ -669,6 +691,9 @@ func (b platformAIConversationBackend) DeleteConversationAtomic(ctx context.Cont
 	if _, err = tx.ExecContext(ctx, `DELETE FROM temp_documents WHERE conversation_id=?`, id); err != nil {
 		return err
 	}
+	if err = database.DeleteConversationArtifactsTx(ctx, tx, id); err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM ai_conversations WHERE id=?`, id)
 	if err != nil {
 		return err
@@ -686,6 +711,9 @@ func (b platformAIConversationBackend) DeleteAllConversationsAtomic(ctx context.
 	}
 	defer tx.Rollback()
 	if _, err = tx.ExecContext(ctx, `DELETE FROM temp_documents WHERE conversation_id IS NOT NULL`); err != nil {
+		return 0, err
+	}
+	if err = database.DeleteAllConversationArtifactsTx(ctx, tx); err != nil {
 		return 0, err
 	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM ai_conversations`)

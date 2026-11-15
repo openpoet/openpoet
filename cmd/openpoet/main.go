@@ -1173,7 +1173,7 @@ func main() {
 	})
 
 	// Serve index.html with version injection for all SPA routes
-	r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
+	serveApp := func(w http.ResponseWriter, r *http.Request) {
 		if fileHandler.ServePreviewReferrerAsset(w, r) {
 			return
 		}
@@ -1186,7 +1186,11 @@ func main() {
 		}
 		content := strings.ReplaceAll(string(data), "__BUILD_VERSION__", BuildVersion)
 		w.Write([]byte(content))
-	})
+	}
+	// A document link whose id stands for an artifact goes to the artifact;
+	// any other /app/doc/<id> is opened by the app, like every SPA route.
+	r.Get("/app/doc/{id}", api.RedirectDocumentLink(serveApp))
+	r.Get("/*", serveApp)
 
 	// Start task due date checker goroutine
 	go runTaskDueChecker(db, notifService, hub)
