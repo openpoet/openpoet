@@ -39,6 +39,9 @@ class ArtifactViewer {
         this.linkTextEl = document.getElementById('artifact-viewer-link-text');
         this.linkOpenBtn = document.getElementById('artifact-viewer-link-open');
         this.linkDismissBtn = document.getElementById('artifact-viewer-link-dismiss');
+        this.reviewEl = document.getElementById('artifact-viewer-review');
+        this.reviewStatusEl = document.getElementById('artifact-viewer-review-status');
+        this.reviewActionsEl = document.getElementById('artifact-viewer-review-actions');
         this.fullscreenBtn = document.getElementById('artifact-viewer-fullscreen');
         this.closeBtn = document.getElementById('artifact-viewer-close');
 
@@ -168,6 +171,7 @@ class ArtifactViewer {
             this._artifact = artifact;
             this.nameEl.textContent = artifact.title || 'Artifact';
             this._renderVersions();
+            this._renderReview();
             this._resetAnnotations();
             this._showVersion(opts.version || artifact.current_version);
             this._loadAnnotations();
@@ -194,6 +198,7 @@ class ArtifactViewer {
         this._dismissLink();
         this._artifact = null;
         this._version = 0;
+        this._renderReview();
         this._hideBanner();
         this._resetAnnotations();
         if (options.updateURL !== false) this._notifyURLStateChanged();
@@ -223,6 +228,7 @@ class ArtifactViewer {
             this._artifact = artifact;
             this.nameEl.textContent = artifact.title || 'Artifact';
             this._renderVersions();
+            this._renderReview();
             if (this.versionSelect) this.versionSelect.value = String(this._version);
             // Do not swap the page under the reader: offer the new version instead.
             this._updateBanner(wasOnLatest);
@@ -350,6 +356,40 @@ class ArtifactViewer {
         const kept = String(content || '').split(',').map(part => part.trim())
             .filter(part => part && !/^(maximum-scale|user-scalable)\s*=/i.test(part));
         return [...kept, 'maximum-scale=5.0', 'user-scalable=yes'].join(', ');
+    }
+
+    // An artifact that waits for the user's decision (a proposal of the chat
+    // assistant, the verification document of a task) says so under the page,
+    // with the buttons that decide it. A proposal is decided here; a
+    // verification document is decided by approving or rejecting its task.
+    _renderReview() {
+        if (!this.reviewEl) return;
+        const review = this._artifact?.review;
+        this.reviewActionsEl.innerHTML = '';
+        if (!review) {
+            this.reviewEl.classList.add('hidden');
+            return;
+        }
+        const subject = {
+            memory: 'Memory document change', task: 'Task proposal', skill: 'Skill proposal',
+            tool: 'Tool run', verification: 'Task verification',
+        }[review.kind] || 'Proposal';
+        const state = { approved: 'approved', rejected: 'rejected' }[review.status]
+            || (review.kind === 'verification' ? 'approve or reject the task to decide it' : 'waiting for your decision');
+        this.reviewStatusEl.textContent = `${subject} · ${state}`;
+        this.reviewEl.dataset.status = review.status || 'pending';
+        const actions = review.kind === 'verification' ? [] : (window.ProposalActions?.build({
+            id: this._artifact.id, kind: review.kind, title: this._artifact.title, status: review.status,
+            close: () => this.close(),
+        }) || []);
+        for (const action of actions) {
+            const button = document.createElement('button');
+            button.className = action.class || 'btn btn-secondary';
+            button.textContent = action.label;
+            button.addEventListener('click', action.onClick);
+            this.reviewActionsEl.appendChild(button);
+        }
+        this.reviewEl.classList.remove('hidden');
     }
 
     // The format of the version shown: "html" (a page) or "markdown" (source the

@@ -470,6 +470,37 @@
     display: none;
 }
 
+/* An artifact that waits for a decision: what is decided, and the buttons */
+.artifact-viewer-review {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px 12px;
+    padding: 10px 16px;
+    background-color: var(--color-bg-secondary);
+    border-top: 1px solid var(--color-border);
+    flex-shrink: 0;
+}
+.artifact-viewer-review.hidden {
+    display: none;
+}
+.artifact-viewer-review-status {
+    font-size: 13px;
+    color: var(--color-text-secondary, var(--color-text));
+}
+.artifact-viewer-review[data-status="approved"] .artifact-viewer-review-status {
+    color: var(--color-success, #16a34a);
+}
+.artifact-viewer-review[data-status="rejected"] .artifact-viewer-review-status {
+    color: var(--color-danger, #dc2626);
+}
+.artifact-viewer-review-actions {
+    display: flex;
+    gap: 8px;
+    margin-left: auto;
+}
+
 /* A link clicked inside the artifact: its address, shown before it is opened */
 .artifact-viewer-link {
     position: absolute;

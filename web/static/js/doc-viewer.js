@@ -72,213 +72,26 @@ class DocViewer {
             if (!resp.ok) throw new Error('Document not found');
             const doc = await resp.json();
 
-            const isPendingMemoryDoc = doc.title && doc.title.startsWith('Memory Doc:');
-            const isTaskDelete = doc.title && doc.title.startsWith('Delete Task:');
-            const isTaskUpdate = doc.title && doc.title.startsWith('Update Task:');
-            const isTaskProposal = isTaskDelete || isTaskUpdate ||
-                (doc.title && doc.title.startsWith('Task:'));
-            const isSkillProposal = doc.title && doc.title.startsWith('Skill:');
-            const openDocument = (extra = {}) => this.openWithContent(doc.title || 'Document', doc.content, {
+            // The id may stand for an artifact: a proposal, a task's
+            // verification document, a Doc that was copied into one. It is
+            // read, annotated and decided in the artifact viewer.
+            if (doc.artifact_id) {
+                await window.artifactViewer?.open(doc.artifact_id, opts);
+                return;
+            }
+
+            // A proposal made before proposals were artifacts is a Doc, told
+            // apart by its title. It gets the same buttons as one read in the
+            // artifact viewer (see proposal-actions.js).
+            const kind = window.ProposalActions?.kindFromTitle(doc.title);
+            const actions = kind
+                ? window.ProposalActions.build({ id: docId, kind, title: doc.title, status: doc.status, close: () => this.close() })
+                : [];
+            this.openWithContent(doc.title || 'Document', doc.content, {
                 ...opts,
-                ...extra,
+                ...(actions.length > 0 ? { actions } : {}),
                 urlState: opts.urlState || { kind: 'document', id: docId, projectId: doc.project_id || null }
             });
-
-            if (isPendingMemoryDoc) {
-                openDocument({
-                    actions: [
-                        {
-                            label: 'Reject',
-                            class: 'btn btn-secondary',
-                            onClick: async () => {
-                                try {
-                                    await fetch(`/api/memory-doc/reject/${docId}`, { method: 'POST' });
-                                    this.close();
-                                    window.aiChat?.updateDocCardStatus(docId, 'rejected');
-                                    window.app?.showToast('Proposal rejected.', 'info');
-                                } catch (e) {
-                                    this.close();
-                                }
-                            }
-                        },
-                        {
-                            label: 'Approve',
-                            class: 'btn btn-primary',
-                            onClick: async () => {
-                                try {
-                                    const r = await fetch(`/api/memory-doc/approve/${docId}`, { method: 'POST' });
-                                    if (r.ok) {
-                                        this.close();
-                                        window.aiChat?.updateDocCardStatus(docId, 'approved');
-                                        window.app?.showToast('Memory doc approved and saved.', 'success');
-                                    } else {
-                                        const err = await r.json();
-                                        window.app?.showToast(err.error || 'Error approving', 'error');
-                                    }
-                                } catch (e) {
-                                    window.app?.showToast('Error approving', 'error');
-                                }
-                            }
-                        }
-                    ]
-                });
-            } else if (isTaskProposal) {
-                const approveLabel = isTaskDelete ? 'Approve Deletion' :
-                                     isTaskUpdate ? 'Approve Change' :
-                                     'Approve Task';
-                const approveClass = isTaskDelete ? 'btn btn-danger' : 'btn btn-primary';
-
-                openDocument({
-                    actions: [
-                        {
-                            label: 'Cancel',
-                            class: 'btn btn-secondary',
-                            onClick: async () => {
-                                try {
-                                    await fetch(`/api/task-proposal/reject/${docId}`, { method: 'POST' });
-                                    this.close();
-                                    window.aiChat?.updateDocCardStatus(docId, 'rejected');
-                                    window.app?.showToast('Proposal rejected.', 'info');
-                                } catch (e) {
-                                    this.close();
-                                }
-                            }
-                        },
-                        {
-                            label: approveLabel,
-                            class: approveClass,
-                            onClick: async () => {
-                                try {
-                                    const r = await fetch(`/api/task-proposal/approve/${docId}`, { method: 'POST' });
-                                    if (r.ok) {
-                                        const data = await r.json();
-                                        this.close();
-                                        window.aiChat?.updateDocCardStatus(docId, 'approved');
-                                        const parts = [];
-                                        if (data.created) parts.push(`${data.created} created`);
-                                        if (data.updated) parts.push(`${data.updated} updated`);
-                                        if (data.deleted) parts.push(`${data.deleted} deleted`);
-                                        const msg = parts.length > 0
-                                            ? `Approved! ${parts.join(', ')}.`
-                                            : 'Approved!';
-                                        window.app?.showToast(msg, 'success');
-                                    } else {
-                                        const err = await r.json();
-                                        window.app?.showToast(err.error || 'Error approving', 'error');
-                                    }
-                                } catch (e) {
-                                    window.app?.showToast('Error approving', 'error');
-                                }
-                            }
-                        }
-                    ]
-                });
-            } else if (doc.title && doc.title.startsWith('Tool:') && doc.status !== 'approved' && doc.status !== 'rejected') {
-                openDocument({
-                    actions: [
-                        {
-                            label: 'Cancel',
-                            class: 'btn btn-secondary',
-                            onClick: async () => {
-                                try {
-                                    await fetch(`/api/tool-proposal/reject/${docId}`, { method: 'POST' });
-                                    this.close();
-                                    window.aiChat?.updateDocCardStatus(docId, 'rejected');
-                                    window.app?.showToast('Tool execution cancelled.', 'info');
-                                } catch (e) {
-                                    this.close();
-                                }
-                            }
-                        },
-                        {
-                            label: 'Run Tool',
-                            class: 'btn btn-primary',
-                            onClick: async () => {
-                                this.close();
-                                window.aiChat?.setDocCardRunning(docId);
-                                try {
-                                    const resp = await fetch(`/api/tool-proposal/approve/${docId}`, { method: 'POST' });
-                                    const reader = resp.body.getReader();
-                                    const decoder = new TextDecoder();
-                                    let buffer = '';
-
-                                    while (true) {
-                                        const { done, value } = await reader.read();
-                                        if (done) break;
-                                        buffer += decoder.decode(value, { stream: true });
-                                        const events = buffer.split('\n\n');
-                                        buffer = events.pop();
-                                        for (const evt of events) {
-                                            let evtType = '', evtData = '';
-                                            for (const line of evt.split('\n')) {
-                                                if (line.startsWith('event: ')) evtType = line.slice(7);
-                                                else if (line.startsWith('data: ')) evtData = line.slice(6);
-                                            }
-                                            if (!evtData) continue;
-                                            try {
-                                                const d = JSON.parse(evtData);
-                                                if (evtType === 'output') {
-                                                    window.aiChat?.setDocCardOutputLine(docId, d.line);
-                                                } else if (evtType === 'done') {
-                                                    window.aiChat?.setDocCardCompleted(docId, d.exit_code);
-                                                } else if (evtType === 'error') {
-                                                    window.aiChat?.setDocCardError(docId, d.message);
-                                                }
-                                            } catch (_) {}
-                                        }
-                                    }
-                                    // If stream ended without a done event
-                                    if (!document.querySelector(`.ai-chat-doc-card[data-doc-id="${docId}"] .ai-chat-doc-card-badge-approved`)) {
-                                        window.aiChat?.setDocCardCompleted(docId, 0);
-                                    }
-                                } catch (e) {
-                                    window.aiChat?.setDocCardError(docId, 'Connection error');
-                                }
-                            }
-                        }
-                    ]
-                });
-            } else if (isSkillProposal) {
-                openDocument({
-                    actions: [
-                        {
-                            label: 'Cancel',
-                            class: 'btn btn-secondary',
-                            onClick: async () => {
-                                try {
-                                    await fetch(`/api/skill-proposal/reject/${docId}`, { method: 'POST' });
-                                    this.close();
-                                    window.aiChat?.updateDocCardStatus(docId, 'rejected');
-                                    window.app?.showToast('Proposal rejected.', 'info');
-                                } catch (e) {
-                                    this.close();
-                                }
-                            }
-                        },
-                        {
-                            label: 'Approve Skill',
-                            class: 'btn btn-primary',
-                            onClick: async () => {
-                                try {
-                                    const r = await fetch(`/api/skill-proposal/approve/${docId}`, { method: 'POST' });
-                                    if (r.ok) {
-                                        this.close();
-                                        window.aiChat?.updateDocCardStatus(docId, 'approved');
-                                        window.app?.showToast('Skill approved and saved to project.', 'success');
-                                    } else {
-                                        const err = await r.json();
-                                        window.app?.showToast(err.error || 'Error approving skill', 'error');
-                                    }
-                                } catch (e) {
-                                    window.app?.showToast('Error approving skill', 'error');
-                                }
-                            }
-                        }
-                    ]
-                });
-            } else {
-                openDocument();
-            }
         } catch (e) {
             console.error('DocViewer: failed to open document', e);
         }

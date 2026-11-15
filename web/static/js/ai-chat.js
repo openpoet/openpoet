@@ -1052,20 +1052,10 @@ class AIChatManager {
             // Render persisted doc cards matched to their originating assistant message
             if (data.doc_cards?.length) {
                 for (const doc of data.doc_cards) {
-                    let type = 'document';
-                    let extraData = {};
-                    if (doc.title && doc.title.startsWith('Memory Doc:')) type = 'proposal';
-                    else if (doc.title && (doc.title.startsWith('Task:') ||
-                        doc.title.startsWith('Update Task:') ||
-                        doc.title.startsWith('Delete Task:'))) type = 'task_proposal';
-                    else if (doc.title && doc.title.startsWith('Tool:')) type = 'tool_proposal';
-                    else if (doc.title && doc.title.startsWith('File:')) {
-                        type = 'file';
-                        try {
-                            const meta = JSON.parse(doc.content || '{}');
-                            extraData = { project_id: meta.project_id, path: meta.path };
-                        } catch (_) {}
-                    }
+                    // The server names the type of each card (a proposal is an
+                    // artifact with a review, a file card has its own record).
+                    const type = doc.type || 'document';
+                    const extraData = type === 'file' ? { project_id: doc.project_id, path: doc.path } : {};
 
                     // Find the specific assistant message this doc card belongs to
                     let targetContent = null;
@@ -1083,7 +1073,7 @@ class AIChatManager {
                         this.addDocCard(targetContent, {
                             doc_id: doc.id,
                             type,
-                            title: type === 'file' ? doc.title.replace('File:', '') : doc.title,
+                            title: doc.title,
                             summary: doc.summary,
                             status: doc.status,
                             ...extraData,

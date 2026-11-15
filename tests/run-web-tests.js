@@ -37,6 +37,7 @@ const GROUPS = {
     'tests/artifact-deep-link-smoke.js',
     'tests/artifact-markdown-smoke.js',
     'tests/artifact-questions-smoke.js',
+    'tests/artifact-review-smoke.js',
     'tests/artifact-viewer-smoke.js',
     'tests/artifact-viewer-zoom-smoke.js',
     'tests/codex-slash-palette-smoke.js',
