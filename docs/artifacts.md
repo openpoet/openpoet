@@ -17,6 +17,7 @@ remain the place for short plain-text answers.
 | `artifact_versions` | The content of every version (an HTML document, or markdown source: see [Markdown artifacts](#markdown-artifacts)), with its format, size, SHA-256, change note and author. Versions are never rewritten or deleted |
 | `artifact_annotations` | The user's notes: the version they were made on, where they point (a text quote or an element), the note, and its resolution. Also the user's answers to the questions an artifact asks (`kind = 'answer'`) |
 | `artifact_questions` | The questions each version declares for the reader |
+| `artifact_reviews` | The approval state of an artifact that waits for the user's decision (see [Artifacts that wait for a decision](#artifacts-that-wait-for-a-decision)). A plain document has no row |
 
 Rules the server enforces on every publish:
 
@@ -186,6 +187,84 @@ UPDATE schema_version SET version = 86;
 Run it only with the server stopped, and only while no markdown version is
 worth keeping: without the column a markdown version is read as HTML.
 
+## Artifacts that wait for a decision
+
+Some artifacts are published by OpenPoet itself for the user to decide on. They
+are markdown artifacts with a **review** (`artifact_reviews`): what is decided
+(`kind`) and where the decision stands (`pending`, `approved`, `rejected`).
+
+| Kind | What it is | Decided by |
+| --- | --- | --- |
+| `memory` | A change to a project's memory document, proposed by the chat assistant or by a session (`openpoet_update_memory_doc`) | The buttons under the artifact |
+| `task` | Tasks to create, change or delete | The buttons under the artifact |
+| `skill` | A project skill to create or change | The buttons under the artifact |
+| `tool` | A project tool to run; approving runs it | The buttons under the artifact |
+| `verification` | The verification document of a task that awaits approval | Approving or rejecting the task |
+
+- **Read and decided in the artifact viewer.** The viewer shows the state of
+  the review under the page, and for a proposal the buttons that decide it.
+  They call the routes that existed for Docs (`/api/memory-doc/…`,
+  `/api/task-proposal/…`, `/api/skill-proposal/…`, `/api/tool-proposal/…`),
+  with the artifact's id. A decision applies once: the review goes from
+  `pending` to its outcome in the same transaction as what it applies.
+- **Not listed as documents.** Listings (`GET /api/artifacts`,
+  `openpoet_list_artifacts`, the project view) leave reviewed artifacts out;
+  `include_reviewed=1` lists them. A task's verification document is listed
+  with the documents of its task.
+- **A proposal belongs to its conversation.** It is linked to the chat message
+  that made it, shows as a card under that message, is reported to the
+  assistant once decided, and is deleted with the conversation. The documents
+  a conversation published are not.
+- **What approving applies is kept in memory.** After a restart a pending
+  proposal can no longer be approved (the route answers that it is not
+  pending); the assistant has to propose again. This is how proposals already
+  worked as Docs.
+
+### Document ids that stand for an artifact
+
+Proposals and verification documents used to be Docs, and are still named by a
+bare id where a Doc id was: on a chat card, in a task's `verification_doc_id`,
+in the `/app/doc/<id>` link a tool result carries. Whatever reads a document by
+id finds the artifact:
+
+- `GET /api/documents/{id}` answers with `artifact_id`, `format`, `review` and
+  the source of the current version; the UI then opens the artifact viewer.
+- `GET /app/doc/{id}` redirects to `/app/artifact/<id>`, and
+  `GET /api/links?kind=document` returns that link.
+- `openpoet_read_document` (and `read_document` in the chat assistant) return
+  the content and name the artifact.
+
+An id is resolved in this order: a Doc copied into an artifact
+(`artifact_legacy_docs`, filled when Docs are migrated) is that artifact; a Doc
+that was not copied stays a Doc; otherwise an id that is the id of an artifact
+is that artifact.
+
+The "file" cards of a chat (a file of a project the assistant pointed at) were
+rows of the Docs table too. They are not documents and have their own table,
+`ai_chat_file_cards`.
+
+### Schema and rollback
+
+Migration V88 adds three tables (`artifact_reviews`, `artifact_legacy_docs`,
+`ai_chat_file_cards`) and two indexes, and changes no existing table. A binary
+from before V88 runs on the migrated database, with two visible effects:
+proposals and verification documents published since show up as ordinary
+artifacts in listings, and a task's "View Document" does not open a
+verification document that is an artifact. To remove the tables as well:
+
+```sql
+DROP TABLE artifact_reviews;
+DROP TABLE artifact_legacy_docs;
+DROP TABLE ai_chat_file_cards;
+DROP INDEX idx_artifacts_conversation;
+UPDATE schema_version SET version = 87;
+```
+
+Run it only with the server stopped. The artifacts themselves stay; to remove
+the proposals and verification documents too, delete them first, by the ids in
+`artifact_reviews` (from `artifact_versions`, `artifact_annotations`,
+`artifact_questions` and `artifacts`).
+
 ## Annotations
 
 The page cannot reach into the sandboxed frame, so the server appends a small
@@ -317,8 +396,8 @@ message from the frame proves nothing about what the user did.
 | Method and route | Purpose |
 | --- | --- |
 | `POST /api/artifacts` | Publish a new artifact (`title`, one of `html`, `html_path`, `markdown`, `markdown_path`, `summary`, optional `project_id`, `task_id`, `conversation_id`, `session_id`) |
-| `GET /api/artifacts?project_id=&session_id=&task_id=&include_archived=` | List artifacts, without HTML |
-| `GET /api/artifacts/{id}` | Metadata, version history (size and SHA-256 of each version), open-annotation count, `link` and `url` |
+| `GET /api/artifacts?project_id=&session_id=&task_id=&include_archived=&include_reviewed=` | List artifacts, without HTML. Proposals and verification documents are left out unless `include_reviewed=1` |
+| `GET /api/artifacts/{id}` | Metadata, version history (size and SHA-256 of each version), open-annotation count, `review` when it waits for a decision, `link` and `url` |
 | `PUT /api/artifacts/{id}` | Publish a new version (one of `html`, `html_path`, `markdown`, `markdown_path`, `base_version`, `change_note`, optional `title`, `summary`, `dry_run`) |
 | `POST /api/artifacts/{id}/patch` | Publish a new version from replacements (`base_version`, `edits: [{old, new, replace_all}]`, `change_note`, optional `title`, `summary`, `dry_run`) |
 | `PATCH /api/artifacts/{id}` | Change `title`, `summary` or `status` |

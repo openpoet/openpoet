@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A link clicked inside an artifact is shown in the viewer, in full, with a
   button to open it (inside OpenPoet for an `/app/...` link, in a new tab
   otherwise), instead of loading inside the artifact's frame.
+- **Approval in artifacts**: the chat assistant's proposals (memory document,
+  tasks, skills, tools) and the verification document of a task are artifacts
+  with a review, read in the artifact viewer and decided with the buttons
+  under the page. They are not listed among a project's documents. See
+  [`docs/artifacts.md`](docs/artifacts.md).
+- `read_document` in the chat assistant, which was advertised and not
+  implemented.
 - **HTML artifacts**: agents publish interactive, self-contained HTML documents
   into the OpenPoet database instead of writing files into the project. Every
   publish is a version and old versions stay readable. Artifacts are linked to
@@ -90,6 +97,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A document id that stands for an artifact opens the artifact: `/app/doc/<id>`
+  redirects to `/app/artifact/<id>`, and `GET /api/documents/{id}`,
+  `GET /api/links?kind=document` and `openpoet_read_document` resolve it.
+- The chat's "file" cards have their own table instead of being rows of the
+  Docs table, and reading a memory document in the chat no longer stores a
+  copy of it: its card opens the memory document itself.
 - The built-in `html-artifact` skill teaches how to ask questions, tells
   agents to keep the content of tabs in the DOM, and states the sandbox policy.
   An installed copy that was never edited is updated on start; an edited one is

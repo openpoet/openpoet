@@ -31,7 +31,7 @@ says so instead of handing out `localhost`.
 | Path | Opens |
 | --- | --- |
 | `/app/artifact/<id>` | The artifact in the artifact viewer (`?v=<n>` for a version) |
-| `/app/doc/<id>` | The Doc in the document viewer |
+| `/app/doc/<id>` | The Doc in the document viewer. When the id stands for an artifact (a proposal, a verification document, a Doc that was copied into one), the server redirects to `/app/artifact/<id>` |
 | `/app/session/<id>` | The session's terminal |
 | `/app/task/<project>/<task>` | The task |
 | `/app/project/<id>` | The project |
