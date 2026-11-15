@@ -139,6 +139,7 @@ func TestEnsureHTMLArtifactSkillUpdatesOnlyAnUneditedCopy(t *testing.T) {
 		1: "326d24eab92e2d87211c3291790053c376570be2409b32eff246051139045e06",
 		2: "50443d4ee9bd35229bf8c417e7b19093f52f3e730c0a3d8b2deddd42b0fe1341",
 		3: "a894910e960c94469a52eb71433b739728dfbee6743219b8e45f6b6d8ac9ee6a",
+		4: "f115603c9d9d1ad14f8071099b9d4f824876753e9a67cfccfd9a5dc14f3b3f74",
 	} {
 		if !htmlArtifactSkillSuperseded[hash] {
 			t.Fatalf("the revision %d text is not listed as superseded", revision)

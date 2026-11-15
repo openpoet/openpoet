@@ -9,8 +9,9 @@ import (
 // harness-native artifacts or loose files, so output lands in one durable,
 // user-visible place. Plans, reports and documentation go out as interactive
 // HTML artifacts (openpoet_create_artifact), which the user can annotate and
-// the agent revises; short plain-text answers stay as OpenPoet Docs
-// (openpoet_create_document).
+// the agent revises; a short plain-text answer goes out through the same tool,
+// as a markdown artifact. Artifacts are the one format of documents: the Docs
+// tools are retired.
 
 const docsSteeringBegin = "<!-- OPENPOET:BEGIN docs-steering -->"
 const docsSteeringEnd = "<!-- OPENPOET:END docs-steering -->"
@@ -45,15 +46,18 @@ project for this, and do not use harness-native artifacts. The
 - When the user has to decide or answer something, declare questions in the
   artifact (the ` + "`html-artifact`" + ` skill shows how). The user answers them in the
   viewer and the answers arrive with the annotations.
-- When the user asks for a link to an artifact, a Doc, a session or a task, get
-  it with ` + "`openpoet_get_link`" + `. Never build a URL yourself.
+- When the user asks for a link to an artifact, a session or a task, get it
+  with ` + "`openpoet_get_link`" + `. Never build a URL yourself.
 - For a short plain-text answer that only needs to leave the chat (a list, a
-  snippet, a quick explanation), create an OpenPoet Doc with
-  ` + "`openpoet_create_document`" + ` instead. Use it too when the artifact tools are
-  not available in this session.
+  snippet, a quick explanation), publish a markdown artifact instead: the same
+  ` + "`openpoet_create_artifact`" + ` tool, with the text in ` + "`markdown`" + ` (or a ` + "`.md`" + `
+  file in ` + "`markdown_path`" + `) in place of ` + "`html_path`" + `. OpenPoet renders it,
+  with ` + "```mermaid" + ` blocks drawn as diagrams. There is no separate tool for
+  documents: ` + "`openpoet_read_artifact`" + ` reads every document, and the ids a
+  task or a session lists.
 - When MCP is unavailable, call the same tools through the CLI, for example
   ` + "`$OPENPOET_BIN cli call openpoet_create_artifact '{\"title\":\"Plan\",\"html_file\":\"/tmp/plan.html\"}'`" + `
-  or ` + "`$OPENPOET_BIN cli call openpoet_create_document ...`" + `.
+  or, for markdown, ` + "`... '{\"title\":\"Notes\",\"markdown_file\":\"/tmp/notes.md\"}'`" + `.
 ` + docsSteeringEnd + "\n"
 }
 

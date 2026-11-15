@@ -26,7 +26,7 @@ const htmlArtifactSkillSetting = "builtin_skill_html_artifact_registered"
 // was offered. When the guide changes, bump the revision and add the SHA-256
 // of the text it replaces to htmlArtifactSkillSuperseded.
 const (
-	htmlArtifactSkillRevision        = 4
+	htmlArtifactSkillRevision        = 5
 	htmlArtifactSkillRevisionSetting = "builtin_skill_html_artifact_revision"
 )
 
@@ -38,6 +38,7 @@ var htmlArtifactSkillSuperseded = map[string]bool{
 	"326d24eab92e2d87211c3291790053c376570be2409b32eff246051139045e06": true, // revision 1
 	"50443d4ee9bd35229bf8c417e7b19093f52f3e730c0a3d8b2deddd42b0fe1341": true, // revision 2
 	"a894910e960c94469a52eb71433b739728dfbee6743219b8e45f6b6d8ac9ee6a": true, // revision 3
+	"f115603c9d9d1ad14f8071099b9d4f824876753e9a67cfccfd9a5dc14f3b3f74": true, // revision 4
 }
 
 const htmlArtifactSkillContent = `Design and publish interactive HTML artifacts in OpenPoet for plans, reports and documentation.
@@ -47,8 +48,16 @@ const htmlArtifactSkillContent = `Design and publish interactive HTML artifacts 
 An artifact is one HTML page you publish into OpenPoet with ` + "`openpoet_create_artifact`" + `.
 The user opens it in a viewer, reads it like a small site, and annotates the
 parts they want changed. Use it for a plan, a report, documentation, a design
-proposal, a comparison, a review: anything the user will read or review. Use a
-Doc (` + "`openpoet_create_document`" + `) for a short plain-text answer.
+proposal, a comparison, a review: anything the user will read or review.
+
+For plain prose, publish markdown instead of a page: pass ` + "`markdown`" + ` (or
+` + "`markdown_path`" + `, a ` + "`.md`" + ` file) to ` + "`openpoet_create_artifact`" + ` in place of
+` + "`html`" + `. That is the way to hand over an answer too long for the chat (a
+list, an explanation, code) and a document that needs no layout. OpenPoet
+renders it as a formatted page (GitHub-flavored markdown, with ` + "```mermaid" + `
+blocks drawn as diagrams), and the user annotates, downloads and prints it like
+any artifact. A markdown artifact cannot declare questions; the rest of this
+guide is about HTML pages.
 
 ## The contract (the viewer enforces it)
 
@@ -67,10 +76,12 @@ load, silently. It is served as ` + "`sandbox allow-scripts`" + ` with the polic
 - **No storage, no cookies.** ` + "`localStorage`" + `, ` + "`sessionStorage`" + ` and
   ` + "`document.cookie`" + ` throw. Keep state in variables; wrap any storage use in
   try/catch.
-- **No way out of the page.** ` + "`fetch`" + `, forms that submit, popups,
-  ` + "`target=\"_blank\"`" + ` and links to other sites do nothing. Navigation is inside
-  the page (` + "`#section`" + ` links, tabs, buttons). Show an external URL as text the
-  user can copy.
+- **No way out of the page.** ` + "`fetch`" + `, forms that submit and popups do
+  nothing. Navigation is inside the page (` + "`#section`" + ` links, tabs, buttons).
+  A plain link to another site or to something in OpenPoet (` + "`<a href>`" + ` with
+  an absolute URL or an ` + "`/app/...`" + ` path) does not load in the page: the
+  viewer shows its address and the user opens it from there. Write such a
+  link as an ordinary ` + "`<a href>`" + ` and do not script it.
 - **Credential-looking text is masked.** ` + "`password=...`" + `, ` + "`api_key: ...`" + `,
   ` + "`secret = ...`" + ` are replaced with ` + "`[REDACTED]`" + ` when stored, also inside
   scripts. Never put real credentials in an artifact, and do not name script

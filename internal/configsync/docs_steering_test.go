@@ -12,24 +12,28 @@ import (
 // (never duplicates) the marker-delimited section on re-sync.
 func TestDocsInstructionBlockPerHarness(t *testing.T) {
 	block := OpenPoetDocsInstructionBlock()
-	for _, token := range []string{"openpoet_create_document", docsSteeringBegin, docsSteeringEnd} {
+	for _, token := range []string{"openpoet_create_artifact", docsSteeringBegin, docsSteeringEnd} {
 		if !strings.Contains(block, token) {
 			t.Fatalf("steering block missing %q", token)
 		}
 	}
-	// Plans and documentation are steered to HTML artifacts first; Docs stay
-	// for short plain text and as the fallback.
+	// Plans and documentation are steered to HTML artifacts; a short plain-text
+	// answer goes out through the same tool, as markdown.
 	for _, token := range []string{
 		"openpoet_create_artifact", "openpoet_update_artifact", "openpoet_list_artifact_annotations", "openpoet_resolve_artifact_annotation",
 		"self-contained", "no external resources", "navigation", "charts", "html-artifact", "html_file",
 		"html_path", "openpoet_patch_artifact", "output_path",
+		"markdown artifact", "`markdown`", "markdown_path", "markdown_file", "openpoet_read_artifact",
 	} {
 		if !strings.Contains(block, token) {
 			t.Fatalf("steering block missing %q:\n%s", token, block)
 		}
 	}
-	if strings.Index(block, "openpoet_create_artifact") > strings.Index(block, "openpoet_create_document") {
-		t.Fatal("the steering block must name the artifact tool before the Docs tool")
+	// Artifacts are the one format of documents: the Docs tools are not named.
+	for _, retired := range []string{"openpoet_create_document", "openpoet_read_document", "OpenPoet Doc", "a Doc"} {
+		if strings.Contains(block, retired) {
+			t.Fatalf("the steering block still names %q:\n%s", retired, block)
+		}
 	}
 	if strings.Count(block, docsSteeringBegin) != 1 || strings.Count(block, docsSteeringEnd) != 1 || !strings.HasSuffix(block, docsSteeringEnd+"\n") {
 		t.Fatal("steering block markers are malformed")
@@ -43,7 +47,7 @@ func TestDocsInstructionBlockPerHarness(t *testing.T) {
 		t.Fatal(err)
 	}
 	first, _ := os.ReadFile(fresh)
-	if !strings.Contains(string(first), "openpoet_create_document") {
+	if !strings.Contains(string(first), "openpoet_create_artifact") {
 		t.Fatal("fresh managed file missing the block")
 	}
 
@@ -68,7 +72,7 @@ func TestDocsInstructionBlockPerHarness(t *testing.T) {
 		t.Fatal(err)
 	}
 	merged, _ := os.ReadFile(userFile)
-	if !strings.Contains(string(merged), "keep me") || !strings.Contains(string(merged), "openpoet_create_document") {
+	if !strings.Contains(string(merged), "keep me") || !strings.Contains(string(merged), "openpoet_create_artifact") {
 		t.Fatalf("managed append lost content: %s", merged)
 	}
 	if err := upsertDocsSteeringFile(userFile); err != nil {
@@ -99,7 +103,7 @@ instead of harness-native artifacts or loose files.
 	}
 	data, _ := os.ReadFile(path)
 	content := string(data)
-	if strings.Contains(content, "Documentation goes to OpenPoet Docs") {
+	if strings.Contains(content, "Documentation goes to OpenPoet Docs") || strings.Contains(content, "openpoet_create_document") {
 		t.Fatalf("the old wording survived the sync:\n%s", content)
 	}
 	if !strings.Contains(content, "openpoet_create_artifact") || strings.Count(content, docsSteeringBegin) != 1 || strings.Count(content, docsSteeringEnd) != 1 {
