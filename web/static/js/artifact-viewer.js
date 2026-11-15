@@ -34,6 +34,11 @@ class ArtifactViewer {
         this.bannerTextEl = document.getElementById('artifact-viewer-banner-text');
         this.bannerBtn = document.getElementById('artifact-viewer-banner-open');
         this.downloadBtn = document.getElementById('artifact-viewer-download');
+        this.pdfBtn = document.getElementById('artifact-viewer-pdf');
+        this.linkBarEl = document.getElementById('artifact-viewer-link');
+        this.linkTextEl = document.getElementById('artifact-viewer-link-text');
+        this.linkOpenBtn = document.getElementById('artifact-viewer-link-open');
+        this.linkDismissBtn = document.getElementById('artifact-viewer-link-dismiss');
         this.fullscreenBtn = document.getElementById('artifact-viewer-fullscreen');
         this.closeBtn = document.getElementById('artifact-viewer-close');
 
@@ -88,6 +93,10 @@ class ArtifactViewer {
         this._activeQuestion = '';
         this._intentWindow = { at: 0, count: 0 }; // rate limit for proposals coming from the frame
 
+        this._pendingLink = null;   // a link clicked in the frame, shown until the user opens or dismisses it
+        this._printFrame = null;    // the throwaway frame the shown version is printed from
+        this._printTimer = null;
+
         // The page's viewport meta, and the value the app ships with (see _syncPageZoom).
         this._viewportMeta = document.querySelector('meta[name="viewport"]');
         this._lockedViewport = this._viewportMeta?.getAttribute('content') || '';
@@ -115,6 +124,9 @@ class ArtifactViewer {
 
         this.closeBtn?.addEventListener('click', () => this.close());
         this.downloadBtn?.addEventListener('click', () => this._download());
+        this.pdfBtn?.addEventListener('click', () => this._print());
+        this.linkOpenBtn?.addEventListener('click', () => this._openPendingLink());
+        this.linkDismissBtn?.addEventListener('click', () => this._dismissLink());
         this.fullscreenBtn?.addEventListener('click', () => this._toggleFullscreen());
         this.bannerBtn?.addEventListener('click', () => {
             this._showVersion(this._artifact?.current_version);
@@ -178,6 +190,8 @@ class ArtifactViewer {
         this._syncPageZoom();
         // Unload the artifact so its scripts and timers stop.
         if (this.frame) this.frame.src = 'about:blank';
+        this._removePrintFrame();
+        this._dismissLink();
         this._artifact = null;
         this._version = 0;
         this._hideBanner();
@@ -242,6 +256,8 @@ class ArtifactViewer {
         if (!known) version = this._artifact.current_version;
         this._version = version;
         if (this.versionSelect) this.versionSelect.value = String(version);
+        if (this.downloadBtn) this.downloadBtn.title = this._format() === 'markdown' ? 'Download markdown' : 'Download HTML';
+        this._dismissLink();
         this._setStatus('Loading artifact…');
         // A new document loads: its bridge has to announce itself again.
         this._bridgeReady = false;
@@ -336,6 +352,97 @@ class ArtifactViewer {
         return [...kept, 'maximum-scale=5.0', 'user-scalable=yes'].join(', ');
     }
 
+    // The format of the version shown: "html" (a page) or "markdown" (source the
+    // server renders into a page).
+    _format() {
+        const shown = (this._artifact?.versions || []).find(v => v.version === this._version);
+        return shown?.format === 'markdown' ? 'markdown' : 'html';
+    }
+
+    // Prints the version shown, which is how it is saved as a PDF. The frame the
+    // artifact is read in cannot open the print dialog (its sandbox has no
+    // modals), and this page cannot print a frame of another origin. So the
+    // version is loaded once more, to be printed, in a frame that may open
+    // dialogs and is removed when the print dialog closes.
+    _print() {
+        if (!this._artifact || !this._version) return;
+        this._removePrintFrame();
+        const frame = document.createElement('iframe');
+        frame.className = 'artifact-viewer-print-frame';
+        frame.setAttribute('sandbox', 'allow-scripts allow-modals');
+        frame.setAttribute('referrerpolicy', 'no-referrer');
+        frame.setAttribute('aria-hidden', 'true');
+        frame.setAttribute('title', 'Artifact being printed');
+        frame.tabIndex = -1;
+        frame.src = `/api/artifacts/${encodeURIComponent(this._artifact.id)}/render?v=${this._version}&print=1`;
+        this._printFrame = frame;
+        // The print step says when the dialog closed. A frame that never does
+        // (its markup swallowed the step) does not stay around.
+        this._printTimer = setTimeout(() => this._removePrintFrame(), 10 * 60 * 1000);
+        document.body.appendChild(frame);
+    }
+
+    _removePrintFrame() {
+        clearTimeout(this._printTimer);
+        this._printTimer = null;
+        this._printFrame?.remove();
+        this._printFrame = null;
+    }
+
+    // A link clicked inside the artifact. The message comes from the frame, so
+    // the artifact's own script can send it too: nothing is opened here. The
+    // address is shown, in full, and the user decides.
+    _onLinkIntent(data) {
+        const link = ArtifactViewer.classifyLink(data.href, location.origin);
+        if (!link || !this.linkBarEl) return;
+        this._pendingLink = link;
+        this.linkTextEl.textContent = link.label;
+        this.linkTextEl.title = link.label;
+        this.linkOpenBtn.textContent = link.inApp ? 'Open' : 'Open in new tab';
+        this.linkBarEl.classList.remove('hidden');
+    }
+
+    _dismissLink() {
+        this._pendingLink = null;
+        this.linkBarEl?.classList.add('hidden');
+    }
+
+    _openPendingLink() {
+        const link = this._pendingLink;
+        this._dismissLink();
+        if (!link) return;
+        if (!link.inApp) {
+            window.open(link.url, '_blank', 'noopener,noreferrer');
+            return;
+        }
+        const route = window.app?.constructor?.routeFromAppPath?.(link.path, link.search);
+        const artifact = route?.doc?.startsWith('artifact:') ? route.doc.slice('artifact:'.length) : '';
+        if (artifact) {
+            this.open(artifact, { version: Number(route.v) || undefined });
+            return;
+        }
+        // Anything else in the app is opened the way a link path is: by loading it.
+        location.assign(link.path + link.search);
+    }
+
+    // What a link clicked in an artifact points at: something in this OpenPoet
+    // (an /app/... link path) or an address outside it. Anything else (a
+    // relative path, which has nothing to be relative to, or another scheme) is
+    // not a link the viewer opens. origin is this page's origin.
+    static classifyLink(href, origin) {
+        if (typeof href !== 'string') return null;
+        href = href.trim();
+        if (!href || href.length > 2000 || !/^(\/|[a-z][a-z0-9+.-]*:)/i.test(href)) return null;
+        let url;
+        try { url = new URL(href, origin + '/'); } catch { return null; }
+        if (url.origin === origin) {
+            if (!url.pathname.startsWith('/app/')) return null;
+            return { inApp: true, path: url.pathname, search: url.search, label: url.pathname + url.search };
+        }
+        if (!['http:', 'https:', 'mailto:'].includes(url.protocol)) return null;
+        return { inApp: false, url: url.href, label: url.href };
+    }
+
     async _download() {
         if (!this._artifact || !this._version) return;
         try {
@@ -349,7 +456,8 @@ class ArtifactViewer {
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `${this._fileStem()}-v${this._version}.html`;
+            const extension = version.format === 'markdown' ? 'md' : 'html';
+            a.download = `${this._fileStem()}-v${this._version}.${extension}`;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
@@ -516,6 +624,11 @@ class ArtifactViewer {
     // shares the frame with the artifact's own scripts), so every field is
     // checked and nothing here is trusted to be what the bridge would send.
     _onFrameMessage(event) {
+        // The frame a version is printed from says when its print dialog closed.
+        if (this._printFrame && event.source === this._printFrame.contentWindow) {
+            if (event.data?.source === 'openpoet-artifact-print') this._removePrintFrame();
+            return;
+        }
         if (!this.isOpen() || !this.frame || event.source !== this.frame.contentWindow) return;
         const data = event.data;
         if (!data || typeof data !== 'object' || data.source !== 'openpoet-artifact-bridge') return;
@@ -548,6 +661,9 @@ class ArtifactViewer {
                 break;
             case 'answer-intent':
                 this._onAnswerIntent(data);
+                break;
+            case 'link':
+                this._onLinkIntent(data);
                 break;
             case 'key':
                 // Escape pressed inside the frame. It may cancel an empty

@@ -6,7 +6,7 @@
 // talks to the OpenPoet page only through postMessage:
 //
 //   frame -> page   ready | selection | annotation-click | anchors | key |
-//                   answer-intent
+//                   answer-intent | link
 //   page  -> frame  set-mode | show-annotations | focus | clear-selection |
 //                   answers | focus-question
 //
@@ -638,6 +638,26 @@
     announce('openpoet:ready', {});
   }
 
+  // ---- links ----------------------------------------------------------------
+
+  // A link that leaves the document cannot be followed in the frame: the
+  // sandbox has no popups and no top navigation, so the browser would load the
+  // target inside the frame, in place of the artifact. The click is reported to
+  // the page instead, which shows the address and lets the user open it. Links
+  // inside the document (#section) and clicks the artifact's own script already
+  // handled are left alone.
+  function onLinkClick(event) {
+    if (annotate || event.defaultPrevented) return;
+    var el = event.target;
+    if (el && el.nodeType !== 1) el = el.parentElement;
+    var link = el && el.closest ? el.closest('a[href]') : null;
+    if (!link || isOwn(link)) return;
+    var href = (link.getAttribute('href') || '').trim();
+    if (!href || href.charAt(0) === '#' || /^javascript:/i.test(href)) return;
+    event.preventDefault();
+    post('link', { href: clip(href, 2000) });
+  }
+
   // ---- messages from the page ----------------------------------------------
 
   window.addEventListener('message', function (event) {
@@ -675,6 +695,8 @@
 
   document.addEventListener('click', onClickCapture, true);
   document.addEventListener('click', onAnswerClick, true);
+  // Not in the capture phase: the artifact's own handlers run first.
+  document.addEventListener('click', onLinkClick);
   document.addEventListener('mouseup', onMouseUp, true);
   document.addEventListener('touchend', onMouseUp, true);
   document.addEventListener('selectionchange', onSelectionChange);

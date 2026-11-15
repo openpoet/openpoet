@@ -469,6 +469,58 @@
 .artifact-viewer-pending.hidden {
     display: none;
 }
+
+/* A link clicked inside the artifact: its address, shown before it is opened */
+.artifact-viewer-link {
+    position: absolute;
+    left: 50%;
+    top: 14px;
+    transform: translateX(-50%);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    width: max-content;
+    max-width: min(calc(100% - 24px), 720px);
+    padding: 8px 10px 8px 14px;
+    font-size: 13px;
+    color: var(--color-text);
+    background-color: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+.artifact-viewer-link.hidden {
+    display: none;
+}
+/* The address is what the user decides on: it wraps, it is never cut. */
+.artifact-viewer-link span {
+    flex: 1 1 220px;
+    min-width: 0;
+    max-height: 7.5em;
+    overflow-y: auto;
+    overflow-wrap: anywhere;
+    line-height: 1.5;
+}
+.artifact-viewer-link button {
+    flex-shrink: 0;
+}
+
+/* The frame an artifact is printed from: laid out, never seen. It stays inside
+   the viewport, under the page: a browser stops running a frame that is
+   scrolled out of view, and its diagrams would never be drawn. */
+.artifact-viewer-print-frame {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: -1;
+    width: 820px;
+    height: 1000px;
+    border: 0;
+    opacity: 0;
+    pointer-events: none;
+}
 .artifact-viewer-pending span {
     white-space: nowrap;
     overflow: hidden;
@@ -616,7 +668,16 @@
     }
     .artifact-viewer-header {
         padding: 8px 10px;
-        gap: 6px;
+        gap: 2px 6px;
+        /* When the title and the actions do not fit side by side, the title
+           takes a line of its own instead of shrinking to nothing. */
+        flex-wrap: wrap;
+    }
+    .artifact-viewer-title {
+        flex: 1 1 160px;
+    }
+    .artifact-viewer-actions {
+        margin-left: auto;
     }
     .artifact-viewer-version {
         max-width: 96px;
