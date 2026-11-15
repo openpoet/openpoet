@@ -31,6 +31,7 @@ type artifactToolView struct {
 	TaskID          *int64 `json:"task_id"`
 	SessionID       string `json:"session_id"`
 	CurrentVersion  int    `json:"current_version"`
+	Format          string `json:"format"`
 	SizeBytes       int64  `json:"size_bytes"`
 	OpenAnnotations int    `json:"open_annotations"`
 	UpdatedAt       string `json:"updated_at"`
@@ -38,6 +39,7 @@ type artifactToolView struct {
 	URL             string `json:"url"`
 	Versions        []struct {
 		Version    int    `json:"version"`
+		Format     string `json:"format"`
 		SizeBytes  int64  `json:"size_bytes"`
 		SHA256     string `json:"sha256"`
 		ChangeNote string `json:"change_note"`
@@ -53,6 +55,8 @@ type artifactPublishToolResult struct {
 	Redacted bool   `json:"redacted"`
 	Link     string `json:"link"`
 	URL      string `json:"url"`
+	// Format is the format of the published version: "html" or "markdown".
+	Format string `json:"format"`
 	// Questions is how many questions the published version declares.
 	Questions int              `json:"questions"`
 	Artifact  artifactToolView `json:"artifact"`
@@ -173,37 +177,75 @@ func artifactAPIError(err error) error {
 	return err
 }
 
-// resolveArtifactHTML returns what to publish: the document itself (html), or
-// the path of a file in the session's workspace that the OpenPoet server reads
-// (html_path). html_file is honored only when allowFiles is set, i.e. in the
-// local CLI, which runs as a process on the user's machine and reads the file
-// itself; the MCP server never opens a path named by a client, it forwards
-// html_path to the server, which confines it to the caller's own workspace.
-func resolveArtifactHTML(params map[string]interface{}, allowFiles bool) (html, htmlPath string, err error) {
-	html, _ = params["html"].(string)
-	htmlPath = stringParam(params, "html_path")
-	file := stringParam(params, "html_file")
+// artifactContentNoun names the content of a version of the given format in a
+// tool result: "HTML", or "markdown" for a markdown version.
+func artifactContentNoun(format string) string {
+	if format == "markdown" {
+		return "markdown"
+	}
+	return "HTML"
+}
+
+// artifactContentParamNames are the arguments that carry the content of a
+// publish: the document itself, the path of a file in the session's workspace
+// that the OpenPoet server reads, or (CLI only) a local file. One set for an
+// HTML document, one for markdown source.
+var artifactContentParamNames = []struct{ inline, path, file string }{
+	{"html", "html_path", "html_file"},
+	{"markdown", "markdown_path", "markdown_file"},
+}
+
+// hasArtifactContentParam reports whether the arguments carry content at all.
+func hasArtifactContentParam(params map[string]interface{}) bool {
+	for _, names := range artifactContentParamNames {
+		if _, inline := params[names.inline].(string); inline || stringParam(params, names.path) != "" || stringParam(params, names.file) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveArtifactContent returns what to publish, as the fields of the request
+// to the server: the document itself (html, or markdown for markdown source),
+// or the path of a file in the session's workspace that the OpenPoet server
+// reads (html_path, markdown_path). html_file and markdown_file are honored
+// only when allowFiles is set, i.e. in the local CLI, which runs as a process
+// on the user's machine and reads the file itself; the MCP server never opens
+// a path named by a client, it forwards the path to the server, which confines
+// it to the caller's own workspace.
+func resolveArtifactContent(params map[string]interface{}, allowFiles bool) (map[string]string, error) {
+	content := map[string]string{}
 	given := 0
-	for _, present := range []bool{strings.TrimSpace(html) != "", htmlPath != "", file != ""} {
-		if present {
-			given++
+	for _, names := range artifactContentParamNames {
+		inline, _ := params[names.inline].(string)
+		path, file := stringParam(params, names.path), stringParam(params, names.file)
+		for _, present := range []bool{strings.TrimSpace(inline) != "", path != "", file != ""} {
+			if present {
+				given++
+			}
+		}
+		switch {
+		case file != "" && !allowFiles:
+			return nil, fmt.Errorf("%s is only available through the openpoet CLI; use %s (a file in your workspace) or pass the document in %s", names.file, names.path, names.inline)
+		case file != "":
+			data, err := os.ReadFile(file)
+			if err != nil {
+				return nil, fmt.Errorf("read %s: %w", names.file, err)
+			}
+			content[names.inline] = string(data)
+		case path != "":
+			content[names.path] = path
+		case strings.TrimSpace(inline) != "":
+			content[names.inline] = inline
 		}
 	}
 	switch {
 	case given == 0:
-		return "", "", fmt.Errorf("html_path (a file in your workspace) or html (the document) is required")
+		return nil, fmt.Errorf("html_path (a file in your workspace) or html (the document) is required; for markdown, markdown_path or markdown")
 	case given > 1:
-		return "", "", fmt.Errorf("pass only one of html_path, html and html_file")
-	case file == "":
-		return html, htmlPath, nil
-	case !allowFiles:
-		return "", "", fmt.Errorf("html_file is only available through the openpoet CLI; use html_path (a file in your workspace) or pass the document in html")
+		return nil, fmt.Errorf("pass only one of html_path, html, html_file, markdown_path, markdown and markdown_file")
 	}
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return "", "", fmt.Errorf("read html_file: %w", err)
-	}
-	return string(data), "", nil
+	return content, nil
 }
 
 // artifactEditsParam reads the edits of a patch: a list of {old, new,
@@ -240,15 +282,19 @@ func artifactEditsParam(params map[string]interface{}) ([]map[string]interface{}
 func executeArtifactTool(client *APIClient, name string, params map[string]interface{}, sessionID, conversationID string, allowFiles bool) (string, error) {
 	switch name {
 	case "openpoet_create_artifact":
-		html, htmlPath, err := resolveArtifactHTML(params, allowFiles)
+		content, err := resolveArtifactContent(params, allowFiles)
 		if err != nil {
 			return "", err
 		}
-		payload, _ := json.Marshal(map[string]interface{}{
-			"title": stringParam(params, "title"), "html": html, "html_path": htmlPath, "summary": stringParam(params, "summary"),
+		request := map[string]interface{}{
+			"title": stringParam(params, "title"), "summary": stringParam(params, "summary"),
 			"task_id": stringParam(params, "task_id"), "conversation_id": conversationID, "session_id": sessionID,
 			"dry_run": boolParam(params, "dry_run"),
-		})
+		}
+		for key, value := range content {
+			request[key] = value
+		}
+		payload, _ := json.Marshal(request)
 		body, err := client.Post("/api/artifacts", string(payload))
 		if err != nil {
 			return "", artifactAPIError(err)
@@ -262,7 +308,7 @@ func executeArtifactTool(client *APIClient, name string, params map[string]inter
 		}
 		meta := artifactMetaParams(params)
 		// A title or summary on its own changes them without a new version.
-		if _, hasHTML := params["html"].(string); !hasHTML && stringParam(params, "html_path") == "" && stringParam(params, "html_file") == "" && len(meta) > 0 {
+		if !hasArtifactContentParam(params) && len(meta) > 0 {
 			encoded, _ := json.Marshal(meta)
 			body, err := client.Patch("/api/artifacts/"+url.PathEscape(id), string(encoded))
 			if err != nil {
@@ -270,14 +316,17 @@ func executeArtifactTool(client *APIClient, name string, params map[string]inter
 			}
 			return FormatArtifactMetaUpdated(body, meta), nil
 		}
-		html, htmlPath, err := resolveArtifactHTML(params, allowFiles)
+		content, err := resolveArtifactContent(params, allowFiles)
 		if err != nil {
 			return "", err
 		}
 		request := map[string]interface{}{
-			"html": html, "html_path": htmlPath, "change_note": stringParam(params, "change_note"),
+			"change_note":  stringParam(params, "change_note"),
 			"base_version": stringParam(params, "base_version"), "session_id": sessionID,
 			"dry_run": boolParam(params, "dry_run"),
+		}
+		for key, value := range content {
+			request[key] = value
 		}
 		for key, value := range meta {
 			request[key] = value
@@ -300,7 +349,7 @@ func executeArtifactTool(client *APIClient, name string, params map[string]inter
 		}
 		baseVersion := stringParam(params, "base_version")
 		if baseVersion == "" {
-			return "", fmt.Errorf("base_version is required: the version whose HTML your edits were written against")
+			return "", fmt.Errorf("base_version is required: the version whose content your edits were written against")
 		}
 		meta := artifactMetaParams(params)
 		request := map[string]interface{}{
@@ -418,14 +467,19 @@ func FormatArtifactPublished(body []byte, toolPrefix string) string {
 		return string(body)
 	}
 	if result.Duplicate {
-		return fmt.Sprintf("Artifact already published: this session created artifact_id %s a moment ago with the same title and identical HTML, so no second artifact was created. "+
+		return fmt.Sprintf("Artifact already published: this session created artifact_id %s a moment ago with the same title and identical %s, so no second artifact was created. "+
 			"It is at version %d; the document of this call is stored as %s, sha256 %s. To change it, call %spatch_artifact or %supdate_artifact with artifact_id %s and base_version %d. Internal link: %s%s%s",
-			result.ID, result.Version, formatArtifactSize(result.SizeBytes), result.SHA256, toolPrefix, toolPrefix, result.ID, result.Version, result.Link,
+			result.ID, artifactContentNoun(result.Format), result.Version, formatArtifactSize(result.SizeBytes), result.SHA256, toolPrefix, toolPrefix, result.ID, result.Version, result.Link,
 			ShareableLinkNote(result.URL, toolPrefix), artifactRedactionNote(result))
 	}
-	return fmt.Sprintf("Artifact published: artifact_id %s, version %d (%s).%s The user was shown a card to open it in the artifact viewer — do NOT paste the HTML or generate links. "+
-		"To change it, call %spatch_artifact (a few replacements) or %supdate_artifact (the whole page) with artifact_id %s and base_version %d. Internal link: %s%s%s",
-		result.ID, result.Version, artifactIntegrity(result), artifactSourceNote(result.SourcePath), toolPrefix, toolPrefix, result.ID, result.Version, result.Link,
+	page := "the whole page"
+	if result.Format == "markdown" {
+		page = "the whole markdown"
+	}
+	return fmt.Sprintf("Artifact published: artifact_id %s, version %d (%s).%s The user was shown a card to open it in the artifact viewer — do NOT paste the %s or generate links. "+
+		"To change it, call %spatch_artifact (a few replacements) or %supdate_artifact (%s) with artifact_id %s and base_version %d. Internal link: %s%s%s",
+		result.ID, result.Version, artifactIntegrity(result), artifactSourceNote(result.SourcePath), artifactContentNoun(result.Format),
+		toolPrefix, toolPrefix, page, result.ID, result.Version, result.Link,
 		ShareableLinkNote(result.URL, toolPrefix), artifactQuestionsNote(result.Questions, toolPrefix)+artifactRedactionNote(result))
 }
 
@@ -507,8 +561,8 @@ func FormatArtifactUpdated(body []byte, openAnnotations int, toolPrefix string) 
 	}
 	links := fmt.Sprintf(" Internal link: %s%s", result.Link, ShareableLinkNote(result.URL, toolPrefix))
 	if !result.Created {
-		return fmt.Sprintf("No new version: the HTML is identical to version %d of artifact %s (%s).%s",
-			result.Version, result.ID, artifactIntegrity(result), links)
+		return fmt.Sprintf("No new version: the %s is identical to version %d of artifact %s (%s).%s",
+			artifactContentNoun(result.Format), result.Version, result.ID, artifactIntegrity(result), links)
 	}
 	patched := ""
 	if result.Replacements > 0 {
@@ -789,6 +843,9 @@ func FormatArtifactDetail(artifactBody, openAnnotations, version []byte, toolPre
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("## Artifact %s — %s\n\n", artifact.ID, oneLine(artifact.Title, 200)))
 	sb.WriteString(fmt.Sprintf("Current version: %d | Status: %s | Size: %s", artifact.CurrentVersion, artifact.Status, formatArtifactSize(artifact.SizeBytes)))
+	if artifact.Format == "markdown" {
+		sb.WriteString(" | Format: markdown")
+	}
 	for _, v := range artifact.Versions {
 		if v.Version == artifact.CurrentVersion && v.SHA256 != "" {
 			sb.WriteString(" | sha256: " + v.SHA256)
@@ -812,6 +869,9 @@ func FormatArtifactDetail(artifactBody, openAnnotations, version []byte, toolPre
 	sb.WriteString("\n### Versions\n")
 	for _, v := range artifact.Versions {
 		sb.WriteString(fmt.Sprintf("- v%d (%s, %s", v.Version, formatArtifactSize(v.SizeBytes), v.CreatedAt))
+		if v.Format == "markdown" {
+			sb.WriteString(", markdown")
+		}
 		if v.SHA256 != "" {
 			sb.WriteString(", sha256 " + v.SHA256)
 		}
@@ -833,11 +893,16 @@ func FormatArtifactDetail(artifactBody, openAnnotations, version []byte, toolPre
 		sb.WriteString(FormatArtifactUnanswered(questions, openAnnotations))
 	}
 	if version == nil {
-		sb.WriteString(fmt.Sprintf("\nTo get the HTML of a version, call %sread_artifact with output_path (writes it to a file in your workspace, byte for byte) or with include_html=true (returns it here).\n", toolPrefix))
+		if artifact.Format == "markdown" {
+			sb.WriteString(fmt.Sprintf("\nTo get the markdown of a version, call %sread_artifact with output_path (writes it to a .md file in your workspace, byte for byte) or with include_html=true (returns it here).\n", toolPrefix))
+		} else {
+			sb.WriteString(fmt.Sprintf("\nTo get the HTML of a version, call %sread_artifact with output_path (writes it to a file in your workspace, byte for byte) or with include_html=true (returns it here).\n", toolPrefix))
+		}
 		return sb.String()
 	}
 	var stored struct {
 		Version   int    `json:"version"`
+		Format    string `json:"format"`
 		Content   string `json:"content"`
 		SizeBytes int64  `json:"size_bytes"`
 		SHA256    string `json:"sha256"`
@@ -845,10 +910,14 @@ func FormatArtifactDetail(artifactBody, openAnnotations, version []byte, toolPre
 	if err := json.Unmarshal(version, &stored); err != nil {
 		return sb.String()
 	}
+	noun := artifactContentNoun(stored.Format)
+	if noun != "HTML" {
+		noun = "Markdown"
+	}
 	if stored.SHA256 != "" {
-		sb.WriteString(fmt.Sprintf("\n### HTML of version %d (%s, sha256 %s)\n\n", stored.Version, formatArtifactSize(stored.SizeBytes), stored.SHA256))
+		sb.WriteString(fmt.Sprintf("\n### %s of version %d (%s, sha256 %s)\n\n", noun, stored.Version, formatArtifactSize(stored.SizeBytes), stored.SHA256))
 	} else {
-		sb.WriteString(fmt.Sprintf("\n### HTML of version %d\n\n", stored.Version))
+		sb.WriteString(fmt.Sprintf("\n### %s of version %d\n\n", noun, stored.Version))
 	}
 	sb.WriteString(stored.Content)
 	sb.WriteString("\n")
@@ -916,16 +985,21 @@ func FormatArtifactExported(body []byte, toolPrefix string) string {
 		ArtifactID string `json:"artifact_id"`
 		Version    int    `json:"version"`
 		Path       string `json:"path"`
+		Format     string `json:"format"`
 		SizeBytes  int64  `json:"size_bytes"`
 		SHA256     string `json:"sha256"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil || result.Path == "" {
 		return string(body)
 	}
-	return fmt.Sprintf("HTML of version %d of artifact %s written to %s (%s, sha256 %s), byte for byte as stored. "+
-		"Edit that file and publish it with %supdate_artifact (html_path, base_version %d), or send only the changes with %spatch_artifact.",
-		result.Version, result.ArtifactID, oneLine(result.Path, 400), formatArtifactSize(result.SizeBytes), result.SHA256,
-		toolPrefix, result.Version, toolPrefix)
+	noun, pathParam := "HTML", "html_path"
+	if result.Format == "markdown" {
+		noun, pathParam = "Markdown", "markdown_path"
+	}
+	return fmt.Sprintf("%s of version %d of artifact %s written to %s (%s, sha256 %s), byte for byte as stored. "+
+		"Edit that file and publish it with %supdate_artifact (%s, base_version %d), or send only the changes with %spatch_artifact.",
+		noun, result.Version, result.ArtifactID, oneLine(result.Path, 400), formatArtifactSize(result.SizeBytes), result.SHA256,
+		toolPrefix, pathParam, result.Version, toolPrefix)
 }
 
 // saveArtifactForCLI writes the stored HTML of a version to a local file. It
@@ -941,11 +1015,16 @@ func saveArtifactForCLI(client *APIClient, id, version, outputFile string) (stri
 	}
 	var stored struct {
 		Version int    `json:"version"`
+		Format  string `json:"format"`
 		Content string `json:"content"`
 		SHA256  string `json:"sha256"`
 	}
 	if err := json.Unmarshal(body, &stored); err != nil || stored.Version == 0 {
 		return "", fmt.Errorf("unexpected artifact version response")
+	}
+	noun := "HTML"
+	if stored.Format == "markdown" {
+		noun = "Markdown"
 	}
 	if err := os.WriteFile(outputFile, []byte(stored.Content), 0o644); err != nil {
 		return "", fmt.Errorf("write output_file: %w", err)
@@ -953,10 +1032,10 @@ func saveArtifactForCLI(client *APIClient, id, version, outputFile string) (stri
 	sum := sha256.Sum256([]byte(stored.Content))
 	written := hex.EncodeToString(sum[:])
 	if stored.SHA256 != "" && stored.SHA256 != written {
-		return "", fmt.Errorf("the HTML written to %s has sha256 %s, but the stored version has %s", outputFile, written, stored.SHA256)
+		return "", fmt.Errorf("the %s written to %s has sha256 %s, but the stored version has %s", noun, outputFile, written, stored.SHA256)
 	}
-	return fmt.Sprintf("HTML of version %d of artifact %s written to %s (%s, sha256 %s), byte for byte as stored.",
-		stored.Version, id, outputFile, formatArtifactSize(int64(len(stored.Content))), written), nil
+	return fmt.Sprintf("%s of version %d of artifact %s written to %s (%s, sha256 %s), byte for byte as stored.",
+		noun, stored.Version, id, outputFile, formatArtifactSize(int64(len(stored.Content))), written), nil
 }
 
 func fetchArtifactAnnotations(client *APIClient, id, status string) ([]artifactAnnotationToolView, error) {

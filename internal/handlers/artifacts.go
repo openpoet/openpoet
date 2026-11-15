@@ -72,6 +72,7 @@ func (a *API) artifactPublishResponse(ctx context.Context, result application.Ar
 		"version":    result.Version,
 		"created":    result.Created,
 		"redacted":   result.Redacted,
+		"format":     result.Format,
 		"questions":  result.Questions,
 		"size_bytes": result.SizeBytes,
 		"sha256":     result.SHA256,
@@ -138,17 +139,17 @@ func decodeArtifactRequest(w http.ResponseWriter, r *http.Request, target any) b
 	return true
 }
 
-// CreateArtifact publishes a new HTML artifact (version 1).
+// CreateArtifact publishes a new artifact (version 1): an HTML document, or
+// markdown source.
 func (a *API) CreateArtifact(w http.ResponseWriter, r *http.Request) {
 	service, ok := a.artifactService(w)
 	if !ok {
 		return
 	}
 	var input struct {
+		artifactContentRequest
 		Title          string     `json:"title"`
 		Summary        string     `json:"summary"`
-		HTML           string     `json:"html"`
-		HTMLPath       string     `json:"html_path"`
 		ProjectID      flexibleID `json:"project_id"`
 		TaskID         flexibleID `json:"task_id"`
 		ConversationID flexibleID `json:"conversation_id"`
@@ -158,13 +159,13 @@ func (a *API) CreateArtifact(w http.ResponseWriter, r *http.Request) {
 	if !decodeArtifactRequest(w, r, &input) {
 		return
 	}
-	html, sourcePath, err := a.artifactHTMLInput(r, input.HTML, input.HTMLPath, input.SessionID)
+	content, format, sourcePath, err := a.artifactContentInput(r, input.artifactContentRequest, input.SessionID)
 	if err != nil {
 		respondArtifactFileError(w, err)
 		return
 	}
 	result, err := service.Create(platformUIContext(r), application.CreateArtifactCommand{
-		Title: input.Title, Summary: input.Summary, Content: html,
+		Title: input.Title, Summary: input.Summary, Content: content, Format: format,
 		ProjectID: input.ProjectID.pointer(), TaskID: input.TaskID.pointer(), ConversationID: input.ConversationID.pointer(),
 		SessionID: artifactSessionID(r, input.SessionID), DryRun: input.DryRun, Authorization: platformUIAuthorization(r),
 	})
@@ -186,8 +187,7 @@ func (a *API) UpdateArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		HTML        string     `json:"html"`
-		HTMLPath    string     `json:"html_path"`
+		artifactContentRequest
 		ChangeNote  string     `json:"change_note"`
 		BaseVersion flexibleID `json:"base_version"`
 		SessionID   string     `json:"session_id"`
@@ -198,13 +198,13 @@ func (a *API) UpdateArtifact(w http.ResponseWriter, r *http.Request) {
 	if !decodeArtifactRequest(w, r, &input) {
 		return
 	}
-	html, sourcePath, err := a.artifactHTMLInput(r, input.HTML, input.HTMLPath, input.SessionID)
+	content, format, sourcePath, err := a.artifactContentInput(r, input.artifactContentRequest, input.SessionID)
 	if err != nil {
 		respondArtifactFileError(w, err)
 		return
 	}
 	result, err := service.Update(platformUIContext(r), application.UpdateArtifactCommand{
-		ArtifactID: chi.URLParam(r, "id"), Content: html, ChangeNote: input.ChangeNote,
+		ArtifactID: chi.URLParam(r, "id"), Content: content, Format: format, ChangeNote: input.ChangeNote,
 		BaseVersion: int(input.BaseVersion), SessionID: artifactSessionID(r, input.SessionID),
 		Title: input.Title, Summary: input.Summary, DryRun: input.DryRun,
 		Authorization: platformUIAuthorization(r),
@@ -216,10 +216,11 @@ func (a *API) UpdateArtifact(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, a.artifactPublishResponse(r.Context(), result, sourcePath))
 }
 
-// PatchArtifactContent publishes a new version made of the HTML of
-// base_version with text replacements applied: POST /api/artifacts/{id}/patch
-// {base_version, edits:[{old, new, replace_all}], change_note}. A small change
-// then costs its own size instead of the whole document.
+// PatchArtifactContent publishes a new version made of the content of
+// base_version (its HTML, or its markdown source) with text replacements
+// applied: POST /api/artifacts/{id}/patch {base_version, edits:[{old, new,
+// replace_all}], change_note}. A small change then costs its own size instead
+// of the whole document. The new version keeps the format of base_version.
 func (a *API) PatchArtifactContent(w http.ResponseWriter, r *http.Request) {
 	service, ok := a.artifactService(w)
 	if !ok {
@@ -250,11 +251,12 @@ func (a *API) PatchArtifactContent(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, a.artifactPublishResponse(r.Context(), result, ""))
 }
 
-// ExportArtifactVersion writes the stored HTML of one version, byte for byte,
-// to a file in the calling session's workspace:
-// POST /api/artifacts/{id}/versions/{version}/export {path}. It answers with
-// the path written and the size and SHA-256 of the HTML, and never returns the
-// HTML itself.
+// ExportArtifactVersion writes the stored content of one version, byte for
+// byte, to a file in the calling session's workspace:
+// POST /api/artifacts/{id}/versions/{version}/export {path}. The file name has
+// to match the format of the version (.html, or .md for a markdown version).
+// It answers with the path written, the format and the size and SHA-256 of the
+// content, and never returns the content itself.
 func (a *API) ExportArtifactVersion(w http.ResponseWriter, r *http.Request) {
 	service, ok := a.artifactService(w)
 	if !ok {
@@ -284,13 +286,13 @@ func (a *API) ExportArtifactVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer workspace.close()
-	written, err := workspace.write(input.Path, view.Content)
+	written, err := workspace.writeFormat(input.Path, view.Format, view.Content)
 	if err != nil {
 		respondArtifactFileError(w, err)
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{
-		"artifact_id": view.ArtifactID, "version": view.Version, "path": written,
+		"artifact_id": view.ArtifactID, "version": view.Version, "path": written, "format": view.Format,
 		"size_bytes": view.SizeBytes, "sha256": view.SHA256,
 	})
 }
@@ -683,14 +685,29 @@ func (n platformArtifactNotifier) ArtifactAnnotationsChanged(_ context.Context, 
 //
 // CSP does not govern navigation: the artifact can still navigate its own
 // frame to another URL, carrying only what the artifact itself contains.
-const artifactContentSecurityPolicy = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; " +
+const artifactContentSecurityPolicy = "sandbox allow-scripts; " + artifactContentSecurityRules
+
+// artifactPrintContentSecurityPolicy is sent instead when the artifact is
+// rendered to be printed (render?print=1). The only difference is
+// allow-modals, which is what lets a sandboxed document open the print dialog.
+// It also lets the artifact's own scripts open alert, confirm and prompt
+// dialogs, so it is granted to that response alone: the viewer asks for it
+// when the user presses "PDF", in a frame it removes afterwards, and the
+// frame the user reads the artifact in never has it.
+const artifactPrintContentSecurityPolicy = "sandbox allow-scripts allow-modals; " + artifactContentSecurityRules
+
+const artifactContentSecurityRules = "default-src 'none'; script-src 'unsafe-inline'; " +
 	"style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; " +
 	"connect-src 'none'; form-action 'none'; base-uri 'none'; frame-src 'none'; child-src 'none'; " +
 	"worker-src 'none'; object-src 'none'; webrtc 'block'; frame-ancestors 'self'"
 
-func setArtifactRenderHeaders(w http.ResponseWriter) {
+func setArtifactRenderHeaders(w http.ResponseWriter, print bool) {
 	header := w.Header()
-	header.Set("Content-Security-Policy", artifactContentSecurityPolicy)
+	policy := artifactContentSecurityPolicy
+	if print {
+		policy = artifactPrintContentSecurityPolicy
+	}
+	header.Set("Content-Security-Policy", policy)
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("Referrer-Policy", "no-referrer")
 	header.Set("Cache-Control", "no-store")
@@ -705,8 +722,14 @@ func setArtifactRenderHeaders(w http.ResponseWriter) {
 // too, so nothing under this path is ever served without them. The route lives
 // under /api/ on purpose: the UI-cookie middleware never plants the UI secret
 // on /api/ responses.
+//
+// A markdown version is rendered into a page first (artifactMarkdownDocument).
+// With ?print=1 the document is served to be printed: the print step takes the
+// place of the annotation bridge and the response may open the print dialog
+// (see artifactPrintContentSecurityPolicy).
 func (a *API) RenderArtifact(w http.ResponseWriter, r *http.Request) {
-	setArtifactRenderHeaders(w)
+	print := r.URL.Query().Get("print") == "1"
+	setArtifactRenderHeaders(w, print)
 	renderError := func(status int, message string) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(status)
@@ -733,9 +756,19 @@ func (a *API) RenderArtifact(w http.ResponseWriter, r *http.Request) {
 		renderError(status, "artifact not available")
 		return
 	}
+	document := view.Content
+	if view.Format == database.ArtifactFormatMarkdown {
+		// The title is the page's <title>, which a browser offers as the name
+		// of the PDF it prints.
+		title := ""
+		if artifact, err := a.db.GetArtifact(r.Context(), view.ArtifactID); err == nil && artifact != nil {
+			title = artifact.Title
+		}
+		document = artifactMarkdownDocument(title, view.Content, print)
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(artifactRenderDocument(view.Content)))
+	_, _ = w.Write([]byte(artifactRenderDocument(document, print)))
 }
 
 // artifactBridgeScript is the annotation bridge appended to an artifact when it
@@ -784,10 +817,16 @@ var reCloseScript = regexp.MustCompile(`(?i)</script`)
 // unclosed <script> or comment) the artifact still renders and annotations are
 // simply unavailable for that version; the viewer says so. The guard cannot be
 // swallowed the same way: it precedes the artifact's markup.
-func artifactRenderDocument(html string) string {
+//
+// A document rendered to be printed gets the print step where the bridge would
+// be: nothing is annotated in the frame that prints.
+func artifactRenderDocument(html string, print bool) string {
 	guard := artifactScriptBlock("data-openpoet-guard", artifactGuardScript)
-	bridge := artifactScriptBlock("data-openpoet-bridge", artifactBridgeScript)
-	return injectAfterDoctype(html, guard) + "\n" + bridge
+	last := artifactScriptBlock("data-openpoet-bridge", artifactBridgeScript)
+	if print {
+		last = artifactScriptBlock("data-openpoet-print", artifactPrintScript)
+	}
+	return injectAfterDoctype(html, guard) + "\n" + last
 }
 
 // injectAfterDoctype inserts snippet right after a leading <!doctype ...>

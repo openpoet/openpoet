@@ -14,6 +14,7 @@ require (
 	github.com/pkg/sftp v1.13.6
 	github.com/sashabaranov/go-openai v1.43.0
 	github.com/severity1/claude-agent-sdk-go v0.10.0
+	github.com/yuin/goldmark v1.8.7
 	golang.org/x/crypto v0.28.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.53.0

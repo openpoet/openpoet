@@ -59,8 +59,30 @@ func TestArtifactToolsPublishFromAFilePatchAndExport(t *testing.T) {
 	if err != nil || !strings.Contains(result, integrity) || !strings.Contains(result, "Read from /home/dev/app/plan.html.") || !strings.Contains(result, shareable) {
 		t.Fatalf("create from file = %q err=%v", result, err)
 	}
-	if body := bodies["POST /api/artifacts"]; body["html_path"] != "plan.html" || body["html"] != "" || body["session_id"] != "sess-1" {
+	if body := bodies["POST /api/artifacts"]; body["html_path"] != "plan.html" || body["html"] != nil || body["session_id"] != "sess-1" {
 		t.Fatalf("create payload = %v", body)
+	}
+
+	// markdown from a file: the same, in the markdown fields.
+	if _, err := call("openpoet_create_artifact", `{"title":"Notes","markdown_path":"notes.md"}`); err != nil {
+		t.Fatalf("create from a markdown file: %v", err)
+	}
+	if body := bodies["POST /api/artifacts"]; body["markdown_path"] != "notes.md" || body["markdown"] != nil || body["html_path"] != nil || body["html"] != nil {
+		t.Fatalf("markdown create payload = %v", body)
+	}
+	if _, err := call("openpoet_create_artifact", `{"title":"Notes","markdown":"# Notes\n\nText."}`); err != nil {
+		t.Fatalf("create from inline markdown: %v", err)
+	}
+	if body := bodies["POST /api/artifacts"]; body["markdown"] != "# Notes\n\nText." || body["markdown_path"] != nil {
+		t.Fatalf("inline markdown create payload = %v", body)
+	}
+	for name, args := range map[string]string{
+		"html and markdown": `{"title":"X","html":"<p>x</p>","markdown":"x"}`,
+		"cli-only markdown": `{"title":"X","markdown_file":"/tmp/notes.md"}`,
+	} {
+		if _, err := call("openpoet_create_artifact", args); err == nil {
+			t.Fatalf("%s: accepted", name)
+		}
 	}
 
 	// update: exact size, hash and the links are in the result.

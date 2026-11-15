@@ -14,12 +14,14 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"openpoet/internal/application"
+	"openpoet/internal/database"
 	"openpoet/internal/files"
 )
 
-// An artifact can be published from a file (html_path) and its HTML written to
-// a file (output_path), so a session does not have to pass a large document
-// through a tool argument in either direction.
+// An artifact can be published from a file (html_path, or markdown_path for a
+// markdown version) and its content written to a file (output_path), so a
+// session does not have to pass a large document through a tool argument in
+// either direction.
 //
 // The file is read or written by OpenPoet on the machine the session runs on
 // (the local disk, or over SFTP for a remote project), and only for a session:
@@ -27,9 +29,10 @@ import (
 // the workspace or the machine's temporary directory, after symbolic links are
 // followed. OpenPoet reaches that machine with the same OS account the session
 // runs as, so this gives a session no file it could not already read or write
-// itself; the limits (a regular .html/.htm file, inside those directories, at
-// most the artifact size limit) keep the tool from being pointed at anything
-// that is not a page being published.
+// itself; the limits (a regular .html/.htm file, or .md/.markdown for a
+// markdown version, inside those directories, at most the artifact size limit)
+// keep the tool from being pointed at anything that is not a document being
+// published.
 
 // artifactFileError is a refusal the caller can act on.
 type artifactFileError struct {
@@ -176,9 +179,29 @@ func (a *API) artifactWorkspaceFor(r *http.Request, claimedSessionID string) (*a
 	}, nil
 }
 
-func isArtifactFileName(name string) bool {
+// artifactFileExtensions are the file names a version of each format may be
+// read from or written to.
+var artifactFileExtensions = map[string][]string{
+	database.ArtifactFormatHTML:     {".html", ".htm"},
+	database.ArtifactFormatMarkdown: {".md", ".markdown"},
+}
+
+func isArtifactFileName(name, format string) bool {
 	lower := strings.ToLower(name)
-	return strings.HasSuffix(lower, ".html") || strings.HasSuffix(lower, ".htm")
+	for _, extension := range artifactFileExtensions[format] {
+		if strings.HasSuffix(lower, extension) {
+			return true
+		}
+	}
+	return false
+}
+
+// artifactFileKind names the files a format accepts, for an error message.
+func artifactFileKind(format string) string {
+	if format == database.ArtifactFormatMarkdown {
+		return "a .md or .markdown file"
+	}
+	return "an .html or .htm file"
 }
 
 // within reports whether resolved is root or a path under it.
@@ -207,13 +230,13 @@ func (w *artifactWorkspace) allowed(resolved string) bool {
 	return false
 }
 
-func (w *artifactWorkspace) absolute(name string) (string, error) {
+func (w *artifactWorkspace) absolute(name, format string) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || strings.ContainsRune(name, 0) {
 		return "", artifactFileErrorf("invalid_path", "The file path is empty or invalid")
 	}
-	if !isArtifactFileName(name) {
-		return "", artifactFileErrorf("invalid_path", "The file must be an .html or .htm file: %s", name)
+	if !isArtifactFileName(name, format) {
+		return "", artifactFileErrorf("invalid_path", "The file must be %s: %s", artifactFileKind(format), name)
 	}
 	if !w.fs.IsAbs(name) {
 		name = w.fs.Join(w.roots[0], name)
@@ -226,7 +249,13 @@ const artifactFileOutsideMessage = "%s is outside this session's workspace (%s) 
 // read returns the content of an HTML file of the workspace and the resolved
 // path it was read from.
 func (w *artifactWorkspace) read(name string, maxBytes int64) (string, string, error) {
-	name, err := w.absolute(name)
+	return w.readFormat(name, database.ArtifactFormatHTML, maxBytes)
+}
+
+// readFormat is read for a file of the given format (an HTML page or a
+// markdown file).
+func (w *artifactWorkspace) readFormat(name, format string, maxBytes int64) (string, string, error) {
+	name, err := w.absolute(name, format)
 	if err != nil {
 		return "", "", err
 	}
@@ -237,8 +266,8 @@ func (w *artifactWorkspace) read(name string, maxBytes int64) (string, string, e
 	if !w.allowed(resolved) {
 		return "", "", artifactFileErrorf("path_not_allowed", artifactFileOutsideMessage, resolved, w.roots[0])
 	}
-	if !isArtifactFileName(resolved) {
-		return "", "", artifactFileErrorf("invalid_path", "The file must be an .html or .htm file: %s", resolved)
+	if !isArtifactFileName(resolved, format) {
+		return "", "", artifactFileErrorf("invalid_path", "The file must be %s: %s", artifactFileKind(format), resolved)
 	}
 	info, err := w.fs.Lstat(resolved)
 	if err != nil || !info.Mode().IsRegular() {
@@ -265,7 +294,13 @@ func (w *artifactWorkspace) read(name string, maxBytes int64) (string, string, e
 // write stores content in an HTML file of the workspace, replacing an existing
 // regular file, and returns the resolved path. The directory must exist.
 func (w *artifactWorkspace) write(name, content string) (string, error) {
-	name, err := w.absolute(name)
+	return w.writeFormat(name, database.ArtifactFormatHTML, content)
+}
+
+// writeFormat is write for a version of the given format: the file name has to
+// match what is written (a markdown version goes to a .md file).
+func (w *artifactWorkspace) writeFormat(name, format, content string) (string, error) {
+	name, err := w.absolute(name, format)
 	if err != nil {
 		return "", err
 	}
@@ -299,21 +334,47 @@ func (w *artifactWorkspace) write(name, content string) (string, error) {
 	return target, nil
 }
 
-// artifactHTMLInput returns the document of a create or update request: the
-// html field, or the file html_path names in the session's workspace. source
-// is the resolved path when the document came from a file.
-func (a *API) artifactHTMLInput(r *http.Request, html, htmlPath, claimedSessionID string) (content, source string, err error) {
-	htmlPath = strings.TrimSpace(htmlPath)
-	if htmlPath == "" {
-		return html, "", nil
+// artifactContentRequest is the content of a create or update request: an HTML
+// document (html, or the file html_path names) or markdown source (markdown,
+// or the file markdown_path names). The paths are files of the session's
+// workspace.
+type artifactContentRequest struct {
+	HTML         string `json:"html"`
+	HTMLPath     string `json:"html_path"`
+	Markdown     string `json:"markdown"`
+	MarkdownPath string `json:"markdown_path"`
+}
+
+// artifactContentInput returns the content a create or update request carries
+// and its format. Exactly one of the four fields names it (none is left to the
+// service, which answers that the content is required). source is the resolved
+// path when the content came from a file.
+func (a *API) artifactContentInput(r *http.Request, input artifactContentRequest, claimedSessionID string) (content, format, source string, err error) {
+	htmlPath, markdownPath := strings.TrimSpace(input.HTMLPath), strings.TrimSpace(input.MarkdownPath)
+	given := 0
+	for _, present := range []bool{strings.TrimSpace(input.HTML) != "", htmlPath != "", strings.TrimSpace(input.Markdown) != "", markdownPath != ""} {
+		if present {
+			given++
+		}
 	}
-	if strings.TrimSpace(html) != "" {
-		return "", "", artifactFileErrorf("invalid_request", "Pass html or html_path, not both")
+	if given > 1 {
+		return "", "", "", artifactFileErrorf("invalid_request", "Pass only one of html, html_path, markdown and markdown_path")
+	}
+	format, filePath := database.ArtifactFormatHTML, htmlPath
+	if strings.TrimSpace(input.Markdown) != "" || markdownPath != "" {
+		format, filePath = database.ArtifactFormatMarkdown, markdownPath
+	}
+	if filePath == "" {
+		if format == database.ArtifactFormatMarkdown {
+			return input.Markdown, format, "", nil
+		}
+		return input.HTML, format, "", nil
 	}
 	workspace, err := a.artifactWorkspaceFor(r, claimedSessionID)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	defer workspace.close()
-	return workspace.read(htmlPath, application.MaxArtifactHTMLBytes)
+	content, source, err = workspace.readFormat(filePath, format, application.MaxArtifactHTMLBytes)
+	return content, format, source, err
 }

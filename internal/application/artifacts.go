@@ -18,7 +18,8 @@ import (
 	"openpoet/internal/database"
 )
 
-// MaxArtifactHTMLBytes bounds the HTML of one artifact version.
+// MaxArtifactHTMLBytes bounds the content of one artifact version (the HTML
+// document, or the markdown source).
 const MaxArtifactHTMLBytes = 2 << 20
 
 const maxArtifactChangeNoteRunes = 1000
@@ -44,15 +45,18 @@ type ArtifactStore interface {
 }
 
 type ArtifactView struct {
-	ID              string                `json:"id"`
-	Title           string                `json:"title"`
-	Summary         string                `json:"summary,omitempty"`
-	Status          string                `json:"status"`
-	ProjectID       *int64                `json:"project_id,omitempty"`
-	TaskID          *int64                `json:"task_id,omitempty"`
-	ConversationID  *int64                `json:"conversation_id,omitempty"`
-	SessionID       string                `json:"session_id,omitempty"`
-	CurrentVersion  int                   `json:"current_version"`
+	ID             string `json:"id"`
+	Title          string `json:"title"`
+	Summary        string `json:"summary,omitempty"`
+	Status         string `json:"status"`
+	ProjectID      *int64 `json:"project_id,omitempty"`
+	TaskID         *int64 `json:"task_id,omitempty"`
+	ConversationID *int64 `json:"conversation_id,omitempty"`
+	SessionID      string `json:"session_id,omitempty"`
+	CurrentVersion int    `json:"current_version"`
+	// Format is the format of the current version ("html" or "markdown"),
+	// where the caller knows it (listings, the detail view and publishes).
+	Format          string                `json:"format,omitempty"`
 	SizeBytes       int64                 `json:"size_bytes,omitempty"`
 	OpenAnnotations int                   `json:"open_annotations"`
 	CreatedBy       string                `json:"created_by,omitempty"`
@@ -64,6 +68,7 @@ type ArtifactView struct {
 type ArtifactVersionView struct {
 	ArtifactID string    `json:"artifact_id"`
 	Version    int       `json:"version"`
+	Format     string    `json:"format"`
 	SizeBytes  int64     `json:"size_bytes"`
 	SHA256     string    `json:"sha256"`
 	ChangeNote string    `json:"change_note,omitempty"`
@@ -82,6 +87,8 @@ type ArtifactPublishResult struct {
 	Version  int          `json:"version"`
 	Created  bool         `json:"created"`
 	Redacted bool         `json:"redacted,omitempty"`
+	// Format is the format of the published version: "html" or "markdown".
+	Format string `json:"format"`
 	// Questions is how many questions the published version declares for the
 	// reader to answer.
 	Questions int `json:"questions"`
@@ -112,9 +119,12 @@ type ArtifactPublishResult struct {
 const artifactCreateRetryWindow = 10 * time.Minute
 
 type CreateArtifactCommand struct {
-	Title          string
-	Summary        string
+	Title   string
+	Summary string
+	// Content is an HTML document, or markdown source when Format is
+	// "markdown". An empty Format means "html".
 	Content        string
+	Format         string
 	ProjectID      *int64
 	TaskID         *int64
 	ConversationID *int64
@@ -126,8 +136,11 @@ type CreateArtifactCommand struct {
 }
 
 type UpdateArtifactCommand struct {
-	ArtifactID  string
+	ArtifactID string
+	// Content and Format are as in CreateArtifactCommand. A version may be in
+	// another format than the one before it.
 	Content     string
+	Format      string
 	ChangeNote  string
 	BaseVersion int
 	SessionID   string
@@ -251,11 +264,7 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 	if err != nil {
 		return ArtifactPublishResult{}, err
 	}
-	content, redactions, err := normalizeArtifactHTML(command.Content)
-	if err != nil {
-		return ArtifactPublishResult{}, err
-	}
-	questions, err := artifactQuestionsOf(content)
+	format, content, redactions, questions, err := normalizeArtifactContent(command.Format, command.Content)
 	if err != nil {
 		return ArtifactPublishResult{}, err
 	}
@@ -263,7 +272,7 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 	if len(sessionID) > 200 {
 		return ArtifactPublishResult{}, validationError("invalid_session_id", "Session ID exceeds its bounded limit")
 	}
-	stored := ArtifactPublishResult{Version: 1, Questions: len(questions), SizeBytes: int64(len(content)), SHA256: artifactContentHash(content)}
+	stored := ArtifactPublishResult{Version: 1, Format: format, Questions: len(questions), SizeBytes: int64(len(content)), SHA256: artifactContentHash(content)}
 	stored.setRedactions(redactions)
 	if command.DryRun {
 		stored.DryRun = true
@@ -274,7 +283,7 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 	if sessionID != "" {
 		if existing, err := s.store.FindRecentArtifactByContent(ctx, sessionID, title, stored.SHA256, artifactCreateRetryWindow); err == nil && existing != nil {
 			stored.Artifact, stored.Version, stored.Duplicate = artifactView(existing), existing.CurrentVersion, true
-			stored.Artifact.SizeBytes = stored.SizeBytes
+			stored.Artifact.SizeBytes, stored.Artifact.Format = stored.SizeBytes, format
 			return stored, nil
 		}
 	}
@@ -329,7 +338,7 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 		artifact.ConversationID = sql.NullInt64{Int64: *command.ConversationID, Valid: true}
 	}
 	version := &database.ArtifactVersion{
-		Content: content, SizeBytes: int64(len(content)), SHA256: artifactContentHash(content),
+		Format: format, Content: content, SizeBytes: int64(len(content)), SHA256: artifactContentHash(content),
 		CreatedBy: actor, SessionID: sessionID, Questions: questions,
 	}
 	if err := s.store.CreateArtifact(ctx, artifact, version); err != nil {
@@ -341,7 +350,7 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 	}
 	publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "artifacts", Action: "created", Meta: artifactChangeMeta(created)})
 	view := artifactView(created)
-	view.SizeBytes = version.SizeBytes
+	view.SizeBytes, view.Format = version.SizeBytes, format
 	s.notifyPublished(ctx, view, true)
 	stored.Artifact, stored.Created = view, true
 	return stored, nil
@@ -388,11 +397,7 @@ func (s *ArtifactService) Update(ctx context.Context, command UpdateArtifactComm
 	if command.BaseVersion < 0 {
 		return ArtifactPublishResult{}, validationError("invalid_base_version", "base_version cannot be negative")
 	}
-	content, redactions, err := normalizeArtifactHTML(command.Content)
-	if err != nil {
-		return ArtifactPublishResult{}, err
-	}
-	questions, err := artifactQuestionsOf(content)
+	format, content, redactions, questions, err := normalizeArtifactContent(command.Format, command.Content)
 	if err != nil {
 		return ArtifactPublishResult{}, err
 	}
@@ -408,13 +413,13 @@ func (s *ArtifactService) Update(ctx context.Context, command UpdateArtifactComm
 	if len(sessionID) > 200 {
 		return ArtifactPublishResult{}, validationError("invalid_session_id", "Session ID exceeds its bounded limit")
 	}
-	result := ArtifactPublishResult{Questions: len(questions), SizeBytes: int64(len(content)), SHA256: artifactContentHash(content)}
+	result := ArtifactPublishResult{Format: format, Questions: len(questions), SizeBytes: int64(len(content)), SHA256: artifactContentHash(content)}
 	result.setRedactions(redactions)
 	if command.DryRun {
 		return s.updateDryRun(ctx, id, command.BaseVersion, result)
 	}
 	version := &database.ArtifactVersion{
-		Content: content, SizeBytes: int64(len(content)), SHA256: artifactContentHash(content),
+		Format: format, Content: content, SizeBytes: int64(len(content)), SHA256: artifactContentHash(content),
 		ChangeNote: note, CreatedBy: command.Authorization.Actor.eventValue(), SessionID: sessionID,
 		Questions: questions,
 	}
@@ -441,7 +446,7 @@ func (s *ArtifactService) Update(ctx context.Context, command UpdateArtifactComm
 		}
 	}
 	view := artifactView(stored)
-	view.SizeBytes = version.SizeBytes
+	view.SizeBytes, view.Format = version.SizeBytes, format
 	if created {
 		publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "artifacts", Action: "version_published", Meta: artifactChangeMeta(stored)})
 		s.notifyPublished(ctx, view, false)
@@ -467,9 +472,9 @@ func (s *ArtifactService) updateDryRun(ctx context.Context, id string, baseVersi
 		return ArtifactPublishResult{}, notFoundError("artifact_version_not_found", "Artifact version not found", err)
 	}
 	result.Artifact, result.DryRun = artifactView(artifact), true
-	result.Artifact.SizeBytes = current.SizeBytes
+	result.Artifact.SizeBytes, result.Artifact.Format = current.SizeBytes, current.Format
 	result.Version = artifact.CurrentVersion
-	if current.SHA256 != result.SHA256 {
+	if current.SHA256 != result.SHA256 || current.Format != result.Format {
 		result.Version++
 		result.Created = true // a version would be created
 	}
@@ -517,8 +522,9 @@ func (s *ArtifactService) Patch(ctx context.Context, command PatchArtifactComman
 	}
 	// Update checks base_version again inside the write transaction, so a
 	// version published between the read above and the write is a conflict.
+	// A patch keeps the format of the version it edits.
 	result, err := s.Update(ctx, UpdateArtifactCommand{
-		ArtifactID: id, Content: content, ChangeNote: command.ChangeNote, BaseVersion: command.BaseVersion,
+		ArtifactID: id, Content: content, Format: base.Format, ChangeNote: command.ChangeNote, BaseVersion: command.BaseVersion,
 		SessionID: command.SessionID, Title: command.Title, Summary: command.Summary, DryRun: command.DryRun,
 		Authorization: command.Authorization,
 	})
@@ -643,7 +649,7 @@ func (s *ArtifactService) Get(ctx context.Context, artifactID string) (ArtifactV
 	for i := range versions {
 		view.Versions = append(view.Versions, artifactVersionView(&versions[i], false))
 		if versions[i].Version == stored.CurrentVersion {
-			view.SizeBytes = versions[i].SizeBytes
+			view.SizeBytes, view.Format = versions[i].SizeBytes, versions[i].Format
 		}
 	}
 	if view.OpenAnnotations, err = s.store.CountOpenArtifactAnnotations(ctx, id); err != nil {
@@ -693,7 +699,7 @@ func (s *ArtifactService) List(ctx context.Context, query ArtifactListQuery) ([]
 	views := make([]ArtifactView, 0, len(items))
 	for i := range items {
 		view := artifactView(&items[i].Artifact)
-		view.SizeBytes = items[i].SizeBytes
+		view.SizeBytes, view.Format = items[i].SizeBytes, items[i].Format
 		view.OpenAnnotations = items[i].OpenAnnotations
 		views = append(views, view)
 	}
@@ -730,13 +736,68 @@ func normalizeArtifactHTML(content string) (string, []ArtifactRedaction, error) 
 		return "", nil, validationError("invalid_artifact_html", "Artifact HTML must be valid UTF-8 text")
 	}
 	if !artifactHTMLPattern.MatchString(content) {
-		return "", nil, validationError("invalid_artifact_html", "Artifact content must be an HTML document (use a Doc for markdown or plain text)")
+		return "", nil, validationError("invalid_artifact_html", "Artifact content must be an HTML document (publish markdown or plain text as markdown instead of html)")
 	}
 	// The document is stored as it was sent: its size and SHA-256 are reported
 	// back so the publisher can compare them with its own copy. Masking is the
 	// only thing that changes it.
 	masked, redactions := maskArtifactSecrets(content)
 	return masked, redactions, nil
+}
+
+// normalizeArtifactFormat maps the format a caller named to a stored one. An
+// empty format is HTML, which is what every publish was before markdown.
+func normalizeArtifactFormat(format string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "", database.ArtifactFormatHTML:
+		return database.ArtifactFormatHTML, nil
+	case database.ArtifactFormatMarkdown, "md":
+		return database.ArtifactFormatMarkdown, nil
+	}
+	return "", validationError("invalid_artifact_format", "Artifact format must be html or markdown")
+}
+
+// normalizeArtifactMarkdown validates the markdown source of a version and
+// masks credentials in it. Any text is markdown, so only the bounds are
+// checked. The source is stored as it was sent, masking aside.
+func normalizeArtifactMarkdown(content string) (string, []ArtifactRedaction, error) {
+	if strings.TrimSpace(content) == "" {
+		return "", nil, validationError("content_required", "Artifact markdown is required")
+	}
+	if len(content) > MaxArtifactHTMLBytes {
+		return "", nil, validationError("content_too_large",
+			fmt.Sprintf("Artifact markdown is %d bytes; the limit is %d bytes per version", len(content), MaxArtifactHTMLBytes))
+	}
+	if !utf8.ValidString(content) || strings.ContainsRune(content, 0) {
+		return "", nil, validationError("invalid_artifact_markdown", "Artifact markdown must be valid UTF-8 text")
+	}
+	masked, redactions := maskArtifactSecrets(content)
+	return masked, redactions, nil
+}
+
+// normalizeArtifactContent validates the content of a version in the given
+// format and returns what is stored: the format, the content after masking,
+// where it was masked, and the questions it declares. Only an HTML document
+// declares questions: they are a block of the page and elements its script
+// marks, which markdown has no way to write.
+func normalizeArtifactContent(format, content string) (string, string, []ArtifactRedaction, []database.ArtifactQuestion, error) {
+	format, err := normalizeArtifactFormat(format)
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+	if format == database.ArtifactFormatMarkdown {
+		normalized, redactions, err := normalizeArtifactMarkdown(content)
+		return format, normalized, redactions, nil, err
+	}
+	normalized, redactions, err := normalizeArtifactHTML(content)
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+	questions, err := artifactQuestionsOf(normalized)
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+	return format, normalized, redactions, questions, nil
 }
 
 // CheckArtifactHTML reports whether content would be accepted as an artifact
@@ -801,8 +862,12 @@ func artifactView(artifact *database.Artifact) ArtifactView {
 }
 
 func artifactVersionView(version *database.ArtifactVersion, includeContent bool) ArtifactVersionView {
+	format := version.Format
+	if format == "" {
+		format = database.ArtifactFormatHTML
+	}
 	view := ArtifactVersionView{
-		ArtifactID: version.ArtifactID, Version: version.Version, SizeBytes: version.SizeBytes, SHA256: version.SHA256,
+		ArtifactID: version.ArtifactID, Version: version.Version, Format: format, SizeBytes: version.SizeBytes, SHA256: version.SHA256,
 		ChangeNote: version.ChangeNote, CreatedBy: version.CreatedBy, SessionID: version.SessionID, CreatedAt: version.CreatedAt,
 	}
 	if includeContent {
@@ -1054,6 +1119,11 @@ func (s *ArtifactService) ListAnnotationsWithPlacement(ctx context.Context, arti
 				return nil, notFoundError("artifact_version_not_found", "Artifact version not found", err)
 			}
 			markup, loaded = current.Content, true
+			// A note was made on the rendered page, so a markdown version is
+			// checked as the page it renders to, not as its source.
+			if current.Format == database.ArtifactFormatMarkdown {
+				markup, _ = RenderArtifactMarkdown(markup)
+			}
 			text = artifactPlainText(markup)
 		}
 		view.Placement = artifactAnnotationPlacement(view.Anchor, artifact.CurrentVersion, markup, text)

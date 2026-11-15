@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"openpoet/internal/application"
+	"openpoet/internal/database"
 	"openpoet/internal/mcp"
 )
 
@@ -60,6 +61,21 @@ func chatToolOptionalID(input map[string]interface{}, key string) (*int64, error
 	return &id, nil
 }
 
+// chatArtifactContent returns the content a chat tool call carries and its
+// format: the html argument (an HTML document) or the markdown argument
+// (markdown source). given is false when the call carries neither.
+func chatArtifactContent(input map[string]interface{}) (content, format string, given bool, err error) {
+	html, hasHTML := input["html"].(string)
+	markdown, hasMarkdown := input["markdown"].(string)
+	if strings.TrimSpace(html) != "" && strings.TrimSpace(markdown) != "" {
+		return "", "", false, fmt.Errorf("pass html or markdown, not both")
+	}
+	if hasMarkdown && strings.TrimSpace(html) == "" {
+		return markdown, database.ArtifactFormatMarkdown, true, nil
+	}
+	return html, database.ArtifactFormatHTML, hasHTML, nil
+}
+
 // executeArtifactChatTool runs one artifact tool for the chat assistant.
 func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, input map[string]interface{}, conversationID int64, authorization application.ActionAuthorization) (string, error) {
 	services, ready := h.api.platformApplicationServices()
@@ -82,9 +98,9 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 
 	// The chat assistant has no workspace: a file path only means something to
 	// a session, whose files OpenPoet can reach.
-	for _, key := range []string{"html_path", "output_path"} {
+	for _, key := range []string{"html_path", "markdown_path", "output_path"} {
 		if chatToolString(input, key) != "" {
-			return "", fmt.Errorf("%s is only available to a session, which has a workspace; here, pass the document in html (and read it with include_html)", key)
+			return "", fmt.Errorf("%s is only available to a session, which has a workspace; here, pass the document in html or markdown (and read it with include_html)", key)
 		}
 	}
 
@@ -103,13 +119,16 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 
 	switch name {
 	case "create_artifact":
-		html, _ := input["html"].(string)
+		content, format, _, err := chatArtifactContent(input)
+		if err != nil {
+			return "", err
+		}
 		taskID, err := chatToolOptionalID(input, "task_id")
 		if err != nil {
 			return "", err
 		}
 		command := application.CreateArtifactCommand{
-			Title: chatToolString(input, "title"), Summary: chatToolString(input, "summary"), Content: html,
+			Title: chatToolString(input, "title"), Summary: chatToolString(input, "summary"), Content: content, Format: format,
 			TaskID: taskID, DryRun: dryRun, Authorization: authorization,
 		}
 		if conversationID > 0 {
@@ -129,9 +148,12 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		if artifactID == "" {
 			return "", fmt.Errorf("artifact_id is required")
 		}
-		html, hasHTML := input["html"].(string)
+		content, format, hasContent, err := chatArtifactContent(input)
+		if err != nil {
+			return "", err
+		}
 		// A title or summary on its own changes them without a new version.
-		if !hasHTML && (title != nil || summary != nil) {
+		if !hasContent && (title != nil || summary != nil) {
 			view, err := service.UpdateMeta(ctx, application.UpdateArtifactMetaCommand{
 				ArtifactID: artifactID, Title: title, Summary: summary, Authorization: authorization,
 			})
@@ -149,7 +171,7 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 			baseVersion = parsed
 		}
 		result, err := service.Update(ctx, application.UpdateArtifactCommand{
-			ArtifactID: artifactID, Content: html, ChangeNote: chatToolString(input, "change_note"),
+			ArtifactID: artifactID, Content: content, Format: format, ChangeNote: chatToolString(input, "change_note"),
 			BaseVersion: baseVersion, Title: title, Summary: summary, DryRun: dryRun, Authorization: authorization,
 		})
 		if err != nil {
@@ -164,7 +186,7 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 		}
 		baseVersion, err := strconv.Atoi(chatToolString(input, "base_version"))
 		if err != nil || baseVersion <= 0 {
-			return "", fmt.Errorf("base_version is required: the version whose HTML your edits were written against")
+			return "", fmt.Errorf("base_version is required: the version whose content your edits were written against")
 		}
 		// The edits are decoded the way the REST route decodes them.
 		var edits []application.ArtifactEdit

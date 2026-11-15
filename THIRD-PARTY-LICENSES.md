@@ -40,6 +40,7 @@ all`) without being compiled in are not listed.
 | [github.com/remyoudompheng/bigfft](https://github.com/remyoudompheng/bigfft) | v0.0.0-20230129092748-24d4a6f8daec | BSD-3-Clause | The Go Authors | all (via modernc.org) | no |
 | [github.com/sashabaranov/go-openai](https://github.com/sashabaranov/go-openai) | v1.43.0 | Apache-2.0 | go-openai contributors | all | yes |
 | [github.com/severity1/claude-agent-sdk-go](https://github.com/severity1/claude-agent-sdk-go) | v0.10.0 | MIT | John Reilly Pospos | all | yes |
+| [github.com/yuin/goldmark](https://github.com/yuin/goldmark) | v1.8.7 | MIT | Yusuke Inuzuka | all | yes |
 | [golang.org/x/crypto](https://go.googlesource.com/crypto) | v0.28.0 | BSD-3-Clause | The Go Authors | all | yes |
 | [golang.org/x/sys](https://go.googlesource.com/sys) | v0.44.0 | BSD-3-Clause | The Go Authors | all | no |
 | [gopkg.in/yaml.v3](https://github.com/go-yaml/yaml) | v3.0.1 | MIT AND Apache-2.0 | Kirill Simonov; Canonical Ltd. | all | yes |
@@ -634,6 +635,32 @@ Apache License 2.0: the full text is reproduced once, at the end of this file
 MIT License
 
 Copyright (c) 2025 John Reilly Pospos
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### github.com/yuin/goldmark v1.8.7 (MIT)
+
+```text
+MIT License
+
+Copyright (c) 2019 Yusuke Inuzuka
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
