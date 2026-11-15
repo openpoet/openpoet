@@ -89,6 +89,18 @@ type DocumentService struct {
 	store   DocumentStore
 	mirror  MemoryDocumentMirror
 	effects ApplicationEffects
+	publish ArtifactPublisher
+}
+
+// ArtifactPublisher publishes an artifact (ArtifactService.Create).
+type ArtifactPublisher func(context.Context, CreateArtifactCommand) (ArtifactPublishResult, error)
+
+// SetArtifactPublisher makes CreateTemp publish a markdown artifact instead of
+// storing a Doc. Artifacts are the one format of documents: what the document
+// tools and routes create is an artifact, named by a document id as before.
+// Without a publisher (a store with no artifacts) a Doc is stored.
+func (s *DocumentService) SetArtifactPublisher(publish ArtifactPublisher) {
+	s.publish = publish
 }
 
 func NewDocumentService(store DocumentStore, mirror MemoryDocumentMirror, effects ApplicationEffects) *DocumentService {
@@ -171,6 +183,25 @@ func (s *DocumentService) CreateTemp(ctx context.Context, command CreateTempDocu
 	}
 	if len(command.SessionID) > 200 {
 		return TempDocumentView{}, validationError("invalid_session_id", "Session ID exceeds its bounded limit")
+	}
+	if s.publish != nil {
+		// The document is a markdown artifact. Its id is returned as the
+		// document id, which is how the caller's card and link name it.
+		published, err := s.publish(ctx, CreateArtifactCommand{
+			Title: title, Summary: summary, Content: content, Format: database.ArtifactFormatMarkdown,
+			ConversationID: command.ConversationID, TaskID: command.TaskID, SessionID: strings.TrimSpace(command.SessionID),
+			CardHandled: true, Authorization: command.Authorization,
+		})
+		if err != nil {
+			return TempDocumentView{}, err
+		}
+		artifact := published.Artifact
+		publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "documents", Action: "temp_created", Meta: map[string]any{"document_id": artifact.ID}})
+		return TempDocumentView{
+			ID: artifact.ID, Title: artifact.Title, SessionID: artifact.SessionID, CreatedAt: artifact.CreatedAt,
+			ConversationID: artifact.ConversationID, TaskID: artifact.TaskID,
+			ArtifactID: artifact.ID, Format: database.ArtifactFormatMarkdown,
+		}, nil
 	}
 	doc := &database.TempDocument{ID: uuid.NewString()[:8], Title: title, Content: content, Summary: summary, SessionID: strings.TrimSpace(command.SessionID)}
 	if command.ConversationID != nil {

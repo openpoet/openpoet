@@ -48,6 +48,20 @@ func (a *API) RedirectDocumentLink(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// LegacyDocsReport serves GET /api/artifacts/legacy-docs/report: how the copy
+// of Docs into artifacts stands. It only reads. It answers with counts (Docs,
+// how many have an artifact, how many do not yet, what they became) and, for
+// every copied Doc, whether its artifact still holds what the Doc holds; a Doc
+// that differs is named by its id and the field, never by its title or content.
+func (a *API) LegacyDocsReport(w http.ResponseWriter, r *http.Request) {
+	report, err := a.db.VerifyLegacyDocMigration(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "The copy of Docs could not be checked")
+		return
+	}
+	respondJSON(w, http.StatusOK, report)
+}
+
 // reviewArtifactActor is the author of the artifacts the server publishes for
 // the user to decide on.
 var reviewArtifactActor = application.Actor{Type: "system", ID: "proposals"}
@@ -165,9 +179,10 @@ func (c chatDocCard) sse() map[string]interface{} {
 	return card
 }
 
-// conversationDocCards returns the cards of a conversation, oldest first: its
-// proposals (artifacts with a review), its file cards, and the Docs it still
-// has from before both moved out of the Docs table.
+// conversationDocCards returns the cards of a conversation, oldest first: the
+// documents it published and its proposals (artifacts, the latter with a
+// review), its file cards, and the Docs it still has that were not copied into
+// artifacts.
 func (a *API) conversationDocCards(ctx context.Context, conversationID int64) []chatDocCard {
 	cards := []chatDocCard{}
 	if conversationID <= 0 {
@@ -196,6 +211,15 @@ func (a *API) conversationDocCards(ctx context.Context, conversationID int64) []
 		cards = append(cards, chatDocCard{
 			ID: proposal.ID, Type: reviewCardType(proposal.Kind), Title: proposal.Title, Summary: proposal.Summary,
 			Status: proposal.Status, MessageID: proposal.MessageID, CreatedAt: proposal.CreatedAt,
+		})
+	}
+	// The documents the conversation published are artifacts. Their card
+	// carries the bare id, which opens the artifact like any document id.
+	documents, _ := a.db.ListConversationDocumentArtifacts(ctx, conversationID)
+	for _, document := range documents {
+		cards = append(cards, chatDocCard{
+			ID: document.ID, Type: "document", Title: document.Title, Summary: document.Summary,
+			MessageID: document.MessageID, CreatedAt: document.CreatedAt,
 		})
 	}
 	files, _ := a.db.ListChatFileCards(ctx, conversationID)

@@ -68,6 +68,9 @@ type ArtifactView struct {
 	// decision: a proposal or a task's verification document. A plain
 	// document has none.
 	Review *ArtifactReviewView `json:"review,omitempty"`
+	// CardHandled tells the notifier that whoever published the artifact
+	// shows its card itself, so the notifier must not show a second one.
+	CardHandled bool `json:"-"`
 }
 
 // ArtifactReviewView is the approval state of an artifact: what is decided
@@ -160,6 +163,9 @@ type CreateArtifactCommand struct {
 	// decision (a proposal, a verification document). Only the server sets
 	// it: no route or tool passes it on from a caller.
 	Review *ArtifactReviewRequest
+	// CardHandled says the caller shows the card of the new artifact itself
+	// (the document tools do, under the document id they return).
+	CardHandled bool
 	// DryRun validates the document and reports what would be stored,
 	// without creating anything.
 	DryRun        bool
@@ -398,6 +404,7 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 	view := artifactView(created)
 	view.SizeBytes, view.Format = version.SizeBytes, format
 	view.Review = artifactReviewView(artifact.Review)
+	view.CardHandled = command.CardHandled
 	s.notifyPublished(ctx, view, true)
 	stored.Artifact, stored.Created = view, true
 	return stored, nil

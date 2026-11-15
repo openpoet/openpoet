@@ -205,6 +205,19 @@ async function main() {
     assert.equal(await page.locator('#artifact-viewer-name').textContent(), 'E2E link target');
     assert.equal(await page.locator('#artifact-viewer-download').getAttribute('title'), 'Download HTML');
 
+    // --- what the document route creates is a markdown artifact, opened by its document id
+    const document = await api(page, 'POST', '/api/documents', { title: 'E2E document', content: '# E2E document\n\nA short answer.' });
+    assert.equal(document.status, 201, document.text);
+    created.push(document.json.id);
+    assert.equal(document.json.link, `/app/doc/${document.json.id}`);
+    const stored = await api(page, 'GET', `/api/artifacts/${document.json.id}`);
+    assert.equal(stored.json.format, 'markdown');
+    await page.evaluate(id => window.docViewer.open(id), document.json.id);
+    await frame.locator('#openpoet-markdown h1:text-is("E2E document")').waitFor({ timeout: 10000 });
+    assert.equal(await page.locator('#doc-review-overlay').evaluate(el => el.classList.contains('hidden')), true,
+      'a document must open in the artifact viewer');
+    assert.equal(await page.locator('#artifact-viewer-download').getAttribute('title'), 'Download markdown');
+
     assert.deepEqual(pageErrors, [], `page errors: ${pageErrors.join(' | ')}`);
     console.log('artifact markdown smoke: OK');
   } finally {

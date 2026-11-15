@@ -27,7 +27,6 @@ import (
 	"openpoet/internal/sessionmeta"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 )
 
 var docLinkRe = regexp.MustCompile(`/app/doc/([a-zA-Z0-9-]+)`)
@@ -3266,18 +3265,28 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 			title = "Documento"
 		}
 
-		doc := &database.TempDocument{
-			ID:             uuid.New().String()[:8],
-			Title:          title,
-			Content:        content,
-			ConversationID: sql.NullInt64{Int64: conversationID, Valid: conversationID > 0},
-			MessageID:      messageID,
+		// The document is a markdown artifact, published into the project the
+		// conversation was opened on. It is named by a document link, which
+		// the chat turns into its card and which opens the artifact.
+		services, ready := h.api.platformApplicationServices()
+		if !ready || services.Collaboration.Artifacts == nil {
+			return "", fmt.Errorf("artifact service is unavailable")
 		}
-		if err := h.api.db.CreateTempDocument(ctx, doc); err != nil {
+		command := application.CreateArtifactCommand{
+			Title: title, Content: content, Format: database.ArtifactFormatMarkdown, CardHandled: true, Authorization: authorization,
+		}
+		if conversationID > 0 {
+			command.ConversationID = &conversationID
+			if projectID := h.getProjectIDFromConversation(ctx, conversationID); projectID > 0 {
+				command.ProjectID = &projectID
+			}
+		}
+		published, err := services.Collaboration.Artifacts.Create(ctx, command)
+		if err != nil {
 			return "", err
 		}
 
-		link := application.DocumentLinkPath(doc.ID)
+		link := application.DocumentLinkPath(published.Artifact.ID)
 		return fmt.Sprintf("Document created successfully. A 'View Document' button was automatically displayed in chat. Do NOT generate links — the user will use the native button. Internal link: %s%s",
 			link, mcp.ShareableLinkNote(h.api.Links().Absolute(ctx, link), "")), nil
 

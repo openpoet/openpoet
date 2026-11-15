@@ -67,6 +67,7 @@ async function main() {
   const browser = await chromium.launch({ headless: true });
   const setup = await browser.newPage();
   let artifactId = '';
+  let documentId = ''; // the document the test creates, which is an artifact too
   try {
     await setup.goto(baseURL, { waitUntil: 'networkidle' });
     const created = await api(setup, 'POST', '/api/artifacts', { title: 'E2E deep link', html: page1, session_id: `e2e-deep-link-${Date.now()}` });
@@ -78,6 +79,7 @@ async function main() {
     const document_ = await api(setup, 'POST', '/api/documents', { title: 'E2E deep link doc', content: '# Deep link doc\n\nBody.' });
     assert.equal(document_.status, 201, document_.text);
     const docId = document_.json.id;
+    documentId = docId;
 
     // The link the server hands out is the path form.
     const link = await api(setup, 'GET', `/api/links?kind=artifact&id=${artifactId}`);
@@ -126,12 +128,21 @@ async function main() {
       await opened.context.close();
     }
 
-    // --- a Doc link opens the document viewer, not the artifact viewer
+    // --- a document is an artifact: its document link leads to the artifact viewer
     opened = await openCold(browser, `/app/doc/${docId}`);
-    await opened.page.waitForFunction(() => window.docViewer && !window.docViewer.overlay.classList.contains('hidden'), null, { timeout: 15000 });
+    await opened.page.waitForFunction(() => window.artifactViewer?.isOpen(), null, { timeout: 15000 });
+    await opened.page.waitForFunction(() => !location.pathname.startsWith('/app'), null, { timeout: 15000 });
+    assert.equal(await opened.page.evaluate(() => window.docViewer.overlay.classList.contains('hidden')), true,
+      'a document must not open in the markdown document overlay');
+    assert.equal(await opened.page.evaluate(() => location.pathname + location.search), `/?view=projects&doc=artifact%3A${docId}`);
+    await opened.page.frameLocator('#artifact-viewer-frame').locator('#openpoet-markdown h1:text-is("Deep link doc")').waitFor({ timeout: 15000 });
+    await opened.context.close();
+
+    // --- a document link that names no artifact is still the app's to open: it
+    // lands on the canonical address and shows nothing that does not exist
+    opened = await openCold(browser, '/app/doc/zzzz0000');
     await opened.page.waitForFunction(() => !location.pathname.startsWith('/app'), null, { timeout: 15000 });
     assert.equal(await opened.page.evaluate(() => window.artifactViewer.isOpen()), false);
-    assert.equal(await opened.page.evaluate(() => location.pathname + location.search), `/?view=projects&doc=${docId}`);
     await opened.context.close();
 
     // --- a link to an artifact that does not exist says so
@@ -147,8 +158,8 @@ async function main() {
 
     console.log('artifact deep link smoke: OK');
   } finally {
-    if (artifactId) {
-      await api(setup, 'PATCH', `/api/artifacts/${artifactId}`, { status: 'archived' }).catch(() => {});
+    for (const id of [artifactId, documentId]) {
+      if (id) await api(setup, 'PATCH', `/api/artifacts/${id}`, { status: 'archived' }).catch(() => {});
     }
     await browser.close();
   }

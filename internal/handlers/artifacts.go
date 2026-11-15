@@ -644,7 +644,7 @@ func (n platformArtifactNotifier) ArtifactPublished(_ context.Context, artifact 
 	}
 	// A proposal or a verification document gets its card from whoever made
 	// it (the chat, the task), with what the user is asked to decide.
-	if isNew && artifact.Review == nil {
+	if isNew && artifact.Review == nil && !artifact.CardHandled {
 		// Same card the Docs get, so the artifact shows up where the agent is
 		// working (floating over the terminal, in the structured view, in chat).
 		n.api.hub.BroadcastChatDocCard(map[string]interface{}{

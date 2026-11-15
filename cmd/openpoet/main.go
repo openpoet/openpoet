@@ -240,6 +240,23 @@ func main() {
 		log.Printf("Warning: Failed to register the html-artifact skill: %v", err)
 	}
 
+	// Docs become artifacts: every Doc that has no artifact yet is copied into
+	// one. The Docs table is never changed. The copy runs beside the server,
+	// which does not wait for it (it takes seconds on a large table); a Doc
+	// opens as a Doc until its copy exists. It runs on every start and copies
+	// only what is missing, so a failure is retried by the next start.
+	go func() {
+		report, err := db.MigrateLegacyDocsToArtifacts(context.Background())
+		if err != nil {
+			log.Printf("[Docs] Copying Docs into artifacts failed: %v", err)
+			return
+		}
+		if report.Copied > 0 || report.Pending > 0 || report.MismatchCount > 0 || len(report.Failed) > 0 {
+			log.Printf("[Docs] Docs copied into artifacts: %d this start, %d of %d in all, %d not copied, %d differing from their Doc, %d failed",
+				report.Copied, report.Mapped, report.Eligible, report.Pending, report.MismatchCount, len(report.Failed))
+		}
+	}()
+
 	// Initialize web push service
 	webpush, err := notifications.NewWebPushService(db, cfg.VAPIDEmail)
 	if err != nil {
@@ -1054,6 +1071,7 @@ func main() {
 		r.Get("/links", api.GetLink)
 		r.Post("/artifacts", api.CreateArtifact)
 		r.Get("/artifacts", api.ListArtifacts)
+		r.Get("/artifacts/legacy-docs/report", api.LegacyDocsReport)
 		r.Get("/artifacts/{id}", api.GetArtifact)
 		r.Put("/artifacts/{id}", api.UpdateArtifact)
 		r.Patch("/artifacts/{id}", api.PatchArtifact)

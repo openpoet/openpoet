@@ -167,9 +167,14 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 		Commands:           services.DB,
 	}
 
+	// Documents are artifacts: what the document service creates is published
+	// through the artifact service.
+	artifactService := newPlatformArtifactService(a, services.DB, effects, sessionService)
+	documentService := application.NewDocumentService(services.DB, platformMemoryMirror{api: a}, effects)
+	documentService.SetArtifactPublisher(artifactService.Create)
 	collaboration := automation.CollaborationPlatformServices{
-		Documents: application.NewDocumentService(services.DB, platformMemoryMirror{api: a}, effects),
-		Artifacts: newPlatformArtifactService(a, services.DB, effects, sessionService),
+		Documents: documentService,
+		Artifacts: artifactService,
 		Proposals: application.NewProposalService(platformProposalBackend{api: a}, effects),
 		AI: application.NewAIAssistantService(
 			platformAIProvider{handler: services.AIHandler},
