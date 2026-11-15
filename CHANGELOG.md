@@ -97,6 +97,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Docs become artifacts.** What creates a document (`POST /api/documents`,
+  `openpoet_create_document`, `create_document` in the chat, the Automation
+  API's `documents.create_temp`) now publishes a markdown artifact, answered
+  with a document id and link as before. Existing Docs are copied into
+  artifacts on start, with their content, title, links and dates; the Docs
+  table is not changed, and `GET /api/artifacts/legacy-docs/report` checks the
+  copy against it. See [`docs/artifacts.md`](docs/artifacts.md).
 - A document id that stands for an artifact opens the artifact: `/app/doc/<id>`
   redirects to `/app/artifact/<id>`, and `GET /api/documents/{id}`,
   `GET /api/links?kind=document` and `openpoet_read_document` resolve it.

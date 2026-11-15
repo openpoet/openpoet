@@ -243,6 +243,79 @@ The "file" cards of a chat (a file of a project the assistant pointed at) were
 rows of the Docs table too. They are not documents and have their own table,
 `ai_chat_file_cards`.
 
+## Docs become artifacts
+
+Docs (rows of `temp_documents`) are the older document format: markdown, no
+versions, no annotations. Artifacts replace them.
+
+**What creates a document creates an artifact.** `POST /api/documents`,
+`openpoet_create_document`, the chat assistant's `create_document` and the
+Automation API's `documents.create_temp` publish a markdown artifact. They
+answer as before, with a document id and a `/app/doc/<id>` link; the id is the
+artifact's, and the link redirects to it.
+
+**Existing Docs are copied, never changed.** On every start the server copies,
+beside itself and without waiting, each Doc that has no artifact yet
+(`MigrateLegacyDocsToArtifacts`). `temp_documents` is not modified or deleted
+by anything. `artifact_legacy_docs` records which artifact each Doc became. A
+Doc becomes:
+
+- a markdown artifact with one version, holding the content byte for byte, the
+  title, the summary and the links to its conversation, task and session, and
+  created at the Doc's own time;
+- under the Doc's id when no artifact has it, so a task's
+  `verification_doc_id` and stored `/app/doc/<id>` links keep working (they
+  resolve through the map in any case);
+- in the project of its task, or else of its session, when either still
+  exists: a Doc has no project of its own;
+- authored by `session:<id>` when the Doc names a session and by
+  `system:doc-migration` otherwise: a Doc has no author of its own;
+- with a review when it was a proposal or a verification document, carrying
+  the status it had. A snapshot of a memory document made for viewing
+  (`Memory Doc: <project> (v3)`) is a plain document.
+
+File cards (`status = 'file'`) are not documents and are not copied. Docs have
+no versions or comments, so there is no history to carry over.
+
+A copied Doc is listed once, as its artifact: the task, session and
+conversation listings leave the Doc out. A Doc that is not copied yet still
+opens as a Doc.
+
+**Checking the copy.** `GET /api/artifacts/legacy-docs/report` only reads. It
+answers with how many Docs there are, how many have an artifact and how many
+do not yet, what they became (`by_kind`), how many got another id, and whether
+every task's `verification_doc_id` still leads to a document. For each copied
+Doc it compares version 1 of the artifact with the Doc (content, size, hash,
+title, summary, creation time, task, session, conversation) and lists the ones
+that differ by id and field, never by title or content. Run it right after the
+copy: an artifact renamed since is reported as differing.
+
+To rehearse the copy on a **copy** of a database before a release:
+
+```
+OPENPOET_LEGACY_DOCS_REHEARSAL_DB=/path/to/copy.db \
+  go test ./internal/database/ -run TestLegacyDocMigrationRehearsal -v
+```
+
+It migrates the schema of that file, copies its Docs and prints the report
+(counts only). Never point it at a database in use.
+
+**Undoing the copy.** The Docs are untouched, so undoing means removing the
+artifacts that were copied from them. With the server stopped:
+
+```sql
+DELETE FROM artifact_versions    WHERE artifact_id IN (SELECT artifact_id FROM artifact_legacy_docs);
+DELETE FROM artifact_annotations WHERE artifact_id IN (SELECT artifact_id FROM artifact_legacy_docs);
+DELETE FROM artifact_questions   WHERE artifact_id IN (SELECT artifact_id FROM artifact_legacy_docs);
+DELETE FROM artifact_reviews     WHERE artifact_id IN (SELECT artifact_id FROM artifact_legacy_docs);
+DELETE FROM artifacts            WHERE id          IN (SELECT artifact_id FROM artifact_legacy_docs);
+DELETE FROM artifact_legacy_docs;
+```
+
+This also removes versions and annotations added to those artifacts since the
+copy. A binary that still copies Docs on start would copy them again: undo the
+copy together with going back to a binary from before it.
+
 ### Schema and rollback
 
 Migration V88 adds three tables (`artifact_reviews`, `artifact_legacy_docs`,
