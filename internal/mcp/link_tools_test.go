@@ -20,7 +20,7 @@ func TestGetLinkToolIsRegisteredForSessionsAndChat(t *testing.T) {
 	if found == nil {
 		t.Fatal("session MCP tools lack openpoet_get_link")
 	}
-	for _, phrase := range []string{"never build a URL yourself", "localhost", "artifact", "Doc", "session", "task"} {
+	for _, phrase := range []string{"never build a URL yourself", "localhost", "artifact", "session", "task"} {
 		if !strings.Contains(found.Description, phrase) {
 			t.Fatalf("get_link description lacks %q: %s", phrase, found.Description)
 		}

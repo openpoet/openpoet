@@ -65,20 +65,24 @@ func chatToolOptionalID(input map[string]interface{}, key string) (*int64, error
 // content of a document by its id, as the MCP tool returns it. The ids are the
 // ones the task and session listings carry: a document id (which may stand for
 // an artifact), "artifact:<id>" and "plan:<sessionId>".
+//
+// The tool is retired (see mcp.RetiredDocumentTools): it is not listed to the
+// assistant anymore, and a call that still names it is answered with a note.
 func (h *AIHandler) executeReadDocumentChatTool(ctx context.Context, input map[string]interface{}, conversationID int64, authorization application.ActionAuthorization) (string, error) {
+	result, err := h.readDocumentForChat(ctx, input, conversationID, authorization)
+	if err != nil {
+		return "", err
+	}
+	return result + mcp.RetiredDocumentToolNote("read_document", ""), nil
+}
+
+func (h *AIHandler) readDocumentForChat(ctx context.Context, input map[string]interface{}, conversationID int64, authorization application.ActionAuthorization) (string, error) {
 	id := chatToolString(input, "document_id")
 	if id == "" {
 		return "", fmt.Errorf("document_id is required")
 	}
-	if strings.HasPrefix(id, "artifact:") {
+	if strings.HasPrefix(id, "artifact:") || strings.HasPrefix(id, "plan:") {
 		return h.executeArtifactChatTool(ctx, "read_artifact", map[string]interface{}{"artifact_id": id}, conversationID, authorization)
-	}
-	if strings.HasPrefix(id, "plan:") {
-		content, _, err := h.api.db.GetSessionPlan(ctx, strings.TrimPrefix(id, "plan:"))
-		if err != nil || content == "" {
-			return "", fmt.Errorf("this session has no plan")
-		}
-		return "## Session Plan\n\n" + content, nil
 	}
 	services, ready := h.api.platformApplicationServices()
 	if !ready || services.Collaboration.Documents == nil {
@@ -242,6 +246,18 @@ func (h *AIHandler) executeArtifactChatTool(ctx context.Context, name string, in
 	case "read_artifact":
 		if artifactID == "" {
 			return "", fmt.Errorf("artifact_id is required")
+		}
+		// It reads every document a listing names: a session plan, and the
+		// id of a document from before artifacts (the artifact it became).
+		if strings.HasPrefix(artifactID, "plan:") {
+			content, _, err := h.api.db.GetSessionPlan(ctx, strings.TrimPrefix(artifactID, "plan:"))
+			if err != nil || content == "" {
+				return "", fmt.Errorf("this session has no plan")
+			}
+			return "## Session Plan\n\n" + content, nil
+		}
+		if resolved, err := h.api.db.ResolveDocumentArtifactID(ctx, artifactID); err == nil && resolved != "" {
+			artifactID = resolved
 		}
 		view, err := service.Get(ctx, artifactID)
 		if err != nil {

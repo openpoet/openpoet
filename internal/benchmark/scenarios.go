@@ -132,20 +132,20 @@ func AllScenarios() []Scenario {
 			ID:          "code-architecture",
 			Name:        "Explain project architecture",
 			Category:    CategoryCode,
-			Description: "Model should use create_document for long explanations",
+			Description: "Model should publish a long explanation as an artifact (markdown), not paste it in chat",
 			Messages: []llm.Message{
 				llm.NewTextMessage("user", "Explain the complete architecture of the test-webapp project"),
 			},
 			Validators: []ValidatorFunc{
-				ValidateToolCalled("create_document"),
+				ValidateToolCalled("create_artifact"),
 			},
 			JudgeRubric: `The assistant should:
 1. First investigate the project (list_directory, read_file, etc.)
-2. Use create_document for the explanation (since >5 lines)
+2. Use create_artifact for the explanation (since >5 lines), passing the text in markdown (an HTML page is also acceptable)
 3. The document should cover: main.go entry point, handlers, models, routes
-4. Chat response should be very brief (1 sentence) — the document has the details
+4. Chat response should be very brief (1 sentence) — the artifact has the details
 5. Should NOT paste a long explanation directly in chat`,
-			ExpectedTools: []string{"create_document"},
+			ExpectedTools: []string{"create_artifact"},
 		},
 
 		// ──── Tool Selection ────
@@ -164,7 +164,7 @@ func AllScenarios() []Scenario {
 1. Call list_directory with project_id "1"
 2. Should NOT call read_file, find_files, or grep_content for this request
 3. Response should be brief, showing or summarizing the file listing
-4. May use create_document if the listing is long`,
+4. May use create_artifact (markdown) if the listing is long`,
 			ExpectedTools: []string{"list_directory"},
 		},
 		{

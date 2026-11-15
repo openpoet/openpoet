@@ -722,35 +722,29 @@ func executeToolWithOptions(client *APIClient, name string, args json.RawMessage
 		}
 		return formatTaskDetail(client, projectID, taskID, body)
 
+	// Retired: not listed anymore, still answered for a caller that names it
+	// (a session started before, an instruction written before). It reads what
+	// openpoet_read_artifact reads.
 	case "openpoet_read_document":
 		docID, _ := params["document_id"].(string)
 		if docID == "" {
 			return "", fmt.Errorf("document_id is required")
 		}
+		note := RetiredDocumentToolNote("read_document", "openpoet_")
 		// Document listings also carry HTML artifacts, as "artifact:<id>".
 		if strings.HasPrefix(docID, "artifact:") {
-			return readArtifactForTool(client, strings.TrimPrefix(docID, "artifact:"), "", false)
+			result, err := readArtifactForTool(client, strings.TrimPrefix(docID, "artifact:"), "", false)
+			return result + note, err
 		}
 		if strings.HasPrefix(docID, "plan:") {
-			sessionID := strings.TrimPrefix(docID, "plan:")
-			body, err := client.Get(fmt.Sprintf("/api/sessions/%s/plan", sessionID))
-			if err != nil {
-				return "", err
-			}
-			var plan struct {
-				Content   string `json:"content"`
-				UpdatedAt string `json:"updated_at"`
-			}
-			if json.Unmarshal(body, &plan) == nil && plan.Content != "" {
-				return fmt.Sprintf("## Session Plan\n\n%s", plan.Content), nil
-			}
-			return string(body), nil
+			result, err := readSessionPlanForTool(client, strings.TrimPrefix(docID, "plan:"))
+			return result + note, err
 		}
 		body, err := client.Get(fmt.Sprintf("/api/documents/%s", docID))
 		if err != nil {
 			return "", err
 		}
-		return FormatDocument(body), nil
+		return FormatDocument(body) + note, nil
 
 	case "openpoet_update_memory_doc":
 		projectID, ok := getID(params)
@@ -1176,6 +1170,8 @@ func executeToolWithOptions(client *APIClient, name string, args json.RawMessage
 		}
 		return fmt.Sprintf("Session %s stopped and linked task #%d (%s) updated", shortID(sid), task.ID, task.Title), nil
 
+	// Retired: not listed anymore, still answered for a caller that names it.
+	// What it creates is a markdown artifact, as openpoet_create_artifact does.
 	case "openpoet_create_document":
 		title, _ := params["title"].(string)
 		content, _ := params["content"].(string)
@@ -1206,7 +1202,8 @@ func executeToolWithOptions(client *APIClient, name string, args json.RawMessage
 			URL  string `json:"url"`
 		}
 		if json.Unmarshal(body, &result) == nil {
-			return fmt.Sprintf("Document created successfully. A 'View Document' button was automatically displayed to the user. Do NOT generate links — the user will use the native button. Internal link: %s%s", result.Link, ShareableLinkNote(result.URL, "openpoet_")), nil
+			return fmt.Sprintf("Document created successfully. A 'View Document' button was automatically displayed to the user. Do NOT generate links — the user will use the native button. Internal link: %s%s", result.Link, ShareableLinkNote(result.URL, "openpoet_")) +
+				RetiredDocumentToolNote("create_document", "openpoet_"), nil
 		}
 		return string(body), nil
 
@@ -1999,6 +1996,60 @@ func formatTaskList(body []byte) (string, error) {
 		result += fmt.Sprintf("%s%s [%d] %s (%s%s)%s\n", indent, icon, t.ID, t.Title, prio, due, umbrella)
 	}
 	return result, nil
+}
+
+// RetiredDocumentTools are the Docs tools, by their name without prefix. They
+// are not listed to any agent: artifacts are the one format of documents. A
+// call that still names one is answered, with a note saying what to use, so a
+// session that started before the change, or an instruction written before it,
+// does not fail. toolPrefix is "openpoet_" for MCP tool names and "" for chat
+// tool names.
+var RetiredDocumentTools = map[string]bool{"create_document": true, "read_document": true}
+
+// RetiredDocumentToolNote is the note appended to the result of a retired tool.
+func RetiredDocumentToolNote(tool, toolPrefix string) string {
+	switch tool {
+	case "create_document":
+		return fmt.Sprintf("\n\nNote: %screate_document is retired and no longer listed. The document was published as a markdown artifact; next time call %screate_artifact with the text in markdown.", toolPrefix, toolPrefix)
+	case "read_document":
+		return fmt.Sprintf("\n\nNote: %sread_document is retired and no longer listed. Next time call %sread_artifact, which takes the same id.", toolPrefix, toolPrefix)
+	}
+	return ""
+}
+
+// readSessionPlanForTool returns the plan of a session ("plan:<sessionId>" in
+// the document listings).
+func readSessionPlanForTool(client *APIClient, sessionID string) (string, error) {
+	body, err := client.Get(fmt.Sprintf("/api/sessions/%s/plan", url.PathEscape(sessionID)))
+	if err != nil {
+		return "", err
+	}
+	var plan struct {
+		Content     string `json:"content"`
+		PlanContent string `json:"plan_content"`
+	}
+	if json.Unmarshal(body, &plan) == nil {
+		if content := plan.Content + plan.PlanContent; content != "" {
+			return "## Session Plan\n\n" + content, nil
+		}
+	}
+	return string(body), nil
+}
+
+// documentArtifactID returns the artifact a document id stands for, or "" when
+// it stands for none (GET /api/documents/{id} names it).
+func documentArtifactID(client *APIClient, documentID string) string {
+	body, err := client.Get("/api/documents/" + url.PathEscape(documentID))
+	if err != nil {
+		return ""
+	}
+	var document struct {
+		ArtifactID string `json:"artifact_id"`
+	}
+	if json.Unmarshal(body, &document) != nil {
+		return ""
+	}
+	return document.ArtifactID
 }
 
 // FormatDocument turns the JSON of a document (GET /api/documents/{id}) into

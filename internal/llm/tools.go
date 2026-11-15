@@ -472,45 +472,20 @@ func AllToolDefs() []ToolDef {
 			},
 			Context: ToolContextBoth,
 		},
-		{
-			Name:           "create_document",
-			Description:    "Create a temporary markdown document and return a clickable link. Use this for a response that would be longer than 5 lines — lists, explanations, code. This keeps the chat clean. For a plan, a report or documentation the user will read or review, prefer create_artifact (an interactive HTML page the user can annotate).",
-			MCPDescription: "Create a temporary markdown document for the user to view. Use for a response longer than ~5 lines (lists, explanations, code). Keeps the chat clean. For a plan, a report or documentation the user will read or review, prefer openpoet_create_artifact (an interactive HTML page the user can annotate).",
-			InputSchema: ToolDefinitionInput{
-				Type: "object",
-				Properties: map[string]ToolPropertySchema{
-					"title":           {Type: "string", Description: "Short document title"},
-					"content":         {Type: "string", Description: "Full markdown content of the document"},
-					"conversation_id": {Type: "string", Description: "Current conversation ID (if available)"},
-					"task_id":         {Type: "string", Description: "Optional task ID to link this document to a task"},
-				},
-				Required: []string{"content"},
-			},
-			Context: ToolContextBoth,
-		},
-		{
-			Name:           "read_document",
-			Description:    "Read the full content of a document by ID.",
-			MCPDescription: "Read the full content of a document by ID. Use after openpoet_get_task to read specific documents.",
-			InputSchema: ToolDefinitionInput{
-				Type: "object",
-				Properties: map[string]ToolPropertySchema{
-					"document_id": {Type: "string", Description: "The document ID (8-char ID for documents, or 'plan:sessionId' for session plans)"},
-				},
-				Required: []string{"document_id"},
-			},
-			Context: ToolContextBoth,
-		},
+		// The Docs tools (create_document, read_document) are retired: artifacts
+		// are the one format of documents. create_artifact publishes markdown and
+		// read_artifact reads any document id. The two old names are not listed
+		// anymore; a call that still names them is answered (see RetiredDocumentTools).
 		{
 			Name: "get_link",
-			Description: "Get the link that opens an artifact, a Doc, a session or a task directly in OpenPoet, ready to pass on to the user (for example in a message they will open on their phone). " +
+			Description: "Get the link that opens an artifact, a session or a task directly in OpenPoet, ready to pass on to the user (for example in a message they will open on their phone). " +
 				"Use it whenever a link is asked for: only the server knows the address this instance is published at, so never build a URL yourself and never use localhost or a port. " +
 				"The result says whether the link works outside the machine OpenPoet runs on.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
-					"kind":    {Type: "string", Description: "What the link opens", Enum: []string{"artifact", "document", "session", "task"}},
-					"id":      {Type: "string", Description: "The artifact ID, document ID, session ID or task ID. For kind \"session\" it can be omitted to mean the calling session"},
+					"kind":    {Type: "string", Description: "What the link opens", Enum: []string{"artifact", "session", "task"}},
+					"id":      {Type: "string", Description: "The artifact ID, session ID or task ID. For kind \"session\" it can be omitted to mean the calling session"},
 					"version": {Type: "string", Description: "Artifacts only: open this version instead of the current one"},
 				},
 				Required: []string{"kind"},
@@ -521,13 +496,13 @@ func AllToolDefs() []ToolDef {
 		{
 			Name: "create_artifact",
 			Description: "Publish an interactive HTML artifact: one self-contained HTML document stored in OpenPoet (not in the project directory) and shown to the user in a sandboxed viewer. " +
-				"Prefer this over create_document for plans, reports, documentation and any deliverable the user will read or review: build a small site with navigation, visual components, inline charts and restrained motion. " +
+				"Use it for plans, reports, documentation and any deliverable the user will read or review: build a small site with navigation, visual components, inline charts and restrained motion. " +
 				"Rules: a complete HTML document with ALL CSS and JavaScript inline; no external scripts, stylesheets, fonts or images (the viewer blocks every network request, so use inline SVG/canvas and data: URIs); must work in light and dark themes and on a phone; at most 2 MiB. " +
 				"The user gets a card to open it — do not paste the HTML or a link in your reply. The user can annotate the artifact; read their notes with list_artifact_annotations. " +
 				"When the user has to decide or answer something, declare questions in the page (a JSON block with id openpoet-questions; the html-artifact skill shows how): the answers come back with the annotations. " +
 				"In a session, write the page to an .html file and pass html_path instead of html: the document is then read from the file instead of being typed again as a tool argument. The result reports the exact size and SHA-256 of what was stored, and where credential-looking text was masked (line and kind). " +
 				"Calling it again from the same session with the same title and identical HTML within a few minutes returns the artifact already created instead of a duplicate, so a call that timed out can be repeated. " +
-				"A document that is plain prose can be published as markdown instead: pass markdown (or markdown_path, a .md file) in place of html. It is stored as markdown and shown as a formatted page, with ```mermaid blocks drawn as diagrams; the user annotates it the same way, but it cannot declare questions.",
+				"A document that is plain prose, and any answer too long for the chat (more than about 5 lines: a list, an explanation, code), is published as markdown instead: pass markdown (or markdown_path, a .md file) in place of html. It is stored as markdown and shown as a formatted page, with ```mermaid blocks drawn as diagrams; the user annotates it the same way, but it cannot declare questions.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
@@ -604,11 +579,12 @@ func AllToolDefs() []ToolDef {
 			Description: "Read an HTML artifact: title, its link, the version history (exact size and SHA-256 of each version) and its open annotations. " +
 				"To get the HTML of a version (the current one by default), in a session pass output_path: the stored HTML is written byte for byte to a file in your workspace, ready to edit and publish again with update_artifact html_path, and is not returned in the result. " +
 				"Set include_html to have it returned in the result instead. " +
-				"The result says when the artifact is markdown: its versions are then markdown source, written to a .md file by output_path and returned by include_html.",
+				"The result says when the artifact is markdown: its versions are then markdown source, written to a .md file by output_path and returned by include_html. " +
+				"It reads every document a task or a session lists: an artifact id, the id of a document from before artifacts (it names the artifact the document became), and 'plan:<sessionId>' for a session's plan.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
 				Properties: map[string]ToolPropertySchema{
-					"artifact_id":  {Type: "string", Description: "The artifact ID (8 characters; an 'artifact:' prefix is accepted)"},
+					"artifact_id":  {Type: "string", Description: "The artifact ID (8 characters; an 'artifact:' prefix is accepted), a document id, or 'plan:<sessionId>' for a session plan"},
 					"version":      {Type: "string", Description: "Version number to read (default: the current version)"},
 					"output_path":  {Type: "string", Description: "Write the HTML of that version to this .html file (a .md file for a markdown version), inside your workspace (relative paths resolve against it) or the temporary directory. The directory must exist; an existing file is replaced. Only in a session"},
 					"include_html": {Type: "boolean", Description: "Also return the HTML of that version (its markdown, for a markdown version) in the result (default: false)"},

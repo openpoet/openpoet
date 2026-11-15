@@ -3287,8 +3287,10 @@ func (h *AIHandler) executeTool(ctx context.Context, name string, input map[stri
 		}
 
 		link := application.DocumentLinkPath(published.Artifact.ID)
+		// The tool is retired (not listed to the assistant anymore): a call
+		// that still names it is answered, with a note saying what to use.
 		return fmt.Sprintf("Document created successfully. A 'View Document' button was automatically displayed in chat. Do NOT generate links — the user will use the native button. Internal link: %s%s",
-			link, mcp.ShareableLinkNote(h.api.Links().Absolute(ctx, link), "")), nil
+			link, mcp.ShareableLinkNote(h.api.Links().Absolute(ctx, link), "")) + mcp.RetiredDocumentToolNote("create_document", ""), nil
 
 	case "list_directory":
 		projectID, err := parseIDParam(input, "project_id")

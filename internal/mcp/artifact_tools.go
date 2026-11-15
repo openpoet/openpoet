@@ -368,21 +368,36 @@ func executeArtifactTool(client *APIClient, name string, params map[string]inter
 		return FormatArtifactUpdated(body, countOpenArtifactAnnotations(client, id), "openpoet_") + ArtifactMetaNote(body, meta), nil
 
 	case "openpoet_read_artifact":
+		// It reads every document a listing names: a session plan too.
+		if raw := stringParam(params, "artifact_id"); strings.HasPrefix(raw, "plan:") {
+			return readSessionPlanForTool(client, strings.TrimPrefix(raw, "plan:"))
+		}
 		id, err := artifactIDParam(params)
 		if err != nil {
 			return "", err
 		}
 		version := stringParam(params, "version")
-		if outputPath := stringParam(params, "output_path"); outputPath != "" {
-			return exportArtifactForTool(client, id, version, outputPath, sessionID)
-		}
-		if outputFile := stringParam(params, "output_file"); outputFile != "" {
-			if !allowFiles {
-				return "", fmt.Errorf("output_file is only available through the openpoet CLI; use output_path (a file in your workspace)")
+		read := func(id string) (string, error) {
+			if outputPath := stringParam(params, "output_path"); outputPath != "" {
+				return exportArtifactForTool(client, id, version, outputPath, sessionID)
 			}
-			return saveArtifactForCLI(client, id, version, outputFile)
+			if outputFile := stringParam(params, "output_file"); outputFile != "" {
+				if !allowFiles {
+					return "", fmt.Errorf("output_file is only available through the openpoet CLI; use output_path (a file in your workspace)")
+				}
+				return saveArtifactForCLI(client, id, version, outputFile)
+			}
+			return readArtifactForTool(client, id, version, boolParam(params, "include_html"))
 		}
-		return readArtifactForTool(client, id, version, boolParam(params, "include_html"))
+		result, err := read(id)
+		if err != nil {
+			// The id of a document from before artifacts that was given
+			// another id when it became one: read the artifact it stands for.
+			if resolved := documentArtifactID(client, id); resolved != "" && resolved != id {
+				return read(resolved)
+			}
+		}
+		return result, err
 
 	case "openpoet_list_artifacts":
 		query := url.Values{}

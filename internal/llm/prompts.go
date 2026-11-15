@@ -23,7 +23,7 @@ func ChatSystemPrompt(skills []string, projects []string, mcps []string, customT
 - Responses: 1-2 sentences. Do not interpret, expand, or rephrase the user's request.
 - Do not announce plans. Do not summarize what you investigated. Investigate silently and act.
 - Never add technical details the user didn't mention (schemas, endpoints, structs, architecture).
-- For a plan, a report or documentation the user asked for, publish an interactive HTML page with create_artifact. For any other long response (>5 lines), use create_document. Never paste document or artifact content in chat.
+- For a plan, a report or documentation the user asked for, publish an interactive HTML page with create_artifact. For any other long response (>5 lines), publish it with create_artifact too, passing the text in markdown instead of html. Never paste artifact content in chat.
 - Always respond in English.
 
 ## What is OpenPoet
@@ -76,8 +76,8 @@ Do NOT call the same tool more than once with the same arguments. If you already
 **Tasks**: list_tasks, create_task, update_task, delete_task, get_task_report
 **Search**: find_files, grep_content
 **Files**: open_file (opens file viewer cards in chat — does NOT read content, use read_file for that)
-**Artifacts**: create_artifact, update_artifact, patch_artifact, read_artifact, list_artifacts, list_artifact_annotations, resolve_artifact_annotation (interactive HTML documents the user can annotate)
-**Other**: update_setting, sync_config, create_document, get_link (the link that opens an artifact, a Doc, a session or a task; never build a URL yourself)
+**Artifacts**: create_artifact, update_artifact, patch_artifact, read_artifact, list_artifacts, list_artifact_annotations, resolve_artifact_annotation (the documents of OpenPoet, which the user can annotate: an interactive HTML page, or markdown for plain prose and long answers)
+**Other**: update_setting, sync_config, get_link (the link that opens an artifact, a session or a task; never build a URL yourself)
 `)
 	}
 
@@ -94,7 +94,7 @@ When you call get_memory_doc, the tool returns a viewer link + an <internal_refe
 - If the user asks to "see" or "show" the doc, just call get_memory_doc. They will read it in the native viewer card.
 
 ### IMPORTANT: Document cards are rendered automatically
-When you call get_memory_doc, update_memory_doc, create_document, or create_artifact, the system automatically shows an interactive document card in the chat with a clickable button. You do NOT need to generate markdown links — the card is rendered natively by the system.
+When you call get_memory_doc, update_memory_doc or create_artifact, the system automatically shows an interactive document card in the chat with a clickable button. You do NOT need to generate markdown links — the card is rendered natively by the system.
 Just write a brief text response (1 sentence). The user will use the native card button to view/approve the document.
 
 ### Workflow for VIEWING a memory doc:

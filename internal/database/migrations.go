@@ -106,6 +106,7 @@ var migrations = []Migration{
 	{Version: 86, Description: "artifacts: when an annotation was last sent to the agent and to which session (artifact_annotations.sent_at, sent_session_id), so the viewer can show it after a reload", Up: migrateV86},
 	{Version: 87, Description: "artifacts: the format of each version (artifact_versions.format: html or markdown), so a markdown document is stored as its source and rendered when it is shown", Up: migrateV87},
 	{Version: 88, Description: "artifacts: approval state of an artifact (artifact_reviews), the artifact an old Doc id stands for (artifact_legacy_docs) and the file cards of a chat conversation (ai_chat_file_cards), so proposals and verification documents can be artifacts", Up: migrateV88},
+	{Version: 89, Description: "tool policies: allowlists that grant the retired Docs tools grant the artifact tools that replace them (create_document: create/update/patch_artifact and resolve_artifact_annotation; read_document: read_artifact, list_artifacts, list_artifact_annotations and get_link)", Up: migrateV89},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2597,6 +2598,54 @@ func migrateV88(tx *sqlx.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV88 failed: %w\nSQL: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// retiredDocToolsFollowing maps each retired Docs tool to the artifact tools
+// that do its job now: an allowlist that let an agent create or read documents
+// keeps letting it.
+var retiredDocToolsFollowing = map[string][]string{
+	"create_document": {"create_artifact", "update_artifact", "patch_artifact", "resolve_artifact_annotation"},
+	"read_document":   {"read_artifact", "list_artifacts", "list_artifact_annotations", "get_link"},
+}
+
+// migrateV89 goes with the retirement of the Docs tools (create_document and
+// read_document are no longer listed to any agent). An allowlist names every
+// tool it grants, so one that granted the Docs tools would leave its agents
+// with no way to create or read a document. V82, V83 and V85 already added the
+// artifact tools to the allowlists that existed then; this covers the ones
+// written or edited since. The retired names stay in the allowlist: a caller
+// that still names a retired tool is answered, under the same policy.
+//
+// Only data is changed, and adding a name that is already there changes
+// nothing, so the migration can run again.
+func migrateV89(tx *sqlx.Tx) error {
+	targets := []struct{ selectSQL, updateSQL string }{
+		{`SELECT key AS id, value AS policy FROM settings WHERE key IN ('mcp_tool_policy_session', 'mcp_tool_policy_chat', 'mcp_tool_policy_http')`,
+			`UPDATE settings SET value = ? WHERE key = ?`},
+		{`SELECT CAST(id AS TEXT) AS id, tool_policy AS policy FROM projects WHERE tool_policy != ''`,
+			`UPDATE projects SET tool_policy = ? WHERE id = ?`},
+		{`SELECT CAST(id AS TEXT) AS id, tool_policy AS policy FROM ai_agents WHERE tool_policy != ''`,
+			`UPDATE ai_agents SET tool_policy = ? WHERE id = ?`},
+	}
+	for _, t := range targets {
+		var rows []struct {
+			ID     string `db:"id"`
+			Policy string `db:"policy"`
+		}
+		if err := tx.Select(&rows, t.selectSQL); err != nil {
+			return fmt.Errorf("migrateV89 failed: %w\nSQL: %s", err, t.selectSQL)
+		}
+		for _, row := range rows {
+			updated, changed := extendToolPolicyAllowlist(row.Policy, retiredDocToolsFollowing)
+			if !changed {
+				continue
+			}
+			if _, err := tx.Exec(t.updateSQL, updated, row.ID); err != nil {
+				return fmt.Errorf("migrateV89 failed: %w\nSQL: %s", err, t.updateSQL)
+			}
 		}
 	}
 	return nil

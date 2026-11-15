@@ -56,7 +56,9 @@ func (m *MockToolExecutor) ExecuteTool(_ context.Context, name string, input map
 		return m.project.MemoryDocResponse(), nil
 	case "update_memory_doc":
 		return `{"status": "pending_approval", "message": "Proposal created. User must approve via viewer."}`, nil
-	case "create_document":
+	case "create_artifact":
+		return `Artifact published: artifact_id ab12cd34, version 1. The user was shown a card to open it in the artifact viewer — do NOT paste the content or generate links.`, nil
+	case "create_document": // retired; a model that still names it gets the answer it used to
 		return `{"document_id": 1, "status": "created", "viewer_url": "/documents/view/1"}`, nil
 	case "create_skill":
 		return `{"skill_id": 1, "status": "created", "message": "Skill created successfully."}`, nil
@@ -265,7 +267,7 @@ IMPORTANT context about OpenPoet AI:
 - It must be VERY brief (1-2 sentences max for most responses)
 - It must use the correct tools for each request
 - It must NOT announce plans before acting
-- It must NOT paste document content in chat (uses create_document or viewer cards)
+- It must NOT paste document content in chat (uses create_artifact or viewer cards)
 - It must match the user's language (Portuguese or English)`
 
 // evaluateWithJudge sends the scenario + response to the judge model for scoring.
