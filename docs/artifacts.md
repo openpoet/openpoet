@@ -14,14 +14,14 @@ remain the place for short plain-text answers.
 | Table | Holds |
 | --- | --- |
 | `artifacts` | Title, summary, status (`active` / `archived`), current version, and the links to the project, session, task and chat conversation that produced it |
-| `artifact_versions` | The HTML of every version, with its size, SHA-256, change note and author. Versions are never rewritten or deleted |
+| `artifact_versions` | The content of every version (an HTML document, or markdown source: see [Markdown artifacts](#markdown-artifacts)), with its format, size, SHA-256, change note and author. Versions are never rewritten or deleted |
 | `artifact_annotations` | The user's notes: the version they were made on, where they point (a text quote or an element), the note, and its resolution. Also the user's answers to the questions an artifact asks (`kind = 'answer'`) |
 | `artifact_questions` | The questions each version declares for the reader |
 
 Rules the server enforces on every publish:
 
-- The content must be an HTML document, valid UTF-8, at most **2 MiB** per
-  version.
+- The content must be an HTML document (or markdown, published as such), valid
+  UTF-8, at most **2 MiB** per version.
 - The HTML is stored exactly as it was sent, and the publish result carries its
   size in bytes and its SHA-256.
 - Credential-looking text (`password=…`, `api_key: …`, private keys) is masked
@@ -107,6 +107,84 @@ in the OpenPoet origin.
 (cookies, storage, the API, the internet, the parent page, popups, remote
 images and scripts) and checks that all of them fail, in the viewer and when
 the render URL is opened directly.
+
+## Markdown artifacts
+
+A version has a format: `html` (a complete HTML document, the default) or
+`markdown`. A markdown version is published with `markdown` or `markdown_path`
+in place of `html` / `html_path`, and is for a document that is plain prose: a
+short answer, notes, a list.
+
+- **Stored as its source.** `artifact_versions.content` holds the markdown
+  exactly as it was sent (masking aside), with its size and SHA-256. Reading,
+  exporting and downloading a version give that source back; a patch edits it
+  and keeps the format. A version may be in another format than the one before
+  it.
+- **Rendered on the server, shown in the sandbox.** `GET
+  /api/artifacts/{id}/render` turns the markdown into a page on every request:
+  GitHub-flavored markdown (tables, task lists, strikethrough, autolinks), a
+  line break for each newline, headings with ids, in a small document with its
+  own stylesheet (both themes, phone width, print). The page goes through the
+  same route, headers, guard and bridge as an HTML artifact. Raw HTML written
+  in the markdown is kept, and that is only acceptable because the result is
+  never placed in an OpenPoet page: no JSON endpoint returns rendered markdown.
+- **Annotations are checked on the rendered page.** The reader annotates the
+  page, so whether a quoted passage is still in a later version is decided on
+  the rendered text, not on the source (`**bold** text` reads as `bold text`).
+  The rendering is pinned by a test (`TestRenderArtifactMarkdownIsPinned`):
+  upgrading the renderer is a deliberate change, because it can move the
+  anchors of existing annotations.
+- **Mermaid.** A ```` ```mermaid ```` block is drawn as a diagram inside the
+  frame. The frame has no network, so the vendored `mermaid.min.js` is inlined
+  in the page, and only when the version has such a block. A block mermaid
+  cannot parse stays on the page as its source.
+- **No questions.** Questions are a data block and marked elements of an HTML
+  page; a markdown version declares none.
+- **Size.** The 2 MiB limit applies to the source.
+
+### Printing (PDF)
+
+The viewer's print button saves any artifact as a PDF through the browser's
+print dialog. The frame an artifact is read in cannot open that dialog, and
+the OpenPoet page cannot print a frame of another origin, so the version is
+loaded once more for printing:
+
+- `GET /api/artifacts/{id}/render?v=n&print=1` sends the same policy with
+  `sandbox allow-scripts allow-modals`, and a print step in place of the
+  annotation bridge. The step waits for the page (and its diagrams), opens the
+  print dialog and tells the page when it closed.
+- The viewer loads that URL in a separate hidden frame with
+  `sandbox="allow-scripts allow-modals"` and removes it afterwards.
+
+`allow-modals` also lets the artifact's own scripts open `alert`, `confirm`
+and `prompt`. It is granted to that response alone, after the user asked to
+print; the frame the artifact is read in never has it.
+
+### Links
+
+A link in an artifact that points outside the document cannot be followed in
+the frame (the browser would load the target there, in place of the
+artifact). The bridge reports the click and the viewer shows the address, in
+full, with a button to open it: an `/app/...` link path opens inside OpenPoet,
+an `http(s)` or `mailto` address opens in a new tab without a handle on the
+OpenPoet page. Nothing opens without that click on the viewer's own button,
+since the message can also be sent by the artifact's script. Links inside the
+document (`#section`), relative links and other schemes are not offered.
+
+### Schema and rollback
+
+Migration V87 adds `artifact_versions.format TEXT NOT NULL DEFAULT 'html'`.
+Every reader of the table names its columns, so a binary from before V87 runs
+on the migrated database without any change; it would show a markdown version
+as raw text in the sandbox. To remove the column as well:
+
+```sql
+ALTER TABLE artifact_versions DROP COLUMN format;
+UPDATE schema_version SET version = 86;
+```
+
+Run it only with the server stopped, and only while no markdown version is
+worth keeping: without the column a markdown version is read as HTML.
 
 ## Annotations
 
@@ -238,15 +316,15 @@ message from the frame proves nothing about what the user did.
 
 | Method and route | Purpose |
 | --- | --- |
-| `POST /api/artifacts` | Publish a new artifact (`title`, `html` or `html_path`, `summary`, optional `project_id`, `task_id`, `conversation_id`, `session_id`) |
+| `POST /api/artifacts` | Publish a new artifact (`title`, one of `html`, `html_path`, `markdown`, `markdown_path`, `summary`, optional `project_id`, `task_id`, `conversation_id`, `session_id`) |
 | `GET /api/artifacts?project_id=&session_id=&task_id=&include_archived=` | List artifacts, without HTML |
 | `GET /api/artifacts/{id}` | Metadata, version history (size and SHA-256 of each version), open-annotation count, `link` and `url` |
-| `PUT /api/artifacts/{id}` | Publish a new version (`html` or `html_path`, `base_version`, `change_note`, optional `title`, `summary`, `dry_run`) |
+| `PUT /api/artifacts/{id}` | Publish a new version (one of `html`, `html_path`, `markdown`, `markdown_path`, `base_version`, `change_note`, optional `title`, `summary`, `dry_run`) |
 | `POST /api/artifacts/{id}/patch` | Publish a new version from replacements (`base_version`, `edits: [{old, new, replace_all}]`, `change_note`, optional `title`, `summary`, `dry_run`) |
 | `PATCH /api/artifacts/{id}` | Change `title`, `summary` or `status` |
-| `GET /api/artifacts/{id}/versions/{n\|current}` | One version with its HTML, as JSON |
-| `POST /api/artifacts/{id}/versions/{n\|current}/export` | Write the HTML of a version to a file in the calling session's workspace (`path`) |
-| `GET /api/artifacts/{id}/render?v=n` | The sandboxed document for the viewer |
+| `GET /api/artifacts/{id}/versions/{n\|current}` | One version with its `format` and content (the HTML, or the markdown source), as JSON |
+| `POST /api/artifacts/{id}/versions/{n\|current}/export` | Write the content of a version to a file in the calling session's workspace (`path`: an `.html` file, or `.md` for a markdown version) |
+| `GET /api/artifacts/{id}/render?v=n` | The sandboxed document for the viewer; with `&print=1`, the document to print |
 | `GET /api/artifacts/{id}/annotations?status=open\|resolved\|all&placement=1` | List annotations; with `placement=1`, whether each older note still applies to the current version |
 | `POST /api/artifacts/{id}/annotations` | Create an annotation (`version`, `anchor`, `body`) |
 | `POST /api/artifacts/{id}/annotations/{annotationId}/resolve` | Resolve, with an optional `resolution_note` |
@@ -296,10 +374,10 @@ to the chat assistant, and through `openpoet cli call`.
 
 | Tool | Arguments |
 | --- | --- |
-| `openpoet_create_artifact` | `title`, `html_path` or `html`, `summary`, `task_id`, `dry_run` |
-| `openpoet_update_artifact` | `artifact_id`, `html_path` or `html`, `change_note`, `base_version`, `title`, `summary`, `dry_run`. With only `title` / `summary`, it renames without publishing a version |
+| `openpoet_create_artifact` | `title`, `html_path` or `html` (for a markdown artifact, `markdown_path` or `markdown`), `summary`, `task_id`, `dry_run` |
+| `openpoet_update_artifact` | `artifact_id`, `html_path` or `html` (or `markdown_path` / `markdown`), `change_note`, `base_version`, `title`, `summary`, `dry_run`. With only `title` / `summary`, it renames without publishing a version |
 | `openpoet_patch_artifact` | `artifact_id`, `base_version`, `edits` (`[{old, new, replace_all}]`), `change_note`, `title`, `summary`, `dry_run` |
-| `openpoet_read_artifact` | `artifact_id`, `version`, `output_path` (write the HTML to a file) or `include_html` (return it) |
+| `openpoet_read_artifact` | `artifact_id`, `version`, `output_path` (write the HTML to a file; the markdown, to a `.md` file, for a markdown version) or `include_html` (return it) |
 | `openpoet_list_artifacts` | `project_id`, `task_id`, `session_id`, `include_archived` |
 | `openpoet_list_artifact_annotations` | `artifact_id`, `status` (default `open`). Lists notes and answers, and names the questions of the current version that have no open answer. Each note names the panel it was made in and, when it was made on an earlier version, whether it still applies to the current one |
 | `openpoet_resolve_artifact_annotation` | `artifact_id`, and either `resolutions` (`[{annotation_id, resolution_note}]`, several in one call) or `annotation_id` with `resolution_note`. One that fails does not undo the others; the result names it |

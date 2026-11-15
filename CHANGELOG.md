@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Markdown artifacts**: an artifact version can be markdown instead of HTML
+  (`markdown` / `markdown_path` on `openpoet_create_artifact` and
+  `openpoet_update_artifact`, and on the REST routes). The source is stored as
+  it was sent and rendered into a page inside the artifact sandbox, with
+  GitHub-flavored markdown and ```` ```mermaid ```` blocks drawn as diagrams;
+  it is versioned, patched, annotated, read and exported (`.md`) like any
+  artifact. See [`docs/artifacts.md`](docs/artifacts.md).
+- The artifact viewer prints the version shown, which saves it as a PDF, and
+  downloads a markdown version as a `.md` file.
+- A link clicked inside an artifact is shown in the viewer, in full, with a
+  button to open it (inside OpenPoet for an `/app/...` link, in a new tab
+  otherwise), instead of loading inside the artifact's frame.
 - **HTML artifacts**: agents publish interactive, self-contained HTML documents
   into the OpenPoet database instead of writing files into the project. Every
   publish is a version and old versions stay readable. Artifacts are linked to
