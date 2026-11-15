@@ -104,6 +104,7 @@ var migrations = []Migration{
 	{Version: 84, Description: "artifacts: questions a version declares for the reader (artifact_questions) and answers stored as annotations (kind, question_id, answer_json, updated_at; one open answer per question)", Up: migrateV84},
 	{Version: 85, Description: "tool policies: allowlists that grant update_artifact also grant patch_artifact, the tool that changes an artifact by sending only the replacements", Up: migrateV85},
 	{Version: 86, Description: "artifacts: when an annotation was last sent to the agent and to which session (artifact_annotations.sent_at, sent_session_id), so the viewer can show it after a reload", Up: migrateV86},
+	{Version: 87, Description: "artifacts: the format of each version (artifact_versions.format: html or markdown), so a markdown document is stored as its source and rendered when it is shown", Up: migrateV87},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2519,6 +2520,30 @@ func migrateV86(tx *sqlx.Tx) error {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrateV86 failed: %w\nSQL: %s", err, s)
 		}
+	}
+	return nil
+}
+
+// migrateV87 records the format of each artifact version: "html" (a complete
+// HTML document, what every version was until now) or "markdown" (the markdown
+// source, rendered into a page when the version is shown).
+//
+// The column is added with a default and every reader of artifact_versions
+// names its columns, so a binary from before this migration keeps working on
+// the migrated table. The ALTER is skipped when the column is already there, so
+// running the migration again (after schema_version was set back by hand) does
+// not fail.
+func migrateV87(tx *sqlx.Tx) error {
+	var present int
+	if err := tx.Get(&present, `SELECT COUNT(*) FROM pragma_table_info('artifact_versions') WHERE name = 'format'`); err != nil {
+		return fmt.Errorf("migrateV87 failed: %w", err)
+	}
+	if present > 0 {
+		return nil
+	}
+	const stmt = `ALTER TABLE artifact_versions ADD COLUMN format TEXT NOT NULL DEFAULT 'html'`
+	if _, err := tx.Exec(stmt); err != nil {
+		return fmt.Errorf("migrateV87 failed: %w\nSQL: %s", err, stmt)
 	}
 	return nil
 }

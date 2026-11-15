@@ -29,11 +29,20 @@ type Artifact struct {
 	UpdatedAt      time.Time     `db:"updated_at" json:"updated_at"`
 }
 
-// ArtifactVersion is one published HTML of an artifact. Versions are never
-// rewritten or deleted.
+// Formats of an artifact version. An HTML version is a complete HTML document;
+// a markdown version is the markdown source, rendered when it is shown.
+const (
+	ArtifactFormatHTML     = "html"
+	ArtifactFormatMarkdown = "markdown"
+)
+
+// ArtifactVersion is one published version of an artifact: its content (an
+// HTML document or markdown source, see Format). Versions are never rewritten
+// or deleted.
 type ArtifactVersion struct {
 	ArtifactID string    `db:"artifact_id" json:"artifact_id"`
 	Version    int       `db:"version" json:"version"`
+	Format     string    `db:"format" json:"format"`
 	Content    string    `db:"content" json:"content,omitempty"`
 	SizeBytes  int64     `db:"size_bytes" json:"size_bytes"`
 	SHA256     string    `db:"sha256" json:"sha256"`
@@ -64,8 +73,9 @@ type ArtifactQuestion struct {
 // ArtifactListItem is an artifact row plus the figures a listing shows.
 type ArtifactListItem struct {
 	Artifact
-	SizeBytes       int64 `db:"size_bytes" json:"size_bytes"`
-	OpenAnnotations int   `db:"open_annotations" json:"open_annotations"`
+	SizeBytes       int64  `db:"size_bytes" json:"size_bytes"`
+	Format          string `db:"format" json:"format"`
+	OpenAnnotations int    `db:"open_annotations" json:"open_annotations"`
 }
 
 // ArtifactFilter narrows ListArtifacts. Zero values mean "any".
@@ -87,7 +97,7 @@ var ErrArtifactAnswerSuperseded = errors.New("the question already has a newer o
 
 const artifactColumns = `id, project_id, session_id, task_id, conversation_id, title, summary, current_version, status, created_by, created_at, updated_at`
 
-const artifactVersionMetaColumns = `artifact_id, version, size_bytes, sha256, change_note, created_by, session_id, created_at`
+const artifactVersionMetaColumns = `artifact_id, version, format, size_bytes, sha256, change_note, created_by, session_id, created_at`
 
 // CreateArtifact stores a new artifact together with its version 1.
 func (d *DB) CreateArtifact(ctx context.Context, artifact *Artifact, version *ArtifactVersion) error {
@@ -103,6 +113,7 @@ func (d *DB) CreateArtifact(ctx context.Context, artifact *Artifact, version *Ar
 	artifact.CurrentVersion = 1
 	version.ArtifactID = artifact.ID
 	version.Version = 1
+	version.Format = artifactFormatOrDefault(version.Format)
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO artifacts (id, project_id, session_id, task_id, conversation_id, title, summary, current_version, status, created_by)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
@@ -111,9 +122,9 @@ func (d *DB) CreateArtifact(ctx context.Context, artifact *Artifact, version *Ar
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO artifact_versions (artifact_id, version, content, size_bytes, sha256, change_note, created_by, session_id)
-		 VALUES (?, 1, ?, ?, ?, ?, ?, ?)`,
-		version.ArtifactID, version.Content, version.SizeBytes, version.SHA256, version.ChangeNote,
+		`INSERT INTO artifact_versions (artifact_id, version, format, content, size_bytes, sha256, change_note, created_by, session_id)
+		 VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+		version.ArtifactID, version.Format, version.Content, version.SizeBytes, version.SHA256, version.ChangeNote,
 		version.CreatedBy, version.SessionID); err != nil {
 		return err
 	}
@@ -121,6 +132,13 @@ func (d *DB) CreateArtifact(ctx context.Context, artifact *Artifact, version *Ar
 		return err
 	}
 	return tx.Commit()
+}
+
+func artifactFormatOrDefault(format string) string {
+	if format == "" {
+		return ArtifactFormatHTML
+	}
+	return format
 }
 
 // insertArtifactQuestions stores the questions a version declares, in the
@@ -188,6 +206,7 @@ func (d *DB) ListArtifacts(ctx context.Context, filter ArtifactFilter) ([]Artifa
 	query := `SELECT a.id, a.project_id, a.session_id, a.task_id, a.conversation_id, a.title, a.summary,
 			a.current_version, a.status, a.created_by, a.created_at, a.updated_at,
 			COALESCE((SELECT v.size_bytes FROM artifact_versions v WHERE v.artifact_id = a.id AND v.version = a.current_version), 0) AS size_bytes,
+			COALESCE((SELECT v.format FROM artifact_versions v WHERE v.artifact_id = a.id AND v.version = a.current_version), 'html') AS format,
 			(SELECT COUNT(*) FROM artifact_annotations n WHERE n.artifact_id = a.id AND n.status = 'open') AS open_annotations
 		FROM artifacts a
 		WHERE ` + strings.Join(where, " AND ") + `
@@ -262,12 +281,16 @@ func (d *DB) AppendArtifactVersion(ctx context.Context, artifactID string, baseV
 	if baseVersion > 0 && baseVersion != current.CurrentVersion {
 		return &current, false, ErrArtifactVersionConflict
 	}
-	var currentHash string
-	if err := tx.GetContext(ctx, &currentHash,
-		`SELECT sha256 FROM artifact_versions WHERE artifact_id = ? AND version = ?`, artifactID, current.CurrentVersion); err != nil {
+	version.Format = artifactFormatOrDefault(version.Format)
+	var latest struct {
+		SHA256 string `db:"sha256"`
+		Format string `db:"format"`
+	}
+	if err := tx.GetContext(ctx, &latest,
+		`SELECT sha256, format FROM artifact_versions WHERE artifact_id = ? AND version = ?`, artifactID, current.CurrentVersion); err != nil {
 		return nil, false, err
 	}
-	if currentHash != "" && currentHash == version.SHA256 {
+	if latest.SHA256 != "" && latest.SHA256 == version.SHA256 && latest.Format == version.Format {
 		return &current, false, nil
 	}
 
@@ -275,9 +298,9 @@ func (d *DB) AppendArtifactVersion(ctx context.Context, artifactID string, baseV
 	version.ArtifactID = artifactID
 	version.Version = next
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO artifact_versions (artifact_id, version, content, size_bytes, sha256, change_note, created_by, session_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		artifactID, next, version.Content, version.SizeBytes, version.SHA256, version.ChangeNote,
+		`INSERT INTO artifact_versions (artifact_id, version, format, content, size_bytes, sha256, change_note, created_by, session_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		artifactID, next, version.Format, version.Content, version.SizeBytes, version.SHA256, version.ChangeNote,
 		version.CreatedBy, version.SessionID); err != nil {
 		return nil, false, err
 	}
