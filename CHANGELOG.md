@@ -97,6 +97,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Docs tools are retired.** `openpoet_create_document` and
+  `openpoet_read_document` (and their chat names) are no longer listed to
+  agents: `openpoet_create_artifact` with `markdown` publishes a short answer,
+  and `openpoet_read_artifact` reads every document id and `plan:<sessionId>`.
+  `openpoet_get_link` no longer offers the `document` kind. A call that still
+  names a retired tool is answered, with a note saying what to use. The
+  managed instruction block, the chat assistant's prompt and the built-in
+  `html-artifact` skill (revision 5) say the same; allowlists that granted the
+  Docs tools get the artifact tools.
 - **Docs become artifacts.** What creates a document (`POST /api/documents`,
   `openpoet_create_document`, `create_document` in the chat, the Automation
   API's `documents.create_temp`) now publishes a markdown artifact, answered

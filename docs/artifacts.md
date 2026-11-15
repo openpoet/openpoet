@@ -6,8 +6,11 @@ OpenPoet database, never in the project directory. The user opens it in a
 sandboxed viewer, annotates the parts that should change, and the agent reads
 those notes, publishes a new version and resolves them.
 
-Use it for plans, reports and documentation. Docs (`openpoet_create_document`)
-remain the place for short plain-text answers.
+Use it for plans, reports and documentation. A short plain-text answer is an
+artifact too, published as markdown (see [Markdown artifacts](#markdown-artifacts)).
+Artifacts are the one format of documents in OpenPoet: the older Docs were
+copied into artifacts and their tools are retired (see
+[Docs become artifacts](#docs-become-artifacts)).
 
 ## What is stored
 
@@ -231,8 +234,8 @@ id finds the artifact:
   the source of the current version; the UI then opens the artifact viewer.
 - `GET /app/doc/{id}` redirects to `/app/artifact/<id>`, and
   `GET /api/links?kind=document` returns that link.
-- `openpoet_read_document` (and `read_document` in the chat assistant) return
-  the content and name the artifact.
+- `openpoet_read_artifact` (and `read_artifact` in the chat assistant) read it
+  by that id.
 
 An id is resolved in this order: a Doc copied into an artifact
 (`artifact_legacy_docs`, filled when Docs are migrated) is that artifact; a Doc
@@ -248,11 +251,23 @@ rows of the Docs table too. They are not documents and have their own table,
 Docs (rows of `temp_documents`) are the older document format: markdown, no
 versions, no annotations. Artifacts replace them.
 
-**What creates a document creates an artifact.** `POST /api/documents`,
-`openpoet_create_document`, the chat assistant's `create_document` and the
+**What creates a document creates an artifact.** `POST /api/documents` and the
 Automation API's `documents.create_temp` publish a markdown artifact. They
 answer as before, with a document id and a `/app/doc/<id>` link; the id is the
 artifact's, and the link redirects to it.
+
+**The Docs tools are retired.** `openpoet_create_document` and
+`openpoet_read_document` (`create_document` and `read_document` in the chat
+assistant) are not listed to any agent. `openpoet_create_artifact` with
+`markdown` publishes what `create_document` did, and `openpoet_read_artifact`
+reads every id `read_document` took: an artifact id, a document id and
+`plan:<sessionId>`. `openpoet_get_link` no longer offers the `document` kind,
+and still answers it. A call that names a retired tool is answered all the
+same, with a note saying what to use, so a session that started before the
+change or an instruction written before it does not fail; the call is subject
+to the tool policy under the retired name. Migration V89 adds the artifact
+tools to every allowlist that granted the Docs tools (it only edits stored
+policies, adds names, and can run again).
 
 **Existing Docs are copied, never changed.** On every start the server copies,
 beside itself and without waiting, each Doc that has no artifact yet
@@ -529,7 +544,7 @@ things avoid that:
 
 ## Agent tools
 
-Registered next to the Docs tools, so they are available to sessions over MCP,
+They are the document tools of OpenPoet, available to sessions over MCP,
 to the chat assistant, and through `openpoet cli call`.
 
 | Tool | Arguments |
@@ -569,7 +584,8 @@ a path named by a client. Sessions started by OpenPoet have the binary in
 Tool policies written as an allowlist name every tool they grant. On upgrade,
 allowlists that already grant `create_document` get the publishing tools,
 those that grant `read_document` get the reading tools, and those that grant
-`update_artifact` get `patch_artifact`. Policies that allow
+`update_artifact` get `patch_artifact`. With the Docs tools retired, V89 does
+it once more for allowlists written since. Policies that allow
 everything are not touched. Remove the tools in the tool policy settings to opt
 a project out.
 
@@ -585,8 +601,10 @@ documents are published through the REST route or the MCP tools.
 
 - The managed instruction block that OpenPoet syncs into every harness
   (`.claude/CLAUDE.md`, `AGENTS.md`, Copilot and ACP instructions) tells agents
-  to publish plans, reports and documentation as HTML artifacts, and to use a
-  Doc for short plain text or when the artifact tools are unavailable.
+  to publish plans, reports and documentation as HTML artifacts, and a short
+  plain-text answer as a markdown artifact, through the same tool. The block
+  is replaced in place on every sync, so projects pick the wording up when
+  their next session starts.
 - The built-in `html-artifact` skill is the design guide: what the sandbox
   enforces, how to structure a page with navigation, visual components, inline
   charts and restrained motion, how to keep it easy to annotate, how to ask

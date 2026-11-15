@@ -50,16 +50,15 @@ pairing is approved. `next` is only ever a path on the same site.
 | Where | How |
 | --- | --- |
 | REST | `GET /api/links?kind=artifact\|document\|session\|task\|project&id=<id>[&version=<n>]` |
-| Agent tool | `openpoet_get_link` (`kind`, `id`, `version`) over MCP and the CLI; `get_link` in the chat assistant |
+| Agent tool | `openpoet_get_link` (`kind`: `artifact`, `session` or `task`; `id`, `version`) over MCP and the CLI; `get_link` in the chat assistant. Documents are artifacts, so the tool no longer offers the `document` kind; it still answers it, with the link of the artifact the id stands for |
 
 The answer carries `path` (always), `url` (the path on the public base URL;
 absent when none is configured), `local_url` (the path on the address the
 request came in on) and `public`. Asking for something that does not exist is
 an error: no link is invented.
 
-`openpoet_create_artifact`, `openpoet_update_artifact` and
-`openpoet_create_document` also answer with the shareable link when a public
-base URL is configured. The REST publish routes return it as `url`, next to the
+`openpoet_create_artifact` and `openpoet_update_artifact` also answer with the
+shareable link when a public base URL is configured. The REST publish routes return it as `url`, next to the
 in-app `link`.
 
 A session can ask for its own link with `kind: "session"` and no `id`.
