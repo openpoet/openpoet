@@ -14,6 +14,14 @@ type ArtifactRedaction struct {
 	Kind string `json:"kind"`
 }
 
+// MaskArtifactText masks credential-looking text the way an artifact is masked
+// when it is stored (the same patterns as maskArtifactSecrets, without the
+// report of where). The copy of Docs into artifacts uses it: a Doc was stored
+// as written and masked whenever it was read, an artifact is masked once.
+func MaskArtifactText(text string) string {
+	return redactReportSecrets(text)
+}
+
 // maxArtifactRedactionsReported bounds the places listed in a publish result.
 // The count is always exact.
 const maxArtifactRedactionsReported = 50

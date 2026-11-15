@@ -260,9 +260,15 @@ beside itself and without waiting, each Doc that has no artifact yet
 by anything. `artifact_legacy_docs` records which artifact each Doc became. A
 Doc becomes:
 
-- a markdown artifact with one version, holding the content byte for byte, the
-  title, the summary and the links to its conversation, task and session, and
-  created at the Doc's own time;
+- a markdown artifact with one version, holding the content, the title, the
+  summary and the links to its conversation, task and session, and created at
+  the Doc's own time;
+- with credential-looking text masked in the content, the title and the
+  summary, as in any artifact. A Doc was stored as it was written and masked
+  every time it was read; an artifact is masked once, when it is stored. Apart
+  from that the content is the Doc's, byte for byte, and the Doc keeps the
+  original. Copies made by a release that did not mask yet are masked by the
+  next start, as long as they still hold exactly what their Doc holds;
 - under the Doc's id when no artifact has it, so a task's
   `verification_doc_id` and stored `/app/doc/<id>` links keep working (they
   resolve through the map in any case);
@@ -283,18 +289,20 @@ opens as a Doc.
 
 **Checking the copy.** `GET /api/artifacts/legacy-docs/report` only reads. It
 answers with how many Docs there are, how many have an artifact and how many
-do not yet, what they became (`by_kind`), how many got another id, and whether
-every task's `verification_doc_id` still leads to a document. For each copied
-Doc it compares version 1 of the artifact with the Doc (content, size, hash,
-title, summary, creation time, task, session, conversation) and lists the ones
-that differ by id and field, never by title or content. Run it right after the
-copy: an artifact renamed since is reported as differing.
+do not yet, what they became (`by_kind`), how many got another id, how many
+hold masked text (`masked`), and whether every task's `verification_doc_id`
+still leads to a document. For each copied Doc it compares version 1 of the
+artifact with what the Doc becomes (content after masking, size, hash, title,
+summary, creation time, task, session, conversation) and lists the ones that
+differ by id and field, never by title or content. An artifact that still
+shows text the mask would hide is listed as differing. Run it right after the
+copy: an artifact renamed since is reported as differing too.
 
 To rehearse the copy on a **copy** of a database before a release:
 
 ```
 OPENPOET_LEGACY_DOCS_REHEARSAL_DB=/path/to/copy.db \
-  go test ./internal/database/ -run TestLegacyDocMigrationRehearsal -v
+  go test ./internal/application/ -run TestLegacyDocMigrationRehearsal -v
 ```
 
 It migrates the schema of that file, copies its Docs and prints the report

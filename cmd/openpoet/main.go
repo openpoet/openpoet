@@ -246,14 +246,14 @@ func main() {
 	// opens as a Doc until its copy exists. It runs on every start and copies
 	// only what is missing, so a failure is retried by the next start.
 	go func() {
-		report, err := db.MigrateLegacyDocsToArtifacts(context.Background())
+		report, err := db.MigrateLegacyDocsToArtifacts(context.Background(), application.MaskArtifactText)
 		if err != nil {
 			log.Printf("[Docs] Copying Docs into artifacts failed: %v", err)
 			return
 		}
-		if report.Copied > 0 || report.Pending > 0 || report.MismatchCount > 0 || len(report.Failed) > 0 {
-			log.Printf("[Docs] Docs copied into artifacts: %d this start, %d of %d in all, %d not copied, %d differing from their Doc, %d failed",
-				report.Copied, report.Mapped, report.Eligible, report.Pending, report.MismatchCount, len(report.Failed))
+		if report.Copied > 0 || report.Remasked > 0 || report.Pending > 0 || report.MismatchCount > 0 || len(report.Failed) > 0 {
+			log.Printf("[Docs] Docs copied into artifacts: %d this start, %d of %d in all, %d not copied, %d differing from their Doc, %d failed; %d hold masked text, %d masked this start",
+				report.Copied, report.Mapped, report.Eligible, report.Pending, report.MismatchCount, len(report.Failed), report.Masked, report.Remasked)
 		}
 	}()
 

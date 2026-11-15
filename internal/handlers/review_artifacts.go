@@ -54,7 +54,7 @@ func (a *API) RedirectDocumentLink(next http.HandlerFunc) http.HandlerFunc {
 // every copied Doc, whether its artifact still holds what the Doc holds; a Doc
 // that differs is named by its id and the field, never by its title or content.
 func (a *API) LegacyDocsReport(w http.ResponseWriter, r *http.Request) {
-	report, err := a.db.VerifyLegacyDocMigration(r.Context())
+	report, err := a.db.VerifyLegacyDocMigration(r.Context(), application.MaskArtifactText)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "The copy of Docs could not be checked")
 		return

@@ -3,8 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
-	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -62,7 +61,7 @@ func TestLegacyDocsAreCopiedIntoArtifactsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := db.MigrateLegacyDocsToArtifacts(ctx)
+	report, err := db.MigrateLegacyDocsToArtifacts(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,17 +172,17 @@ func TestLegacyDocsAreCopiedIntoArtifactsOnce(t *testing.T) {
 	}
 
 	// A second run copies nothing; a Doc created since is picked up by the next.
-	again, err := db.MigrateLegacyDocsToArtifacts(ctx)
+	again, err := db.MigrateLegacyDocsToArtifacts(ctx, nil)
 	if err != nil || again.Copied != 0 || again.Mapped != 9 || again.MismatchCount != 0 {
 		t.Fatalf("second run = %+v err=%v", again, err)
 	}
 	if err := db.CreateTempDocument(ctx, &TempDocument{ID: "late0001", Title: "Late", Content: "late"}); err != nil {
 		t.Fatal(err)
 	}
-	if pending, err := db.VerifyLegacyDocMigration(ctx); err != nil || pending.Pending != 1 {
+	if pending, err := db.VerifyLegacyDocMigration(ctx, nil); err != nil || pending.Pending != 1 {
 		t.Fatalf("pending before the third run = %+v err=%v", pending, err)
 	}
-	if third, err := db.MigrateLegacyDocsToArtifacts(ctx); err != nil || third.Copied != 1 || third.Mapped != 10 || third.Pending != 0 {
+	if third, err := db.MigrateLegacyDocsToArtifacts(ctx, nil); err != nil || third.Copied != 1 || third.Mapped != 10 || third.Pending != 0 {
 		t.Fatalf("third run = %+v err=%v", third, err)
 	}
 
@@ -194,7 +193,7 @@ func TestLegacyDocsAreCopiedIntoArtifactsOnce(t *testing.T) {
 	if _, err := db.Exec(`UPDATE artifacts SET created_at = '2026-03-01 00:00:00' WHERE id = 'task0001'`); err != nil {
 		t.Fatal(err)
 	}
-	checked, err := db.VerifyLegacyDocMigration(ctx)
+	checked, err := db.VerifyLegacyDocMigration(ctx, nil)
 	if err != nil || checked.MismatchCount != 2 {
 		t.Fatalf("check after tampering = %+v err=%v", checked, err)
 	}
@@ -207,33 +206,97 @@ func TestLegacyDocsAreCopiedIntoArtifactsOnce(t *testing.T) {
 	}
 }
 
-// TestLegacyDocMigrationRehearsal runs the copy against a database file named
-// by OPENPOET_LEGACY_DOCS_REHEARSAL_DB and prints the report: counts only,
-// never a title or a content. It is how the copy is rehearsed on a COPY of a
-// real database before a release; it migrates the schema of that file and
-// writes to it, so never point it at a database in use.
-func TestLegacyDocMigrationRehearsal(t *testing.T) {
-	path := os.Getenv("OPENPOET_LEGACY_DOCS_REHEARSAL_DB")
-	if path == "" {
-		t.Skip("OPENPOET_LEGACY_DOCS_REHEARSAL_DB is not set")
+// testLegacyDocMask stands in for the application's mask: it hides one word.
+func testLegacyDocMask(text string) string {
+	return strings.ReplaceAll(text, "hunter2", "[REDACTED]")
+}
+
+// A Doc was stored as written and masked when read; its artifact is masked
+// when stored, like any artifact. The Doc keeps the original.
+func TestLegacyDocsAreMaskedWhenCopied(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	for _, doc := range []TempDocument{
+		{ID: "secr0001", Title: "Deploy with hunter2", Summary: "uses hunter2", Content: "run with password hunter2\nand keep going\n"},
+		{ID: "clean001", Title: "Clean", Summary: "nothing to hide", Content: "nothing to hide\n"},
+	} {
+		doc := doc
+		if err := db.CreateTempDocument(ctx, &doc); err != nil {
+			t.Fatal(err)
+		}
 	}
-	db, err := New(path)
-	if err != nil {
+	report, err := db.MigrateLegacyDocsToArtifacts(ctx, testLegacyDocMask)
+	if err != nil || report.Copied != 2 || report.Masked != 1 || report.Remasked != 0 || report.MismatchCount != 0 {
+		t.Fatalf("report = %+v err=%v", report, err)
+	}
+	artifact, err := db.GetArtifact(ctx, "secr0001")
+	if err != nil || artifact.Title != "Deploy with [REDACTED]" || artifact.Summary != "uses [REDACTED]" {
+		t.Fatalf("artifact = %+v err=%v", artifact, err)
+	}
+	version, err := db.GetArtifactVersion(ctx, "secr0001", 1)
+	want := "run with password [REDACTED]\nand keep going\n"
+	if err != nil || version.Content != want || version.SizeBytes != int64(len(want)) || version.SHA256 != legacyDocContentHash(want) {
+		t.Fatalf("version = %+v err=%v", version, err)
+	}
+	if clean, err := db.GetArtifactVersion(ctx, "clean001", 1); err != nil || clean.Content != "nothing to hide\n" {
+		t.Fatalf("a Doc with nothing to hide was changed: %+v err=%v", clean, err)
+	}
+	// The Doc keeps what was written.
+	if doc, err := db.GetTempDocument(ctx, "secr0001"); err != nil || doc.Content != "run with password hunter2\nand keep going\n" || doc.Title != "Deploy with hunter2" {
+		t.Fatalf("the Doc was changed: %+v err=%v", doc, err)
+	}
+}
+
+// Copies made before the copy masked are masked by the next run, as long as
+// they still hold exactly what their Doc holds.
+func TestLegacyDocCopiesAreMaskedAfterTheFact(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	for _, doc := range []TempDocument{
+		{ID: "secr0001", Title: "Deploy with hunter2", Summary: "uses hunter2", Content: "password hunter2\n"},
+		{ID: "secr0002", Title: "Edited since", Content: "token hunter2\n"},
+		{ID: "clean001", Title: "Clean", Content: "nothing to hide\n"},
+	} {
+		doc := doc
+		if err := db.CreateTempDocument(ctx, &doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The copy as it was first released: no masking.
+	if report, err := db.MigrateLegacyDocsToArtifacts(ctx, nil); err != nil || report.Copied != 3 {
+		t.Fatalf("unmasked copy = %+v err=%v", report, err)
+	}
+	// One of the artifacts got a second version since; version 1 is history.
+	if _, _, err := db.AppendArtifactVersion(ctx, "secr0002", 1, &ArtifactVersion{Format: ArtifactFormatMarkdown, Content: "rewritten\n", SHA256: "h2"}); err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	started := time.Now()
-	report, err := db.MigrateLegacyDocsToArtifacts(context.Background())
-	if err != nil {
-		t.Fatal(err)
+
+	// The check, with the mask, tells the copies that still show the word.
+	if checked, err := db.VerifyLegacyDocMigration(ctx, testLegacyDocMask); err != nil || checked.MismatchCount != 2 || checked.Masked != 2 {
+		t.Fatalf("check before masking = %+v err=%v", checked, err)
 	}
-	encoded, _ := json.MarshalIndent(report, "", "  ")
-	t.Logf("copied in %s\n%s", time.Since(started).Round(time.Millisecond), encoded)
-	if report.Pending != 0 || report.MismatchCount != 0 || len(report.Failed) != 0 || report.VerificationDocsResolved != report.VerificationDocs {
-		t.Fatalf("the copy is not complete or not faithful")
+	report, err := db.MigrateLegacyDocsToArtifacts(ctx, testLegacyDocMask)
+	if err != nil || report.Remasked != 2 || report.Copied != 0 || report.MismatchCount != 0 || report.Masked != 2 {
+		t.Fatalf("run that masks = %+v err=%v", report, err)
 	}
-	again, err := db.MigrateLegacyDocsToArtifacts(context.Background())
-	if err != nil || again.Copied != 0 {
-		t.Fatalf("a second run copied %d Docs (err %v)", again.Copied, err)
+	for id, want := range map[string]string{"secr0001": "password [REDACTED]\n", "secr0002": "token [REDACTED]\n", "clean001": "nothing to hide\n"} {
+		version, err := db.GetArtifactVersion(ctx, id, 1)
+		if err != nil || version.Content != want || version.SHA256 != legacyDocContentHash(want) || version.SizeBytes != int64(len(want)) {
+			t.Errorf("version 1 of %s = %+v err=%v", id, version, err)
+		}
+	}
+	if artifact, err := db.GetArtifact(ctx, "secr0001"); err != nil || artifact.Title != "Deploy with [REDACTED]" || artifact.Summary != "uses [REDACTED]" {
+		t.Fatalf("artifact = %+v err=%v", artifact, err)
+	}
+	// What was published since is not touched.
+	if current, err := db.GetArtifactVersion(ctx, "secr0002", 2); err != nil || current.Content != "rewritten\n" {
+		t.Fatalf("version 2 = %+v err=%v", current, err)
+	}
+	// Nothing left to do.
+	if again, err := db.MigrateLegacyDocsToArtifacts(ctx, testLegacyDocMask); err != nil || again.Remasked != 0 {
+		t.Fatalf("second masking run = %+v err=%v", again, err)
+	}
+	if count := countRows(t, db, `SELECT COUNT(*) FROM temp_documents WHERE content LIKE '%hunter2%'`); count != 2 {
+		t.Fatalf("%d Docs still hold the original, want 2", count)
 	}
 }

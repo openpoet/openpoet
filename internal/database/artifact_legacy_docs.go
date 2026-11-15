@@ -19,9 +19,14 @@ import (
 //
 // What a Doc becomes:
 //
-//   - a markdown artifact with one version: the content byte for byte, with its
-//     title, summary, conversation, task and session, and the Doc's creation
-//     time as the time the artifact and the version were created;
+//   - a markdown artifact with one version: the content, with its title,
+//     summary, conversation, task and session, and the Doc's creation time as
+//     the time the artifact and the version were created;
+//   - with credential-looking text masked in the content, the title and the
+//     summary, as in any artifact. A Doc was stored as it was written and
+//     masked every time it was read; an artifact is masked once, when it is
+//     stored. Apart from that the content is the Doc's, byte for byte, and the
+//     Doc keeps the original;
 //   - the Doc's id as the artifact's id, unless an artifact already has it (a
 //     new id is drawn then). Ids a Doc is known by elsewhere (a task's
 //     verification_doc_id, a stored /app/doc/<id> link) therefore keep working,
@@ -39,6 +44,18 @@ import (
 // LegacyDocMigrationActor is the author of an artifact copied from a Doc that
 // names no session.
 const LegacyDocMigrationActor = "system:doc-migration"
+
+// LegacyDocMask masks credential-looking text the way artifacts are masked
+// when they are stored. The application layer provides it (the patterns live
+// there). A nil mask changes nothing, which is only for tests.
+type LegacyDocMask func(string) string
+
+func (mask LegacyDocMask) apply(text string) string {
+	if mask == nil {
+		return text
+	}
+	return mask(text)
+}
 
 // LegacyDocMigrationReport says what a run of the copy did, or what a check of
 // it found.
@@ -58,9 +75,16 @@ type LegacyDocMigrationReport struct {
 	ByKind map[string]int `db:"-" json:"by_kind"`
 	// NewIDs is how many Docs got an artifact with another id than theirs.
 	NewIDs int `db:"new_ids" json:"new_ids"`
-	// Mismatches lists the mapped Docs whose artifact differs from them in
-	// content, title, summary, creation time, task, session or conversation
-	// (at most 50; MismatchCount is exact). A copy that is right has none.
+	// Masked is how many copied Docs have credential-looking text, which
+	// their artifact holds masked. Remasked is how many artifacts this run
+	// masked after the fact: copies made before the copy masked.
+	Masked   int `db:"-" json:"masked"`
+	Remasked int `db:"-" json:"remasked"`
+	// Mismatches lists the mapped Docs whose artifact differs from what the
+	// Doc becomes, in content, title, summary, creation time, task, session
+	// or conversation (at most 50; MismatchCount is exact). A copy that is
+	// right has none. An artifact that still holds text the mask would hide
+	// is a mismatch in "content", "title" or "summary".
 	Mismatches    []LegacyDocMismatch `db:"-" json:"mismatches"`
 	MismatchCount int                 `db:"-" json:"mismatch_count"`
 	// VerificationDocs is how many tasks name a verification document, and
@@ -119,7 +143,15 @@ func legacyDocContentHash(content string) string {
 // transaction, so a run that stops halfway leaves whole copies and the next
 // run goes on. A Doc that cannot be copied is reported and left for the next
 // run; it stops nothing.
-func (d *DB) MigrateLegacyDocsToArtifacts(ctx context.Context) (LegacyDocMigrationReport, error) {
+//
+// It also masks, after the fact, the copies that were made before the copy
+// masked: an artifact that still holds exactly what its Doc holds, where the
+// mask would hide something.
+func (d *DB) MigrateLegacyDocsToArtifacts(ctx context.Context, mask LegacyDocMask) (LegacyDocMigrationReport, error) {
+	remasked, err := d.remaskCopiedLegacyDocs(ctx, mask)
+	if err != nil {
+		return LegacyDocMigrationReport{}, err
+	}
 	var pending []string
 	if err := d.SelectContext(ctx, &pending,
 		`SELECT t.id FROM temp_documents t LEFT JOIN artifact_legacy_docs m ON m.doc_id = t.id
@@ -132,19 +164,27 @@ func (d *DB) MigrateLegacyDocsToArtifacts(ctx context.Context) (LegacyDocMigrati
 		if err := ctx.Err(); err != nil {
 			return LegacyDocMigrationReport{}, err
 		}
-		if err := d.copyLegacyDoc(ctx, id); err != nil {
+		if err := d.copyLegacyDoc(ctx, id, mask); err != nil {
 			failed = append(failed, LegacyDocFailure{DocID: id, Reason: err.Error()})
 			continue
 		}
 		copied++
 	}
-	report, err := d.VerifyLegacyDocMigration(ctx)
-	report.Copied, report.Failed = copied, failed
+	// A run that changed something is checked in full. One that found nothing
+	// to do (every start after the first) only counts: comparing every Doc
+	// with its artifact again reads and masks the whole table.
+	var report LegacyDocMigrationReport
+	if copied > 0 || remasked > 0 || len(failed) > 0 {
+		report, err = d.VerifyLegacyDocMigration(ctx, mask)
+	} else {
+		report, err = d.countLegacyDocs(ctx)
+	}
+	report.Copied, report.Remasked, report.Failed = copied, remasked, failed
 	return report, err
 }
 
 // copyLegacyDoc copies one Doc into an artifact, in one transaction.
-func (d *DB) copyLegacyDoc(ctx context.Context, docID string) error {
+func (d *DB) copyLegacyDoc(ctx context.Context, docID string, mask LegacyDocMask) error {
 	tx, err := d.BeginTxx(ctx, nil)
 	if err != nil {
 		return err
@@ -153,12 +193,13 @@ func (d *DB) copyLegacyDoc(ctx context.Context, docID string) error {
 
 	var doc struct {
 		Title     string        `db:"title"`
+		Summary   string        `db:"summary"`
 		Content   string        `db:"content"`
 		Status    string        `db:"status"`
 		SessionID string        `db:"session_id"`
 		TaskID    sql.NullInt64 `db:"task_id"`
 	}
-	if err := tx.GetContext(ctx, &doc, `SELECT title, content, status, session_id, task_id FROM temp_documents WHERE id = ?`, docID); err != nil {
+	if err := tx.GetContext(ctx, &doc, `SELECT title, summary, content, status, session_id, task_id FROM temp_documents WHERE id = ?`, docID); err != nil {
 		return err
 	}
 	var mapped int
@@ -189,7 +230,8 @@ func (d *DB) copyLegacyDoc(ctx context.Context, docID string) error {
 	if doc.SessionID != "" {
 		author = "session:" + doc.SessionID
 	}
-	// Everything a Doc has is copied by the database itself, so times and text
+	title, summary, content := mask.apply(doc.Title), mask.apply(doc.Summary), mask.apply(doc.Content)
+	// The times and the links are copied by the database itself, so they
 	// arrive exactly as they are stored. The project is the task's, or else
 	// the session's, when it still exists.
 	if _, err := tx.ExecContext(ctx,
@@ -197,14 +239,14 @@ func (d *DB) copyLegacyDoc(ctx context.Context, docID string) error {
 		 SELECT ?, COALESCE(
 				(SELECT p.id FROM project_tasks k JOIN projects p ON p.id = k.project_id WHERE k.id = t.task_id),
 				(SELECT p.id FROM sessions s JOIN projects p ON p.id = s.project_id WHERE s.id = t.session_id AND t.session_id != '')),
-			t.session_id, t.task_id, t.conversation_id, t.title, t.summary, 1, 'active', ?, t.created_at, t.created_at
-		 FROM temp_documents t WHERE t.id = ?`, artifactID, author, docID); err != nil {
+			t.session_id, t.task_id, t.conversation_id, ?, ?, 1, 'active', ?, t.created_at, t.created_at
+		 FROM temp_documents t WHERE t.id = ?`, artifactID, title, summary, author, docID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO artifact_versions (artifact_id, version, format, content, size_bytes, sha256, change_note, created_by, session_id, created_at)
-		 SELECT ?, 1, ?, t.content, ?, ?, '', ?, t.session_id, t.created_at FROM temp_documents t WHERE t.id = ?`,
-		artifactID, ArtifactFormatMarkdown, len(doc.Content), legacyDocContentHash(doc.Content), author, docID); err != nil {
+		 SELECT ?, 1, ?, ?, ?, ?, '', ?, t.session_id, t.created_at FROM temp_documents t WHERE t.id = ?`,
+		artifactID, ArtifactFormatMarkdown, content, len(content), legacyDocContentHash(content), author, docID); err != nil {
 		return err
 	}
 	if kind := legacyDocReviewKind(doc.Title); kind != "" {
@@ -225,14 +267,171 @@ func (d *DB) copyLegacyDoc(ctx context.Context, docID string) error {
 	return tx.Commit()
 }
 
+// legacyDocCopy is a copied Doc next to its artifact, as the check and the
+// masking after the fact read them.
+type legacyDocCopy struct {
+	DocID                  string         `db:"doc_id"`
+	ArtifactID             string         `db:"artifact_id"`
+	Content                string         `db:"content"`
+	Title                  string         `db:"title"`
+	Summary                string         `db:"summary"`
+	DocCreatedAt           time.Time      `db:"doc_created_at"`
+	DocTaskID              sql.NullInt64  `db:"doc_task_id"`
+	DocSessionID           string         `db:"doc_session_id"`
+	DocConversationID      sql.NullInt64  `db:"doc_conversation_id"`
+	ArtifactTitle          sql.NullString `db:"artifact_title"`
+	ArtifactSummary        sql.NullString `db:"artifact_summary"`
+	ArtifactCreatedAt      sql.NullTime   `db:"artifact_created_at"`
+	ArtifactTaskID         sql.NullInt64  `db:"artifact_task_id"`
+	ArtifactSessionID      sql.NullString `db:"artifact_session_id"`
+	ArtifactConversationID sql.NullInt64  `db:"artifact_conversation_id"`
+	VersionContent         sql.NullString `db:"version_content"`
+	SHA256                 string         `db:"sha256"`
+	SizeBytes              int64          `db:"size_bytes"`
+	Format                 string         `db:"format"`
+}
+
+// legacyDocCopiesQuery reads every copied Doc that still exists, with version
+// 1 of its artifact.
+const legacyDocCopiesQuery = `SELECT m.doc_id, m.artifact_id, t.content, t.title, t.summary, t.created_at AS doc_created_at,
+		t.task_id AS doc_task_id, t.session_id AS doc_session_id, t.conversation_id AS doc_conversation_id,
+		a.title AS artifact_title, a.summary AS artifact_summary, a.created_at AS artifact_created_at,
+		a.task_id AS artifact_task_id, a.session_id AS artifact_session_id, a.conversation_id AS artifact_conversation_id,
+		v.content AS version_content, COALESCE(v.sha256, '') AS sha256, COALESCE(v.size_bytes, -1) AS size_bytes, COALESCE(v.format, '') AS format
+	FROM artifact_legacy_docs m
+	JOIN temp_documents t ON t.id = m.doc_id
+	LEFT JOIN artifacts a ON a.id = m.artifact_id
+	LEFT JOIN artifact_versions v ON v.artifact_id = m.artifact_id AND v.version = 1
+	ORDER BY m.doc_id`
+
+func (d *DB) eachLegacyDocCopy(ctx context.Context, visit func(*legacyDocCopy)) error {
+	rows, err := d.QueryxContext(ctx, legacyDocCopiesQuery)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var row legacyDocCopy
+		if err := rows.StructScan(&row); err != nil {
+			return err
+		}
+		visit(&row)
+	}
+	return rows.Err()
+}
+
+// remaskCopiedLegacyDocs masks the artifacts that were copied from a Doc
+// before the copy masked. It only touches what is still exactly the Doc's: a
+// version 1 whose content is the Doc's content, a title or a summary that is
+// the Doc's. Whatever was published or renamed since is left alone. It returns
+// how many artifacts it changed.
+func (d *DB) remaskCopiedLegacyDocs(ctx context.Context, mask LegacyDocMask) (int, error) {
+	if mask == nil {
+		return 0, nil
+	}
+	type change struct {
+		artifactID                       string
+		rawContent, content              string
+		rawTitle, title                  string
+		rawSummary, summary              string
+		fixContent, fixTitle, fixSummary bool
+	}
+	var changes []change
+	if err := d.eachLegacyDocCopy(ctx, func(row *legacyDocCopy) {
+		next := change{artifactID: row.ArtifactID, rawContent: row.Content, rawTitle: row.Title, rawSummary: row.Summary}
+		if masked := mask(row.Content); masked != row.Content && row.VersionContent.Valid && row.VersionContent.String == row.Content {
+			next.content, next.fixContent = masked, true
+		}
+		if masked := mask(row.Title); masked != row.Title && row.ArtifactTitle.String == row.Title {
+			next.title, next.fixTitle = masked, true
+		}
+		if masked := mask(row.Summary); masked != row.Summary && row.ArtifactSummary.String == row.Summary {
+			next.summary, next.fixSummary = masked, true
+		}
+		if next.fixContent || next.fixTitle || next.fixSummary {
+			changes = append(changes, next)
+		}
+	}); err != nil {
+		return 0, err
+	}
+	for _, next := range changes {
+		tx, err := d.BeginTxx(ctx, nil)
+		if err != nil {
+			return 0, err
+		}
+		if next.fixContent {
+			_, err = tx.ExecContext(ctx,
+				`UPDATE artifact_versions SET content = ?, size_bytes = ?, sha256 = ? WHERE artifact_id = ? AND version = 1 AND content = ?`,
+				next.content, len(next.content), legacyDocContentHash(next.content), next.artifactID, next.rawContent)
+		}
+		if err == nil && next.fixTitle {
+			_, err = tx.ExecContext(ctx, `UPDATE artifacts SET title = ? WHERE id = ? AND title = ?`, next.title, next.artifactID, next.rawTitle)
+		}
+		if err == nil && next.fixSummary {
+			_, err = tx.ExecContext(ctx, `UPDATE artifacts SET summary = ? WHERE id = ? AND summary = ?`, next.summary, next.artifactID, next.rawSummary)
+		}
+		if err != nil {
+			_ = tx.Rollback()
+			return 0, err
+		}
+		if err := tx.Commit(); err != nil {
+			return 0, err
+		}
+	}
+	return len(changes), nil
+}
+
 const maxLegacyDocMismatchesReported = 50
 
 // VerifyLegacyDocMigration checks the copy against the Docs, without changing
 // anything: how many Docs there are and how many have an artifact, and, for
-// every Doc that has one, whether version 1 of the artifact holds the Doc's
-// content and the artifact its title, summary, time and links. It is meant for
-// right after a copy: an artifact that was renamed since is reported too.
-func (d *DB) VerifyLegacyDocMigration(ctx context.Context) (LegacyDocMigrationReport, error) {
+// every Doc that has one, whether version 1 of the artifact holds what the
+// Doc becomes (its content, title and summary with credential-looking text
+// masked) and the artifact its time and links. It is meant for right after a
+// copy: an artifact that was renamed since is reported too.
+func (d *DB) VerifyLegacyDocMigration(ctx context.Context, mask LegacyDocMask) (LegacyDocMigrationReport, error) {
+	report, err := d.countLegacyDocs(ctx)
+	if err != nil {
+		return report, err
+	}
+	err = d.eachLegacyDocCopy(ctx, func(row *legacyDocCopy) {
+		content, title, summary := mask.apply(row.Content), mask.apply(row.Title), mask.apply(row.Summary)
+		if content != row.Content || title != row.Title || summary != row.Summary {
+			report.Masked++
+		}
+		field := ""
+		switch {
+		case !row.ArtifactTitle.Valid:
+			field = "artifact missing"
+		case !row.VersionContent.Valid || row.VersionContent.String != content || row.SHA256 != legacyDocContentHash(content) ||
+			row.SizeBytes != int64(len(content)) || row.Format != ArtifactFormatMarkdown:
+			field = "content"
+		case row.ArtifactTitle.String != title:
+			field = "title"
+		case row.ArtifactSummary.String != summary:
+			field = "summary"
+		case !row.ArtifactCreatedAt.Valid || !row.ArtifactCreatedAt.Time.Equal(row.DocCreatedAt):
+			field = "created_at"
+		case row.ArtifactTaskID != row.DocTaskID:
+			field = "task"
+		case row.ArtifactSessionID.String != row.DocSessionID:
+			field = "session"
+		case row.ArtifactConversationID != row.DocConversationID:
+			field = "conversation"
+		}
+		if field == "" {
+			return
+		}
+		report.MismatchCount++
+		if len(report.Mismatches) < maxLegacyDocMismatchesReported {
+			report.Mismatches = append(report.Mismatches, LegacyDocMismatch{DocID: row.DocID, ArtifactID: row.ArtifactID, Field: field})
+		}
+	})
+	return report, err
+}
+
+// countLegacyDocs fills the counts of a report: the part that reads no content.
+func (d *DB) countLegacyDocs(ctx context.Context) (LegacyDocMigrationReport, error) {
 	report := LegacyDocMigrationReport{ByKind: map[string]int{}, Mismatches: []LegacyDocMismatch{}}
 	if err := d.GetContext(ctx, &report, `SELECT
 			(SELECT COUNT(*) FROM temp_documents) AS docs,
@@ -259,74 +458,5 @@ func (d *DB) VerifyLegacyDocMigration(ctx context.Context) (LegacyDocMigrationRe
 	for _, kind := range kinds {
 		report.ByKind[kind.Kind] = kind.Count
 	}
-
-	// Compare each mapped Doc that still exists with version 1 of its artifact.
-	rows, err := d.QueryxContext(ctx, `SELECT m.doc_id, m.artifact_id, t.content, t.title, t.summary, t.created_at AS doc_created_at,
-			t.task_id AS doc_task_id, t.session_id AS doc_session_id, t.conversation_id AS doc_conversation_id,
-			a.title AS artifact_title, a.summary AS artifact_summary, a.created_at AS artifact_created_at,
-			a.task_id AS artifact_task_id, a.session_id AS artifact_session_id, a.conversation_id AS artifact_conversation_id,
-			COALESCE(v.sha256, '') AS sha256, COALESCE(v.size_bytes, -1) AS size_bytes, COALESCE(v.format, '') AS format,
-			COALESCE(v.content = t.content, 0) AS same_content
-		FROM artifact_legacy_docs m
-		JOIN temp_documents t ON t.id = m.doc_id
-		LEFT JOIN artifacts a ON a.id = m.artifact_id
-		LEFT JOIN artifact_versions v ON v.artifact_id = m.artifact_id AND v.version = 1
-		ORDER BY m.doc_id`)
-	if err != nil {
-		return report, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var row struct {
-			DocID                  string         `db:"doc_id"`
-			ArtifactID             string         `db:"artifact_id"`
-			Content                string         `db:"content"`
-			Title                  string         `db:"title"`
-			Summary                string         `db:"summary"`
-			DocCreatedAt           time.Time      `db:"doc_created_at"`
-			DocTaskID              sql.NullInt64  `db:"doc_task_id"`
-			DocSessionID           string         `db:"doc_session_id"`
-			DocConversationID      sql.NullInt64  `db:"doc_conversation_id"`
-			ArtifactTitle          sql.NullString `db:"artifact_title"`
-			ArtifactSummary        sql.NullString `db:"artifact_summary"`
-			ArtifactCreatedAt      sql.NullTime   `db:"artifact_created_at"`
-			ArtifactTaskID         sql.NullInt64  `db:"artifact_task_id"`
-			ArtifactSessionID      sql.NullString `db:"artifact_session_id"`
-			ArtifactConversationID sql.NullInt64  `db:"artifact_conversation_id"`
-			SHA256                 string         `db:"sha256"`
-			SizeBytes              int64          `db:"size_bytes"`
-			Format                 string         `db:"format"`
-			SameContent            bool           `db:"same_content"`
-		}
-		if err := rows.StructScan(&row); err != nil {
-			return report, err
-		}
-		field := ""
-		switch {
-		case !row.ArtifactTitle.Valid:
-			field = "artifact missing"
-		case !row.SameContent || row.SHA256 != legacyDocContentHash(row.Content) || row.SizeBytes != int64(len(row.Content)) || row.Format != ArtifactFormatMarkdown:
-			field = "content"
-		case row.ArtifactTitle.String != row.Title:
-			field = "title"
-		case row.ArtifactSummary.String != row.Summary:
-			field = "summary"
-		case !row.ArtifactCreatedAt.Valid || !row.ArtifactCreatedAt.Time.Equal(row.DocCreatedAt):
-			field = "created_at"
-		case row.ArtifactTaskID != row.DocTaskID:
-			field = "task"
-		case row.ArtifactSessionID.String != row.DocSessionID:
-			field = "session"
-		case row.ArtifactConversationID != row.DocConversationID:
-			field = "conversation"
-		}
-		if field == "" {
-			continue
-		}
-		report.MismatchCount++
-		if len(report.Mismatches) < maxLegacyDocMismatchesReported {
-			report.Mismatches = append(report.Mismatches, LegacyDocMismatch{DocID: row.DocID, ArtifactID: row.ArtifactID, Field: field})
-		}
-	}
-	return report, rows.Err()
+	return report, nil
 }

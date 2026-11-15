@@ -227,7 +227,7 @@ func TestCopiedDocsAreListedOnceAndReported(t *testing.T) {
 		t.Fatalf("documents of the task before the copy = %v", documents)
 	}
 
-	if _, err := api.db.MigrateLegacyDocsToArtifacts(ctx); err != nil {
+	if _, err := api.db.MigrateLegacyDocsToArtifacts(ctx, application.MaskArtifactText); err != nil {
 		t.Fatal(err)
 	}
 	after := report()
