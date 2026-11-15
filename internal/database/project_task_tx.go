@@ -347,10 +347,16 @@ func (t *ProjectTaskTx) CreateHistory(ctx context.Context, history *TaskHistory)
 	return nil
 }
 
+// UpdateDocumentStatus records the outcome of a task's verification on its
+// verification document. The document is an artifact with a review; one
+// created before verification documents were artifacts is a Doc, whose status
+// is still kept in step.
 func (t *ProjectTaskTx) UpdateDocumentStatus(ctx context.Context, documentID, status string) error {
-	_, err := t.tx.ExecContext(ctx,
-		"UPDATE temp_documents SET status = ? WHERE id = ?", status, documentID)
-	return err
+	if _, err := t.tx.ExecContext(ctx,
+		"UPDATE temp_documents SET status = ? WHERE id = ?", status, documentID); err != nil {
+		return err
+	}
+	return SetDocumentReviewStatusTx(ctx, t.tx, documentID, status)
 }
 
 func (t *ProjectTaskTx) LinkSession(ctx context.Context, sessionID string, taskID int64, name string) error {

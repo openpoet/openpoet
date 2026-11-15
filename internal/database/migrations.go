@@ -105,6 +105,7 @@ var migrations = []Migration{
 	{Version: 85, Description: "tool policies: allowlists that grant update_artifact also grant patch_artifact, the tool that changes an artifact by sending only the replacements", Up: migrateV85},
 	{Version: 86, Description: "artifacts: when an annotation was last sent to the agent and to which session (artifact_annotations.sent_at, sent_session_id), so the viewer can show it after a reload", Up: migrateV86},
 	{Version: 87, Description: "artifacts: the format of each version (artifact_versions.format: html or markdown), so a markdown document is stored as its source and rendered when it is shown", Up: migrateV87},
+	{Version: 88, Description: "artifacts: approval state of an artifact (artifact_reviews), the artifact an old Doc id stands for (artifact_legacy_docs) and the file cards of a chat conversation (ai_chat_file_cards), so proposals and verification documents can be artifacts", Up: migrateV88},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2544,6 +2545,59 @@ func migrateV87(tx *sqlx.Tx) error {
 	const stmt = `ALTER TABLE artifact_versions ADD COLUMN format TEXT NOT NULL DEFAULT 'html'`
 	if _, err := tx.Exec(stmt); err != nil {
 		return fmt.Errorf("migrateV87 failed: %w\nSQL: %s", err, stmt)
+	}
+	return nil
+}
+
+// migrateV88 gives artifacts what the Docs table (temp_documents) carried
+// besides documents, so proposals and verification documents can be artifacts:
+//
+//   - artifact_reviews: an artifact that waits for the user's decision. kind
+//     says what is decided (a task's verification, or a memory, task, skill or
+//     tool proposal of the chat assistant), status is pending, approved or
+//     rejected, message_id is the chat message a proposal belongs to, and
+//     feedback_ack records that the assistant was told about the decision. An
+//     artifact with no row here is a plain document.
+//   - artifact_legacy_docs: for each Doc copied into an artifact, the artifact
+//     its id now stands for, so /app/doc/<id> links and stored ids keep
+//     working.
+//   - ai_chat_file_cards: the "file" cards a chat message shows. They were
+//     rows of temp_documents and are not documents.
+//
+// Only tables and indexes are added, all with IF NOT EXISTS, so a binary from
+// before this migration is unaffected and the migration can run again.
+func migrateV88(tx *sqlx.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS artifact_reviews (
+			artifact_id  TEXT PRIMARY KEY,
+			kind         TEXT NOT NULL,
+			status       TEXT NOT NULL DEFAULT 'pending',
+			message_id   INTEGER NOT NULL DEFAULT 0,
+			feedback_ack INTEGER NOT NULL DEFAULT 0,
+			decided_at   TIMESTAMP,
+			created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS artifact_legacy_docs (
+			doc_id      TEXT PRIMARY KEY,
+			artifact_id TEXT NOT NULL,
+			migrated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_artifact_legacy_docs_artifact ON artifact_legacy_docs(artifact_id)`,
+		`CREATE TABLE IF NOT EXISTS ai_chat_file_cards (
+			id              TEXT PRIMARY KEY,
+			conversation_id INTEGER NOT NULL,
+			message_id      INTEGER NOT NULL DEFAULT 0,
+			project_id      INTEGER NOT NULL DEFAULT 0,
+			path            TEXT NOT NULL,
+			created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_chat_file_cards_conversation ON ai_chat_file_cards(conversation_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_artifacts_conversation ON artifacts(conversation_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrateV88 failed: %w\nSQL: %s", err, s)
+		}
 	}
 	return nil
 }

@@ -1459,18 +1459,28 @@ func (d *DB) UpdateAIConversationSessionID(ctx context.Context, id int64, sessio
 
 func (d *DB) DeleteAIConversation(ctx context.Context, id int64) error {
 	d.DeleteTempDocumentsByConversation(ctx, id)
+	_ = deleteConversationArtifacts(ctx, d, `?`, id)
 	_, err := d.ExecContext(ctx, "DELETE FROM ai_conversations WHERE id = ?", id)
 	return err
 }
 
 func (d *DB) DeleteAllAIConversations(ctx context.Context) error {
 	d.ExecContext(ctx, "DELETE FROM temp_documents WHERE conversation_id IS NOT NULL")
+	_ = deleteConversationArtifacts(ctx, d, `SELECT id FROM ai_conversations`)
 	_, err := d.ExecContext(ctx, "DELETE FROM ai_conversations")
 	return err
 }
 
+// prunedAIConversations selects the conversations PruneOldAIConversations
+// removes: all but the most recently updated ones (one argument: how many stay).
+const prunedAIConversations = `SELECT id FROM ai_conversations WHERE id NOT IN (
+	SELECT id FROM ai_conversations ORDER BY updated_at DESC LIMIT ?
+)`
+
 // PruneOldAIConversations keeps only the most recent N conversations.
 func (d *DB) PruneOldAIConversations(ctx context.Context, keep int) error {
+	// The proposals and file cards of the conversations being pruned go with them.
+	_ = deleteConversationArtifacts(ctx, d, prunedAIConversations, keep)
 	// Clean up temp documents for conversations being pruned
 	d.ExecContext(ctx, `DELETE FROM temp_documents WHERE conversation_id IN (
 		SELECT id FROM ai_conversations WHERE id NOT IN (

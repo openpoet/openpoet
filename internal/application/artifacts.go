@@ -37,6 +37,7 @@ type ArtifactStore interface {
 	ListArtifacts(context.Context, database.ArtifactFilter) ([]database.ArtifactListItem, error)
 	ListArtifactVersions(context.Context, string) ([]database.ArtifactVersion, error)
 	GetArtifactVersion(context.Context, string, int) (*database.ArtifactVersion, error)
+	GetArtifactReview(context.Context, string) (*database.ArtifactReview, error)
 	AppendArtifactVersion(context.Context, string, int, *database.ArtifactVersion) (*database.Artifact, bool, error)
 	UpdateArtifactMeta(context.Context, string, *string, *string, *string) error
 	FindRecentArtifactByContent(ctx context.Context, sessionID, title, sha256 string, window time.Duration) (*database.Artifact, error)
@@ -63,6 +64,32 @@ type ArtifactView struct {
 	CreatedAt       time.Time             `json:"created_at"`
 	UpdatedAt       time.Time             `json:"updated_at"`
 	Versions        []ArtifactVersionView `json:"versions,omitempty"`
+	// Review is set on an artifact that waits for (or got) the user's
+	// decision: a proposal or a task's verification document. A plain
+	// document has none.
+	Review *ArtifactReviewView `json:"review,omitempty"`
+}
+
+// ArtifactReviewView is the approval state of an artifact: what is decided
+// ("verification", "memory", "task", "skill" or "tool") and where the decision
+// stands ("pending", "approved" or "rejected").
+type ArtifactReviewView struct {
+	Kind   string `json:"kind"`
+	Status string `json:"status"`
+}
+
+// ArtifactReviewRequest makes a new artifact one that waits for the user's
+// decision. MessageID is the chat message a proposal belongs to (0 for none).
+type ArtifactReviewRequest struct {
+	Kind      string
+	MessageID int64
+}
+
+func artifactReviewView(review *database.ArtifactReview) *ArtifactReviewView {
+	if review == nil {
+		return nil
+	}
+	return &ArtifactReviewView{Kind: review.Kind, Status: review.Status}
 }
 
 type ArtifactVersionView struct {
@@ -129,6 +156,10 @@ type CreateArtifactCommand struct {
 	TaskID         *int64
 	ConversationID *int64
 	SessionID      string
+	// Review, when set, creates an artifact that waits for the user's
+	// decision (a proposal, a verification document). Only the server sets
+	// it: no route or tool passes it on from a caller.
+	Review *ArtifactReviewRequest
 	// DryRun validates the document and reports what would be stored,
 	// without creating anything.
 	DryRun        bool
@@ -193,6 +224,9 @@ type ArtifactListQuery struct {
 	SessionID       string
 	TaskID          int64
 	IncludeArchived bool
+	// IncludeReviewed also lists proposals and verification documents, which
+	// a listing of documents leaves out.
+	IncludeReviewed bool
 	Limit           int
 }
 
@@ -337,6 +371,18 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 	if command.ConversationID != nil {
 		artifact.ConversationID = sql.NullInt64{Int64: *command.ConversationID, Valid: true}
 	}
+	if command.Review != nil {
+		switch command.Review.Kind {
+		case database.ArtifactReviewVerification, database.ArtifactReviewMemory, database.ArtifactReviewTask,
+			database.ArtifactReviewSkill, database.ArtifactReviewTool:
+		default:
+			return ArtifactPublishResult{}, validationError("invalid_artifact_review", "Artifact review kind is invalid")
+		}
+		if command.Review.MessageID < 0 {
+			return ArtifactPublishResult{}, validationError("invalid_artifact_review", "Artifact review message is invalid")
+		}
+		artifact.Review = &database.ArtifactReview{Kind: command.Review.Kind, Status: database.ArtifactReviewPending, MessageID: command.Review.MessageID}
+	}
 	version := &database.ArtifactVersion{
 		Format: format, Content: content, SizeBytes: int64(len(content)), SHA256: artifactContentHash(content),
 		CreatedBy: actor, SessionID: sessionID, Questions: questions,
@@ -351,6 +397,7 @@ func (s *ArtifactService) Create(ctx context.Context, command CreateArtifactComm
 	publishApplicationChange(ctx, s.effects, ApplicationChange{Domain: "artifacts", Action: "created", Meta: artifactChangeMeta(created)})
 	view := artifactView(created)
 	view.SizeBytes, view.Format = version.SizeBytes, format
+	view.Review = artifactReviewView(artifact.Review)
 	s.notifyPublished(ctx, view, true)
 	stored.Artifact, stored.Created = view, true
 	return stored, nil
@@ -655,6 +702,11 @@ func (s *ArtifactService) Get(ctx context.Context, artifactID string) (ArtifactV
 	if view.OpenAnnotations, err = s.store.CountOpenArtifactAnnotations(ctx, id); err != nil {
 		return ArtifactView{}, err
 	}
+	review, err := s.store.GetArtifactReview(ctx, id)
+	if err != nil {
+		return ArtifactView{}, err
+	}
+	view.Review = artifactReviewView(review)
 	return view, nil
 }
 
@@ -691,7 +743,7 @@ func (s *ArtifactService) List(ctx context.Context, query ArtifactListQuery) ([]
 	}
 	items, err := s.store.ListArtifacts(ctx, database.ArtifactFilter{
 		ProjectID: query.ProjectID, SessionID: sessionID, TaskID: query.TaskID,
-		IncludeArchived: query.IncludeArchived, Limit: query.Limit,
+		IncludeArchived: query.IncludeArchived, IncludeReviewed: query.IncludeReviewed, Limit: query.Limit,
 	})
 	if err != nil {
 		return nil, err
@@ -701,6 +753,9 @@ func (s *ArtifactService) List(ctx context.Context, query ArtifactListQuery) ([]
 		view := artifactView(&items[i].Artifact)
 		view.SizeBytes, view.Format = items[i].SizeBytes, items[i].Format
 		view.OpenAnnotations = items[i].OpenAnnotations
+		if items[i].ReviewKind != "" {
+			view.Review = &ArtifactReviewView{Kind: items[i].ReviewKind, Status: items[i].ReviewStatus}
+		}
 		views = append(views, view)
 	}
 	return views, nil

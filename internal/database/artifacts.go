@@ -27,6 +27,10 @@ type Artifact struct {
 	CreatedBy      string        `db:"created_by" json:"created_by"`
 	CreatedAt      time.Time     `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time     `db:"updated_at" json:"updated_at"`
+	// Review, when set on the way in, makes the new artifact one that waits
+	// for the user's decision: CreateArtifact stores it with the artifact. It
+	// is not read back here (see GetArtifactReview).
+	Review *ArtifactReview `db:"-" json:"-"`
 }
 
 // Formats of an artifact version. An HTML version is a complete HTML document;
@@ -76,6 +80,9 @@ type ArtifactListItem struct {
 	SizeBytes       int64  `db:"size_bytes" json:"size_bytes"`
 	Format          string `db:"format" json:"format"`
 	OpenAnnotations int    `db:"open_annotations" json:"open_annotations"`
+	// ReviewKind and ReviewStatus are empty for a plain document.
+	ReviewKind   string `db:"review_kind" json:"-"`
+	ReviewStatus string `db:"review_status" json:"-"`
 }
 
 // ArtifactFilter narrows ListArtifacts. Zero values mean "any".
@@ -84,6 +91,10 @@ type ArtifactFilter struct {
 	SessionID       string
 	TaskID          int64
 	IncludeArchived bool
+	// IncludeReviewed also lists the artifacts that wait for (or got) the
+	// user's decision: proposals and verification documents. They are left
+	// out by default, because a listing of documents is what callers want.
+	IncludeReviewed bool
 	Limit           int
 }
 
@@ -130,6 +141,11 @@ func (d *DB) CreateArtifact(ctx context.Context, artifact *Artifact, version *Ar
 	}
 	if err := insertArtifactQuestions(ctx, tx, artifact.ID, 1, version.Questions); err != nil {
 		return err
+	}
+	if artifact.Review != nil {
+		if err := insertArtifactReview(ctx, tx, artifact.ID, artifact.Review); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -198,6 +214,9 @@ func (d *DB) ListArtifacts(ctx context.Context, filter ArtifactFilter) ([]Artifa
 	if !filter.IncludeArchived {
 		where = append(where, "a.status != 'archived'")
 	}
+	if !filter.IncludeReviewed {
+		where = append(where, "r.artifact_id IS NULL")
+	}
 	limit := filter.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 200
@@ -207,8 +226,9 @@ func (d *DB) ListArtifacts(ctx context.Context, filter ArtifactFilter) ([]Artifa
 			a.current_version, a.status, a.created_by, a.created_at, a.updated_at,
 			COALESCE((SELECT v.size_bytes FROM artifact_versions v WHERE v.artifact_id = a.id AND v.version = a.current_version), 0) AS size_bytes,
 			COALESCE((SELECT v.format FROM artifact_versions v WHERE v.artifact_id = a.id AND v.version = a.current_version), 'html') AS format,
-			(SELECT COUNT(*) FROM artifact_annotations n WHERE n.artifact_id = a.id AND n.status = 'open') AS open_annotations
-		FROM artifacts a
+			(SELECT COUNT(*) FROM artifact_annotations n WHERE n.artifact_id = a.id AND n.status = 'open') AS open_annotations,
+			COALESCE(r.kind, '') AS review_kind, COALESCE(r.status, '') AS review_status
+		FROM artifacts a LEFT JOIN artifact_reviews r ON r.artifact_id = a.id
 		WHERE ` + strings.Join(where, " AND ") + `
 		ORDER BY a.updated_at DESC, a.id
 		LIMIT ?`
