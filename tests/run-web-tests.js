@@ -42,6 +42,7 @@ const GROUPS = {
     'tests/artifact-viewer-zoom-smoke.js',
     'tests/codex-slash-palette-smoke.js',
     'tests/codex-transcript-snapshot-smoke.js',
+    'tests/session-restore-lazy-smoke.js',
     'tests/structured-view-resume-smoke.js',
   ],
 };

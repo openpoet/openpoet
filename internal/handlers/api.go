@@ -1168,6 +1168,14 @@ func (a *API) ListSessions(w http.ResponseWriter, r *http.Request) {
 	if sessions == nil {
 		sessions = []database.Session{}
 	}
+	// ?view=summary drops the persisted plan text, which is most of the
+	// payload once the history grows (the web UI only needs metadata here and
+	// reads a plan through /sessions/{id}/plan).
+	if r.URL.Query().Get("view") == "summary" {
+		for i := range sessions {
+			sessions[i].PlanContent = ""
+		}
+	}
 	respondJSON(w, http.StatusOK, sessions)
 }
 

@@ -223,7 +223,7 @@ class OpenPoet {
 
         try {
             // Fetch fresh session data
-            this.sessions = await this.api('GET', '/sessions');
+            this.sessions = await this.api('GET', '/sessions?view=summary');
             const activeSessions = this.sessions.filter(s => s.status === 'running' || s.status === 'starting');
 
             if (activeSessions.length === 0) {
@@ -3695,7 +3695,7 @@ class OpenPoet {
     async _doLoadSessions() {
         try {
             const [sessions, activeDetails] = await Promise.all([
-                this.api('GET', '/sessions'),
+                this.api('GET', '/sessions?view=summary'),
                 this.api('GET', '/sessions/active-details')
             ]);
             this.activeSessionDetails = activeDetails || [];
@@ -3904,8 +3904,12 @@ class OpenPoet {
         // Show terminal view if not already visible
         this.showTerminalView({ updateURL: false });
 
-        // Refresh sessions to sync tabs (this will create tab if needed)
-        await this.loadSessions();
+        // Refresh sessions to sync tabs: that refresh is what creates a missing
+        // tab. A session that already has its tab skips it, since the list
+        // carries the whole session history and is the slowest call here.
+        if (!this.openTabs.has(sessionId) || !document.querySelector(`.terminal-tab[data-session-id="${sessionId}"]`)) {
+            await this.loadSessions();
+        }
 
         // If custom name provided, update it
         if (customName) {
@@ -4214,25 +4218,7 @@ class OpenPoet {
         // Tab click - connect terminal if needed, then switch to session
         tabDiv.addEventListener('click', (e) => {
             if (e.target === closeImg) return; // Don't switch if clicking close
-
-            // Check if terminal is connected for this session
-            const tabData = this.openTabs.get(sessionId);
-            if (tabData && !tabData.connected) {
-                // First time clicking this tab - connect the terminal
-                const session = this.sessions.find(s => s.id === sessionId);
-                if (session) {
-                    const tabName = tabData.sessionName;
-                    window.terminalManager.connect(sessionId, tabName, session);
-                    tabData.connected = true;
-                }
-            }
-
-            if (window.terminalManager.hasSession(sessionId)) {
-                window.terminalManager.switchToSession(sessionId);
-            }
-            this.currentSession = sessionId;
-            this.updateTabActiveState(sessionId);
-            this._updateLinkTaskButton(sessionId);
+            this._activateTab(sessionId);
         });
 
         // Name span doesn't need special handlers anymore - clicking the tab switches sessions
@@ -4323,6 +4309,25 @@ class OpenPoet {
             // Save tab order to localStorage
             this.saveTabOrder();
         });
+    }
+
+    // Shows a tab's session, connecting its terminal on first use: tabs start
+    // unconnected (syncSessionTabs) and get a terminal only when opened.
+    _activateTab(sessionId) {
+        const tabData = this.openTabs.get(sessionId);
+        if (tabData && !(tabData.connected && window.terminalManager.hasSession(sessionId))) {
+            const session = this.sessions.find(s => s.id === sessionId);
+            if (session) {
+                window.terminalManager.connect(sessionId, tabData.sessionName, session);
+                tabData.connected = true;
+            }
+        }
+        if (window.terminalManager.hasSession(sessionId)) {
+            window.terminalManager.switchToSession(sessionId);
+        }
+        this.currentSession = sessionId;
+        this.updateTabActiveState(sessionId);
+        this._updateLinkTaskButton(sessionId);
     }
 
     closeTab(sessionId) {
@@ -4682,23 +4687,7 @@ class OpenPoet {
             }
 
             // Switch to session
-            const tabData = this.openTabs.get(sessionId);
-            if (tabData && !tabData.connected) {
-                // Connect terminal if not connected
-                const session = this.sessions.find(s => s.id === sessionId);
-                if (session) {
-                    window.terminalManager.connect(sessionId, tabData.sessionName, session);
-                    tabData.connected = true;
-                }
-            }
-
-            if (window.terminalManager.hasSession(sessionId)) {
-                window.terminalManager.switchToSession(sessionId);
-            }
-
-            this.currentSession = sessionId;
-            this.updateTabActiveState(sessionId);
-            this._updateLinkTaskButton(sessionId);
+            this._activateTab(sessionId);
             this.updateMobileSessionTrigger(sessionId);
             this.closeMobileSessionMenu();
         });
@@ -5284,48 +5273,42 @@ class OpenPoet {
                 }
             }
 
-            // Restore each tab if session still exists
-            for (const tabData of state.tabs) {
-                const session = this.sessions.find(s => s.id === tabData.sessionId);
-
+            // The saved tabs whose session is still running. Their tabs already
+            // exist, unconnected and named after the backend session:
+            // loadSessions() -> syncSessionTabs() made one per running session.
+            const restorable = [];
+            for (const tabData of state.tabs || []) {
                 // Skip recently created sessions (they're already being opened)
                 if (this.recentlyCreatedSessions.has(tabData.sessionId)) {
                     console.log('[restoreTabsFromStorage] Skipping recently created session:', tabData.sessionId);
                     continue;
                 }
-
-                // Only restore if session is still running
-                if (session && session.status === 'running') {
-                    await this.openTerminal(tabData.sessionId);
-
-                    // Always use the backend session name (not cached localStorage name)
-                    const currentName = session.name;
-                    if (currentName) {
-                        window.terminalManager.renameSession(tabData.sessionId, currentName);
-                        const tab = document.querySelector(`.terminal-tab[data-session-id="${tabData.sessionId}"]`);
-                        if (tab) {
-                            const nameContainer = tab.querySelector('.terminal-tab-name');
-                            if (nameContainer) {
-                                const nameText = nameContainer.querySelector('.terminal-tab-name-text');
-                                if (nameText) nameText.textContent = currentName;
-                                else nameContainer.textContent = currentName;
-                            }
-                        }
-                    }
+                const session = this.sessions.find(s => s.id === tabData.sessionId);
+                if (session && session.status === 'running' && this.openTabs.has(session.id)) {
+                    restorable.push(session.id);
                 }
             }
 
-            // Restore active tab (but respect pending session open)
-            if (state.activeSessionId && this.openTabs.has(state.activeSessionId)) {
-                // Don't override if a session is currently being opened
+            // Only the tab the user was on connects now. Opening every saved
+            // tab in turn made startup wait on each one (a full session-list
+            // reload plus a history replay per tab). The others connect when
+            // the user opens them; their pending prompts load in background.
+            if (restorable.length > 0) {
+                let activeId = null;
                 if (this.pendingSessionOpen && this.pendingSessionOpen.sessionId !== state.activeSessionId) {
                     console.log('[restoreTabsFromStorage] Not restoring active tab - session being opened:', this.pendingSessionOpen.sessionId);
-                } else if (!this.recentlyCreatedSessions.has(state.activeSessionId)) {
-                    window.terminalManager.switchToSession(state.activeSessionId);
-                    this.currentSession = state.activeSessionId;
-                    this.updateTabActiveState(state.activeSessionId);
-                    this._updateLinkTaskButton(state.activeSessionId);
+                } else {
+                    activeId = restorable.includes(state.activeSessionId) ? state.activeSessionId : restorable[0];
+                    // Let the session list and tabs paint before the terminal
+                    // is built (xterm setup is a long task). The timeout
+                    // covers a background browser tab, where rAF never fires.
+                    await new Promise(resolve => {
+                        requestAnimationFrame(() => setTimeout(resolve, 0));
+                        setTimeout(resolve, 100);
+                    });
+                    await this.openTerminal(activeId);
                 }
+                this._prefetchTabStateInBackground(restorable.filter(id => id !== activeId));
             }
 
             // Restore tab order
@@ -5343,6 +5326,39 @@ class OpenPoet {
             console.error('Failed to restore tabs from storage:', e);
             localStorage.removeItem('openpoet-tabs-state');
         }
+    }
+
+    // Loads, in the background, the light per-session state a connected
+    // terminal used to fetch on open: pending permission requests and recent
+    // tool events (HookManager.restoreFromServer), so a prompt waiting in an
+    // unopened tab still surfaces. The terminal itself (xterm instance plus
+    // history replay, the expensive part) is only created when the tab is
+    // opened. At most PREFETCH_CONCURRENCY requests are in flight, each
+    // started when the browser is idle.
+    async _prefetchTabStateInBackground(sessionIds) {
+        const hooks = window.hookManager;
+        if (!hooks || sessionIds.length === 0) return;
+        const PREFETCH_CONCURRENCY = 3;
+        const idle = () => new Promise(resolve => {
+            if (window.requestIdleCallback) requestIdleCallback(() => resolve(), { timeout: 2000 });
+            else setTimeout(resolve, 100);
+        });
+        const queue = [...sessionIds];
+        const worker = async () => {
+            while (queue.length > 0) {
+                const sessionId = queue.shift();
+                await idle();
+                // Opened meanwhile: its terminal fetched this state on connect.
+                if (window.terminalManager?.hasSession(sessionId) || !this.openTabs.has(sessionId)) continue;
+                try {
+                    const resp = await fetch(`/api/hooks/pending/${sessionId}`);
+                    if (resp.ok) hooks.restoreFromServer(await resp.json(), sessionId);
+                } catch (err) {
+                    console.warn('[prefetchTabState] failed for', sessionId, err);
+                }
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(PREFETCH_CONCURRENCY, queue.length) }, worker));
     }
 
     // ==================== KEYBOARD SHORTCUTS ====================
@@ -5405,10 +5421,7 @@ class OpenPoet {
         const currentIndex = sessionIds.indexOf(window.terminalManager.activeSessionId);
         const nextIndex = (currentIndex + 1) % sessionIds.length;
 
-        window.terminalManager.switchToSession(sessionIds[nextIndex]);
-        this.currentSession = sessionIds[nextIndex];
-        this.updateTabActiveState(sessionIds[nextIndex]);
-        this._updateLinkTaskButton(sessionIds[nextIndex]);
+        this._activateTab(sessionIds[nextIndex]);
     }
 
     switchToPreviousTab() {
@@ -5418,19 +5431,13 @@ class OpenPoet {
         const currentIndex = sessionIds.indexOf(window.terminalManager.activeSessionId);
         const prevIndex = (currentIndex - 1 + sessionIds.length) % sessionIds.length;
 
-        window.terminalManager.switchToSession(sessionIds[prevIndex]);
-        this.currentSession = sessionIds[prevIndex];
-        this.updateTabActiveState(sessionIds[prevIndex]);
-        this._updateLinkTaskButton(sessionIds[prevIndex]);
+        this._activateTab(sessionIds[prevIndex]);
     }
 
     switchToTabByIndex(index) {
         const sessionIds = Array.from(this.openTabs.keys());
         if (index >= 0 && index < sessionIds.length) {
-            window.terminalManager.switchToSession(sessionIds[index]);
-            this.currentSession = sessionIds[index];
-            this.updateTabActiveState(sessionIds[index]);
-            this._updateLinkTaskButton(sessionIds[index]);
+            this._activateTab(sessionIds[index]);
         }
     }
 
