@@ -26,7 +26,7 @@ const htmlArtifactSkillSetting = "builtin_skill_html_artifact_registered"
 // was offered. When the guide changes, bump the revision and add the SHA-256
 // of the text it replaces to htmlArtifactSkillSuperseded.
 const (
-	htmlArtifactSkillRevision        = 5
+	htmlArtifactSkillRevision        = 6
 	htmlArtifactSkillRevisionSetting = "builtin_skill_html_artifact_revision"
 )
 
@@ -39,6 +39,7 @@ var htmlArtifactSkillSuperseded = map[string]bool{
 	"50443d4ee9bd35229bf8c417e7b19093f52f3e730c0a3d8b2deddd42b0fe1341": true, // revision 2
 	"a894910e960c94469a52eb71433b739728dfbee6743219b8e45f6b6d8ac9ee6a": true, // revision 3
 	"f115603c9d9d1ad14f8071099b9d4f824876753e9a67cfccfd9a5dc14f3b3f74": true, // revision 4
+	"393b2de0d9b2e7f702a8c09af8b8c96172126bb206e68b5881eb89af0a311a57": true, // revision 5
 }
 
 const htmlArtifactSkillContent = `Design and publish interactive HTML artifacts in OpenPoet for plans, reports and documentation.
@@ -68,6 +69,11 @@ load, silently. It is served as ` + "`sandbox allow-scripts`" + ` with the polic
 - **One self-contained document.** All CSS in ` + "`<style>`" + `, all JavaScript in
   ` + "`<script>`" + `. No ` + "`<link>`" + `, no script ` + "`src`" + `, no CDN, no web fonts, no remote
   images. Images are inline SVG or ` + "`data:`" + ` URIs.
+- **No nested frames, no shadow DOM.** Everything is in this one document.
+  ` + "`<iframe>`" + `, ` + "`srcdoc`" + `, ` + "`<object>`" + `, ` + "`<embed>`" + `, ` + "`attachShadow`" + ` and
+  ` + "`document.write`" + ` are blocked: a publish that uses them is refused with the
+  line of each, and the viewer does not run them. Content inside a frame
+  cannot be annotated either. See "One document" below.
 - **No external libraries by URL.** Draw charts with inline SVG or ` + "`<canvas>`" + `.
   If you truly need a library, its source has to be pasted inline, and it counts
   toward the size limit.
@@ -124,6 +130,28 @@ load, silently. It is served as ` + "`sandbox allow-scripts`" + ` with the polic
   focus, sufficient contrast, ` + "`alt`" + ` or ` + "`aria-label`" + ` on meaningful graphics.
 - **System fonts.** ` + "`font-family: system-ui, sans-serif`" + ` and a monospace stack
   for code.
+
+## One document
+
+The user comments on what OpenPoet can see, and it sees one document. Build
+every page that way, even when it holds several pages or proposals:
+
+- **Every page, tab and panel is a ` + "`<section>`" + ` (or ` + "`<div>`" + `) in this HTML**,
+  with its own ` + "`id`" + `. Never put a page in an ` + "`<iframe>`" + `, a ` + "`srcdoc`" + `, an
+  ` + "`<object>`" + ` or a shadow root.
+- **Write content as markup, not as data.** Do not keep pages as HTML
+  strings in JSON or in script and inject them at run time. Script may
+  build charts and small repeated parts, in this document.
+- **Tabs only show and hide.** A tab button toggles the ` + "`hidden`" + ` attribute of
+  sections that are already in the page (and may update the ` + "`#hash`" + `). It
+  does not create, load or replace a page.
+- **Isolate a page's look with scoped CSS, not with a frame.** Prefix its
+  rules with the section id (` + "`#lp-2 h1 {…}`" + `) and set its custom properties
+  on the section (` + "`#lp-2 { --accent:#0a7; }`" + `) instead of on ` + "`:root`" + `.
+- **Images go in place.** ` + "`<img src=\"data:image/webp;base64,…\" alt=\"…\">`" + `
+  where the image appears, not a ` + "`{{placeholder}}`" + ` that script fills in. To
+  reuse one image many times, put it once in a CSS class as a
+  ` + "`background-image`" + `, or in an SVG ` + "`<symbol>`" + ` with ` + "`<use>`" + `.
 
 ## Make it easy to annotate and to revise
 
