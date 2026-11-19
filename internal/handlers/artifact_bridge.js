@@ -6,7 +6,7 @@
 // talks to the OpenPoet page only through postMessage:
 //
 //   frame -> page   ready | selection | annotation-click | anchors | key |
-//                   answer-intent | link
+//                   answer-intent | link | frames-blocked
 //   page  -> frame  set-mode | show-annotations | focus | clear-selection |
 //                   answers | focus-question
 //
@@ -723,5 +723,17 @@
     new ResizeObserver(queueSlowDraw).observe(document.body);
   }
 
+  // Frames the render guard blocked (artifact_guard.js): what the artifact put
+  // in them is not shown and cannot be annotated, so the viewer tells the user.
+  var framesReported = 0;
+  function reportBlockedFrames() {
+    var blocked = Number(window.__openpoetBlockedFrames) || 0;
+    if (blocked <= framesReported) return;
+    framesReported = blocked;
+    post('frames-blocked', { count: blocked });
+  }
+  window.addEventListener('openpoet:frames-blocked', reportBlockedFrames);
+
   post('ready', {});
+  reportBlockedFrames();
 })();

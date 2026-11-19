@@ -33,6 +33,7 @@ class ArtifactViewer {
         this.bannerEl = document.getElementById('artifact-viewer-banner');
         this.bannerTextEl = document.getElementById('artifact-viewer-banner-text');
         this.bannerBtn = document.getElementById('artifact-viewer-banner-open');
+        this.framesNoticeEl = document.getElementById('artifact-viewer-frames');
         this.downloadBtn = document.getElementById('artifact-viewer-download');
         this.pdfBtn = document.getElementById('artifact-viewer-pdf');
         this.linkBarEl = document.getElementById('artifact-viewer-link');
@@ -85,6 +86,7 @@ class ArtifactViewer {
         this._bridgeTimer = null;
         this._orphaned = new Set(); // annotation ids the bridge could not place
         this._hidden = new Set();   // annotation ids placed in a part of the page that is not shown
+        this._framesBlocked = 0;    // nested frames the render guard blocked in the shown version
         this._pendingAnchor = null; // anchor of the note being written
         this._activeAnnotation = 0;
         this._notice = null;        // {text, error, success} shown in the panel hint
@@ -270,6 +272,7 @@ class ArtifactViewer {
         this._bridgeMissing = false;
         this._orphaned = new Set();
         this._hidden = new Set();
+        this._setFramesBlocked(0);
         this._cancelComposer();
         clearTimeout(this._bridgeTimer);
         // Questions belong to a version: forget the previous one's.
@@ -305,6 +308,18 @@ class ArtifactViewer {
             : `You are viewing version ${this._version}. The latest is version ${latest}.`;
         this.bannerBtn.textContent = `Open version ${latest}`;
         this.bannerEl.classList.remove('hidden');
+    }
+
+    // The render guard blocks nested frames (iframe, srcdoc, object, embed):
+    // whatever the version put in them is missing from the page and cannot be
+    // annotated. Say so, instead of leaving an unexplained gap.
+    _setFramesBlocked(count) {
+        this._framesBlocked = count;
+        if (!this.framesNoticeEl) return;
+        this.framesNoticeEl.textContent = count > 0
+            ? `This version puts content in nested frames, which OpenPoet blocks (${count} blocked): that content is not shown and cannot be annotated. Ask the agent to republish it as one document.`
+            : '';
+        this.framesNoticeEl.classList.toggle('hidden', count === 0);
     }
 
     _hideBanner() {
@@ -536,6 +551,7 @@ class ArtifactViewer {
         this._bridgeMissing = false;
         this._orphaned = new Set();
         this._hidden = new Set();
+        this._setFramesBlocked(0);
         this._pendingAnchor = null;
         this._activeAnnotation = 0;
         this._notice = null;
@@ -704,6 +720,10 @@ class ArtifactViewer {
                 break;
             case 'link':
                 this._onLinkIntent(data);
+                break;
+            case 'frames-blocked':
+                // Only a count: the notice text is the page's own.
+                if (Number.isInteger(data.count) && data.count > 0) this._setFramesBlocked(Math.min(data.count, 9999));
                 break;
             case 'key':
                 // Escape pressed inside the frame. It may cancel an empty

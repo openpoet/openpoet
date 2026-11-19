@@ -95,6 +95,9 @@
 .artifact-viewer-banner button {
     flex-shrink: 0;
 }
+.artifact-viewer-frames {
+    box-shadow: inset 3px 0 0 var(--color-warning, #d97706);
+}
 .artifact-viewer-body {
     flex: 1;
     min-height: 0;
