@@ -800,6 +800,9 @@ func normalizeArtifactHTML(content string) (string, []ArtifactRedaction, error) 
 	if !artifactHTMLPattern.MatchString(content) {
 		return "", nil, validationError("invalid_artifact_html", "Artifact content must be an HTML document (publish markdown or plain text as markdown instead of html)")
 	}
+	if findings := artifactFrameFindings(content); len(findings) > 0 {
+		return "", nil, artifactFramesError(findings)
+	}
 	// The document is stored as it was sent: its size and SHA-256 are reported
 	// back so the publisher can compare them with its own copy. Masking is the
 	// only thing that changes it.

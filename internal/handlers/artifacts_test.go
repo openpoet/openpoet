@@ -172,6 +172,18 @@ func TestArtifactRESTLifecycle(t *testing.T) {
 	}
 }
 
+func TestArtifactRESTRejectsNestedFrames(t *testing.T) {
+	_, router := artifactTestRouter(t)
+	html := "<!doctype html><html><body><script>\nconst f = document.createElement('iframe'); f.srcdoc = '<p>x</p>'; document.body.append(f);\n</script></body></html>"
+	recorder, body := artifactRequest(t, router, http.MethodPost, "/api/artifacts", map[string]any{"title": "Framed", "html": html}, nil)
+	if recorder.Code != http.StatusBadRequest || body["code"] != "artifact_nested_frames" {
+		t.Fatalf("framed status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "line 2: createElement('iframe')") {
+		t.Fatalf("the error does not point at the line: %s", recorder.Body.String())
+	}
+}
+
 func TestArtifactRESTRejectsInvalidAndOversizedContent(t *testing.T) {
 	_, router := artifactTestRouter(t)
 
