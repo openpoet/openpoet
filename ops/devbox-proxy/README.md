@@ -42,6 +42,7 @@ edge nginx (TLS, wildcard) --> devbox-proxy <BIND_ADDR>:28081 --Host--> 127.0.0.
 | `render.sh` | Renders both into the proxy's directory (`--check` shows the diff) |
 | `edge-nginx.conf.tmpl`, `render-edge.sh` | Edge nginx server blocks for the subzone |
 | `terraform/` | The wildcard DNS record (one resource) |
+| `edge/` | Certbot deploy hook + host units that reload the edge nginx after a renewal |
 | `render_test.sh` | Tests, including `caddy adapt` of the rendered file when the image is present |
 
 Route files in `routes/`: OpenPoet writes `op-<app>.caddy`; routes managed by
@@ -130,3 +131,20 @@ terraform apply -state=<private>/terraform.tfstate <private>/plan.bin
 single resource and reads the zone by name: it never imports or changes other
 records of the zone. Removing the wildcard is `terraform destroy` with the
 same arguments.
+
+### Reload after certificate renewal
+
+The edge's ACME client (certbot, in a container without Docker access)
+renews certificates but cannot reload nginx, which would keep serving the old
+certificate until its next restart. `edge/` closes that gap:
+
+- `certbot-deploy-hook.sh` is installed as `renewal-hooks/deploy/nginx-reload.sh`.
+  After a renewal of a lineage listed in `renewal-hooks/nginx-reload.lineages`
+  it rewrites `nginx-reload.request` on the shared volume.
+- `nginx-reload.path` (host, systemd) watches that file and starts
+  `nginx-reload.service`: `nginx -t`, then `nginx -s reload`.
+
+Install or update on the edge host:
+`COMPOSE_DIR=... LE_DIR=... RUN_USER=... edge/install-reload-hook.sh <lineage>...`.
+Test with `certbot renew --dry-run --run-deploy-hooks` and
+`journalctl -u nginx-reload.service`.

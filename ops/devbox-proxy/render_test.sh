@@ -47,6 +47,16 @@ grep -q '/etc/letsencrypt/live/dev9.example.com/fullchain.pem' "$edge" || fail "
 SUBZONE='dev9.example.com;' PROXY_ADDR=192.0.2.4:28081 ALLOW_CIDR=192.0.2.0/24 bash "$here/render-edge.sh" "$tmp/bad.conf" 2>/dev/null && fail "bad subzone accepted"
 SUBZONE=dev9.example.com PROXY_ADDR=192.0.2.4 ALLOW_CIDR=192.0.2.0/24 bash "$here/render-edge.sh" "$tmp/bad.conf" 2>/dev/null && fail "proxy without port accepted"
 
+# Certbot deploy hook: only listed lineages request an nginx reload.
+le="$tmp/le"; mkdir -p "$le/renewal-hooks"
+printf 'a.example.com\nb.example.com\n' > "$le/renewal-hooks/nginx-reload.lineages"
+CERTBOT_CONFIG_DIR="$le" RENEWED_LINEAGE="$le/live/c.example.com" sh "$here/edge/certbot-deploy-hook.sh" >/dev/null
+[ ! -e "$le/nginx-reload.request" ] || fail "unlisted lineage requested a reload"
+CERTBOT_CONFIG_DIR="$le" RENEWED_LINEAGE="$le/live/b.example.com" sh "$here/edge/certbot-deploy-hook.sh" >/dev/null
+grep -q ' b.example.com$' "$le/nginx-reload.request" || fail "listed lineage did not request a reload"
+CERTBOT_CONFIG_DIR="$le" sh "$here/edge/certbot-deploy-hook.sh" >/dev/null 2>&1 || fail "hook must not fail without RENEWED_LINEAGE"
+ls -A "$le" | grep -q '^\.nginx-reload' && fail "hook left a temporary file"
+
 image=caddy:2.10-alpine
 if command -v docker >/dev/null && docker image inspect "$image" >/dev/null 2>&1; then
 	rm -f "$out/routes/manual-x.caddy"

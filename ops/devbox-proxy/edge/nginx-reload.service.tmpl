@@ -1,0 +1,8 @@
+# Started by nginx-reload.path (ops/devbox-proxy/edge in the OpenPoet repository).
+[Unit]
+Description=Reload the edge nginx after a certificate renewal
+
+[Service]
+Type=oneshot
+User=@@RUN_USER@@
+ExecStart=/bin/sh -c 'cat @@LE_DIR@@/nginx-reload.request; docker compose --project-directory @@COMPOSE_DIR@@ exec -T nginx nginx -t && docker compose --project-directory @@COMPOSE_DIR@@ exec -T nginx nginx -s reload && echo "nginx reloaded"'

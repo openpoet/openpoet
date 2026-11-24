@@ -1,0 +1,11 @@
+# Reload the edge nginx when the certbot deploy hook asks for it
+# (ops/devbox-proxy/edge in the OpenPoet repository).
+[Unit]
+Description=Watch for nginx reload requests from the certbot deploy hook
+
+[Path]
+PathChanged=@@LE_DIR@@/nginx-reload.request
+Unit=nginx-reload.service
+
+[Install]
+WantedBy=multi-user.target
