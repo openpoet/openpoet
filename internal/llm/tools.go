@@ -497,7 +497,7 @@ func AllToolDefs() []ToolDef {
 			Name: "devbox_publish_port",
 			Description: "Publish a port of the devbox container this session runs in as an HTTPS URL reachable only from the private network (VPN). " +
 				"Start the app first: it must already accept connections on the port. By default the app has to listen on 0.0.0.0; if it can only listen on 127.0.0.1, pass mode \"exec\". " +
-				"The container is always the session's own: you cannot publish another container's ports. The app name must carry this devbox's prefix (the error says which); the URL is https://<app>-<host suffix>.<domain>/. " +
+				"The container is always the session's own: you cannot publish another container's ports. The app name must carry this devbox's prefix (the error says which) and becomes the first label of the host name; the result gives the URL, which is returned only once the name resolves on the private network. " +
 				"Calling it again with the same app and port is safe and returns the same URL. The publication stays until it is removed with devbox_unpublish_port or the container is deleted, so remove it when it is no longer needed.",
 			InputSchema: ToolDefinitionInput{
 				Type: "object",
