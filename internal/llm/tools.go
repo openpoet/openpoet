@@ -492,6 +492,42 @@ func AllToolDefs() []ToolDef {
 			},
 			Context: ToolContextBoth,
 		},
+		// ──── Devbox ports (an app in the session's own devbox container, published to the private network) ────
+		{
+			Name: "devbox_publish_port",
+			Description: "Publish a port of the devbox container this session runs in as an HTTPS URL reachable only from the private network (VPN). " +
+				"Start the app first: it must already accept connections on the port. By default the app has to listen on 0.0.0.0; if it can only listen on 127.0.0.1, pass mode \"exec\". " +
+				"The container is always the session's own: you cannot publish another container's ports. The app name must carry this devbox's prefix (the error says which); the URL is https://<app>-<host suffix>.<domain>/. " +
+				"Calling it again with the same app and port is safe and returns the same URL. The publication stays until it is removed with devbox_unpublish_port or the container is deleted, so remove it when it is no longer needed.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"app":  {Type: "string", Description: "Name of the app in the URL: lowercase letters, digits and hyphens, starting with this devbox's prefix (e.g. \"<prefix>-web\")"},
+					"port": {Type: "integer", Description: "Port the app listens on inside the container (1024-65535)"},
+					"mode": {Type: "string", Description: "ip (default): the app listens on 0.0.0.0. exec: the app listens on 127.0.0.1 only", Enum: []string{"ip", "exec"}},
+				},
+				Required: []string{"app", "port"},
+			},
+			Context: ToolContextSession,
+		},
+		{
+			Name:        "devbox_list_ports",
+			Description: "List the ports published from the devbox container this session runs in, with their URLs.",
+			InputSchema: ToolDefinitionInput{Type: "object", Properties: map[string]ToolPropertySchema{}},
+			Context:     ToolContextSession,
+		},
+		{
+			Name:        "devbox_unpublish_port",
+			Description: "Remove a port published from the devbox container this session runs in. The URL stops answering at once.",
+			InputSchema: ToolDefinitionInput{
+				Type: "object",
+				Properties: map[string]ToolPropertySchema{
+					"app": {Type: "string", Description: "The app name it was published as"},
+				},
+				Required: []string{"app"},
+			},
+			Context: ToolContextSession,
+		},
 		// ──── HTML artifacts (versioned interactive documents stored in OpenPoet) ────
 		{
 			Name: "create_artifact",

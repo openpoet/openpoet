@@ -204,6 +204,8 @@
     {"route":"/api/voice/uploads/{uploadId}/chunks/{index}","method":"POST","reason":"voice_upload_staging"},
     {"route":"/api/voice/uploads/{uploadId}","method":"DELETE","reason":"voice_upload_staging"},
     {"route":"/api/artifacts/{id}/versions/{version}/export","method":"POST","reason":"session_workspace_file_transfer"},
+    {"route":"/api/devbox/ports","method":"POST","reason":"session_only_devbox_port_publish"},
+    {"route":"/api/devbox/ports/{app}","method":"DELETE","reason":"session_only_devbox_port_publish"},
     {"route":"/api/debug/client-error","method":"POST","reason":"debug_telemetry"},
     {"route":"/api/debug/client-log","method":"POST","reason":"debug_telemetry"},
     {"route":"/v1/metrics","method":"POST","reason":"otel_ingest"},

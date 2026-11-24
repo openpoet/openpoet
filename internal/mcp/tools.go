@@ -82,6 +82,9 @@ func executeToolWithOptions(client *APIClient, name string, args json.RawMessage
 	if name == "openpoet_get_link" {
 		return executeLinkTool(client, params, sessionID)
 	}
+	if devboxToolNames[name] {
+		return executeDevboxTool(client, name, params)
+	}
 
 	switch name {
 	case "openpoet_list_skills":

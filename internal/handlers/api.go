@@ -21,6 +21,7 @@ import (
 	"openpoet/internal/automation"
 	"openpoet/internal/configsync"
 	"openpoet/internal/database"
+	"openpoet/internal/devboxpublish"
 	"openpoet/internal/files"
 	"openpoet/internal/mcp"
 	"openpoet/internal/notifications"
@@ -138,6 +139,9 @@ type API struct {
 	// links builds the links handed out for use outside the app (see Links).
 	linksOnce sync.Once
 	links     *application.LinkService
+
+	// devboxPublisher publishes ports of devbox containers (nil: not configured).
+	devboxPublisher *devboxpublish.Service
 
 	// ReinitAIProvider is called when legacy AI settings change (kept for backward compat).
 	ReinitAIProvider func()

@@ -29,6 +29,7 @@ import (
 	"openpoet/internal/configsync"
 	"openpoet/internal/coordinator"
 	"openpoet/internal/database"
+	"openpoet/internal/devboxpublish"
 	"openpoet/internal/handlers"
 	"openpoet/internal/llm"
 	"openpoet/internal/mcp"
@@ -276,6 +277,22 @@ func main() {
 		os.Getenv("OPENPOET_CLAUDE_CODE_PROXY_BIN"),
 	)
 	api.SetProviderBridge(openAIProviderBridge)
+
+	// Devbox port publishing (off unless OPENPOET_DEVBOX_PUBLISH=1). A bad
+	// configuration disables the feature and is logged; it never stops startup.
+	devboxCfg, devboxCfgErr := devboxpublish.ConfigFromEnv()
+	if devboxCfgErr != nil {
+		log.Printf("[devbox-publish] disabled: %v", devboxCfgErr)
+		devboxCfg.Enabled = false
+	}
+	devboxPublisher := devboxpublish.NewService(devboxCfg, db, devboxpublish.NewExecHost(devboxCfg),
+		devboxpublish.NewDNS(devboxCfg), devboxpublish.NewResolver(devboxCfg))
+	api.SetDevboxPublisher(devboxPublisher)
+	if devboxCfg.Enabled {
+		log.Printf("[devbox-publish] enabled for %d container(s), host ports %d-%d, URL %s, DNS %s, resolver %q",
+			len(devboxCfg.Prefixes), devboxCfg.PortMin, devboxCfg.PortMax, devboxCfg.URL("{app}"), devboxCfg.DNSMode, devboxCfg.Resolver)
+		go devboxPublisher.RunGarbageCollector(context.Background(), 10*time.Minute)
+	}
 
 	// Initialize binary auto-updater
 	appUpdater := updater.New(BuildVersion)
@@ -1069,6 +1086,10 @@ func main() {
 
 		// HTML Artifacts (versioned, stored in the database)
 		r.Get("/links", api.GetLink)
+		// Devbox ports (a session publishes a port of its own container)
+		r.Get("/devbox/ports", api.ListDevboxPorts)
+		r.Post("/devbox/ports", api.PublishDevboxPort)
+		r.Delete("/devbox/ports/{app}", api.UnpublishDevboxPort)
 		r.Post("/artifacts", api.CreateArtifact)
 		r.Get("/artifacts", api.ListArtifacts)
 		r.Get("/artifacts/legacy-docs/report", api.LegacyDocsReport)

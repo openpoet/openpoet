@@ -107,6 +107,7 @@ var migrations = []Migration{
 	{Version: 87, Description: "artifacts: the format of each version (artifact_versions.format: html or markdown), so a markdown document is stored as its source and rendered when it is shown", Up: migrateV87},
 	{Version: 88, Description: "artifacts: approval state of an artifact (artifact_reviews), the artifact an old Doc id stands for (artifact_legacy_docs) and the file cards of a chat conversation (ai_chat_file_cards), so proposals and verification documents can be artifacts", Up: migrateV88},
 	{Version: 89, Description: "tool policies: allowlists that grant the retired Docs tools grant the artifact tools that replace them (create_document: create/update/patch_artifact and resolve_artifact_annotation; read_document: read_artifact, list_artifacts, list_artifact_annotations and get_link)", Up: migrateV89},
+	{Version: 90, Description: "devbox ports: the ports agents publish from their devbox container (devbox_port_publications: app, container, project, session, container and host port, relay mode)", Up: migrateV90},
 }
 
 // RunMigrations applies all pending migrations to the database.
@@ -2647,6 +2648,27 @@ func migrateV89(tx *sqlx.Tx) error {
 				return fmt.Errorf("migrateV89 failed: %w\nSQL: %s", err, t.updateSQL)
 			}
 		}
+	}
+	return nil
+}
+
+// migrateV90 creates devbox_port_publications: one row per port an agent
+// published from its devbox container (see internal/devboxpublish). app is the
+// published name; host_port is the loopback relay port, unique across rows.
+// A new table only: binaries older than v90 never read it.
+func migrateV90(tx *sqlx.Tx) error {
+	const stmt = `CREATE TABLE IF NOT EXISTS devbox_port_publications (
+		app TEXT PRIMARY KEY,
+		container TEXT NOT NULL,
+		project_id INTEGER NOT NULL DEFAULT 0,
+		session_id TEXT NOT NULL DEFAULT '',
+		container_port INTEGER NOT NULL CHECK(container_port BETWEEN 1 AND 65535),
+		host_port INTEGER NOT NULL UNIQUE CHECK(host_port BETWEEN 1 AND 65535),
+		mode TEXT NOT NULL CHECK(mode IN ('ip', 'exec')),
+		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`
+	if _, err := tx.Exec(stmt); err != nil {
+		return fmt.Errorf("migrateV90 failed: %w\nSQL: %s", err, stmt)
 	}
 	return nil
 }
