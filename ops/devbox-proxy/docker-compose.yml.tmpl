@@ -1,0 +1,17 @@
+# devbox-proxy: official Caddy on the host network. Rendered by render.sh from
+# the OpenPoet repository (ops/devbox-proxy); do not edit the rendered copy.
+# routes/ is written by OpenPoet on the host and read-only here.
+services:
+  devbox-proxy:
+    image: @@IMAGE@@
+    container_name: @@CONTAINER@@
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./routes:/etc/caddy/routes:ro
+    tmpfs:
+      - /data
+      - /config
+      - /run/caddy-admin:mode=0700
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }

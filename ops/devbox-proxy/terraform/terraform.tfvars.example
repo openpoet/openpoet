@@ -1,0 +1,3 @@
+zone_name   = "example.com"
+record_name = "*.dev9.example.com"
+address     = "192.0.2.1"

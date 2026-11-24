@@ -1,0 +1,35 @@
+# devbox-proxy: HTTP origin of the devbox apps for the edge nginx (TLS, DNS
+# and the wildcard route live on the edge server). Rendered by render.sh from
+# the OpenPoet repository (ops/devbox-proxy); do not edit the rendered copy.
+#
+# - Plain HTTP on @@BIND_ADDR@@:@@LISTEN_PORT@@, accepted only from @@ORIGIN_CIDR@@
+#   (remote_ip is the socket address, X-Forwarded-For is not read).
+# - Routed by Host: one file per app in routes/ (OpenPoet writes op-*.caddy,
+#   hand-managed routes are manual-*.caddy). Unknown Host: connection dropped.
+# - The admin API listens only on a unix socket in a tmpfs inside this
+#   container: no TCP port. OpenPoet reloads with
+#   docker exec <container> caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --address unix//run/caddy-admin/admin.sock
+{
+	admin unix//run/caddy-admin/admin.sock
+	auto_https off
+	servers {
+		protocols h1
+	}
+}
+
+http://:@@LISTEN_PORT@@ {
+	bind @@BIND_ADDR@@
+	@not_from_edge not remote_ip @@ORIGIN_CIDR@@
+
+	# route keeps the order: 1) wrong origin dropped, 2) known Host proxied,
+	# 3) everything else dropped.
+	route {
+		abort @not_from_edge
+		import /etc/caddy/routes/*.caddy
+		abort
+	}
+	log {
+		output stdout
+		format console
+	}
+}

@@ -102,3 +102,9 @@ AGENTS.md
 # OS
 .DS_Store
 Thumbs.db
+
+# Terraform (ops/devbox-proxy/terraform): provider cache, state and values stay local
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
