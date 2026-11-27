@@ -2408,9 +2408,52 @@ func (cs *ConfigSyncer) syncSkillsToACPInstructions(ctx context.Context, acpDir 
 	return os.WriteFile(instructionsPath, []byte(sb.String()), 0644)
 }
 
-// syncBridgeScriptLocal copies bridge.sh to the project's .claude/hooks/ directory
-func (cs *ConfigSyncer) syncBridgeScriptLocal(hooksDir string) error {
-	bridgeScript := `#!/bin/bash
+// bridgeEventDeliveryFunctions and bridgeEventDeliveryCases deliver the
+// non-blocking hook events. Each event gets an id and its emission time
+// (nanoseconds; microsecond or second precision where the shell offers no
+// better) so the server drops a retried copy and ignores a delivery older
+// than the event that set the session's turn. curl retries a refused
+// connection, a timeout and a 5xx. Stop and Notification are the only events
+// that close a turn, so they are delivered before the hook returns; the
+// others stay in the background so a prompt or a tool never waits on them.
+const bridgeEventDeliveryFunctions = `
+bridge_now_ns() {
+    if [ -n "${EPOCHREALTIME:-}" ]; then
+        local t="${EPOCHREALTIME/[.,]/}"
+        case "$t" in *[!0-9]*|"") ;; *) echo "${t}000"; return ;; esac
+    fi
+    local t
+    t=$(date +%s%N 2>/dev/null)
+    case "$t" in *[!0-9]*|"") t="$(date +%s)000000000" ;; esac
+    echo "$t"
+}
+
+EVENT_AT=$(bridge_now_ns)
+EVENT_ID="${EVENT_AT}-$$-${RANDOM}${RANDOM}"
+
+bridge_post_event() {
+    curl -s -o /dev/null --connect-timeout 2 --max-time 5 \
+        --retry 5 --retry-delay 2 --retry-max-time 30 --retry-connrefused \
+        -X POST "${HOOK_URL}/api/hooks/event" \
+        -H "Content-Type: application/json" \
+        -H "X-Session-ID: ${SESSION_ID}" \
+        -H "X-Hook-Token: ${HOOK_TOKEN}" \
+        -H "X-Hook-Event-ID: ${EVENT_ID}" \
+        -H "X-Hook-Event-At: ${EVENT_AT}" \
+        -d "$INPUT" > /dev/null 2>&1
+}
+`
+
+const bridgeEventDeliveryCases = `    Stop|Notification)
+        bridge_post_event
+        ;;
+    SessionStart|PostToolUse|PostToolUseFailure|UserPromptSubmit)
+        bridge_post_event &
+        ;;
+`
+
+// localBridgeScript is the Claude Code hook bridge written into local projects.
+var localBridgeScript = `#!/bin/bash
 # OpenPoet Hook Bridge Script
 # Receives hook event JSON on stdin, POSTs to OpenPoet API, returns response on stdout.
 
@@ -2430,7 +2473,7 @@ fi
 if [ -z "$EVENT" ] || [ -z "$SESSION_ID" ]; then
     exit 0
 fi
-
+` + bridgeEventDeliveryFunctions + `
 case "$EVENT" in
     PermissionRequest)
         RESPONSE=$(curl -s --max-time 590 -X POST \
@@ -2458,17 +2501,14 @@ case "$EVENT" in
             echo "$RESPONSE"
         fi
         ;;
-    SessionStart|PostToolUse|PostToolUseFailure|Notification|Stop|UserPromptSubmit)
-        curl -s -X POST "${HOOK_URL}/api/hooks/event" \
-            -H "Content-Type: application/json" \
-            -H "X-Session-ID: ${SESSION_ID}" \
-            -H "X-Hook-Token: ${HOOK_TOKEN}" \
-            -d "$INPUT" > /dev/null 2>&1 &
-        ;;
-esac
+` + bridgeEventDeliveryCases + `esac
 
 exit 0
 `
+
+// syncBridgeScriptLocal copies bridge.sh to the project's .claude/hooks/ directory
+func (cs *ConfigSyncer) syncBridgeScriptLocal(hooksDir string) error {
+	bridgeScript := localBridgeScript
 	bridgePath := filepath.Join(hooksDir, "bridge.sh")
 	if err := os.WriteFile(bridgePath, []byte(bridgeScript), 0755); err != nil {
 		return err
@@ -2476,9 +2516,8 @@ exit 0
 	return nil
 }
 
-// syncBridgeScriptRemote copies bridge.sh to the remote project's .claude/hooks/ directory
-func (cs *ConfigSyncer) syncBridgeScriptRemote(sshClient *ssh.Client, sftpClient *sftp.Client, hooksDir string) error {
-	bridgeScript := `#!/bin/bash
+// remoteBridgeScript is the Claude Code hook bridge written into remote projects.
+var remoteBridgeScript = `#!/bin/bash
 HOOK_URL="${OPENPOET_HOOK_URL:-http://localhost:8080}"
 SESSION_ID="${OPENPOET_SESSION_ID}"
 HOOK_TOKEN="${OPENPOET_HOOK_TOKEN}"
@@ -2495,7 +2534,7 @@ fi
 if [ -z "$EVENT" ] || [ -z "$SESSION_ID" ]; then
     exit 0
 fi
-
+` + bridgeEventDeliveryFunctions + `
 case "$EVENT" in
     PermissionRequest)
         RESPONSE=$(curl -s --max-time 590 -X POST \
@@ -2523,17 +2562,14 @@ case "$EVENT" in
             echo "$RESPONSE"
         fi
         ;;
-    SessionStart|PostToolUse|PostToolUseFailure|Notification|Stop|UserPromptSubmit)
-        curl -s -X POST "${HOOK_URL}/api/hooks/event" \
-            -H "Content-Type: application/json" \
-            -H "X-Session-ID: ${SESSION_ID}" \
-            -H "X-Hook-Token: ${HOOK_TOKEN}" \
-            -d "$INPUT" > /dev/null 2>&1 &
-        ;;
-esac
+` + bridgeEventDeliveryCases + `esac
 
 exit 0
 `
+
+// syncBridgeScriptRemote copies bridge.sh to the remote project's .claude/hooks/ directory
+func (cs *ConfigSyncer) syncBridgeScriptRemote(sshClient *ssh.Client, sftpClient *sftp.Client, hooksDir string) error {
+	bridgeScript := remoteBridgeScript
 	bridgePath := filepath.Join(hooksDir, "bridge.sh")
 	f, err := sftpClient.Create(bridgePath)
 	if err != nil {
