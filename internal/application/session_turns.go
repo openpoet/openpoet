@@ -73,6 +73,14 @@ func (g *sessionInputGate) acquire(sessionID string) bool {
 	return true
 }
 
+// busy reports whether a guarded send to the session is in flight.
+func (g *sessionInputGate) busy(sessionID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, inFlight := g.inFlight[sessionID]
+	return inFlight
+}
+
 func (g *sessionInputGate) release(sessionID string) {
 	g.mu.Lock()
 	delete(g.inFlight, sessionID)

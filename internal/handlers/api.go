@@ -3625,7 +3625,7 @@ func (a *API) SendSessionInput(w http.ResponseWriter, r *http.Request) {
 
 	result, err := services.Execution.Sessions.SendInputWithAck(platformUIContext(r), application.SendSessionInputCommand{
 		SessionID: id, Text: input.Text, Authorization: platformUIAuthorization(r),
-		RejectIfBusy: input.IfIdle, AwaitAck: input.AwaitAck,
+		RejectIfBusy: input.IfIdle, AwaitAck: input.AwaitAck, RejectIfAwaitingInput: input.IfIdle,
 	})
 	if err != nil {
 		respondApplicationError(w, err)

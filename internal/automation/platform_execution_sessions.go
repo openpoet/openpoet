@@ -106,15 +106,32 @@ type SessionAutomationView struct {
 	LastInput *sessioninput.LastInput `json:"last_input,omitempty"`
 }
 
-// SessionTurnView is the automation shape of application.SessionTurnState.
+// SessionTurnView is the automation shape of application.SessionTurnState,
+// with the hook detail an operator needs to tell a stuck turn from a busy one.
 type SessionTurnView struct {
 	Open   bool      `json:"open"`
 	Since  time.Time `json:"since"`
 	Reason string    `json:"reason,omitempty"`
+	// LastEvent and LastEventAt are the session's last hook event of any kind;
+	// LastPromptAt is its last accepted prompt (Since keeps the turn's start).
+	LastEvent         string                                `json:"last_event,omitempty"`
+	LastEventAt       *time.Time                            `json:"last_event_at,omitempty"`
+	LastPromptAt      *time.Time                            `json:"last_prompt_at,omitempty"`
+	PendingTools      []application.SessionPendingTool      `json:"pending_tools,omitempty"`
+	PendingPermission bool                                  `json:"pending_permission,omitempty"`
+	PermissionTimeout *application.SessionPermissionTimeout `json:"last_permission_timeout,omitempty"`
 }
 
 func sessionTurnView(turn application.SessionTurnState) *SessionTurnView {
 	return &SessionTurnView{Open: turn.Open, Since: turn.Since.UTC(), Reason: turn.Reason}
+}
+
+func sessionTurnActivityView(activity application.SessionTurnActivity) *SessionTurnView {
+	view := sessionTurnView(activity.Turn)
+	detail := application.TurnActivityView(activity)
+	view.LastEvent, view.LastEventAt, view.LastPromptAt = detail.LastEvent, detail.LastEventAt, detail.LastPromptAt
+	view.PendingTools, view.PendingPermission, view.PermissionTimeout = detail.PendingTools, detail.PendingPermission, detail.PermissionTimeout
+	return view
 }
 
 // SessionRuntimeSettingsView is a session's configured model and effort
@@ -251,7 +268,11 @@ func (e *sessionPlatformExecutor) view(ctx context.Context, session database.Ses
 		}
 	}
 	if e.service != nil {
-		if turn, known := e.service.TurnState(session.ID); known {
+		if activity, ok := e.service.TurnActivity(session.ID); ok {
+			if activity.Known {
+				view.Turn = sessionTurnActivityView(activity)
+			}
+		} else if turn, known := e.service.TurnState(session.ID); known {
 			view.Turn = sessionTurnView(turn)
 		}
 	}
@@ -293,6 +314,9 @@ func sessionPlatformDefinitions() []PlatformCapabilityDefinition {
 		withPayloadSchema(executionDestructiveCapability("sessions.isolate", "sessions", "sessions:write"), session, sessionIsolatePayload{}, "", ""),
 		withPayloadSchema(executionWriteCapability("sessions.reopen", "sessions", "sessions:write"), session, sessionReopenPayload{}, "", sessionReopenNotes),
 		withPayloadSchema(executionPayloadLimit(executionWriteCapability("sessions.send_input", "sessions", "sessions:write"), 20<<10), session, sessionInputPayload{}, "", sessionSendInputNotes),
+		withPayloadSchema(executionReadCapability("sessions.turn_preflight", "sessions", "sessions:read"), session, nil, "", sessionTurnPreflightNotes),
+		withPayloadSchema(executionWriteCapability("sessions.reconcile_turn", "sessions", "sessions:write"), session, sessionReconcileTurnPayload{},
+			`{"turn_token":"<turn_token from sessions.turn_preflight>"}`, sessionReconcileTurnNotes),
 		withPayloadSchema(executionWriteCapability("sessions.set_model", "sessions", "sessions:write"), session, sessionModelPayload{}, `{"model":"opus"}`, sessionSetModelNotes),
 		withPayloadSchema(executionWriteCapability("sessions.set_effort", "sessions", "sessions:write"), session, sessionEffortPayload{}, `{"effort":"high"}`, sessionSetEffortNotes),
 		withPayloadSchema(executionWriteCapability("sessions.set_permission_mode", "sessions", "sessions:write"), session, sessionPermissionModePayload{},
@@ -367,6 +391,10 @@ type sessionInputPayload struct {
 	Force    bool  `json:"force,omitempty"`
 }
 
+type sessionReconcileTurnPayload struct {
+	TurnToken string `json:"turn_token" doc:"turn_token from the sessions.turn_preflight that found the turn reconcilable"`
+}
+
 type sessionModelPayload struct {
 	Model string `json:"model" doc:"claude_code: best, opus, sonnet, haiku, opusplan, fable or a claude-* model id, optionally with [1m]; codex: a model from its catalog (models.list); default/reset are refused"`
 }
@@ -388,7 +416,7 @@ const sessionStateNotes = "Session views carry interaction_state: awaiting_input
 	"When awaiting_input, the awaiting_input object describes the question: question_id, source (hook|terminal), kind (workspace_trust, bypass_permissions, tool_permission, ask_user_question, plan_approval, confirm, selection; treat unknown kinds as selection), " +
 	"text, options[{index,label,description,grants_permission,ends_session}], selected_index, accepts_text, questions (ask_user_question), tool_name, tool_input, detected_at. Answer it with sessions.answer_prompt. " +
 	"startup_state (starting|awaiting_input|ready|failed) tracks the initial prompt; error_reason and last_output explain a session with status error. " +
-	"turn {open, since, reason} says whether the agent is inside a turn: it opens when the agent accepts a prompt and closes on Stop (or the agent's idle notification after an interrupt); a long tool run is still an open turn. It is omitted until a turn signal has been seen. " +
+	"turn {open, since, reason, last_event, last_event_at, last_prompt_at, pending_tools, pending_permission, last_permission_timeout} says whether the agent is inside a turn: it opens when the agent accepts a prompt and closes on Stop (or the agent's idle notification); a long tool run is still an open turn. since is when it opened (later prompts in the same turn move last_prompt_at, not since); last_event is the session's last hook event of any kind; pending_tools are tools that started without finishing; last_permission_timeout is a permission request nobody answered within 590 s (the agent was told deny). An interrupt (Esc) sends no Stop and may leave the turn open: diagnose it with sessions.turn_preflight. It is omitted until a turn signal has been seen. " +
 	"last_input {source, actor, command_id, via, basis, at, sent_at} says who wrote the last prompt the agent accepted: source human (typed in the terminal or sent from the UI), automation (sessions.send_input, a text sessions.answer_prompt, the sessions.create initial prompt, OpenPoet's own agents; actor and command_id name the sender) or unknown; omitted until a prompt is seen since the server started. " +
 	"Events platform.session.awaiting_input and platform.session.input_resolved (aggregate id = session id) signal changes; re-read sessions.get for details."
 
@@ -407,9 +435,27 @@ const sessionCreateNotes = "Returns as soon as the agent process is running (sta
 
 const sessionSendInputNotes = "Types text into the session's agent and, by default (await_ack true), waits up to 8 s for the agent to accept it: acknowledged true means the agent took the prompt; false means it did not confirm in time (the text may still be in its input) or took a different prompt. " +
 	"delivery compares the prompt the agent reported with the text sent: verified (it holds the whole text), mismatch (the agent took a prompt without the whole text; acknowledged is false and received_chars says how much arrived; check the session before resending) or unverified (no ack, or the backend does not report its prompt). " +
-	"Refused with session_busy while the session's turn is open (from the accepted prompt until the turn completes, however long its tools run) or while another guarded send to it is still being delivered; retry after turn.open is false, or send force true to type anyway. " +
+	"Refused with session_busy while the session's turn is open (from the accepted prompt until the turn completes, however long its tools run) or while another guarded send to it is still being delivered; retry after turn.open is false. " +
+	"Refused with session_awaiting_input, force or not, while a question or permission request is open (answer it with sessions.answer_prompt): text typed into a dialog would answer it. " +
+	"force true skips only the busy guard and types into a turn that may still be running; for a turn left open by an interrupt use sessions.turn_preflight and sessions.reconcile_turn instead. " +
 	"A call takes about 2-10 s, so use a client timeout of at least 15 s. The command finishes and records its real result even if the client times out or disconnects. " +
 	"After a timeout NEVER resend with a new idempotency_key (that delivers the text twice): resend the identical envelope (same idempotency_key and command_id), which returns the recorded result or waits for it, or read it with automation.commands.get."
+
+const sessionTurnPreflightNotes = "Diagnoses the session's turn without changing anything: verdict reconcilable (the turn is open and the agent's transcript shows it ended), blocked (see blockers) or not_needed (the turn is already closed). " +
+	"checks lists every condition with passed, code and detail: session_running, backend_supported (claude_code), turn_open, startup_complete, no_open_question (session_awaiting_input), no_pending_permission (permission_pending), " +
+	"no_input_in_flight (session_input_in_flight), hooks_quiet (hooks_recent: 30 s without any hook event, a settling time and never evidence), transcript_turn_ended and tools_resolved. " +
+	"transcript_turn_ended reads the agent's own transcript after the last prompt it accepted: interrupted (the user's interruption marker) or completed (end_turn with no Stop hook) pass; " +
+	"tool_running/tool_pending (a tool call without a result), generating/agent_working (the agent owes a reply) and inconclusive (no transcript, prompt not found, any other ending) block. " +
+	"Silence and the age of the turn never count as idleness. turn carries the hook detail (last_event_at, last_prompt_at, pending_tools, pending_permission, last_permission_timeout, dropped duplicate and stale deliveries). " +
+	"turn_token identifies the exact hook state checked; pass it to sessions.reconcile_turn."
+
+const sessionReconcileTurnNotes = "Closes a session's open turn when sessions.turn_preflight finds it reconcilable; it changes only the turn state OpenPoet tracks: it never types, presses a key, interrupts or restarts the session. " +
+	"Send the turn_token of the preflight you acted on, a reason and correlation_id set to the owner's authorization reference (e.g. ain:example-1); session agents cannot call it. " +
+	"It re-runs every preflight check while holding the session's input gate (no guarded send can start meanwhile) and closes the turn only if no hook event arrived since the token was issued. " +
+	"outcome reconciled (changed true, previous_turn and turn show the transition, evidence says why) or already_closed (changed false, nothing to do; repeating a call is safe). " +
+	"Refused, with nothing changed, with turn_reconcile_refused (the message lists the blocker codes; run sessions.turn_preflight for details), turn_changed (hook events or a restart since the token: re-run the preflight), " +
+	"session_input_in_flight, turn_token_required, reason_required or authorization_ref_required. Every attempt past authorization, refused ones included, is kept in the event outbox (platform.session.turn_reconcile_recorded) and the linked task's history (session_turn_reconciled). " +
+	"After reconciled, guarded sessions.send_input is accepted again; if the agent was in fact still in its turn, its next hook reopens it."
 
 const sessionSetPermissionModeNotes = "Switches a running Claude Code session's permission mode (auto, acceptEdits, default, plan) with the session's own Shift+Tab cycle, reading the mode indicator on its screen after every press; " +
 	"the result's to is that read-back, never assumed. bypassPermissions and dontAsk are never set this way. " +
@@ -811,7 +857,7 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"session_id": sessionID, "input_bytes": len([]byte(text))}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
 			result, err := e.service.SendInputWithAck(ctx, application.SendSessionInputCommand{
 				SessionID: sessionID, Text: text, Authorization: authorization,
-				RejectIfBusy: rejectIfBusy, AwaitAck: awaitAck,
+				RejectIfBusy: rejectIfBusy, AwaitAck: awaitAck, RejectIfAwaitingInput: true,
 			})
 			if err != nil {
 				return nil, err
@@ -822,6 +868,35 @@ func (e *sessionPlatformExecutor) Validate(_ context.Context, input PlatformExec
 				view["received_chars"] = result.ReceivedChars
 			}
 			return view, nil
+		}}, nil
+	case "sessions.turn_preflight":
+		return e.sessionWithoutPayload(input, target, func(ctx context.Context, sessionID string, _ application.ActionAuthorization) (any, error) {
+			if _, err := e.scopedSession(ctx, input, sessionID); err != nil {
+				return nil, err
+			}
+			return e.service.TurnPreflight(ctx, sessionID, e.turnProbe())
+		})
+	case "sessions.reconcile_turn":
+		sessionID, err := executionStringID(target, "session id")
+		if err != nil {
+			return nil, err
+		}
+		var payload sessionReconcileTurnPayload
+		if err := decodeExecutionPayload(input.Payload, &payload); err != nil {
+			return nil, err
+		}
+		payload.TurnToken = strings.TrimSpace(payload.TurnToken)
+		if payload.TurnToken == "" || len(payload.TurnToken) > 200 {
+			return nil, missingPayloadField("turn_token", "the turn_token sessions.turn_preflight returned")
+		}
+		return &executionValidatedCommand{preview: executionPreview(input.Handler, map[string]any{"session_id": sessionID, "turn_token": payload.TurnToken}), execute: func(ctx context.Context, authorization application.ActionAuthorization) (any, error) {
+			if _, err := e.scopedSession(ctx, input, sessionID); err != nil {
+				return nil, err
+			}
+			return e.service.ReconcileTurn(ctx, application.ReconcileSessionTurnCommand{
+				SessionID: sessionID, TurnToken: payload.TurnToken, Probe: e.turnProbe(), Authorization: authorization,
+				AuthorizationRef: application.EventMetadataFromContext(ctx).CorrelationID,
+			})
 		}}, nil
 	case "sessions.set_model":
 		sessionID, err := executionStringID(target, "session id")
@@ -944,6 +1019,33 @@ func (e *sessionPlatformExecutor) persistedHistory(ctx context.Context, sessionI
 		SessionID: item.ID, Content: content, Bytes: len([]byte(content)), Truncated: truncated,
 		Redacted: true, Source: "persisted", Status: item.Status, ErrorReason: item.ErrorReason,
 	}, nil
+}
+
+// scopedSession loads a session the caller's project scope allows.
+func (e *sessionPlatformExecutor) scopedSession(ctx context.Context, input PlatformExecutionInput, sessionID string) (*database.Session, error) {
+	if e.queries == nil {
+		return nil, platformFailure("session_not_found", "session not found", false)
+	}
+	item, err := e.queries.GetSession(ctx, sessionID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if err != nil || item == nil || !input.ProjectScope.Allows(item.ProjectID) {
+		return nil, platformFailure("session_not_found", "session not found", false)
+	}
+	return item, nil
+}
+
+// turnProbe reports the session runtime's startup state to the turn preflight.
+func (e *sessionPlatformExecutor) turnProbe() application.SessionTurnProbe {
+	startup, ok := e.runtime.(SessionStartupReadPort)
+	if !ok {
+		return application.SessionTurnProbe{}
+	}
+	return application.SessionTurnProbe{StartupState: func(sessionID string) string {
+		state, _ := startup.SessionStartupState(sessionID)
+		return state
+	}}
 }
 
 func (e *sessionPlatformExecutor) sessionWithoutPayload(

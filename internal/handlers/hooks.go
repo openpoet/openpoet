@@ -163,7 +163,10 @@ type HookHandler struct {
 	submittedPrompts  map[string]string                       // sessionID -> prompt text of the last UserPromptSubmit (delivery check)
 	turns             map[string]application.SessionTurnState // sessionID -> open/closed turn (UserPromptSubmit .. Stop)
 	turnObserver      func(sessionID string, turn application.SessionTurnState)
-	inputs            *sessioninput.Tracker // who wrote each session's last accepted prompt
+	turnActivity      map[string]*hookTurnActivity // sessionID -> hook detail behind the turn (epoch, pending tools, dedup)
+	bootID            string                       // part of every turn token, so a token never survives a restart
+	permissionTimeout time.Duration                // how long a permission request waits for an answer (590 s)
+	inputs            *sessioninput.Tracker        // who wrote each session's last accepted prompt
 }
 
 // ACPUsageInfo holds Copilot ACP usage tracking data for a session.
@@ -203,6 +206,9 @@ func NewHookHandler(hub *websocket.Hub, notifService *notifications.Service, ses
 		promptWaiters:     make(map[string][]chan struct{}),
 		submittedPrompts:  make(map[string]string),
 		turns:             make(map[string]application.SessionTurnState),
+		turnActivity:      make(map[string]*hookTurnActivity),
+		bootID:            newHookBootID(),
+		permissionTimeout: 590 * time.Second,
 		inputs:            sessioninput.NewTracker(),
 	}
 }
@@ -364,7 +370,11 @@ func (h *HookHandler) SessionTurnState(sessionID string) (application.SessionTur
 // events and silence never close it: a long Bash run is still the same turn.
 // An interrupted turn (Esc) sends no Stop; Claude Code's idle notification
 // ("waiting for your input", about a minute later) closes it instead.
-func (h *HookHandler) trackTurnFromEvent(sessionID, eventName string, hookEvent map[string]interface{}) {
+//
+// emittedAt is the event's emission time on the agent host (0 when the bridge
+// does not send one): an event older than the one that last set or confirmed
+// the turn is a late delivery and does not change it.
+func (h *HookHandler) trackTurnFromEvent(sessionID, eventName string, hookEvent map[string]interface{}, emittedAt int64) {
 	open, reason := false, eventName
 	switch eventName {
 	case "UserPromptSubmit":
@@ -391,11 +401,21 @@ func (h *HookHandler) trackTurnFromEvent(sessionID, eventName string, hookEvent 
 	default:
 		return
 	}
-	h.setSessionTurn(sessionID, open, reason)
+	h.setSessionTurn(sessionID, open, reason, emittedAt)
 }
 
-func (h *HookHandler) setSessionTurn(sessionID string, open bool, reason string) {
+func (h *HookHandler) setSessionTurn(sessionID string, open bool, reason string, emittedAt int64) {
 	h.mu.Lock()
+	activity := h.activityLocked(sessionID)
+	if emittedAt > 0 && activity.stateAt > 0 && emittedAt < activity.stateAt {
+		activity.stale++
+		h.mu.Unlock()
+		log.Printf("[hooks] Turn signal %s ignored: session=%s emitted before the event that set the current turn", reason, shortSessionID(sessionID))
+		return
+	}
+	if emittedAt > activity.stateAt {
+		activity.stateAt = emittedAt
+	}
 	previous, known := h.turns[sessionID]
 	if known && previous.Open == open {
 		h.mu.Unlock()
@@ -403,6 +423,8 @@ func (h *HookHandler) setSessionTurn(sessionID string, open bool, reason string)
 	}
 	turn := application.SessionTurnState{Open: open, Since: time.Now(), Reason: reason}
 	h.turns[sessionID] = turn
+	// A turn that ends takes its tool calls with it; one that starts has none.
+	activity.pendingTools = map[string]application.SessionPendingTool{}
 	observer := h.turnObserver
 	h.mu.Unlock()
 	if observer != nil {
@@ -475,6 +497,7 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	}
 	h.trackClaudeProviderSessionID(sessionID, hookEvent, backend)
 	h.recordPermissionMode(sessionID, hookEvent)
+	h.noteHookEvent(sessionID, "PermissionRequest", hookEvent)
 
 	// Normalize Copilot event names
 	if isCopilot {
@@ -568,7 +591,7 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	h.mu.Unlock()
 
 	// Create a context with timeout (590s, just under Claude Code's 600s default)
-	ctx, cancel := context.WithTimeout(r.Context(), 590*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), h.permissionTimeout)
 
 	// Create response channel
 	responseCh := make(chan PermissionResponse, 1)
@@ -588,14 +611,24 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	if existing, ok := h.pending[sessionID]; ok {
 		existing.cancel()
 	}
-	h.pending[sessionID] = &pendingPermission{
+	parked := &pendingPermission{
 		responseCh: responseCh,
 		cancel:     cancel,
 		hookEvent:  hookEvent,
 		msgType:    pendingMsgType,
 		createdAt:  time.Now(),
 	}
+	h.pending[sessionID] = parked
 	h.mu.Unlock()
+	// Only this request's own entry is removed: a newer request for the same
+	// session may have replaced it already.
+	dropParked := func() {
+		h.mu.Lock()
+		if h.pending[sessionID] == parked {
+			delete(h.pending, sessionID)
+		}
+		h.mu.Unlock()
+	}
 	if backend == "codex" && h.OnAttention != nil {
 		if q := h.pendingHookQuestion(sessionID); q != nil {
 			h.OnAttention(sessionID, q.Kind, attentionExcerpt(q.Text))
@@ -685,9 +718,7 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 	case resp := <-responseCh:
 		// User responded
 		cancel()
-		h.mu.Lock()
-		delete(h.pending, sessionID)
-		h.mu.Unlock()
+		dropParked()
 
 		// Mark session notifications as read and cancel push
 		if h.notifService != nil {
@@ -867,10 +898,15 @@ func (h *HookHandler) HandlePermission(w http.ResponseWriter, r *http.Request) {
 
 	case <-ctx.Done():
 		// Timeout or context cancelled
-		h.mu.Lock()
-		delete(h.pending, sessionID)
-		h.mu.Unlock()
+		timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+		dropParked()
 		cancel()
+		if timedOut {
+			// The agent is told deny and decides on its own whether to go on:
+			// the turn stays as the agent's next hooks report it.
+			h.notePermissionTimeout(sessionID, toolName)
+			log.Printf("[hooks] Permission request timed out: session=%s tool=%s (answered deny)", shortSessionID(sessionID), toolName)
+		}
 
 		// Broadcast resolved to browser so UI cleans up
 		h.hub.BroadcastHookEvent(sessionID, &websocket.Message{
@@ -1265,6 +1301,12 @@ func (h *HookHandler) HandlePreToolUseGate(w http.ResponseWriter, r *http.Reques
 	if h.GatePreToolUse != nil {
 		deny, reason = h.GatePreToolUse(r.Context(), sessionID, toolName, toolInput)
 	}
+	// A denied call never runs, so it is not left pending.
+	if deny {
+		h.noteHookEvent(sessionID, "PreToolUse(denied)", hookEvent)
+	} else {
+		h.noteHookEvent(sessionID, "PreToolUse", hookEvent)
+	}
 	out := preToolUseHookOutput{HookEventName: "PreToolUse"}
 	if deny {
 		out.PermissionDecision = "deny" // allow stays neutral (omitted) — see the type
@@ -1292,6 +1334,15 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
+	// A bridge retry of an event already delivered (its response was lost)
+	// is acknowledged without being applied twice.
+	if h.duplicateHookDelivery(sessionID, r.Header.Get(hookEventIDHeader)) {
+		eventName, _ := hookEvent["hook_event_name"].(string)
+		log.Printf("[hooks] Duplicate delivery dropped: session=%s event=%s", shortSessionID(sessionID), eventName)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	emittedAt := hookEventEmittedAt(r)
 	backend := r.Header.Get("X-Backend")
 	if backend != "" {
 		hookEvent["backend"] = backend
@@ -1388,7 +1439,8 @@ func (h *HookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.recordPermissionMode(sessionID, hookEvent)
-	h.trackTurnFromEvent(sessionID, eventName, hookEvent)
+	h.noteHookEvent(sessionID, eventName, hookEvent)
+	h.trackTurnFromEvent(sessionID, eventName, hookEvent, emittedAt)
 	h.observeSessionInput(sessionID, eventName, hookEvent)
 
 	// Track execution mode changes
@@ -1750,6 +1802,7 @@ func (h *HookHandler) ClearSession(sessionID string) {
 	delete(h.lastActivityTouch, sessionID)
 	delete(h.sessionMode, sessionID)
 	delete(h.turns, sessionID)
+	delete(h.turnActivity, sessionID)
 	delete(h.imagePromptMeta, sessionID)
 	delete(h.acpUsage, sessionID)
 	// Drop any prompt waiters WITHOUT signaling them: a torn-down session never

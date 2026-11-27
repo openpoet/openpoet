@@ -192,6 +192,10 @@ type SessionService struct {
 	effects    SessionEffects
 	creation   SessionCreationCollaborators
 	inputs     sessionInputGate
+	// turnTranscripts and turnQuestions back the turn preflight (see
+	// SetTurnReconciliation).
+	turnTranscripts SessionTranscriptPort
+	turnQuestions   *SessionQuestionService
 }
 
 func NewSessionService(
@@ -953,6 +957,11 @@ type SendSessionInputCommand struct {
 	// AwaitAck blocks until the agent's UserPromptSubmit hook confirms the
 	// prompt was accepted (or a short timeout), reporting acknowledged.
 	AwaitAck bool
+	// RejectIfAwaitingInput refuses the send with session_awaiting_input while
+	// the session shows a question or a permission request, busy guard or not:
+	// typed text and Enter would answer a dialog nobody decided. Agents and
+	// automation set it (force included); the interactive UI does not.
+	RejectIfAwaitingInput bool
 }
 
 // SendInputResult reports whether the line reached the PTY and whether the
@@ -1012,6 +1021,11 @@ func (s *SessionService) SendInputWithAck(ctx context.Context, command SendSessi
 			return SendInputResult{}, conflictError("session_busy", reason)
 		}
 	}
+	if command.RejectIfAwaitingInput {
+		if err := s.refuseIfAwaitingInput(ctx, command.SessionID); err != nil {
+			return SendInputResult{}, err
+		}
+	}
 	// Once the text is typed the outcome must not depend on the caller staying
 	// connected: an aborted request still waits for the ack, so the recorded
 	// result (and automation.commands.get) tells whether the agent took it.
@@ -1047,6 +1061,25 @@ func (s *SessionService) SendInputWithAck(ctx context.Context, command SendSessi
 		s.verifyDelivery(command.SessionID, text, &result)
 	}
 	return result, nil
+}
+
+// refuseIfAwaitingInput fails when the session is blocked on a question or a
+// parked permission request; a question that cannot be read counts as open.
+func (s *SessionService) refuseIfAwaitingInput(ctx context.Context, sessionID string) error {
+	if activity, ok := s.TurnActivity(sessionID); ok && activity.PendingPermission {
+		return conflictError("session_awaiting_input", "The session is waiting on a permission request; answer it with sessions.answer_prompt instead of typing")
+	}
+	if s.turnQuestions == nil {
+		return nil
+	}
+	question, err := s.turnQuestions.Pending(ctx, sessionID)
+	if err != nil {
+		return conflictError("session_awaiting_input", "The session's open question could not be read; re-read sessions.get before sending")
+	}
+	if question != nil {
+		return conflictError("session_awaiting_input", "The session is waiting on a "+questionKindLabel(question)+" ("+question.ID+"); answer it with sessions.answer_prompt instead of typing")
+	}
+	return nil
 }
 
 // verifyDelivery compares the prompt the agent reported with the text that

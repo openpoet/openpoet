@@ -322,9 +322,9 @@ func TestHookTurnChangesReachTheObserver(t *testing.T) {
 	hook := NewHookHandler(nil, nil, nil)
 	var seen []bool
 	hook.setTurnObserver(func(_ string, turn application.SessionTurnState) { seen = append(seen, turn.Open) })
-	hook.trackTurnFromEvent("s1", "UserPromptSubmit", nil)
-	hook.trackTurnFromEvent("s1", "PostToolUse", nil)
-	hook.trackTurnFromEvent("s1", "Stop", nil)
+	hook.trackTurnFromEvent("s1", "UserPromptSubmit", nil, 0)
+	hook.trackTurnFromEvent("s1", "PostToolUse", nil, 0)
+	hook.trackTurnFromEvent("s1", "Stop", nil, 0)
 	if len(seen) != 2 || !seen[0] || seen[1] {
 		t.Fatalf("observer saw %v, want [true false]", seen)
 	}

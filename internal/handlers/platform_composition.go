@@ -45,9 +45,12 @@ const (
 	// artifacts.annotations.send (mutation) tells the publishing session
 	// about the open annotations and records the send on them: +1 capability,
 	// +1 mutation.
-	expectedPlatformCapabilities = 197
-	expectedPlatformMutations    = 130
-	expectedPlatformReads        = 67
+	// sessions.turn_preflight (read) and sessions.reconcile_turn (mutation)
+	// diagnose and close a turn the hooks left open: +2 capabilities, +1
+	// mutation, +1 read.
+	expectedPlatformCapabilities = 199
+	expectedPlatformMutations    = 131
+	expectedPlatformReads        = 68
 )
 
 // PlatformServices is the explicit runtime composition root for Automation.
@@ -140,6 +143,7 @@ func (a *API) ConfigurePlatformServices(services PlatformServices) error {
 	)
 	sessionQuestions := application.NewSessionQuestionService(services.DB, questions, effects)
 	sessionQuestions.SetInputRecorder(services.HookHandler)
+	sessionService.SetTurnReconciliation(platformSessionEventReader{handler: services.StructuredView}, sessionQuestions)
 	execution := automation.ExecutionPlatformServices{
 		Sessions:           sessionService,
 		SessionQuestions:   sessionQuestions,

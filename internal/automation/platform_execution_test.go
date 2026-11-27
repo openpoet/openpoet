@@ -234,8 +234,8 @@ func executionPlatformActor(definitions []PlatformCapabilityDefinition) Actor {
 
 func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 	definitions := executionPlatformDefinitionsForTest()
-	if len(definitions) != 67 {
-		t.Fatalf("execution surface has %d capabilities, want 67", len(definitions))
+	if len(definitions) != 69 {
+		t.Fatalf("execution surface has %d capabilities, want 69", len(definitions))
 	}
 	seen := make(map[application.CapabilityName]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -245,11 +245,11 @@ func TestExecutionPlatformRegistersCompleteUniqueSurface(t *testing.T) {
 		seen[definition.Name] = struct{}{}
 	}
 	capabilities, registry := executionPlatformTestRegistry(t, &executionPlatformFakePorts{})
-	if got := len(capabilities.List()); got != 67 {
-		t.Fatalf("application registry has %d execution capabilities, want 67", got)
+	if got := len(capabilities.List()); got != 69 {
+		t.Fatalf("application registry has %d execution capabilities, want 69", got)
 	}
-	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 67 {
-		t.Fatalf("platform discovery has %d execution capabilities, want 67", got)
+	if got := len(registry.ListForActor(executionPlatformActor(definitions))); got != 69 {
+		t.Fatalf("platform discovery has %d execution capabilities, want 69", got)
 	}
 }
 
@@ -341,7 +341,7 @@ func TestExecutionPlatformReadSurfaceIsExplicit(t *testing.T) {
 		"blackboard.get",
 		"conflicts.get", "conflicts.list",
 		"files.list", "files.preview_metadata", "files.read", "git.branches", "git.diff", "git.log", "git.show", "git.status",
-		"sessions.active", "sessions.events_status", "sessions.file_activity", "sessions.get", "sessions.history", "sessions.list", "sessions.messages",
+		"sessions.active", "sessions.events_status", "sessions.file_activity", "sessions.get", "sessions.history", "sessions.list", "sessions.messages", "sessions.turn_preflight",
 		"tunnel.devices", "tunnel.status", "update.check", "update.status",
 		"workspaces.get", "workspaces.list",
 		"compose.status", "compose.logs",
@@ -407,6 +407,8 @@ func executionDryRunCases() []executionDryRunCase {
 		{name: "sessions.isolate", target: `{"id":"s1"}`, payload: `{"reason":"contested write","briefing":"brief-secret"}`, secretText: []string{"brief-secret"}},
 		{name: "sessions.reopen", target: `{"id":"s1"}`, payload: `{}`},
 		{name: "sessions.send_input", target: `{"id":"s1"}`, payload: `{"text":"input-secret"}`, secretText: []string{"input-secret"}},
+		{name: "sessions.turn_preflight", target: `{"id":"s1"}`, payload: `{}`},
+		{name: "sessions.reconcile_turn", target: `{"id":"s1"}`, payload: `{"turn_token":"abc.1"}`},
 		{name: "sessions.set_model", target: `{"id":"s1"}`, payload: `{"model":"gpt-test"}`},
 		{name: "sessions.set_effort", target: `{"id":"s1"}`, payload: `{"effort":"high"}`},
 		{name: "sessions.set_permission_mode", target: `{"id":"s1"}`, payload: `{"mode":"acceptEdits"}`},

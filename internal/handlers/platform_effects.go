@@ -161,6 +161,55 @@ func (e *platformEffects) RecordSessionClosure(ctx context.Context, closure appl
 	}
 }
 
+// RecordSessionTurnReconciliation keeps every turn reconciliation attempt
+// (reconciled, already_closed or refused, with its blockers), who made it,
+// on what evidence and under which authorization: in the event outbox and in
+// the linked task's history.
+func (e *platformEffects) RecordSessionTurnReconciliation(ctx context.Context, record application.SessionTurnReconciliation) {
+	fields := map[string]any{
+		"action": "turn_reconcile_recorded", "outcome": record.Outcome, "evidence": record.Evidence,
+		"turn_token": record.TurnToken, "reason": record.Reason,
+		"authorization_ref": record.AuthorizationRef, "approved_by": record.ApprovedBy,
+	}
+	if len(record.Blockers) > 0 {
+		fields["blockers"] = record.Blockers
+	}
+	if !record.PreviousSince.IsZero() {
+		fields["previous_since"] = record.PreviousSince.UTC()
+		fields["previous_reason"] = record.PreviousReason
+	}
+	if record.TaskID > 0 {
+		fields["task_id"] = record.TaskID
+	}
+	e.auditPayload(ctx, "session", "turn_reconcile_recorded", nonEmptyAggregateID(record.SessionID), record.Actor, fields)
+	log.Printf("[Automation] session turn reconcile %s session=%s evidence=%s blockers=%v actor=%s:%s ref=%s",
+		record.Outcome, record.SessionID, record.Evidence, record.Blockers, record.Actor.Type, record.Actor.ID, record.AuthorizationRef)
+	if e.db == nil || record.TaskID <= 0 {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	details, _ := json.Marshal(map[string]any{
+		"session_id": record.SessionID, "outcome": record.Outcome, "evidence": record.Evidence, "blockers": record.Blockers,
+		"previous_since": record.PreviousSince.UTC(), "previous_reason": record.PreviousReason,
+		"reason": record.Reason, "authorization_ref": record.AuthorizationRef,
+		"actor_type": record.Actor.Type, "approved_by": record.ApprovedBy,
+	})
+	actorID := strings.TrimSpace(record.Actor.ID)
+	if actorID == "" {
+		actorID = "automation"
+	}
+	history := &database.TaskHistory{
+		TaskID: record.TaskID, ProjectID: record.ProjectID, EventType: "session_turn_reconciled",
+		Details: string(details), Actor: actorID,
+		SessionID: sql.NullString{String: record.SessionID, Valid: record.SessionID != ""},
+	}
+	if err := e.db.CreateTaskHistory(ctx, history); err != nil {
+		log.Printf("[Automation] session turn reconcile history failed task=%d session=%s: %v", record.TaskID, record.SessionID, err)
+	}
+}
+
 // RecordSessionPermissionModeChange keeps who changed a session's permission
 // mode, from what to what, under which authorization and why: in the event
 // outbox (its correlation_id is the command's authorization reference) and in
